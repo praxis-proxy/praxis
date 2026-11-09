@@ -11,8 +11,9 @@
 
 use std::collections::HashMap;
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use http::{HeaderValue, Method};
-use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+use openssl::{hash::MessageDigest, pkey::PKey, sign::Signer};
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -38,11 +39,27 @@ fn now_unix() -> u64 {
         .as_secs()
 }
 
+/// Mint a compact HS256 JWT over `claims`, signed with `secret` through the
+/// system OpenSSL (RFC 7515 section 5.1).
+fn hs256(claims: &serde_json::Value, secret: &[u8]) -> String {
+    let header = json!({ "alg": "HS256", "typ": "JWT" });
+    let signing_input = format!(
+        "{}.{}",
+        URL_SAFE_NO_PAD.encode(header.to_string()),
+        URL_SAFE_NO_PAD.encode(claims.to_string())
+    );
+    let key = PKey::hmac(secret).expect("HMAC key");
+    let mut signer = Signer::new(MessageDigest::sha256(), &key).expect("HMAC-SHA256 signer");
+    signer
+        .update(signing_input.as_bytes())
+        .expect("feed the JWT signing input");
+    let signature = signer.sign_to_vec().expect("HMAC-SHA256 signature");
+    format!("{signing_input}.{}", URL_SAFE_NO_PAD.encode(signature))
+}
+
 /// Mint an HS256 JWT signed with [`TEST_SECRET`].
 fn mint_jwt(claims: &serde_json::Value) -> String {
-    let header = Header::new(Algorithm::HS256);
-    let key = EncodingKey::from_secret(TEST_SECRET.as_bytes());
-    encode(&header, claims, &key).expect("sign JWT")
+    hs256(claims, TEST_SECRET.as_bytes())
 }
 
 /// Standard token claims: test issuer + audience, fresh `exp`.
@@ -894,6 +911,7 @@ fn build_filter_with_meta(config_path: String, context_meta: ContextMetaConfig) 
             config_path,
             allow_private_idp: false,
             trusted_private_endpoints: vec![],
+            trusted_proxies: vec![],
             body_access: BodyAccessMode::ReadOnly,
             require_protocol_metadata: true,
             init_timeout_secs: 30,
@@ -1015,6 +1033,7 @@ fn build_filter_with_context(
             config_path,
             allow_private_idp: false,
             trusted_private_endpoints: vec![],
+            trusted_proxies: vec![],
             body_access: BodyAccessMode::ReadOnly,
             require_protocol_metadata: true,
             init_timeout_secs: 30,
@@ -1207,6 +1226,7 @@ fn filter_config(config_path: String) -> PolicyFilterConfig {
         config_path,
         allow_private_idp: false,
         trusted_private_endpoints: vec![],
+        trusted_proxies: vec![],
         body_access: BodyAccessMode::ReadOnly,
         require_protocol_metadata: true,
         init_timeout_secs: 30,
@@ -1442,6 +1462,7 @@ fn rejects_zero_max_buffer_bytes() {
         config_path: "/nonexistent/policy.yaml".to_owned(),
         allow_private_idp: false,
         trusted_private_endpoints: vec![],
+        trusted_proxies: vec![],
         body_access: BodyAccessMode::ReadWrite,
         require_protocol_metadata: true,
         init_timeout_secs: 30,
@@ -1463,6 +1484,7 @@ fn rejects_oversized_max_buffer_bytes() {
         config_path: "/nonexistent/policy.yaml".to_owned(),
         allow_private_idp: false,
         trusted_private_endpoints: vec![],
+        trusted_proxies: vec![],
         body_access: BodyAccessMode::ReadWrite,
         require_protocol_metadata: true,
         init_timeout_secs: 30,
@@ -1772,20 +1794,9 @@ async fn request_without_auth_header_rejects_401() {
     }
 }
 
-/// When a downstream pre-read ran `on_request_body` first and stashed
-/// `ResolvedIdentity` (having stripped the inbound credential for the
-/// upstream), the early `identity_gate` must skip rather than re-resolve
-/// against the now-missing headers. A credential-less request that would
-/// normally 401 here passes because the body phase is authoritative.
-///
-/// The routes-only config is what puts `on_request` on the `identity_gate`
-/// path, and stashing `ResolvedIdentity` is what a body phase that already
-/// resolved and enforced identity leaves behind.
 #[tokio::test(flavor = "multi_thread")]
 async fn identity_gate_skips_when_body_phase_already_resolved() {
     use ppe::praxis_policy_core::identity::{IdentityPayload, TokenSource};
-
-    use super::filter::ResolvedIdentity;
 
     let (_dir, path) = write_cel_policy_config();
     let filter = build_filter(path);
@@ -1793,22 +1804,15 @@ async fn identity_gate_skips_when_body_phase_already_resolved() {
     let req = make_request(Method::POST, "/");
     let mut ctx = make_filter_context(&req);
 
-    ctx.extensions.insert(ResolvedIdentity(IdentityPayload::new(
-        String::new(),
-        TokenSource::Bearer,
-    )));
+    super::request_state::state_mut(&mut ctx).identity = Some(IdentityPayload::new(String::new(), TokenSource::Bearer));
 
     let action = filter.on_request(&mut ctx).await.expect("on_request ran");
     assert!(
         matches!(action, FilterAction::Continue),
-        "gate must be skipped when ResolvedIdentity is already stashed; got {action:?}",
+        "gate must be skipped when this instance already admitted an identity; got {action:?}",
     );
 }
 
-/// Control for `identity_gate_skips_when_body_phase_already_resolved`: the
-/// same credential-less request with no `ResolvedIdentity` stashed must run
-/// the gate and reject — proving the skip (not something else) is what flips
-/// the outcome to `Continue`.
 #[tokio::test(flavor = "multi_thread")]
 async fn identity_gate_rejects_when_identity_not_yet_resolved() {
     let (_dir, path) = write_cel_policy_config();
@@ -2059,6 +2063,38 @@ async fn dotted_role_does_not_satisfy_its_prefix() {
         matches!(&action, FilterAction::Reject(_)),
         "admin.readonly must not grant role.admin; got {action:?}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn apl_settled_operand_decides_past_an_unorderable_one() {
+    for rule in [
+        r#""subject.id > 10 & role.guest: deny('blocked', 'blocked')""#,
+        r#""role.guest & subject.id > 10: deny('blocked', 'blocked')""#,
+        r#""require(subject.id <= 10 | role.admin)""#,
+        r#""require(role.admin | subject.id <= 10)""#,
+    ] {
+        let action = dispatch_with_roles(rule, &["admin"]).await;
+        assert!(
+            matches!(action, FilterAction::Continue),
+            "a settled operand must decide {rule}; got {action:?}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn apl_unsettled_unorderable_operand_fails_closed() {
+    for rule in [
+        r#""subject.id > 10: deny('blocked', 'blocked')""#,
+        r#""subject.id <= 10: deny('blocked', 'blocked')""#,
+        r#""require(subject.id <= 10 | role.guest)""#,
+        r#""subject.id > 10 & role.admin: deny('blocked', 'blocked')""#,
+    ] {
+        let action = dispatch_with_roles(rule, &["admin"]).await;
+        assert!(
+            matches!(&action, FilterAction::Reject(_)),
+            "an unsettled unorderable predicate must deny {rule}; got {action:?}"
+        );
+    }
 }
 
 /// Write a pure-L7 JWT policy decided by `data.authz.allow` over `modules`,
@@ -2459,6 +2495,7 @@ async fn missing_protocol_metadata_passes_when_not_required() {
         config_path: path,
         allow_private_idp: false,
         trusted_private_endpoints: vec![],
+        trusted_proxies: vec![],
         body_access: BodyAccessMode::ReadOnly,
         require_protocol_metadata: false,
         init_timeout_secs: 30,
@@ -3299,6 +3336,7 @@ async fn response_phase_without_request_identity_fails_closed() {
         config_path: path,
         allow_private_idp: false,
         trusted_private_endpoints: vec![],
+        trusted_proxies: vec![],
         body_access: BodyAccessMode::ReadWrite,
         require_protocol_metadata: true,
         init_timeout_secs: 30,
@@ -3371,7 +3409,7 @@ fn attach_delegated_tokens_first_writer_wins_per_outbound_header() {
 
     let req = make_request(Method::POST, "/");
     let mut ctx = make_filter_context(&req);
-    let count = attach_delegated_tokens(&mut ctx, Some(&ext));
+    let count = attach_delegated_tokens(&mut ctx, Some(&ext)).expect("header credentials attach");
 
     assert_eq!(count, 1, "exactly one token attaches for a colliding header");
     assert_eq!(ctx.request_headers_to_set.len(), 1, "exactly one header push");
@@ -3415,7 +3453,7 @@ fn attach_delegated_tokens_uses_each_tokens_outbound_prefix() {
 
     let req = make_request(Method::POST, "/");
     let mut ctx = make_filter_context(&req);
-    assert_eq!(attach_delegated_tokens(&mut ctx, Some(&ext)), 2);
+    assert_eq!(attach_delegated_tokens(&mut ctx, Some(&ext)).expect("tokens attach"), 2);
 
     let attached: HashMap<&str, &str> = ctx
         .request_headers_to_set
@@ -3461,7 +3499,7 @@ fn attach_delegated_tokens_distinct_outbound_headers_all_attach() {
 
     let req = make_request(Method::POST, "/");
     let mut ctx = make_filter_context(&req);
-    let count = attach_delegated_tokens(&mut ctx, Some(&ext));
+    let count = attach_delegated_tokens(&mut ctx, Some(&ext)).expect("header credentials attach");
 
     assert_eq!(count, 2, "two distinct headers must both attach");
     assert_eq!(ctx.request_headers_to_set.len(), 2);
@@ -3638,6 +3676,7 @@ fn try_build_filter_allowing_private(
             config_path,
             allow_private_idp,
             trusted_private_endpoints: vec![],
+            trusted_proxies: vec![],
             body_access: BodyAccessMode::ReadOnly,
             require_protocol_metadata: true,
             init_timeout_secs: 30,
@@ -3749,12 +3788,7 @@ fn mint_route_jwt(subject: &str) -> String {
         "exp": now_unix() + 300,
         "iat": now_unix(),
     });
-    encode(
-        &Header::new(Algorithm::HS256),
-        &claims,
-        &EncodingKey::from_secret(ROUTE_SECRET.as_bytes()),
-    )
-    .expect("sign route JWT")
+    hs256(&claims, ROUTE_SECRET.as_bytes())
 }
 
 /// Return identity plugins that trust distinct global and route issuers.
@@ -4313,7 +4347,7 @@ async fn an_asserted_secret_stays_redacted_on_the_response_half() {
     let mut response_ctx = make_filter_context(&forwarded);
     response_ctx.extensions = std::mem::take(&mut ctx.extensions);
 
-    let extensions = PolicyFilter::response_extensions(&response_ctx, HashMap::new(), 200, &filter_config(path));
+    let extensions = PolicyFilter::response_extensions(&response_ctx, HashMap::new(), 200, &filter_config(path), &[]);
     let http = extensions.http.as_deref().expect("the response half carries http");
     let view = serde_json::to_string(http).expect("serialize http extension");
     assert!(!view.contains(&secret), "response view leaks the secret: {view}");
@@ -4381,6 +4415,7 @@ routes:
         config_path: cfg_path.to_str().expect("utf8 path").to_owned(),
         allow_private_idp: false,
         trusted_private_endpoints: vec![],
+        trusted_proxies: vec![],
         body_access: BodyAccessMode::ReadOnly,
         require_protocol_metadata: true,
         init_timeout_secs: 30,
@@ -4751,6 +4786,7 @@ fn build_filter_with_llm(config_path: String, llm: super::config::LlmOptions) ->
             config_path,
             allow_private_idp: false,
             trusted_private_endpoints: vec![],
+            trusted_proxies: vec![],
             body_access: BodyAccessMode::ReadOnly,
             require_protocol_metadata: true,
             init_timeout_secs: 30,
@@ -5124,6 +5160,7 @@ fn the_lower_ceiling_binds_when_both_apply() {
             config_path: path,
             allow_private_idp: false,
             trusted_private_endpoints: vec![],
+            trusted_proxies: vec![],
             body_access: BodyAccessMode::ReadWrite,
             require_protocol_metadata: true,
             init_timeout_secs: 30,
@@ -5205,6 +5242,7 @@ fn rejects_an_out_of_range_inference_ceiling() {
                 config_path: path,
                 allow_private_idp: false,
                 trusted_private_endpoints: vec![],
+                trusted_proxies: vec![],
                 body_access: BodyAccessMode::ReadOnly,
                 require_protocol_metadata: true,
                 init_timeout_secs: 30,
@@ -5280,6 +5318,7 @@ fn build_read_write_filter(config_path: String) -> PolicyFilter {
             config_path,
             allow_private_idp: false,
             trusted_private_endpoints: vec![],
+            trusted_proxies: vec![],
             body_access: BodyAccessMode::ReadWrite,
             require_protocol_metadata: true,
             init_timeout_secs: 30,
@@ -7250,6 +7289,31 @@ async fn cancelling_suspended_policy_releases_payload_and_next_request_is_clean(
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_crypto_failure_in_a_policy_hook_denies_the_request() {
+    register_policy_plugin_factory("test/crypto-failing", Arc::new(|| Box::new(CryptoFailingFactory)));
+    let (_dir, path) = write_entity_config_with_routes(
+        r#"routes:
+  - tool: echo
+    authorization:
+      pre_invocation:
+        - "run(crypto-failing)"
+"#,
+    );
+    let yaml = std::fs::read_to_string(&path).unwrap().replace(
+        "\nglobal:",
+        "\n  - name: crypto-failing\n    kind: test/crypto-failing\n    hooks: [cmf.tool_pre_invoke]\n    mode: sequential\n    on_error: fail\nglobal:",
+    );
+    std::fs::write(&path, yaml).unwrap();
+    let filter = build_filter(path);
+
+    let action = dispatch_echo_as(&filter, "alice").await;
+    assert!(
+        matches!(action, FilterAction::Reject(_)),
+        "a crypto backend failure must deny an authenticated request, never allow it; got {action:?}",
+    );
+}
+
 // -----------------------------------------------------------------------------
 // Load-time warnings
 // -----------------------------------------------------------------------------
@@ -7302,6 +7366,16 @@ fn a_read_only_tool_response_policy_warns_that_the_rules_will_not_run() {
     assert!(
         logs.contains("response-phase `tool:` rules") && logs.contains("body_access: read_write"),
         "a `read_only` filter must name the remedy for tool response rules; got {logs}",
+    );
+}
+
+#[test]
+fn a_legacy_header_credential_loads_with_a_deprecation_warning() {
+    let (_dir, path) = write_l7_global_config();
+    let logs = capture_warnings(|| drop(build_filter(path)));
+    assert!(
+        logs.contains("deprecated `header:` setting"),
+        "the legacy `header:` form must still load and name its replacement; got {logs}",
     );
 }
 
@@ -7422,6 +7496,7 @@ fn an_http_route_beside_entity_routes_fails_filter_construction() {
         config_path: path,
         allow_private_idp: false,
         trusted_private_endpoints: vec![],
+        trusted_proxies: vec![],
         body_access: BodyAccessMode::ReadWrite,
         require_protocol_metadata: true,
         init_timeout_secs: 30,
@@ -7623,6 +7698,7 @@ fn minimal_cfg() -> PolicyFilterConfig {
         require_protocol_metadata: true,
         allow_private_idp: false,
         trusted_private_endpoints: vec![],
+        trusted_proxies: vec![],
         llm: super::config::LlmOptions::default(),
         context_headers: HashMap::default(),
         context_meta: ContextMetaConfig::default(),
@@ -7665,6 +7741,7 @@ fn policy_filter_new_rejects_non_reserved_context_header() {
         config_path: "/nonexistent/policy.yaml".to_owned(),
         allow_private_idp: false,
         trusted_private_endpoints: vec![],
+        trusted_proxies: vec![],
         body_access: BodyAccessMode::ReadOnly,
         require_protocol_metadata: true,
         init_timeout_secs: 30,
@@ -7916,4 +7993,58 @@ context_headers:
         Some("x-ext-agent-id")
     );
     cfg.validate_context_headers().unwrap();
+}
+
+// -----------------------------------------------------------------------------
+// Test Utilities
+// -----------------------------------------------------------------------------
+
+/// A host plugin whose policy hook fails with a crypto backend error.
+struct CryptoFailingPlugin {
+    /// Configuration of the failing test plugin.
+    cfg: PluginConfig,
+}
+
+impl Plugin for CryptoFailingPlugin {
+    fn config(&self) -> &PluginConfig {
+        &self.cfg
+    }
+}
+
+/// Type-erased handler that reports a crypto failure instead of a decision.
+struct CryptoFailingHandler;
+
+#[async_trait::async_trait]
+impl AnyHookHandler for CryptoFailingHandler {
+    async fn invoke(
+        &self,
+        _payload: &dyn ppe::prelude::PluginPayload,
+        _extensions: &Extensions,
+        _ctx: &mut PluginContext,
+    ) -> Result<Box<dyn std::any::Any + Send + Sync>, Box<PluginError>> {
+        Err(PluginError::Crypto {
+            source: ppe::CryptoError::DigestLength,
+        }
+        .boxed())
+    }
+
+    fn hook_type_name(&self) -> &'static str {
+        <CmfHook as ppe::prelude::HookTypeDef>::NAME
+    }
+}
+
+/// Factory for [`CryptoFailingPlugin`].
+///
+/// [`CryptoFailingPlugin`]: CryptoFailingPlugin
+struct CryptoFailingFactory;
+
+impl PluginFactory for CryptoFailingFactory {
+    fn create(&self, config: &PluginConfig) -> Result<PluginInstance, Box<PluginError>> {
+        let plugin = Arc::new(CryptoFailingPlugin { cfg: config.clone() });
+        let adapter: Arc<dyn AnyHookHandler> = Arc::new(CryptoFailingHandler);
+        Ok(PluginInstance {
+            plugin,
+            handlers: vec![("cmf.tool_pre_invoke", adapter)],
+        })
+    }
 }

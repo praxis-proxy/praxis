@@ -47,7 +47,7 @@ passed them on `main`.
 ## Tagging a Release
 
 Tags follow the format `v<MAJOR>.<MINOR>.<PATCH>` (e.g.
-`v0.1.0`), optionally with a pre-release suffix (e.g.
+`v0.8.0`), optionally with a pre-release suffix (e.g.
 `v1.0.0-rc.1`), and must match
 `workspace.package.version`; the release workflow rejects
 mismatched tags. A pre-release tag cuts a pre-release
@@ -56,8 +56,8 @@ not to a fork (`upstream` below is whichever remote
 points there):
 
 ```console
-git tag v0.1.0
-git push upstream v0.1.0
+git tag v0.8.0
+git push upstream v0.8.0
 ```
 
 The release runs in two phases
@@ -138,13 +138,13 @@ its test suites pass.
 | Pattern | Example | Pushed |
 | --------- | --------- | ------------- |
 | `sha-<hash>` | `sha-abc1234` | Phase 1 releases, manual Publish runs, Nightly |
-| `<version>` | `0.1.0` | Phase 1, every release |
-| `<major>.<minor>` | `0.1` | Phase 2, stable releases only |
+| `<version>` | `0.8.0` | Phase 1, every release |
+| `<major>.<minor>` | `0.8` | Phase 2, stable releases only |
 | `latest` | `latest` | Phase 2, stable releases only |
 | `<branch>` | `main` | Manual Publish runs only |
 | `nightly` | `nightly` | Nightly |
 | `nightly-<YYYYMMDD>` | `nightly-20260923` | Scheduled Nightly runs |
-| `<any of the above>-fips` | `0.1.0-fips`, `latest-fips` | Same runs, for the FIPS image |
+| `<any of the above>-fips` | `0.8.0-fips`, `latest-fips` | Same runs, for the FIPS image |
 
 Every run that pushes a standard image also pushes the
 FIPS image (`Containerfile.fips`, UBI 9) under the same
@@ -196,7 +196,7 @@ https://github.com/praxis-proxy/conventions/blob/main/docs/release.md#changelog
 
 Release branches are optional and created from tags when
 backports are needed. The naming convention is
-`release/v<MAJOR>.<MINOR>.x` (e.g. `release/v0.1.x`).
+`release/v<MAJOR>.<MINOR>.x` (e.g. `release/v0.8.x`).
 
 Fixes are cherry-picked onto the release branch, a new
 patch tag is created from it, and the release workflow

@@ -141,14 +141,14 @@ def run_cases(args, output, report, results):
     target = ROOT / "target" if args.adapter == "pingora" else ROOT / "target/hyper"
     env = os.environ.copy()
     env.setdefault("CARGO_BUILD_JOBS", "4")
-    proxy_features = f"{args.adapter},config-reload,admin-api,policy-engine,cloud-events-filter"
+    proxy_features = f"{args.adapter},config-reload,admin-api,policy-builtins,cloud-events-filter"
     common = ["--locked", "--profile", args.profile, "--target-dir", str(target), "--no-default-features"]
     run(["cargo", "build", *common, "-p", "praxis-proxy", "--features", proxy_features],
         output / "build-proxy.log", env, 3600)
     env["PRAXIS_BIN"] = str(target / args.profile / "praxis")
     suites = {}
     for package in dict.fromkeys(case["package"] for case in cases):
-        features = f"{args.adapter},policy-engine"
+        features = f"{args.adapter},policy-builtins"
         if package == "praxis-tests-integration":
             features += ",cloud-events-filter"
         build = run(["cargo", "test", *common, "-p", package, "--features", features,

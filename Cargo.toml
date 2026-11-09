@@ -26,7 +26,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.7.5"
+version = "0.8.0"
 edition = "2024"
 rust-version = "1.92"
 authors = ["Shane Utt <shaneutt@linux.com>"]
@@ -57,7 +57,6 @@ http = "1.5.0"
 http-body-util = "0.1.5"
 hyper = { version = "1.12.0", default-features = false }
 hyper-util = { version = "0.1.21", default-features = false }
-jsonwebtoken = { version = "11.1.0", features = ["aws_lc_rs"] }
 loom = "0.7.2"
 metrics = "0.24.6"
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
@@ -75,38 +74,43 @@ pingora-proxy = { version = "0.11.0", package = "quixotic-plecostomus-proxy", fe
 percent-encoding = "2.3.2"
 rand = "0.10.3"
 plotters = { version = "0.3.7", default-features = false, features = ["svg_backend", "line_series"] }
-ppe = { version = "0.5.0", package = "praxis-policy", features = ["builtins"] }
+ppe = { version = "0.6.0", package = "praxis-policy", default-features = false }
 parking_lot = "0.12.5"
 portable-atomic = "1.15.0"
 proptest = "1.12.0"
 quote = "1.0.47"
 # default-features = false for the same reason as praxis-filter below: the
-# binary's default set includes `policy-engine`, and the test harness depends
+# binary's default set includes `policy-builtins`, and the test harness depends
 # on this crate, so leaving the defaults on made every test suite build the
-# policy engine (and its aws-lc-rs, sha2 and hmac) no matter which features the
-# suite asked for. Each dependant now names the features it needs; the test
-# crates keep `policy-engine` in their own defaults, so the standard test run is
-# unchanged, and `--no-default-features` gives the FIPS build's feature set.
+# policy engine and its non-FIPS crypto no matter which features the suite
+# asked for. Each dependant names the Policy selection it needs; the test
+# crates keep `policy-builtins` in their own defaults, so the standard test run
+# is unchanged, and `--no-default-features` gives the FIPS build's feature set.
 praxis = { path = "crates/server", package = "praxis-proxy", default-features = false }
 # default-features = false, like praxis-filter below: the core crate's only
 # default is the `pingora` network backend, and the backend is chosen once, by
 # the `praxis-proxy` binary's own `pingora` feature, which forwards it here
 # through praxis-protocol. A member that inherits this entry gets the backend
 # through that chain, never by accident.
-praxis-core = { version = "0.7.5", path = "crates/core", package = "praxis-proxy-core", default-features = false }
-# default-features = false: the filter crate's own default (`policy-engine`)
+praxis-core = { version = "0.8.0", path = "crates/core", package = "praxis-proxy-core", default-features = false }
+# default-features = false: the filter crate's own default (`policy-builtins`)
 # must not leak in through this dependency edge, or a build that turns the
-# policy engine off at the binary (`--no-default-features`, the FIPS build)
-# would still link it. The `praxis-proxy` binary's default feature set forwards
-# `policy-engine` explicitly, so the standard build is unchanged.
-praxis-filter = { version = "0.7.5", path = "crates/filter", package = "praxis-proxy-filter", default-features = false }
+# policy engine off at the binary (`--no-default-features`, the FIPS build), or
+# narrows its Policy selection, would still link the full bundle. The
+# `praxis-proxy` binary's default feature set forwards `policy-builtins`
+# explicitly, so the standard build is unchanged.
+praxis-filter = { version = "0.8.0", path = "crates/filter", package = "praxis-proxy-filter", default-features = false }
 # default-features = false: the harness's default is the Pingora backend, and
 # a suite crate that runs on hyper must be able to leave it off, so each suite
 # forwards the backend it wants (`pingora` in its own default set).
-praxis-protocol = { version = "0.7.5", path = "crates/protocol", package = "praxis-proxy-protocol", default-features = false }
-praxis-tls = { version = "0.7.5", path = "crates/tls", package = "praxis-proxy-tls" }
+praxis-protocol = { version = "0.8.0", path = "crates/protocol", package = "praxis-proxy-protocol", default-features = false }
+praxis-tls = { version = "0.8.0", path = "crates/tls", package = "praxis-proxy-tls" }
 praxis-test-utils = { path = "tests/utils", default-features = false }
 praxis-proxy-benchmarks = "0.2.2"
+# Backend-neutral: no member may select a jsonwebtoken crypto backend, which
+# would unify into Policy's copy and pull aws-lc-rs or RustCrypto into a FIPS
+# graph. Policy selects the backend; tests only install a rival provider.
+jsonwebtoken = { version = "11.1.0", default-features = false }
 # System OpenSSL bindings, the same crate the rustls provider below uses; never
 # with the `vendored` feature, the platform library is the validated module.
 openssl = "0.10.81"

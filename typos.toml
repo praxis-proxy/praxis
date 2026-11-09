@@ -7,6 +7,9 @@ extend-ignore-identifiers-re = [
     '^00f067aa0ba902b[78]$',
 ]
 extend-ignore-re = [
+    # Base64url JWK components in JSON fixtures and embedded YAML policies.
+    '"[nxyk]": "[A-Za-z0-9_-]{40,}"',
+    '\b[xy]: \\?"[A-Za-z0-9_-]{43}\\?"',
     # Red Hat's full key fingerprint, in documentation and the key file.
     '567E 347A D004 4ADE 55BA +8A5F 199E 2F91 FD43 1D51',
     # Deliberately broken keys in deny-unknown-fields tests and their assertions.

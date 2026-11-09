@@ -110,10 +110,12 @@ fn exported_parentage_links_edge_provider_and_backend() {
         .build()
         .expect("collector runtime");
 
-    let collector_listener = collector_runtime
-        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
-        .expect("collector listener");
-    let collector_port = collector_listener.local_addr().expect("collector address").port();
+    let (collector_listener, collector_port) = praxis_test_utils::bind_unique_port();
+    collector_listener.set_nonblocking(true).expect("nonblocking collector");
+    let collector_listener = {
+        let _entered = collector_runtime.enter();
+        tokio::net::TcpListener::from_std(collector_listener).expect("collector listener")
+    };
 
     let collector_service = collector.clone();
     collector_runtime.spawn(async move {

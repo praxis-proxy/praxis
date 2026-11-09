@@ -525,7 +525,7 @@ filter_chains:
 mod payload_child_limits {
     use std::{
         io::{BufRead as _, BufReader, Read as _, Write as _},
-        net::{TcpListener, TcpStream},
+        net::TcpStream,
         sync::{Arc, mpsc},
         thread,
         time::Duration,
@@ -609,8 +609,7 @@ mod payload_child_limits {
     type ChildHandle = (u16, mpsc::Receiver<ChildReceipt>, thread::JoinHandle<()>);
 
     fn child(response: Response) -> ChildHandle {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
+        let (listener, port) = praxis_test_utils::bind_unique_port();
         let (sender, received) = mpsc::channel();
         let worker = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -916,9 +915,8 @@ filter_chains:
     }
 
     fn check_http2_overflow(advertise_large_length: bool) {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let (listener, child_port) = praxis_test_utils::bind_unique_port();
         listener.set_nonblocking(true).unwrap();
-        let child_port = listener.local_addr().unwrap().port();
         let (sender, received) = mpsc::channel();
         let worker = thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()

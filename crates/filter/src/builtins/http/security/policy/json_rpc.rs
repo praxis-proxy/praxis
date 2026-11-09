@@ -33,7 +33,7 @@ impl ParsedEnvelope {
 
     /// Parse `body`; malformed or empty input yields a `Null` envelope.
     pub(super) fn parse(body: &Bytes) -> Self {
-        Self::try_parse(body).unwrap_or_else(|_| Self(serde_json::Value::Null))
+        Self::try_parse(body).unwrap_or(Self(serde_json::Value::Null))
     }
 
     /// The raw `id` value (`Null` when absent), preserving the original

@@ -21,13 +21,27 @@ plugins:
 global:
   authentication:
     - jwt-user
+  # Global rules also govern bodyless requests such as `GET /v1/models`, so
+  # they must not depend on the inference request.
   authorization:
     pre_invocation:
       - "require(authenticated)"
-      # Response policy cannot evaluate SSE frames, so reject streaming first.
-      - "custom.llm.stream: deny('streaming is not permitted', 'stream_not_allowed')"
+  # Every `llm:` route stacks onto these inference-only rules.
+  defaults:
+    llm:
+      authorization:
+        pre_invocation:
+          # Response policy cannot evaluate SSE frames, so reject streaming first.
+          - "custom.llm.stream: deny('streaming is not permitted', 'stream_not_allowed')"
 
 routes:
+  # Model discovery for any authenticated caller.
+  - http:
+      path_prefix: /v1/models
+    authorization:
+      pre_invocation:
+        - "require(authenticated)"
+
   # Open to any authenticated caller.
   - llm: gpt-4o-mini
     authorization:

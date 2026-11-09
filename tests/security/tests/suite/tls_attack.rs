@@ -11,8 +11,9 @@ use std::{
 
 use praxis_core::config::Config;
 use praxis_test_utils::{
-    TestCertificates, ensure_crypto_provider, free_port, parse_body, parse_cert_chain_and_key, parse_status,
-    simple_proxy_yaml, start_backend_with_shutdown, start_full_proxy, start_tls_proxy_no_wait, wait_for_tcp,
+    TestCertificates, bind_unique_port, ensure_crypto_provider, free_port, parse_body, parse_cert_chain_and_key,
+    parse_status, simple_proxy_yaml, start_backend_with_shutdown, start_full_proxy, start_tls_proxy_no_wait,
+    wait_for_tcp,
 };
 use rustls::{CipherSuite, ClientConfig, ClientConnection, ServerConfig, ServerConnection};
 
@@ -210,9 +211,8 @@ fn upstream_exchange(certs: &TestCertificates, version: &str) -> (u16, String, V
     let server = Arc::new(server);
     let (observed, observations) = mpsc::channel();
     let (stop, stopping) = mpsc::channel();
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let (listener, port) = bind_unique_port();
     listener.set_nonblocking(true).unwrap();
-    let port = listener.local_addr().unwrap().port();
     let accepting = listener.try_clone().unwrap();
     let worker = std::thread::spawn(move || {
         serve_alpn_connections(&accepting, &server, &observed, &stopping);
