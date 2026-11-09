@@ -240,6 +240,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `KvStoreRegistry::get_or_create`, which silently created an in-memory
   store for any unknown name. Use `get` to look up a configured store, or
   `get_or_create_memory` to choose memory explicitly.
+
+### Fixed
+
 - Cluster `max_connections` is now enforced. It was parsed, validated and
   documented as shedding excess requests with 503, but nothing read it, so a
   cluster accepted unlimited concurrent requests. The load balancer now claims
@@ -277,11 +280,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   answered 503 to everything until the config was reloaded (CWE-772). The
   slot is now an `AdmissionLease` shared by every phase, which returns it
   exactly once whether the request finishes or is dropped.
-
-### Fixed
-
-### Fixed
-
+- A request whose endpoint a preceding filter preset now counts against its
+  cluster's `max_connections` ceiling. The load balancer skips selection when
+  an upstream is already set, and the admission claim sat inside the selection
+  path, so an `endpoint_selector` -> `router` -> `load_balancer` pipeline sent
+  preset requests to a saturated cluster uncounted and unshed. A preset
+  request now takes a slot whenever a router placed it in one of the load
+  balancer's clusters, is shed with `503` and `Retry-After: 1` when that
+  cluster is full, and hands the slot back at the final response without
+  touching the endpoint counter it never took. Session affinity keeps its
+  documented exception.
 - Pingora sub-request connections now respect the cluster
   `idle_timeout_ms` when returned to the pool, avoiding reuse of idle
   connections silently dropped by NAT or firewall state.

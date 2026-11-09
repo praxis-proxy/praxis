@@ -281,6 +281,40 @@ impl LoadBalancerFilter {
         Ok((key, entry))
     }
 
+    /// Serve a request whose upstream a preceding filter already chose.
+    ///
+    /// Selection is skipped — the preset address stands — but the request
+    /// still goes to the routed cluster, so it is reached under that
+    /// cluster's base path, carries its application metadata, and is
+    /// admitted against its `max_connections` ceiling like any other
+    /// request to it. When no routed cluster of this filter's answers for
+    /// the request there is no ceiling to charge and no metadata to
+    /// publish, and it passes through untouched.
+    fn preset_upstream(&self, ctx: &mut HttpFilterContext<'_>) -> FilterAction {
+        debug!("upstream already set, skipping LB selection");
+        let Some((cluster, entry)) = ctx
+            .cluster
+            .as_deref()
+            .and_then(|name| self.clusters.get_key_value(name))
+        else {
+            return FilterAction::Continue;
+        };
+        if let Some(rejection) = admit_preset(cluster, entry, ctx) {
+            return FilterAction::Reject(rejection);
+        }
+        // The preset address answers for the routed cluster, so it is
+        // reached under that cluster's base path.
+        if let Some(base_path) = entry.base_path.clone()
+            && let Some(upstream) = ctx.upstream.as_mut()
+        {
+            upstream.base_path = Some(base_path);
+        }
+        // A preset upstream still serves the routed cluster, so
+        // `selected_upstream` conditions must see its metadata.
+        ctx.publish_selected_application(entry.application_protocol.clone(), entry.application_provider.clone());
+        FilterAction::Continue
+    }
+
     /// Look up health state for `cluster_name` from the context's
     /// [`HealthRegistry`].
     fn cluster_health<'a>(registry: Option<&'a HealthRegistry>, cluster_name: &str) -> Option<&'a ClusterHealthState> {
@@ -313,6 +347,36 @@ fn cluster_overloaded() -> Rejection {
     Rejection::status(503)
         .with_header("Retry-After", "1")
         .with_body("cluster at max_connections")
+}
+
+/// Count a preset upstream against its cluster's `max_connections`
+/// ceiling, answering with the 503 to shed it with when the cluster is
+/// full.
+///
+/// An admitted request is marked `lb.admitted` so the response phase hands
+/// the slot back. It cannot ride the `lb.selected` marker: that one also
+/// releases an endpoint counter, and a preset upstream never went through
+/// `strategy.select`, so it holds no such counter to release.
+///
+/// A request already holding a lease — a sub-request, or a second load
+/// balancer in the chain — keeps the one it has, since the ceiling counts
+/// requests to the cluster rather than the filters that handled them.
+fn admit_preset(cluster: &Arc<str>, entry: &ClusterEntry, ctx: &mut HttpFilterContext<'_>) -> Option<Rejection> {
+    if ctx.cluster_admission.is_some() {
+        return None;
+    }
+    let Some(lease) = AdmissionLease::claim(&entry.retry_state) else {
+        debug!(
+            cluster = %cluster,
+            max_connections = entry.retry_state.max_concurrent.unwrap_or_default(),
+            "cluster at max_connections, shedding preset-upstream request"
+        );
+        crate::metrics::record_cluster_overload_reject(SharedString::from(Arc::clone(cluster)));
+        return Some(cluster_overloaded());
+    };
+    ctx.cluster_admission = Some(lease);
+    ctx.set_metadata("lb.admitted", "true");
+    None
 }
 
 /// Whether `status` is the answer that ends the request.
@@ -383,23 +447,7 @@ impl HttpFilter for LoadBalancerFilter {
 
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         if ctx.upstream.is_some() {
-            debug!("upstream already set, skipping LB selection");
-            // A preset upstream (endpoint_selector) still serves the routed
-            // cluster, so `selected_upstream` conditions must see its metadata.
-            let entry = ctx.cluster.as_deref().and_then(|name| self.clusters.get(name));
-            let application =
-                entry.map(|entry| (entry.application_protocol.clone(), entry.application_provider.clone()));
-            // The preset address answers for the routed cluster, so it is
-            // reached under that cluster's base path.
-            if let Some(base_path) = entry.and_then(|entry| entry.base_path.clone())
-                && let Some(upstream) = ctx.upstream.as_mut()
-            {
-                upstream.base_path = Some(base_path);
-            }
-            if let Some((protocol, provider)) = application {
-                ctx.publish_selected_application(protocol, provider);
-            }
-            return Ok(FilterAction::Continue);
+            return Ok(self.preset_upstream(ctx));
         }
 
         let (cluster, entry) = self.resolve_cluster(ctx)?;
@@ -520,7 +568,12 @@ impl HttpFilter for LoadBalancerFilter {
     }
 
     async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        if ctx.get_metadata("lb.selected").is_none() {
+        // `lb.selected` marks a request this filter picked an endpoint for,
+        // which owes back both an endpoint counter and a cluster slot.
+        // `lb.admitted` marks one it only admitted — a preset upstream —
+        // which owes back the cluster slot alone.
+        let selected = ctx.get_metadata("lb.selected").is_some();
+        if !selected && ctx.get_metadata("lb.admitted").is_none() {
             return Ok(FilterAction::Continue);
         }
         // The response phase runs once per response head the upstream sends,
@@ -534,7 +587,8 @@ impl HttpFilter for LoadBalancerFilter {
         }
 
         tracing::trace!("releasing in-flight counter");
-        if let (Some(cluster_name), Some(upstream)) = (&ctx.cluster, &ctx.upstream)
+        if selected
+            && let (Some(cluster_name), Some(upstream)) = (&ctx.cluster, &ctx.upstream)
             && let Some(entry) = self.clusters.get(cluster_name)
         {
             entry.strategy.release(&upstream.address);
