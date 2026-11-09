@@ -3,7 +3,13 @@
 
 //! `WebSocket` echo backend for integration testing.
 
-use std::net::SocketAddr;
+use std::{
+    net::SocketAddr,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
 use futures::{SinkExt as _, StreamExt as _};
 use tokio::net::TcpListener;
@@ -23,6 +29,9 @@ pub struct WsBackendGuard {
     /// The port the backend is listening on.
     port: u16,
 
+    /// Number of client TCP connections accepted by this backend.
+    connections: Arc<AtomicUsize>,
+
     /// Shutdown signal sender.
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
 
@@ -34,6 +43,11 @@ impl WsBackendGuard {
     /// The allocated port number.
     pub fn port(&self) -> u16 {
         self.port
+    }
+
+    /// Number of client connections accepted so far.
+    pub fn connection_count(&self) -> usize {
+        self.connections.load(Ordering::Relaxed)
     }
 }
 
@@ -66,10 +80,12 @@ pub async fn start_websocket_echo_backend() -> WsBackendGuard {
 
     let listener = TcpListener::bind(addr).await.unwrap();
     debug!(port, "websocket echo backend listening");
+    let connections = Arc::new(AtomicUsize::new(0));
+    let backend_connections = Arc::clone(&connections);
 
     let handle = tokio::spawn(async move {
         tokio::select! {
-            _ = accept_loop(&listener) => {},
+            _ = accept_loop(&listener, backend_connections) => {},
             _ = shutdown_rx => {
                 debug!("websocket echo backend shutting down");
             },
@@ -78,6 +94,7 @@ pub async fn start_websocket_echo_backend() -> WsBackendGuard {
 
     WsBackendGuard {
         port,
+        connections,
         shutdown: Some(shutdown_tx),
         handle: Some(handle),
     }
@@ -85,11 +102,12 @@ pub async fn start_websocket_echo_backend() -> WsBackendGuard {
 
 /// Accept `WebSocket` connections in a loop.
 #[expect(clippy::infinite_loop, reason = "server accept loop runs until task cancellation")]
-async fn accept_loop(listener: &TcpListener) {
+async fn accept_loop(listener: &TcpListener, connections: Arc<AtomicUsize>) {
     loop {
         let Ok((stream, peer)) = listener.accept().await else {
             continue;
         };
+        connections.fetch_add(1, Ordering::Relaxed);
         debug!(%peer, "websocket echo backend accepted connection");
         tokio::spawn(async move {
             let Ok(ws) = accept_async(stream).await else {

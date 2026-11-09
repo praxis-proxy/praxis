@@ -234,6 +234,9 @@ fn settle(
         release(&listener.connector, session, false);
         return Outcome::Failed(Failure::internal("request snapshot not set during response phase"));
     };
+    if head.response.status == StatusCode::SWITCHING_PROTOCOLS {
+        return refuse_synthesized_101(listener, flight, session);
+    }
     reframe(flight, &mut head, &result);
     match result {
         Ok(
@@ -256,6 +259,16 @@ fn settle(
             Outcome::Failed(Failure::internal(format!("response filter error: {err}")))
         },
     }
+}
+
+/// Refuse a response filter that creates a `101` after Hyper's upstream guard.
+fn refuse_synthesized_101(listener: &ListenerShared, flight: &mut Flight, session: HyperSession) -> Outcome {
+    error!("response filter attempted an unsupported protocol upgrade");
+    flight.ctx.stamp_error_type("upgrade_synthesized_101");
+    release(&listener.connector, session, false);
+    let failure = Failure::status(502, "response filter synthesized unsupported 101");
+    record_attempt_failure(&failure, &mut flight.ctx);
+    Outcome::Failed(failure)
 }
 
 /// Restore HTTP/1.1 framing a filter's rewrite removed, re-strip reserved

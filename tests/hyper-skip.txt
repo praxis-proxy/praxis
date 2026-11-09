@@ -8,13 +8,16 @@
 # its bucket; a bucket disappears from this file when its follow-up lands. See
 # docs/architecture/hyper-backend.md, "What is not at parity".
 
-# WebSocket and other upgrades: the hyper adapter strips the upgrade headers
-# instead of tunnelling them.
+# WebSocket and other upgrades: the hyper adapter rejects upgrade requests
+# because it does not tunnel them.
 adversarial::header_smuggling::hop_by_hop_upgrade_header_preserved_for_upgrade_requests
 examples::websocket::websocket_example_config_proxies_upgrade
+examples::protocol_examples::websocket_example_proxies_plain_http
 rfcs::rfc6455::rfc6455_101_response_forwarded
 rfcs::rfc6455::rfc6455_connection_upgrade_forwarded
 rfcs::rfc6455::rfc6455_sec_websocket_accept_forwarded_unchanged
+rfcs::rfc6455::rfc6455_sec_websocket_key_forwarded_unchanged
+rfcs::rfc6455::rfc6455_sec_websocket_version_forwarded
 rfcs::rfc6455::rfc6455_upgrade_header_forwarded
 websocket::upgrade_request_preserves_upgrade_headers
 websocket::websocket_binary_messages
@@ -24,7 +27,23 @@ websocket::websocket_message_ordering_preserved
 websocket::websocket_multiple_simultaneous_connections
 websocket::websocket_ping_pong_frames
 websocket::websocket_rate_limit_applies_to_upgrade
+websocket::upgrade_rejected_by_upstream_returns_normal_response
 websocket::websocket_upgrade_succeeds
+websocket::optional_body_observer_allows_websocket_message_exchange
+websocket::inactive_required_body_condition_does_not_block_websocket
+websocket::inactive_branch_required_body_does_not_block_websocket
+websocket::websocket_rejected_before_upstream_when_selected_filter_requires_body
+websocket::selected_required_response_body_processing_blocks_websocket
+websocket::required_bound_upstream_body_processing_blocks_websocket
+websocket::required_pre_read_body_processing_blocks_websocket
+websocket::selected_upstream_required_body_processing_blocks_websocket
+websocket::post_only_required_body_condition_does_not_block_websocket_get
+websocket::defensive_invalid_pipeline_inactive_branch_body_filter_does_not_block_websocket
+websocket::defensive_invalid_pipeline_nested_branch_body_filter_blocks_before_upstream
+websocket::explicit_listener_deny_blocks_websocket_before_upstream
+websocket::malformed_or_unsupported_upstream_101_never_opens_a_tunnel
+websocket::response_filter_cannot_mutate_a_valid_101_into_an_invalid_handshake
+websocket::reload_applies_upgrade_policy_to_new_requests_and_keeps_existing_tunnel
 websocket::websocket_via_header_on_upgrade_response
 
 # Response compression: no hyper equivalent of Pingora's compression module.

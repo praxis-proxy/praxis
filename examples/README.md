@@ -151,7 +151,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | [tls-version-constraint.yaml](configs/protocols/tls-version-constraint.yaml) | Restrict accepted TLS versions via `min_version` |
 | [upstream-ca-file.yaml](configs/protocols/upstream-ca-file.yaml) | Sets a trusted CA bundle for all upstream TLS connections via `runtime.upstream_ca_file` |
 | [upstream-tls.yaml](configs/protocols/upstream-tls.yaml) | Plain HTTP on the listener; TLS to the upstream |
-| [websocket.yaml](configs/protocols/websocket.yaml) | HTTP listener that transparently proxies WebSocket upgrade requests |
+| [websocket.yaml](configs/protocols/websocket.yaml) | HTTP listener that explicitly permits opaque WebSocket passthrough |
 
 ### Security
 
