@@ -230,7 +230,8 @@ pub(crate) fn resolve_pipelines_with_composition(
             session_stores,
             slow_start_registry,
             subrequest_client,
-        )?;
+        )
+        .map_err(|error| format!("listener '{}': {error}", listener.name))?;
 
         // Attach a fresh downstream extension per listener pipeline. Runs at
         // startup and on every reload, so extensions survive reloads.
@@ -771,10 +772,17 @@ body_limits:
   max_buffer_bytes: 4096
   max_request_bytes: 8192
 listeners:
+  - name: other
+    address: "127.0.0.1:8081"
+    filter_chains: [unbuffered]
   - name: web
     address: "127.0.0.1:8080"
     filter_chains: [main]
 filter_chains:
+  - name: unbuffered
+    filters:
+      - filter: static_response
+        status: 200
   - name: main
     filters:
       - filter: json_body_field
@@ -801,6 +809,7 @@ filter_chains:
                 .err()
                 .expect("conflicting request limits must fail startup")
                 .to_string();
+            assert!(message.contains("listener 'web':"), "{message}");
             assert!(message.contains("body_limits.max_request_bytes (8192)"), "{message}");
             assert!(message.contains("body_limits.max_buffer_bytes (4096)"), "{message}");
         }
