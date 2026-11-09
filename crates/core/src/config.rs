@@ -61,7 +61,7 @@ pub use filters::{FailureMode, FilterChainConfig, FilterEntry};
 pub use forward_proxy::{DestinationRule, ForwardProxyConfig};
 pub use hedge_policy::{HedgePolicy, MAX_HEDGE_ATTEMPTS};
 pub use insecure_options::{InsecureFlag, InsecureOptions, SkipPipelineChecks};
-pub use listener::{Listener, ListenerTls, ProtocolKind};
+pub use listener::{Listener, ListenerTls, ProtocolKind, UpgradeAction, UpgradePolicy};
 pub use logging::{DEFAULT_BUFFER_SIZE_LINES, LogOutput, LoggingConfig};
 pub use metrics::{MetricLabel, MetricLabelsConfig, MetricsConfig, RouteTemplates};
 use parse::check_yaml_safety;
