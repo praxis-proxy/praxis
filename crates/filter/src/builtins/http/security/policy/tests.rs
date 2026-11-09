@@ -5223,9 +5223,9 @@ fn assert_policy_body_capabilities(
         })
     );
     let expected_access = if matches!(access, BodyAccessMode::ReadWrite) {
-        BodyAccess::ReadWrite(crate::BodyRequirement::Optional)
+        BodyAccess::ReadWrite(crate::BodyRequirement::Required)
     } else {
-        BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
+        BodyAccess::ReadOnly(crate::BodyRequirement::Required)
     };
     assert_eq!(filter.request_body_access(), expected_access);
 }
