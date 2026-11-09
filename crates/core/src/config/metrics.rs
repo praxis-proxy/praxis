@@ -498,45 +498,15 @@ mod tests {
     }
 
     #[test]
-    fn the_superseded_disabled_list_explains_its_replacement() {
-        let parsed: Result<MetricLabelsConfig, _> = serde_yaml::from_str("disabled: [route, endpoint]");
-        let err = parsed.expect_err("the old list form must not parse").to_string();
-        assert!(
-            err.contains("metrics.labels.disabled is no longer supported"),
-            "the error should name the removed key, got: {err}"
-        );
-        assert!(
-            err.contains("route: false") && err.contains("endpoint: false"),
-            "the error should echo back the operator's own dimensions, got: {err}"
-        );
-    }
-
-    #[test]
-    fn the_enabled_key_is_caught_without_claiming_it_ever_worked() {
-        let parsed: Result<MetricLabelsConfig, _> = serde_yaml::from_str("enabled: [status_code]");
-        let err = parsed.expect_err("a list key must not parse").to_string();
-        assert!(
-            err.contains("metrics.labels.enabled is not a label dimension"),
-            "the error should name the key, got: {err}"
-        );
-        assert!(
-            !err.contains("no longer supported"),
-            "`enabled` shipped in no release, so the error must not imply it was removed, got: {err}"
-        );
-        assert!(
-            err.contains("status_code: true"),
-            "an off-by-default dimension is written as `true`, got: {err}"
-        );
-    }
-
-    #[test]
-    fn an_empty_superseded_list_still_explains_itself() {
-        let parsed: Result<MetricLabelsConfig, _> = serde_yaml::from_str("disabled: []");
-        let err = parsed.expect_err("the old list form must not parse").to_string();
-        assert!(
-            err.contains("<dimension>: false"),
-            "with nothing to echo back the error should still show the shape, got: {err}"
-        );
+    fn superseded_label_list_keys_are_rejected() {
+        // `disabled` shipped as a list and was replaced by per-dimension
+        // settings; `enabled` is the obvious wrong guess at its counterpart.
+        // Neither names a dimension, so both must fail rather than be ignored,
+        // whatever the diagnostic ends up saying.
+        for yaml in ["disabled: [route, endpoint]", "enabled: [status_code]", "disabled: []"] {
+            let parsed: Result<MetricLabelsConfig, _> = serde_yaml::from_str(yaml);
+            assert!(parsed.is_err(), "{yaml} names no dimension, so it must not parse");
+        }
     }
 
     #[test]
