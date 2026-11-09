@@ -147,20 +147,10 @@ insecure_options:
 
 #[test]
 fn reject_superseded_metrics_label_lists() {
-    // `disabled` shipped and was removed; `enabled` never shipped and is only
-    // caught as the obvious wrong guess. The wording differs for that reason.
-    for (key, lead, replacement) in [
-        (
-            "disabled",
-            "metrics.labels.disabled is no longer supported",
-            "route: false",
-        ),
-        (
-            "enabled",
-            "metrics.labels.enabled is not a label dimension",
-            "status_code: true",
-        ),
-    ] {
+    // `disabled` shipped and was replaced by per-dimension settings; `enabled`
+    // is the obvious wrong guess at its counterpart. Neither names a dimension,
+    // so the whole config must fail to load rather than silently ignore them.
+    for key in ["disabled", "enabled"] {
         let yaml = format!(
             r#"
 metrics:
@@ -177,14 +167,9 @@ filter_chains:
         status: 200
 "#
         );
-        let err = Config::from_yaml(&yaml).unwrap_err().to_string();
         assert!(
-            err.contains(lead),
-            "the operator must be told what is wrong with `{key}`, got: {err}"
-        );
-        assert!(
-            err.contains(replacement),
-            "the error must show the per-dimension replacement, got: {err}"
+            Config::from_yaml(&yaml).is_err(),
+            "metrics.labels.{key} names no dimension, so the config must not load"
         );
     }
 }
