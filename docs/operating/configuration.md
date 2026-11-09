@@ -534,44 +534,48 @@ warning; metrics are recorded but not exposed.
 ### Label Dimensions
 
 `metrics.labels` selects which label dimensions metrics
-carry, bounding total time-series cardinality.
+carry, bounding total time-series cardinality. Each
+dimension takes its own `true`/`false` setting.
 
 ```yaml
 metrics:
   labels:
-    disabled:        # drop default-on dimensions
-      - route
-      - endpoint
-    enabled:         # add opt-in dimensions
-      - status_code
+    route: false        # drop a dimension that defaults on
+    endpoint: false
+    status_code: true   # add a dimension that defaults off
 ```
 
-- `disabled`: dimensions to drop from every metric that
-  carries them. The metric stays available, with the
-  series that differed only by that dimension collapsed
-  into one. Empty by default, so the default
-  configuration emits every default-on dimension
-  (`cluster`, `endpoint`, `listener`, `method`, `route`,
-  `status_class`).
-- `enabled`: opt-in dimensions to add to the metrics
-  that carry them. A dimension that multiplies
-  cardinality without being useful to every deployment
-  is absent unless named here; `status_code` on
-  `praxis_http_requests_total` is the only one today.
-  Listing a default-on dimension is a no-op. Empty by
-  default.
+A dimension you leave out keeps its default. Six default
+to on (`cluster`, `endpoint`, `listener`, `method`,
+`route`, `status_class`) and one defaults to off
+(`status_code`), so an empty `labels` block emits exactly
+the series Praxis emitted before this setting existed.
 
-`disabled` takes precedence: a dimension named in both
-lists is dropped, so a contradictory configuration
-resolves to the lower-cardinality reading rather than
-silently picking one.
+Setting a dimension to `false` drops it from every metric
+that carries it. The metric stays available, with the
+series that differed only by that dimension collapsed
+into one. Setting one to the value it already has changes
+nothing.
+
+The exception is `cluster` on the two per-cluster health
+gauges (`praxis_upstream_healthy_endpoints` and
+`praxis_upstream_total_endpoints`), which keep the label
+either way: those gauges are set rather than summed, so
+dropping it would collapse every cluster onto one
+last-writer series instead of lowering cardinality.
 
 Label selection installs once at startup and is not
-hot-reloadable. A reload that changes either list is
-ignored and logs a warning; the new set takes effect on
-restart. For the per-dimension table and what enabling
-`status_code` costs, see
+hot-reloadable. A reload that changes it is ignored and
+logs a warning; the new set takes effect on restart. For
+the per-dimension table and what enabling `status_code`
+costs, see
 [Metric Label Sets](observability.md#metric-label-sets).
+
+> **Changed:** this setting used to take a `disabled`
+> list, which could only remove a dimension. It was
+> replaced by the per-dimension form above. A config
+> still using `disabled` is rejected at startup with a
+> message naming the replacement.
 
 ## Header and Request Limits
 

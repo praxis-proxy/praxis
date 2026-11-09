@@ -144,3 +144,81 @@ insecure_options:
         "TCP listener should have no filter chains"
     );
 }
+
+#[test]
+fn reject_superseded_metrics_label_lists() {
+    // `disabled` shipped and was removed; `enabled` never shipped and is only
+    // caught as the obvious wrong guess. The wording differs for that reason.
+    for (key, lead, replacement) in [
+        (
+            "disabled",
+            "metrics.labels.disabled is no longer supported",
+            "route: false",
+        ),
+        (
+            "enabled",
+            "metrics.labels.enabled is not a label dimension",
+            "status_code: true",
+        ),
+    ] {
+        let yaml = format!(
+            r#"
+metrics:
+  labels:
+    {key}: [route, status_code]
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#
+        );
+        let err = Config::from_yaml(&yaml).unwrap_err().to_string();
+        assert!(
+            err.contains(lead),
+            "the operator must be told what is wrong with `{key}`, got: {err}"
+        );
+        assert!(
+            err.contains(replacement),
+            "the error must show the per-dimension replacement, got: {err}"
+        );
+    }
+}
+
+#[test]
+fn accept_per_dimension_metrics_labels() {
+    let yaml = r#"
+metrics:
+  labels:
+    route: false
+    status_code: true
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+    let config = Config::from_yaml(yaml).unwrap();
+    assert!(
+        !config
+            .metrics
+            .labels
+            .is_enabled(praxis_core::config::MetricLabel::Route),
+        "route should be turned off"
+    );
+    assert!(
+        config
+            .metrics
+            .labels
+            .is_enabled(praxis_core::config::MetricLabel::StatusCode),
+        "status_code should be turned on"
+    );
+}

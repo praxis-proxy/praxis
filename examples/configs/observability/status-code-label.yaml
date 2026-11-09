@@ -2,8 +2,9 @@
 #
 # Adds the opt-in `status_code` label to `praxis_http_requests_total`, so a
 # rate limit (429) and a missing route (404) stop sharing one `4xx` series.
-# The label is off unless named in `enabled`, and codes outside a fixed
-# allowlist collapse to their class, holding it to about seventeen values.
+# The label is the one dimension that defaults to off, and codes outside a
+# fixed allowlist collapse to their class, holding it to about seventeen
+# values.
 #
 # Usage:
 #   cargo run -p praxis-proxy -- -c examples/configs/observability/status-code-label.yaml
@@ -19,11 +20,10 @@ admin:
 
 metrics:
   labels:
-    # Opt-in dimensions. `status_class` is untouched and stays enabled, so
-    # existing 4xx/5xx dashboards and alerts keep working; `status_code`
-    # refines the same information for the queries that need it.
-    enabled:
-      - status_code
+    # `status_class` is untouched and stays enabled, so existing 4xx/5xx
+    # dashboards and alerts keep working; `status_code` refines the same
+    # information for the queries that need it.
+    status_code: true
 
 insecure_options:
   allow_private_endpoints: true # example proxies to a local backend
