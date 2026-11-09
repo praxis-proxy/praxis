@@ -54,9 +54,10 @@ including the rejecting policy. They execute once in reverse order, with
 normal response conditions. A rejection replaces the pending response
 and cancels its old stream. Earlier policies continue over the replacement;
 the phase never restarts. Applied header-policy mutations survive a
-replacement; untouched handler headers do not. Handler failures and request-limit denials take
-this same response path. The configured `cors` and `headers` filters can
-therefore apply CORS and security headers to local outcomes.
+replacement; untouched handler headers do not. Handler failures and
+request-limit denials take this same response path. The configured
+`cors` and `headers` filters can therefore apply CORS and security
+headers to local outcomes.
 
 External `Policy` filters use
 `praxis_filter::local_http::record_response_header_effects` from
