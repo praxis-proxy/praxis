@@ -142,6 +142,7 @@ impl LocalExchange {
         transport: &mut dyn LocalTransport,
         completion: &mut LocalCompletion,
     ) -> LocalResponse {
+        ctx.executed_filter_indices = vec![false; self.claim.pipeline().len()];
         let approval = tokio::select! {
             biased;
             () = self.cancellation.cancelled() => { completion.outcome = LocalOutcome::Cancelled; return LocalResponse::internal_error(); },

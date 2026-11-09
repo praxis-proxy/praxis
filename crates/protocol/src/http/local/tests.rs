@@ -609,6 +609,40 @@ async fn cancellation_interrupts_blocked_response_suppression() {
     }
 }
 
+#[tokio::test]
+async fn cancellation_before_approval_skips_response_body_hooks() {
+    let state = State::default();
+    let pipeline = pipeline(vec![
+        Fixture::policy("before", state.clone()),
+        Fixture::owner(state.clone()),
+    ]);
+    let request = praxis_filter::Request {
+        method: http::Method::POST,
+        uri: "/files".parse().unwrap(),
+        headers: http::HeaderMap::new(),
+    };
+    let mut head = Response {
+        status: http::StatusCode::OK,
+        headers: http::HeaderMap::new(),
+    };
+    let mut ctx = context::context(&request, &pipeline);
+    ctx.response_header = Some(&mut head);
+    let exchange = LocalExchange::claim(&pipeline, &mut ctx).unwrap();
+    exchange.cancellation().cancel();
+    let result = exchange
+        .run(
+            &mut ctx,
+            &mut Transport {
+                state: state.clone(),
+                input: Input::bytes(1),
+            },
+        )
+        .await;
+
+    assert_eq!(result.outcome, LocalOutcome::Cancelled);
+    assert!(!state.events().iter().any(|event| event.starts_with("chunk:")));
+}
+
 #[test]
 fn mandatory_build_validation_rejects_all_unsafe_compositions() {
     let state = State::default();
