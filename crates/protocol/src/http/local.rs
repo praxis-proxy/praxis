@@ -23,7 +23,7 @@ use praxis_filter::{
 /// Returns an error until the adapter implements all local transport duties.
 pub fn require_supported_adapter(pipeline: &FilterPipeline) -> Result<(), FilterError> {
     if pipeline.has_local_http_routes() {
-        return Err("local HTTP serving is unsupported by this adapter (Issue 2)".into());
+        return Err("local HTTP serving is unsupported by this adapter; see praxis-proxy/praxis#854".into());
     }
     Ok(())
 }

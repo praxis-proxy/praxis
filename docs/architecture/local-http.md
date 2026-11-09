@@ -151,7 +151,7 @@ failure has no handler to finalize. Drop only signals cancellation: forced
 task/runtime termination cannot promise async cleanup. Services must
 recover their durable incomplete operations independently.
 
-## Issue 2 transport obligations
+## Issue #854 transport obligations
 
 Before enabling Pingora's capability gate, implement and test:
 
