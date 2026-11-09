@@ -6,12 +6,22 @@
 use std::{
     pin::Pin,
     sync::{Mutex, PoisonError},
+    thread::JoinHandle,
+    time::Duration,
 };
 
-use pingora_core::server::{RunArgs, Server, ShutdownSignal, ShutdownSignalWatch, configuration::ServerConf};
+use async_trait::async_trait;
+#[cfg(unix)]
+use pingora_core::server::UnixShutdownSignalWatch;
+use pingora_core::{
+    server::{
+        ExecutionPhase, RunArgs, Server, ShutdownSignal, ShutdownSignalWatch, ShutdownWatch, configuration::ServerConf,
+    },
+    services::background::{BackgroundService, background_service},
+};
 use tracing::info;
 
-use super::{RuntimeOptions, ServerRuntime, ShutdownFuture, resolve_thread_count};
+use super::{LifecycleHandle, RuntimeOptions, ServerRuntime, ShutdownFuture, resolve_thread_count};
 use crate::config::Config;
 
 // -----------------------------------------------------------------------------
@@ -30,9 +40,16 @@ const SHUTDOWN_GRACE_CAP_SECS: u64 = 5; // 5 s pre-drain grace before runtime sh
 pub struct PingoraServerRuntime {
     /// The underlying Pingora server instance.
     server: Server,
+
+    /// Shared lifecycle state for management services and handlers.
+    lifecycle: LifecycleHandle,
+
+    /// Readiness-first handoff delay before Pingora begins graceful shutdown.
+    shutdown_drain_delay: Duration,
 }
 
 impl std::fmt::Debug for PingoraServerRuntime {
+    /// Format the runtime's worker-thread count.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PingoraServerRuntime")
             .field("threads", &self.server.configuration.threads)
@@ -45,8 +62,21 @@ impl PingoraServerRuntime {
     #[must_use]
     pub fn new(config: &Config) -> Self {
         let opts = RuntimeOptions::from(&config.runtime);
-        let server = build_http_server(config.shutdown_timeout_secs, &opts);
-        Self { server }
+        let shutdown_budget = config
+            .shutdown_timeout_secs
+            .saturating_sub(config.shutdown_drain_delay_secs);
+        let mut server = build_http_server(shutdown_budget, &opts);
+        let lifecycle = LifecycleHandle::new();
+        let phases = server.watch_execution_phase();
+        server.add_service(background_service(
+            "lifecycle monitor",
+            LifecycleMonitor::new(phases, lifecycle.clone()),
+        ));
+        Self {
+            server,
+            lifecycle,
+            shutdown_drain_delay: Duration::from_secs(config.shutdown_drain_delay_secs),
+        }
     }
 
     /// Access the inner Pingora server for service registration.
@@ -64,7 +94,9 @@ impl PingoraServerRuntime {
     ///
     /// [`run_until_shutdown`]: ServerRuntime::run_until_shutdown
     pub fn run(self) -> ! {
-        self.server.run_forever()
+        let args = self.delayed_run_args();
+        self.run_with_args(args);
+        std::process::exit(0)
     }
 
     /// Start all registered services with Pingora's own run arguments.
@@ -77,11 +109,140 @@ impl PingoraServerRuntime {
     /// [`run_with_shutdown`]: ServerRuntime::run_with_shutdown
     /// [`RunArgs`]: pingora_core::server::RunArgs
     pub fn run_with_args(self, args: RunArgs) {
+        ensure_sighup_ignored();
         self.server.run(args);
+        self.lifecycle.begin_drain();
+        self.lifecycle.mark_stopped();
+    }
+
+    /// Build Pingora's signal arguments with readiness-first handoff.
+    #[cfg(unix)]
+    fn delayed_run_args(&self) -> RunArgs {
+        RunArgs {
+            shutdown_signal: Box::new(DelayedShutdownWatch {
+                delay: self.shutdown_drain_delay,
+                lifecycle: self.lifecycle.clone(),
+            }),
+        }
+    }
+
+    /// Build default arguments on platforms without Unix signals.
+    #[cfg(not(unix))]
+    fn delayed_run_args(&self) -> RunArgs {
+        RunArgs::default()
+    }
+}
+
+/// Pingora background service that starts the lifecycle monitor thread.
+///
+/// Pingora forks for daemon mode inside [`Server::run`] and discards threads
+/// created before the fork, so starting the monitor from a service keeps it in
+/// the daemon child.
+struct LifecycleMonitor {
+    /// Pingora's execution-phase stream, taken when the service starts.
+    phases: Mutex<Option<tokio::sync::broadcast::Receiver<ExecutionPhase>>>,
+    /// Process lifecycle the monitor thread publishes into.
+    lifecycle: LifecycleHandle,
+}
+
+impl LifecycleMonitor {
+    /// Build the service around Pingora's phase stream.
+    fn new(phases: tokio::sync::broadcast::Receiver<ExecutionPhase>, lifecycle: LifecycleHandle) -> Self {
+        Self {
+            phases: Mutex::new(Some(phases)),
+            lifecycle,
+        }
+    }
+}
+
+#[async_trait]
+impl BackgroundService for LifecycleMonitor {
+    /// Start the monitor thread in the process Pingora runs services in.
+    async fn start(&self, _shutdown: ShutdownWatch) {
+        let Some(phases) = self.phases.lock().unwrap_or_else(PoisonError::into_inner).take() else {
+            return;
+        };
+        drop(monitor_lifecycle(phases, self.lifecycle.clone()));
+    }
+}
+
+/// Mirror Pingora's execution phases into the process lifecycle.
+fn monitor_lifecycle(
+    mut phases: tokio::sync::broadcast::Receiver<ExecutionPhase>,
+    lifecycle: LifecycleHandle,
+) -> JoinHandle<()> {
+    std::thread::spawn(move || {
+        while let Ok(phase) = phases.blocking_recv() {
+            if matches!(phase, ExecutionPhase::Running) {
+                _ = lifecycle.mark_serving();
+            } else if matches!(
+                phase,
+                ExecutionPhase::GracefulTerminate | ExecutionPhase::ShutdownStarted
+            ) {
+                lifecycle.begin_drain();
+            } else if matches!(phase, ExecutionPhase::Terminated) {
+                lifecycle.mark_stopped();
+                return;
+            }
+        }
+        lifecycle.mark_stopped();
+    })
+}
+
+/// Installs a process-wide SIGHUP ignore before any service starts.
+///
+/// The handler lives on its own thread and runtime so it is in place before
+/// Pingora can fork for daemon mode; the OS disposition is inherited by the
+/// child, and the thread drains signals in the foreground process.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one function installs the handler and keeps its runtime alive for the process lifetime"
+)]
+fn ensure_sighup_ignored() {
+    #[cfg(unix)]
+    {
+        use std::sync::OnceLock;
+
+        static INSTALLED: OnceLock<()> = OnceLock::new();
+        INSTALLED.get_or_init(|| {
+            let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+            let spawned = std::thread::Builder::new()
+                .name("sighup-ignore".to_owned())
+                .spawn(move || {
+                    let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                        Ok(runtime) => runtime,
+                        Err(error) => {
+                            tracing::warn!(%error, "failed to start the SIGHUP handler runtime");
+                            let _started = ready_tx.send(false);
+                            return;
+                        },
+                    };
+                    runtime.block_on(async move {
+                        let mut hangup = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()) {
+                            Ok(signal) => signal,
+                            Err(error) => {
+                                tracing::warn!(%error, "failed to install the SIGHUP handler");
+                                let _started = ready_tx.send(false);
+                                return;
+                            },
+                        };
+                        let _started = ready_tx.send(true);
+                        while hangup.recv().await.is_some() {}
+                    });
+                });
+            if let Err(error) = spawned {
+                tracing::warn!(%error, "failed to spawn the SIGHUP handler thread");
+                return;
+            }
+            if !ready_rx.recv().unwrap_or(false) {
+                tracing::warn!("SIGHUP handler did not install; a hangup may stop the proxy");
+            }
+        });
     }
 }
 
 impl ServerRuntime for PingoraServerRuntime {
+    /// Build the runtime from `config`; the same as [`PingoraServerRuntime::new`].
     fn from_config(config: &Config) -> Self {
         Self::new(config)
     }
@@ -92,13 +253,76 @@ impl ServerRuntime for PingoraServerRuntime {
     ///
     /// [`run`]: PingoraServerRuntime::run
     fn run_until_shutdown(self) {
-        self.run_with_args(RunArgs::default());
+        let args = self.delayed_run_args();
+        self.run_with_args(args);
     }
 
+    /// Stop as soon as `shutdown` resolves, by requesting a fast shutdown.
     fn run_with_shutdown(self, shutdown: ShutdownFuture) {
         self.run_with_args(RunArgs {
             shutdown_signal: Box::new(FutureShutdown::new(shutdown)),
         });
+    }
+
+    /// Return the lifecycle handle shared with registered protocol services.
+    fn lifecycle(&self) -> LifecycleHandle {
+        self.lifecycle.clone()
+    }
+}
+
+/// Pingora signal watcher that fails readiness before delayed graceful stop.
+#[cfg(unix)]
+struct DelayedShutdownWatch {
+    /// Delay before returning the graceful termination signal.
+    delay: Duration,
+
+    /// Lifecycle shared with readiness handlers.
+    lifecycle: LifecycleHandle,
+}
+
+#[cfg(unix)]
+impl ShutdownSignalWatch for DelayedShutdownWatch {
+    /// Wait for the next shutdown signal.
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "ShutdownSignal is non_exhaustive; unknown signals pass through unchanged"
+    )]
+    fn recv<'watch, 'fut>(&'watch self) -> Pin<Box<dyn Future<Output = ShutdownSignal> + Send + 'fut>>
+    where
+        'watch: 'fut,
+        Self: 'fut,
+    {
+        let delay = self.delay;
+        let lifecycle = self.lifecycle.clone();
+        Box::pin(async move {
+            match UnixShutdownSignalWatch.recv().await {
+                ShutdownSignal::GracefulTerminate => {
+                    _ = lifecycle.begin_drain();
+                    wait_for_pingora_drain_delay(delay).await
+                },
+                signal => signal,
+            }
+        })
+    }
+}
+
+/// Wait for the handoff delay while retaining Pingora's fast-stop signals.
+#[cfg(unix)]
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "the pre-drain delay is capped by the shutdown grace period"
+)]
+async fn wait_for_pingora_drain_delay(delay: Duration) -> ShutdownSignal {
+    let deadline = tokio::time::Instant::now() + delay;
+    loop {
+        tokio::select! {
+            () = tokio::time::sleep_until(deadline) => return ShutdownSignal::GracefulTerminate,
+            signal = UnixShutdownSignalWatch.recv() => match signal {
+                ShutdownSignal::FastShutdown => return ShutdownSignal::FastShutdown,
+                ShutdownSignal::GracefulUpgrade => return ShutdownSignal::GracefulUpgrade,
+                ShutdownSignal::GracefulTerminate => tracing::warn!("repeated SIGTERM received during shutdown drain delay; continuing"),
+            },
+        }
     }
 }
 
@@ -157,6 +381,8 @@ impl FutureShutdown {
 }
 
 impl ShutdownSignalWatch for FutureShutdown {
+    /// Hand the shutdown future to Pingora and request a fast shutdown when it
+    /// resolves.
     fn recv<'watch, 'fut>(&'watch self) -> Pin<Box<dyn Future<Output = ShutdownSignal> + Send + 'fut>>
     where
         'watch: 'fut,
@@ -183,7 +409,7 @@ impl ShutdownSignalWatch for FutureShutdown {
 /// requests finish, then shuts the runtimes down with the graceful
 /// shutdown timeout. The grace period is capped at
 /// [`SHUTDOWN_GRACE_CAP_SECS`] and the timeout gets the remainder, so
-/// the two phases sum to `shutdown_timeout_secs`.
+/// the two phases sum to the shutdown budget left after the drain delay.
 ///
 /// Runtime shutdown drops async tasks at their next yield and only
 /// waits on blocking threads, so requests still in flight when the
@@ -238,14 +464,26 @@ fn warn_unsupported_global_queue_interval(runtime: &RuntimeOptions) {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
-#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
-#[allow(
+#[expect(
     clippy::expect_used,
     clippy::unwrap_used,
     reason = "tests use expect/unwrap for brevity"
 )]
 mod tests {
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+        thread,
+        time::Instant,
+    };
+
     use super::*;
+    use crate::server::LifecyclePhase;
+
+    /// How long a test waits for the lifecycle to reach a phase.
+    const PHASE_DEADLINE: Duration = Duration::from_secs(10); // 10 s
 
     #[test]
     fn build_http_server_returns_bootstrapped_server() {
@@ -259,6 +497,23 @@ mod tests {
             server.configuration.graceful_shutdown_timeout_seconds,
             Some(25),
             "drain should get the remainder of the shutdown timeout"
+        );
+    }
+
+    #[test]
+    /// The drain delay is subtracted from the shutdown budget.
+    fn new_subtracts_drain_delay_from_shutdown_budget() {
+        let yaml = format!(
+            "{}\nshutdown_timeout_secs: 30\nshutdown_drain_delay_secs: 10\n",
+            crate::config::DEFAULT_CONFIG
+        );
+        let config = Config::from_yaml(&yaml).unwrap();
+        let runtime = PingoraServerRuntime::new(&config);
+        assert_eq!(runtime.server.configuration.grace_period_seconds, Some(5));
+        assert_eq!(
+            runtime.server.configuration.graceful_shutdown_timeout_seconds,
+            Some(15),
+            "the drain delay must come out of the shutdown budget"
         );
     }
 
@@ -320,6 +575,7 @@ mod tests {
     }
 
     #[test]
+    /// Pingora's run loop returns after a shutdown signal.
     fn run_with_args_returns_after_shutdown() {
         let config = Config::from_yaml(crate::config::DEFAULT_CONFIG).unwrap();
         let runtime = PingoraServerRuntime::new(&config);
@@ -329,11 +585,105 @@ mod tests {
     }
 
     #[test]
+    /// The harness shutdown future stops Pingora.
     fn run_with_shutdown_returns_once_the_future_resolves() {
         let config = Config::from_yaml(crate::config::DEFAULT_CONFIG).unwrap();
         let runtime = PingoraServerRuntime::from_config(&config);
 
         runtime.run_with_shutdown(Box::pin(std::future::ready(())));
+    }
+
+    #[test]
+    /// The lifecycle becomes serving while Pingora runs.
+    fn run_with_args_marks_serving_while_pingora_runs() {
+        let config = Config::from_yaml(crate::config::DEFAULT_CONFIG).unwrap();
+        let runtime = PingoraServerRuntime::new(&config);
+        let lifecycle = runtime.lifecycle();
+        let observed_serving = Arc::new(AtomicBool::new(false));
+
+        runtime.run_with_args(RunArgs {
+            shutdown_signal: Box::new(WaitForServing {
+                lifecycle: lifecycle.subscribe(),
+                observed_serving: Arc::clone(&observed_serving),
+            }),
+        });
+
+        assert!(
+            observed_serving.load(Ordering::SeqCst),
+            "the lifecycle must report serving while Pingora is running"
+        );
+        assert_eq!(
+            lifecycle.phase(),
+            LifecyclePhase::Stopped,
+            "the lifecycle must report stopped after Pingora returns"
+        );
+    }
+
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one test covers every phase the monitor recognises"
+    )]
+    /// The monitor publishes each Pingora execution phase.
+    fn lifecycle_monitor_publishes_each_phase() {
+        let lifecycle = LifecycleHandle::new();
+        let (sender, receiver) = tokio::sync::broadcast::channel(8);
+        let monitor = monitor_lifecycle(receiver, lifecycle.clone());
+        sender.send(ExecutionPhase::Running).unwrap();
+        wait_for_phase(&lifecycle, LifecyclePhase::Serving);
+        sender.send(ExecutionPhase::Terminated).unwrap();
+        drop(sender);
+        monitor.join().unwrap();
+        assert_eq!(
+            lifecycle.phase(),
+            LifecyclePhase::Stopped,
+            "terminated Pingora must stop the lifecycle"
+        );
+
+        for phase in [ExecutionPhase::GracefulTerminate, ExecutionPhase::ShutdownStarted] {
+            let shutdown_lifecycle = LifecycleHandle::new();
+            let (shutdown_sender, shutdown_receiver) = tokio::sync::broadcast::channel(8);
+            let shutdown_monitor = monitor_lifecycle(shutdown_receiver, shutdown_lifecycle.clone());
+            shutdown_sender.send(phase).unwrap();
+            wait_for_phase(&shutdown_lifecycle, LifecyclePhase::Draining);
+            shutdown_sender.send(ExecutionPhase::Terminated).unwrap();
+            drop(shutdown_sender);
+            shutdown_monitor.join().unwrap();
+            assert_eq!(
+                shutdown_lifecycle.phase(),
+                LifecyclePhase::Stopped,
+                "Pingora shutdown must stop the lifecycle"
+            );
+        }
+
+        let closed_lifecycle = LifecycleHandle::new();
+        let (closed_sender, closed_receiver) = tokio::sync::broadcast::channel(8);
+        let closed_monitor = monitor_lifecycle(closed_receiver, closed_lifecycle.clone());
+        drop(closed_sender);
+        closed_monitor.join().unwrap();
+        assert_eq!(
+            closed_lifecycle.phase(),
+            LifecyclePhase::Stopped,
+            "a closed Pingora phase stream must stop the lifecycle"
+        );
+    }
+
+    /// Wait for the monitor thread to publish `expected` without racing it.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the monitor runs on its own thread; poll it from this synchronous test"
+    )]
+    fn wait_for_phase(lifecycle: &LifecycleHandle, expected: LifecyclePhase) {
+        let start = Instant::now();
+        while lifecycle.phase() != expected && start.elapsed() < PHASE_DEADLINE {
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(
+            lifecycle.phase(),
+            expected,
+            "Pingora lifecycle monitor did not publish the expected phase"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -344,6 +694,7 @@ mod tests {
     struct ImmediateShutdown;
 
     impl ShutdownSignalWatch for ImmediateShutdown {
+        /// Wait for the next shutdown signal.
         fn recv<'watch, 'fut>(&'watch self) -> Pin<Box<dyn Future<Output = ShutdownSignal> + Send + 'fut>>
         where
             'watch: 'fut,
@@ -353,11 +704,45 @@ mod tests {
         }
     }
 
+    /// Shutdown watch that waits for the serving phase, records the
+    /// observation, then asks for a fast shutdown.
+    struct WaitForServing {
+        /// Lifecycle phases to observe.
+        lifecycle: tokio::sync::watch::Receiver<LifecyclePhase>,
+
+        /// Set when serving was observed before the deadline.
+        observed_serving: Arc<AtomicBool>,
+    }
+
+    impl ShutdownSignalWatch for WaitForServing {
+        /// Wait for the next shutdown signal.
+        fn recv<'watch, 'fut>(&'watch self) -> Pin<Box<dyn Future<Output = ShutdownSignal> + Send + 'fut>>
+        where
+            'watch: 'fut,
+            Self: 'fut,
+        {
+            let mut lifecycle = self.lifecycle.clone();
+            let observed_serving = Arc::clone(&self.observed_serving);
+            Box::pin(async move {
+                let serving = tokio::time::timeout(PHASE_DEADLINE, async move {
+                    while *lifecycle.borrow() != LifecyclePhase::Serving {
+                        if lifecycle.changed().await.is_err() {
+                            return false;
+                        }
+                    }
+                    true
+                })
+                .await
+                .unwrap_or(false);
+                observed_serving.store(serving, Ordering::SeqCst);
+                ShutdownSignal::FastShutdown
+            })
+        }
+    }
+
     /// Run `func` under a thread-local subscriber that records everything
     /// logged at WARN or above, returning the value and captured output.
     fn capture_warnings<T, F: FnOnce() -> T>(func: F) -> (T, String) {
-        use std::sync::Arc;
-
         #[derive(Clone)]
         struct Buffer(Arc<Mutex<Vec<u8>>>);
 

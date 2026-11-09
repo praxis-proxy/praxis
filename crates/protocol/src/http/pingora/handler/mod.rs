@@ -23,6 +23,8 @@ use pingora_core::{Result, server::Server, services::listening::Service};
 #[cfg(feature = "pingora")]
 use pingora_proxy::http_proxy;
 #[cfg(feature = "pingora")]
+use praxis_core::server::LifecycleHandle;
+#[cfg(feature = "pingora")]
 use praxis_filter::FilterPipeline;
 #[cfg(feature = "pingora")]
 use tokio::sync::Semaphore;
@@ -141,6 +143,10 @@ pub use with_body::PingoraHttpHandler;
 ///
 /// Returns [`ProxyError`] if the listener fails to bind.
 ///
+/// This compatibility entry point uses an isolated lifecycle and therefore
+/// does not observe runtime drain transitions. Production wiring should use
+/// [`load_http_handler_with_lifecycle`].
+///
 /// [`ProxyError`]: praxis_core::ProxyError
 #[cfg(feature = "pingora")]
 pub fn load_http_handler(
@@ -148,6 +154,28 @@ pub fn load_http_handler(
     listener: &praxis_core::config::Listener,
     pipeline: Arc<ArcSwap<FilterPipeline>>,
     cert_watcher_shutdowns: &mut Vec<tokio::sync::watch::Sender<bool>>,
+) -> Result<(), praxis_core::ProxyError> {
+    load_http_handler_with_lifecycle(
+        server,
+        listener,
+        pipeline,
+        cert_watcher_shutdowns,
+        LifecycleHandle::new(),
+    )
+}
+
+/// Load an HTTP handler with the process lifecycle shared by readiness and responses.
+///
+/// # Errors
+///
+/// Returns the listener wiring error when the handler cannot be registered.
+#[cfg(feature = "pingora")]
+pub fn load_http_handler_with_lifecycle(
+    server: &mut Server,
+    listener: &praxis_core::config::Listener,
+    pipeline: Arc<ArcSwap<FilterPipeline>>,
+    cert_watcher_shutdowns: &mut Vec<tokio::sync::watch::Sender<bool>>,
+    lifecycle: LifecycleHandle,
 ) -> Result<(), praxis_core::ProxyError> {
     let downstream_read_timeout = listener.downstream_read_timeout_ms.map(Duration::from_millis);
     let downstream_keepalive_timeout_secs = listener
@@ -169,6 +197,7 @@ pub fn load_http_handler(
         // handler clones it per connection, and an owned `String` label
         // would deep-copy on every clone.
         ::metrics::SharedString::from_shared(Arc::from(listener.name.as_str())),
+        lifecycle,
     );
     wire_service(server, listener, handler, cert_watcher_shutdowns)?;
     Ok(())
@@ -245,6 +274,7 @@ mod tests {
             None,
             None,
             "test".into(),
+            LifecycleHandle::new(),
         );
         let (_client, stream) = tokio::io::duplex(1024);
         let mut session = pingora_proxy::Session::new_h1(Box::new(stream));

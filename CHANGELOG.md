@@ -17,6 +17,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Add `shutdown_drain_delay_secs` for readiness-first SIGTERM handoff. The
+  process becomes unready, waits for the configured delay, then begins
+  graceful connection shutdown; HTTP/1 responses during the drain advertise
+  `Connection: close`. The orchestrator's termination timeout must cover
+  `shutdown_timeout_secs` (which already includes this delay), any `preStop`
+  hook, and final cleanup.
+
+- Add configurable `/ready` policy: `admin.readiness: serving` (the default)
+  keeps a serving replica ready during upstream degradation, while
+  `admin.readiness: upstreams` preserves upstream-dependent readiness.
+  `/ready` also reports the `initializing`, `draining`, and `stopped`
+  lifecycle phases with `503` instead of claiming readiness.
+
+### Changed
+
+- **Breaking:** Rust API: `ServerRuntime` implementations must implement
+  `lifecycle()`, explicit `Config` struct literals must set
+  `shutdown_drain_delay_secs`, and `UnavailableRuntime` is no longer a unit
+  value or `Copy`; use `UnavailableRuntime::default()` or `from_config`, and
+  `clone()` where a copy was relied on.
+- **Behavior change:** `/ready` defaults to `admin.readiness: serving`, so a
+  serving replica stays ready when a checked cluster has no healthy endpoints.
+  Set `admin.readiness: upstreams` to preserve upstream-dependent readiness.
+
 ### Changed
 
 - Update the Pingora fork dependencies to v0.11.4.

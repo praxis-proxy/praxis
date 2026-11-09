@@ -18,6 +18,7 @@ body_limits:           # Optional. Global body size ceilings.
 metrics:               # Optional. Prometheus metric collection toggles.
 runtime:               # Optional. Thread pool and logging tuning.
 shutdown_timeout_secs: # Optional. Shutdown budget (default: 30 seconds).
+shutdown_drain_delay_secs: # Optional. Readiness-first drain delay (default: 0).
 insecure_options:      # Optional. Dev/test overrides. See developing/getting-started.md.
 ```
 
@@ -175,9 +176,15 @@ without the other; the two listeners must not overlap.
   once the server is accepting connections (liveness).
 - `/ready` returns per-cluster health status with
   healthy/unhealthy/total counts when active health
-  checks are configured; it returns `503 SERVICE UNAVAILABLE` when any
-  cluster has zero healthy endpoints. Without health
-  checks, `/ready` returns `{"status":"ok"}`.
+  checks are configured. The default `readiness: serving`
+  returns `200 OK` once the replica is serving, even when
+  an upstream cluster is degraded. Set `readiness: upstreams`
+  to return `503 SERVICE UNAVAILABLE` when any checked cluster
+  has zero healthy endpoints. Without health checks, both modes
+  return `{"status":"ok"}`. While the replica is initializing,
+  draining, or stopped, `/ready` returns `503` with
+  `{"status":"initializing"}`, `{"status":"draining"}`, or
+  `{"status":"stopped"}`.
 - `/metrics` returns Prometheus text exposition format
   with HTTP request metrics (`praxis_http_requests_total`,
   `praxis_http_request_duration_seconds`). When
@@ -213,12 +220,17 @@ the configured metrics port.
 admin:
   address: "127.0.0.1:9901"
   metrics_address: "127.0.0.1:9902"
+  readiness: serving # or upstreams for upstream-dependent readiness
 ```
 
 When `admin.verbose: true`, the `/ready` response
 includes per-cluster detail (cluster names, health
 counts). Default is `false` to avoid leaking internal
 topology.
+
+`admin.readiness` defaults to `serving`. It is a startup
+setting: changing it in a watched file logs a restart warning
+and leaves the running listener unchanged.
 
 ```yaml
 admin:
@@ -813,16 +825,25 @@ module docs for the trait definition.
 ## Graceful Shutdown
 
 With the default Pingora backend, `shutdown_timeout_secs`
-sets the budget for the request grace period and runtime
-shutdown:
+sets the total SIGTERM-to-exit budget, including the
+readiness-first drain delay:
 
 ```yaml
 shutdown_timeout_secs: 60    # default: 30
+shutdown_drain_delay_secs: 2 # optional readiness-first handoff delay
 ```
 
-On SIGTERM listeners stop accepting new connections.
+On SIGTERM listeners become unready immediately but continue accepting new
+connections during `shutdown_drain_delay_secs`. Eligible HTTP/1 responses for
+connections accepted during this handoff carry `Connection: close`; HTTP/2
+and upgraded connections do not use that header. After the delay, listeners
+stop accepting and graceful connection shutdown begins. The delay must not
+exceed `shutdown_timeout_secs` and consumes that budget; zero preserves the
+immediate handoff.
+
+Listeners stop accepting new connections.
 In-flight requests have a grace period of
-`min(shutdown_timeout_secs, 5)` seconds. Runtime shutdown
+`min(shutdown_timeout_secs - shutdown_drain_delay_secs, 5)` seconds. Runtime shutdown
 then cancels remaining async tasks; the rest of the budget
 bounds the wait for blocking work. A setting of `60`
 therefore still gives requests at most five seconds to
@@ -840,18 +861,19 @@ connections. Clients of those see the connection or
 stream close before the request completes and should be
 ready to reconnect, retrying only idempotent requests.
 
-On Kubernetes, `terminationGracePeriodSeconds` only caps
-this window. A larger value does not extend it. A
-smaller one, once any `preStop` hook time is taken out,
-lets the kubelet kill the container before the grace
-period ends. Streams still open when the window ends are
-closed on every pod deletion, rolling update, and node
-drain.
+On Kubernetes, `terminationGracePeriodSeconds` must cover
+`shutdown_timeout_secs` (which already includes
+`shutdown_drain_delay_secs`), any `preStop` hook, and time
+for final cleanup. A smaller value lets the kubelet kill
+the container before the shutdown budget completes.
+Streams still open when the window ends are closed on
+every pod deletion, rolling update, and node drain.
 
 On the experimental hyper backend, HTTP listeners let
 in-flight connections finish for up to
-`shutdown_timeout_secs` minus a 1 s reserve, so
-`shutdown_timeout_secs: 1` leaves them no drain time.
+`shutdown_timeout_secs` minus `shutdown_drain_delay_secs`
+and a 1 s reserve, so `shutdown_timeout_secs: 1` leaves
+them no drain time.
 Active TCP forwarding stops as soon as the signal
 arrives. See
 [Hyper Backend](../architecture/hyper-backend.md#runtime-and-shutdown).

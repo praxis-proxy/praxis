@@ -27,6 +27,18 @@ use crate::http::pingora::handler::request_filter::terminal_responses::{
     streaming_size_limit_exceeded,
 };
 
+/// Mark an HTTP/1 connection for close when the process is draining.
+///
+/// Matches [`Flight::local_response`] so a streaming terminal response cannot
+/// keep a connection alive past the listener's graceful shutdown.
+///
+/// [`Flight::local_response`]: Flight::local_response
+fn add_drain_connection_close(flight: &Flight, headers: &mut http::HeaderMap) {
+    if flight.version != Version::HTTP_2 && flight.lifecycle.phase() == praxis_core::server::LifecyclePhase::Draining {
+        headers.insert(http::header::CONNECTION, http::HeaderValue::from_static("close"));
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Streaming Terminal Responses
 // -----------------------------------------------------------------------------
@@ -120,6 +132,7 @@ async fn bodyless(
     let is_head = flight.is_head();
     let is_not_modified = response.status == StatusCode::NOT_MODIFIED;
     prepare_streaming_headers(&mut response, is_head, is_not_modified, Version::HTTP_10);
+    add_drain_connection_close(&flight, &mut response.headers);
     if !(200..=599).contains(&response.status.as_u16()) {
         source.cancel().await;
         let refusal = reply::rejection(Rejection::status(500), &flight.ctx, flight.version);
@@ -145,6 +158,7 @@ fn commit(
 ) -> Response<ProxyBody> {
     let version = flight.version;
     prepare_streaming_headers(&mut response, false, false, version);
+    add_drain_connection_close(&flight, &mut response.headers);
     // The status is fixed from here even if the first pull fails; the
     // source sees that before its next step runs.
     source.swap_extensions(&mut flight.ctx.extensions);
@@ -333,6 +347,36 @@ mod tests {
         assert!(
             http2_response.headers().get(http::header::TRANSFER_ENCODING).is_none(),
             "HTTP/2 frames the stream itself"
+        );
+    }
+
+    #[tokio::test]
+    async fn draining_stream_closes_an_http1_connection() {
+        let flight = get_flight(empty_pipeline());
+        assert!(flight.lifecycle.begin_drain());
+        let (source, _calls) = Source::new(&[Pull::End]);
+
+        let response = stream(flight, terminal(200, source)).await;
+
+        assert_eq!(
+            response.headers().get(http::header::CONNECTION),
+            Some(&HeaderValue::from_static("close")),
+            "a streaming terminal response must not keep an HTTP/1 connection alive during drain"
+        );
+    }
+
+    #[tokio::test]
+    async fn draining_stream_never_names_the_connection_on_http2() {
+        let mut flight = get_flight(empty_pipeline());
+        flight.version = Version::HTTP_2;
+        assert!(flight.lifecycle.begin_drain());
+        let (source, _calls) = Source::new(&[Pull::End]);
+
+        let response = stream(flight, terminal(200, source)).await;
+
+        assert!(
+            response.headers().get(http::header::CONNECTION).is_none(),
+            "HTTP/2 forbids the Connection header"
         );
     }
 
