@@ -1830,7 +1830,10 @@ impl HttpFilter for AccessLogFilter {
     #[cfg(feature = "local-http")]
     fn complete_local_http(&self, ctx: &mut HttpFilterContext<'_>, status: u16) {
         let active = ctx.extensions.remove::<crate::local_http::LocalHttpActive>();
-        let headers = ctx.response_header.as_ref().map(|response| response.headers.clone());
+        let headers = self
+            .needs_response_headers
+            .then(|| ctx.response_header.as_ref().map(|response| response.headers.clone()))
+            .flatten();
         self.maybe_emit(ctx, status, headers.as_ref());
         if let Some(active) = active {
             ctx.extensions.insert(active);
