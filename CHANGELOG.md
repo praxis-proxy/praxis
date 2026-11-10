@@ -229,6 +229,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   and `ring_hash` instead of silently hashing by request path.
 - **Breaking:** Reject HTTP-only downstream read and keepalive timeouts on TCP
   listeners instead of silently ignoring them.
+- Reject explicit listener `upgrade_policy` settings until protocol admission
+  enforcement is available, rather than silently accepting unenforced denials.
+
 - **Breaking:** statically buffered request pipelines now reject a finite
   `body_limits.max_request_bytes` above `body_limits.max_buffer_bytes` at
   startup, config validation, and reload, naming both fields and byte values.
