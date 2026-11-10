@@ -235,7 +235,6 @@ impl PaceReservation {
     }
 
     /// Prepare another body attempt against these same shared budgets.
-    #[must_use]
     pub fn prepare_again(&self, bytes: u64) -> Self {
         Self {
             grants: self.grants.iter().map(|grant| grant.schedule.prepare(bytes)).collect(),
