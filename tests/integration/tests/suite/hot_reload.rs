@@ -6,9 +6,10 @@
 use std::time::{Duration, Instant};
 
 use praxis_test_utils::{
+    PraxisProcess,
     net::{
         backend::{start_backend_with_shutdown, start_slow_backend},
-        http_client::http_get,
+        http_client::{http_get, http_post},
         port::free_port,
     },
     start_reloadable_proxy,
@@ -161,6 +162,40 @@ fn reload_invalid_yaml_keeps_old_config() {
     let (status, body) = http_get(proxy.addr(), "/", None);
     assert_eq!(status, 200, "should still serve after invalid config");
     assert_eq!(body, "original", "should use old pipeline after invalid config");
+}
+
+#[test]
+#[cfg_attr(coverage, ignore = "spawns the proxy binary")]
+fn reload_incompatible_buffered_request_limits_keeps_old_config_then_recovers() {
+    let original = start_backend_with_shutdown("original");
+    let replacement = start_backend_with_shutdown("replacement");
+    let proxy_port = free_port();
+    let addr = format!("127.0.0.1:{proxy_port}");
+    let proxy = PraxisProcess::spawn_with_env(
+        &buffered_request_yaml(proxy_port, original.port(), 8192),
+        &addr,
+        &[("RUST_LOG", "info")],
+    );
+    wait_for_process_log(&proxy, "config file watcher started");
+    let payload = format!(r#"{{"model":"test","padding":"{}"}}"#, "x".repeat(6000));
+    assert_eq!(http_post(&addr, "/", &payload), (200, "original".to_owned()));
+
+    proxy.write_config(&buffered_request_yaml(proxy_port, replacement.port(), 4096));
+    let logs = wait_for_process_log(&proxy, "config reload failed: pipeline build error");
+    assert!(logs.contains("body_limits.max_request_bytes (8192)"), "{logs}");
+    assert!(logs.contains("body_limits.max_buffer_bytes (4096)"), "{logs}");
+    assert_eq!(
+        http_post(&addr, "/", &payload),
+        (200, "original".to_owned()),
+        "rejected reload must retain both the old route and the old request limit"
+    );
+
+    proxy.write_config(&buffered_request_yaml(proxy_port, replacement.port(), 8192));
+    assert_eq!(
+        get_eventually(&addr, "/", |status, body| status == 200 && body == "replacement"),
+        (200, "replacement".to_owned())
+    );
+    assert_eq!(http_post(&addr, "/", &payload), (200, "replacement".to_owned()));
 }
 
 #[test]
@@ -541,6 +576,52 @@ insecure_options:
 // ---------------------------------------------------------------------------
 // Test Utilities
 // ---------------------------------------------------------------------------
+
+/// Wait for evidence that the process handled the configuration change.
+fn wait_for_process_log(proxy: &PraxisProcess, message: &str) -> String {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let logs = proxy.logs();
+        if logs.contains(message) {
+            return logs;
+        }
+        assert!(Instant::now() < deadline, "missing {message:?}: {logs}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// A buffered request pipeline with independently configurable storage capacity.
+fn buffered_request_yaml(proxy_port: u16, backend_port: u16, cap: usize) -> String {
+    format!(
+        r#"
+runtime:
+  threads: 2
+body_limits:
+  max_buffer_bytes: {cap}
+  max_request_bytes: 8192
+listeners:
+  - name: default
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: json_body_field
+        field: model
+        header: x-praxis-model
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints: ["127.0.0.1:{backend_port}"]
+insecure_options:
+  allow_private_endpoints: true
+"#
+    )
+}
 
 fn proxy_yaml(proxy_port: u16, backend_port: u16) -> String {
     format!(

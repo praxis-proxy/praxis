@@ -15,8 +15,9 @@ use std::{
 };
 
 use rcgen::{CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, KeyUsagePurpose, SanType};
-use rustls::ClientConfig;
+use rustls::{ClientConfig, pki_types::pem::PemObject as _};
 use tempfile::TempDir;
+use tokio::net::TcpStream as AsyncTcpStream;
 
 use crate::net::wait::{DEFAULT_HTTP_TIMEOUT, poll_until_ready, ready_timeout};
 
@@ -480,55 +481,105 @@ fn generate_ca(cn: &str) -> (KeyPair, CertificateParams, rcgen::Certificate) {
 ///
 /// Panics if the TLS connection or HTTP/2 handshake fails.
 pub fn https_get(addr: &str, path: &str, client_config: &Arc<ClientConfig>) -> (u16, String) {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("tokio runtime");
-
-    rt.block_on(async { h2_get(addr, path, client_config).await })
+    https_get_attempt(addr, path, client_config).expect("HTTPS request")
 }
+
+/// Perform one HTTPS GET and return transport errors to the caller.
+///
+/// # Errors
+///
+/// Returns an error when the runtime, TLS connection, or HTTP/2 exchange fails.
+pub fn https_get_attempt(
+    addr: &str,
+    path: &str,
+    client_config: &Arc<ClientConfig>,
+) -> Result<(u16, String), Box<dyn std::error::Error + Send + Sync>> {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    let request = runtime.block_on(async {
+        Box::pin(tokio::time::timeout(
+            DEFAULT_HTTP_TIMEOUT,
+            h2_get(addr, path, client_config, usize::MAX),
+        ))
+        .await
+    });
+    request.map_err(|error| -> Box<dyn std::error::Error + Send + Sync> { error.into() })?
+}
+
+/// Perform one HTTPS GET on a caller-owned runtime.
+///
+/// Continuous load drivers own a single runtime so per-request setup does not
+/// dominate the load they generate. Health responses are capped at a small
+/// body so a misbehaving peer cannot exhaust the test runner.
+///
+/// # Errors
+///
+/// Returns an error when the TLS connection or HTTP/2 exchange fails.
+pub fn https_get_attempt_on(
+    runtime: &tokio::runtime::Runtime,
+    addr: &str,
+    path: &str,
+    client_config: &Arc<ClientConfig>,
+) -> Result<(u16, String), Box<dyn std::error::Error + Send + Sync>> {
+    let request = runtime.block_on(async {
+        Box::pin(tokio::time::timeout(
+            DEFAULT_HTTP_TIMEOUT,
+            h2_get(addr, path, client_config, HEALTH_BODY_LIMIT),
+        ))
+        .await
+    });
+    request.map_err(|error| -> Box<dyn std::error::Error + Send + Sync> { error.into() })?
+}
+
+/// Largest health response body the continuous HTTPS worker retains.
+const HEALTH_BODY_LIMIT: usize = 64;
 
 /// Perform an HTTP/2 GET over TLS.
 #[expect(clippy::large_stack_frames, reason = "test utility with H2 handshake structs")]
-async fn h2_get(addr: &str, path: &str, client_config: &Arc<ClientConfig>) -> (u16, String) {
-    let tls = tls_connect(addr, client_config).await;
+async fn h2_get(
+    addr: &str,
+    path: &str,
+    client_config: &Arc<ClientConfig>,
+    max_body: usize,
+) -> Result<(u16, String), Box<dyn std::error::Error + Send + Sync>> {
+    let tls = tls_connect(addr, client_config).await?;
 
-    let (mut client, h2_conn) = h2::client::handshake(tls).await.expect("H2 handshake");
+    let (mut client, h2_conn) = h2::client::handshake(tls).await?;
     tokio::spawn(async move {
         if let Err(e) = h2_conn.await {
             tracing::debug!(error = %e, "H2 connection closed");
         }
     });
 
-    let request = http::Request::get(path)
-        .header("host", "localhost")
-        .body(())
-        .expect("build H2 request");
+    let port = addr.rsplit_once(':').map_or("443", |(_, port)| port);
+    let mut request = http::Request::get(format!("https://localhost:{port}{path}")).body(())?;
+    *request.version_mut() = http::Version::HTTP_2;
 
-    let (response_fut, _) = client.send_request(request, true).expect("send H2 request");
-    let response = response_fut.await.expect("H2 response");
+    let (response_fut, _) = client.send_request(request, true)?;
+    let response = response_fut.await?;
     let status = response.status().as_u16();
     let mut body_stream = response.into_body();
 
     let mut body = Vec::new();
-    while let Some(chunk) = body_stream.data().await {
-        let data = chunk.expect("H2 body chunk");
-        body.extend_from_slice(&data);
+    while body.len() < max_body {
+        let Some(chunk) = body_stream.data().await else { break };
+        let data = chunk?;
+        let keep = (max_body - body.len()).min(data.len());
+        body.extend_from_slice(&data[..keep]);
         drop(body_stream.flow_control().release_capacity(data.len()));
     }
 
-    (status, String::from_utf8_lossy(&body).into_owned())
+    Ok((status, String::from_utf8_lossy(&body).into_owned()))
 }
 
 /// Establish a TLS connection to `addr` using the given client config.
 async fn tls_connect(
     addr: &str,
     client_config: &Arc<ClientConfig>,
-) -> tokio_rustls::client::TlsStream<tokio::net::TcpStream> {
+) -> Result<tokio_rustls::client::TlsStream<tokio::net::TcpStream>, Box<dyn std::error::Error + Send + Sync>> {
     let connector = tokio_rustls::TlsConnector::from(Arc::clone(client_config));
-    let server_name = rustls::pki_types::ServerName::try_from("localhost").expect("server name");
-    let tcp = tokio::net::TcpStream::connect(addr).await.expect("TCP connect");
-    connector.connect(server_name, tcp).await.expect("TLS handshake")
+    let server_name = rustls::pki_types::ServerName::try_from("localhost")?;
+    let tcp = tokio::net::TcpStream::connect(addr).await?;
+    Ok(connector.connect(server_name, tcp).await?)
 }
 
 // -----------------------------------------------------------------------------
@@ -926,6 +977,139 @@ pub fn start_tcp_tagged_backend(tag: &str) -> u16 {
     port
 }
 
+/// Reads the serial number of the certificate served over TLS.
+///
+/// # Errors
+///
+/// Returns an error when the TLS connection, certificate extraction, or
+/// certificate parsing fails.
+pub fn tls_serial(endpoint: &str, trusted_certificates: &[PathBuf]) -> Result<String, String> {
+    let connector = tokio_rustls::TlsConnector::from(https_client_config(trusted_certificates)?);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| format!("build TLS probe runtime: {error}"))?;
+    let handshake = tls_peer_serial(endpoint, connector);
+    runtime.block_on(async {
+        match tokio::time::timeout(Duration::from_secs(5), handshake).await {
+            Ok(result) => result,
+            Err(error) => Err(format!("TLS probe timed out: {error}")),
+        }
+    })
+}
+
+/// Reads the serial number from the certificate presented by one TLS peer.
+async fn tls_peer_serial(endpoint: &str, connector: tokio_rustls::TlsConnector) -> Result<String, String> {
+    let server_name = rustls::pki_types::ServerName::try_from("localhost")
+        .map_err(|error| format!("build TLS server name: {error}"))?;
+    let stream = AsyncTcpStream::connect(endpoint)
+        .await
+        .map_err(|error| format!("connect over TLS: {error}"))?;
+    let stream = connector
+        .connect(server_name, stream)
+        .await
+        .map_err(|error| format!("complete TLS handshake: {error}"))?;
+    let certificate = stream
+        .get_ref()
+        .1
+        .peer_certificates()
+        .and_then(|certificates| certificates.first())
+        .ok_or_else(|| "TLS peer omitted its certificate".to_owned())?;
+    let parsed =
+        openssl::x509::X509::from_der(certificate.as_ref()).map_err(|error| format!("parse certificate: {error}"))?;
+    let serial = parsed
+        .serial_number()
+        .to_bn()
+        .map_err(|error| format!("read certificate serial: {error}"))?;
+    let serial = serial
+        .to_hex_str()
+        .map_err(|error| format!("format certificate serial: {error}"))?;
+    Ok(canonical_hex_serial(&serial))
+}
+
+/// Normalizes OpenSSL serial text so decimal and hexadecimal probes agree.
+fn canonical_hex_serial(serial: &str) -> String {
+    let digits = serial.trim().trim_start_matches('0');
+    if digits.is_empty() {
+        "0".to_owned()
+    } else {
+        digits.to_uppercase()
+    }
+}
+
+/// Extensions required for a self-signed leaf certificate accepted by rustls.
+const TEST_CERTIFICATE_EXTENSIONS: [&str; 4] = [
+    "subjectAltName=DNS:localhost",
+    "basicConstraints=critical,CA:FALSE",
+    "keyUsage=critical,digitalSignature,keyEncipherment",
+    "extendedKeyUsage=serverAuth",
+];
+
+/// Writes a self-signed localhost certificate and key with the given prefix.
+///
+/// # Errors
+///
+/// Returns an error when `openssl` cannot generate the certificate.
+pub fn write_test_certificate(temp_dir: &TempDir, prefix: &str) -> Result<(), String> {
+    let certificate = temp_dir.path().join(format!("{prefix}.crt"));
+    let key = temp_dir.path().join(format!("{prefix}.key"));
+    let mut command = std::process::Command::new("openssl");
+    command.args([
+        "req",
+        "-x509",
+        "-newkey",
+        "rsa:2048",
+        "-nodes",
+        "-keyout",
+        key.to_string_lossy().as_ref(),
+        "-out",
+        certificate.to_string_lossy().as_ref(),
+        "-days",
+        "1",
+        "-subj",
+        "/CN=localhost",
+    ]);
+    for extension in TEST_CERTIFICATE_EXTENSIONS {
+        command.args(["-addext", extension]);
+    }
+    let status = command
+        .status()
+        .map_err(|error| format!("generate {prefix} certificate: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("generate {prefix} certificate: openssl failed"))
+    }
+}
+
+/// Builds an HTTPS client configuration trusting the supplied certificates.
+///
+/// The rollout suite rotates between self-signed certificates, so its client
+/// must trust both the original and replacement certificate.
+///
+/// # Errors
+///
+/// Returns an error when a certificate cannot be parsed or added to the root
+/// store.
+pub fn https_client_config(certificates: &[PathBuf]) -> Result<Arc<ClientConfig>, String> {
+    ensure_crypto_provider();
+    let mut roots = rustls::RootCertStore::empty();
+    for certificate in certificates {
+        let pem = std::fs::read(certificate).map_err(|error| format!("read certificate: {error}"))?;
+        for der in rustls::pki_types::CertificateDer::pem_slice_iter(&pem) {
+            let der = der.map_err(|error| format!("parse certificate PEM: {error}"))?;
+            roots
+                .add(der)
+                .map_err(|error| format!("add certificate root: {error}"))?;
+        }
+    }
+    let mut config = ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    config.alpn_protocols = vec![b"h2".to_vec()];
+    Ok(Arc::new(config))
+}
+
 /// Tagged handler: read one chunk, respond with `tag:data`.
 fn handle_tagged(mut stream: TcpStream, tag: &str) {
     stream
@@ -941,5 +1125,17 @@ fn handle_tagged(mut stream: TcpStream, tag: &str) {
             resp.extend_from_slice(&buf[..n]);
             let _ = stream.write_all(&resp);
         },
+    }
+}
+
+#[cfg(test)]
+mod serial_tests {
+    use super::*;
+
+    #[test]
+    fn certificate_serial_is_canonical_hexadecimal() {
+        assert_eq!(canonical_hex_serial("00ABCDEF"), "ABCDEF");
+        assert_eq!(canonical_hex_serial("abcdef"), "ABCDEF");
+        assert_eq!(canonical_hex_serial("000"), "0");
     }
 }

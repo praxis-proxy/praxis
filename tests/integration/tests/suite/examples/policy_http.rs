@@ -384,7 +384,7 @@ impl praxis_filter::HttpFilter for PolicyBodyProbe {
     }
 
     fn request_body_access(&self) -> praxis_filter::BodyAccess {
-        praxis_filter::BodyAccess::ReadOnly
+        praxis_filter::BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional)
     }
 
     fn request_body_mode(&self) -> praxis_filter::BodyMode {

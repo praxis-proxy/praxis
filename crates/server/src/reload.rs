@@ -564,6 +564,66 @@ mod tests {
     }
 
     #[test]
+    fn incompatible_buffered_request_reload_preserves_live_state() {
+        let (live, old_config, registry, shutdown, meta, cluster_meta) = setup_live_pipelines();
+        let old_pipeline = live.get("web").unwrap().load_full();
+        let old_meta = meta.load_full();
+        let old_cluster_meta = cluster_meta.load_full();
+        let old_token = shutdown.lock().unwrap().clone();
+        let new_config = Config::from_yaml(
+            r#"
+body_limits:
+  max_buffer_bytes: 4096
+  max_request_bytes: 8192
+listeners:
+  - name: web
+    address: "127.0.0.1:9090"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: json_body_field
+        field: model
+        header: x-praxis-model
+      - filter: static_response
+        status: 204
+"#,
+        )
+        .unwrap();
+        let error = reload_pipelines(
+            &new_config,
+            &old_config,
+            &registry,
+            &live,
+            &meta,
+            &cluster_meta,
+            &shutdown,
+            &empty_kv_stores(),
+            &empty_session_stores(),
+            &empty_slow_start_registry(),
+            &empty_subrequest_client(),
+            None,
+            &PipelineComposition::default(),
+        )
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("body_limits.max_request_bytes (8192)"), "{message}");
+        assert!(message.contains("body_limits.max_buffer_bytes (4096)"), "{message}");
+        assert!(Arc::ptr_eq(&live.get("web").unwrap().load_full(), &old_pipeline));
+        assert!(Arc::ptr_eq(&meta.load_full(), &old_meta));
+        assert!(Arc::ptr_eq(&cluster_meta.load_full(), &old_cluster_meta));
+        assert!(
+            !old_token.is_cancelled(),
+            "failed reload must keep the old health tasks"
+        );
+        assert_eq!(
+            old_pipeline.request_body_ceiling(),
+            old_config.body_limits.max_request_bytes
+        );
+        assert_eq!(old_pipeline.buffer_cap(), old_config.body_limits.max_buffer_bytes.get());
+    }
+
+    #[test]
     fn valid_reload_swaps_pipeline() {
         let (live, old_config, registry, shutdown, meta, cluster_meta) = setup_live_pipelines();
         let old_ptr = Arc::as_ptr(&live.get("web").unwrap().load());

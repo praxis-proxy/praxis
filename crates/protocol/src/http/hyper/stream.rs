@@ -120,12 +120,17 @@ impl Relaying {
     ///
     /// The trailer hooks come first, as on Pingora, so a filter that turns
     /// trailers into body bytes (gRPC-Web) has done so when the end of the
-    /// body reaches it. Those bytes are final: they follow whatever the
-    /// end-of-stream filters release, without passing through them.
+    /// body reaches it. Synthetic EOF dispatch in that hook marks the body
+    /// complete, so it is not run a second time below.
     async fn deliver_end(&mut self) -> Ended {
-        let (produced, trailers) = self.take_trailers();
+        let (produced, trailers) = match self.take_trailers() {
+            Ok(value) => value,
+            Err(reason) => return Ended::Filter(reason),
+        };
         let mut body = None;
-        if let Err(reason) = run_response_body(&self.flight.pipeline, &mut body, true, &mut self.flight.ctx) {
+        if !self.flight.ctx.response_delivery_complete
+            && let Err(reason) = run_response_body(&self.flight.pipeline, &mut body, true, &mut self.flight.ctx)
+        {
             return Ended::Filter(reason);
         }
         if let Some(chunk) = body
@@ -281,20 +286,20 @@ impl Relaying {
 
     /// The upstream's trailers after the upstream trailer hook, and the body
     /// bytes a trailer filter turned them into instead, if it did.
-    fn take_trailers(&mut self) -> (Option<Bytes>, Option<http::HeaderMap>) {
+    fn take_trailers(&mut self) -> Result<(Option<Bytes>, Option<http::HeaderMap>), String> {
         let Some(mut trailers) = self.session.take_trailers() else {
-            return (None, None);
+            return Ok((None, None));
         };
         strip_reserved_internal_header_map(&mut trailers);
         response_trailers::capture(&trailers, &mut self.flight.ctx);
         if !self.flight.pipeline.needs_response_trailers() {
-            return (None, Some(trailers));
+            return Ok((None, Some(trailers)));
         }
-        let produced = response_trailer_filter::execute(&self.flight.pipeline, &mut trailers, &mut self.flight.ctx);
+        let produced = response_trailer_filter::execute(&self.flight.pipeline, &mut trailers, &mut self.flight.ctx)?;
         strip_reserved_internal_header_map(&mut trailers);
         match produced {
-            Some(body) => (Some(body), None),
-            None => (None, Some(trailers)),
+            Some(body) => Ok((Some(body), None)),
+            None => Ok((None, Some(trailers))),
         }
     }
 }
@@ -720,6 +725,117 @@ mod tests {
             "the upstream's trailers reach the client"
         );
         assert_eq!(collected.to_bytes(), "ok", "after the body");
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the regression test asserts body, trailers, and callback ordering"
+    )]
+    async fn synthetic_eof_runs_before_response_trailers() {
+        let (_upstream, connector, session) =
+            answered(b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n2\r\nok\r\n0\r\nx-checksum: 9\r\n\r\n")
+                .await;
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let body_events = Arc::clone(&events);
+        let trailer_events = Arc::clone(&events);
+        let pipeline = scripted_pipeline(Script {
+            response_body: Some((
+                BodyMode::Stream,
+                Arc::new(move |_body, end_of_stream| {
+                    if end_of_stream {
+                        body_events.lock().unwrap().push("eof");
+                    }
+                    Ok(FilterAction::Continue)
+                }),
+            )),
+            response_trailers: Some(Arc::new(move |_trailers| {
+                trailer_events.lock().unwrap().push("trailers");
+                Ok(None)
+            })),
+            ..Script::default()
+        });
+        let (relaying, body) = relaying(connector, pipeline, session, Start::Fresh, true).await;
+
+        let relayed = tokio::spawn(relaying.run());
+        let collected = tokio::time::timeout(Duration::from_secs(5), body.collect())
+            .await
+            .expect("the relay finishes")
+            .unwrap();
+        relayed.await.unwrap();
+
+        assert_eq!(
+            collected
+                .trailers()
+                .and_then(|trailers| trailers.get("x-checksum"))
+                .unwrap(),
+            "9",
+            "the trailer hook leaves upstream trailers intact"
+        );
+        assert_eq!(collected.to_bytes(), "ok", "the body remains unchanged");
+        assert_eq!(
+            *events.lock().unwrap(),
+            ["eof", "trailers"],
+            "response policy output is published before trailer callbacks"
+        );
+    }
+
+    #[tokio::test]
+    async fn response_trailer_error_preserves_client_trailers() {
+        let (_upstream, connector, session) =
+            answered(b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n2\r\nok\r\n0\r\nx-checksum: 9\r\n\r\n")
+                .await;
+        let pipeline = scripted_pipeline(Script {
+            response_trailers: Some(Arc::new(|_trailers| Err("trailer filter failed".into()))),
+            ..Script::default()
+        });
+        let (relaying, body) = relaying(connector, pipeline, session, Start::Fresh, true).await;
+
+        let relayed = tokio::spawn(relaying.run());
+        let collected = tokio::time::timeout(Duration::from_secs(5), body.collect())
+            .await
+            .expect("the relay finishes")
+            .expect("a trailer filter error is soft");
+        relayed.await.unwrap();
+
+        assert_eq!(
+            collected
+                .trailers()
+                .and_then(|trailers| trailers.get("x-checksum"))
+                .unwrap(),
+            "9",
+            "the original trailers are forwarded after a trailer filter error"
+        );
+        assert_eq!(collected.to_bytes(), "ok", "the body remains available");
+    }
+
+    #[tokio::test]
+    async fn synthetic_eof_error_aborts_client_stream() {
+        let (_upstream, connector, session) =
+            answered(b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n2\r\nok\r\n0\r\nx-checksum: 9\r\n\r\n")
+                .await;
+        let pipeline = scripted_pipeline(Script {
+            response_body: Some((
+                BodyMode::Stream,
+                Arc::new(|_body, end_of_stream| {
+                    if end_of_stream {
+                        return Err("synthetic EOF failed".into());
+                    }
+                    Ok(FilterAction::Continue)
+                }),
+            )),
+            response_trailers: Some(Arc::new(|_trailers| Ok(None))),
+            ..Script::default()
+        });
+        let (relaying, body) = relaying(connector, pipeline, session, Start::Fresh, true).await;
+
+        let relayed = tokio::spawn(relaying.run());
+        let collected = tokio::time::timeout(Duration::from_secs(5), body.collect())
+            .await
+            .expect("the relay finishes");
+        relayed.await.unwrap();
+
+        assert!(collected.is_err(), "synthetic EOF failures abort the client stream");
     }
 
     #[tokio::test]

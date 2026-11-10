@@ -417,9 +417,9 @@ fn direction_access(op_set: &JsonOps) -> BodyAccess {
     if op_set.is_empty() {
         BodyAccess::None
     } else if op_set.is_extract_only() {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(crate::BodyRequirement::Required)
     } else {
-        BodyAccess::ReadWrite
+        BodyAccess::ReadWrite(crate::BodyRequirement::Required)
     }
 }
 
