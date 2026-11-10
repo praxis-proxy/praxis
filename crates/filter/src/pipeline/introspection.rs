@@ -291,7 +291,7 @@ mod tests {
                 Some("required"),
             ),
         ] {
-            let json = serde_json::to_value(body_info(access, BodyMode::Stream)).unwrap();
+            let json = serde_json::to_value(body_info(access, BodyMode::Stream)).expect("body access info serializes");
             match expected {
                 None => assert!(
                     json.get("requirement").is_none(),
