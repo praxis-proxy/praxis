@@ -25,19 +25,34 @@ use crate::{
 
 #[test]
 fn response_body_activity_reuses_handles_within_each_request_and_recorder() {
-    for _ in 0..2 {
-        let (recorder, handle) = recorder();
-        let pipeline = make_pipeline(vec![Box::new(HookProbe {
-            filter: "body_activity_probe",
-            handle: handle.clone(),
-        })]);
+    assert_body_activity_uses_request_recorders(false);
+}
+
+#[test]
+fn request_body_activity_reuses_handles_within_each_request_and_recorder() {
+    assert_body_activity_uses_request_recorders(true);
+}
+
+/// Reuse one pipeline across requests without reusing their recorder handles.
+fn assert_body_activity_uses_request_recorders(request_body: bool) {
+    let recorders = [recorder(), recorder()];
+    let pipeline = make_pipeline(vec![Box::new(HookProbe {
+        filter: "body_activity_probe",
+        handle: recorders[0].1.clone(),
+    })]);
+    for (recorder, handle) in &recorders {
         let request = crate::test_utils::make_request(Method::GET, "/");
         let mut ctx = crate::test_utils::make_filter_context(&request);
-        metrics::with_local_recorder(&recorder, || {
+        ctx.extensions.insert(handle.clone());
+        metrics::with_local_recorder(recorder, || {
             for chunk in [b"first".as_slice(), b"second".as_slice()] {
                 let mut body = Some(Bytes::copy_from_slice(chunk));
-                drop(pipeline.execute_http_response_body(&mut ctx, &mut body, false).unwrap());
-                assert!(sample(&handle, "body_activity_probe").abs() < f64::EPSILON);
+                if request_body {
+                    drop(run_ready(pipeline.execute_http_request_body(&mut ctx, &mut body, false)).unwrap());
+                } else {
+                    drop(pipeline.execute_http_response_body(&mut ctx, &mut body, false).unwrap());
+                }
+                assert!(sample(handle, "body_activity_probe").abs() < f64::EPSILON);
             }
         });
         assert_eq!(
@@ -45,6 +60,9 @@ fn response_body_activity_reuses_handles_within_each_request_and_recorder() {
             1,
             "both chunks must reuse one handle from this request's recorder"
         );
+    }
+    for (_, handle) in &recorders {
+        assert!(sample(handle, "body_activity_probe").abs() < f64::EPSILON);
     }
 }
 
@@ -128,6 +146,12 @@ struct HookProbe {
 }
 
 impl HookProbe {
+    /// Body hooks inspect the recorder owned by the current request.
+    fn assert_body_active(&self, ctx: &HttpFilterContext<'_>) {
+        let handle = ctx.extensions.get::<PrometheusHandle>().unwrap();
+        assert!((sample(handle, self.filter) - 1.0).abs() < f64::EPSILON);
+    }
+
     /// Require exactly one active invocation while this hook executes.
     fn assert_active(&self) {
         assert!(
@@ -153,13 +177,23 @@ impl HttpFilter for HookProbe {
         Ok(FilterAction::Continue)
     }
 
-    fn on_response_body(
+    async fn on_request_body(
         &self,
-        _ctx: &mut HttpFilterContext<'_>,
+        ctx: &mut HttpFilterContext<'_>,
         _body: &mut Option<Bytes>,
         _end_of_stream: bool,
     ) -> Result<FilterAction, FilterError> {
-        self.assert_active();
+        self.assert_body_active(ctx);
+        Ok(FilterAction::Continue)
+    }
+
+    fn on_response_body(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+        _body: &mut Option<Bytes>,
+        _end_of_stream: bool,
+    ) -> Result<FilterAction, FilterError> {
+        self.assert_body_active(ctx);
         Ok(FilterAction::Continue)
     }
 
@@ -173,6 +207,10 @@ impl HttpFilter for HookProbe {
     }
 
     fn response_body_access(&self) -> BodyAccess {
+        BodyAccess::ReadOnly
+    }
+
+    fn request_body_access(&self) -> BodyAccess {
         BodyAccess::ReadOnly
     }
 

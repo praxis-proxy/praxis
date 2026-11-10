@@ -483,7 +483,7 @@ pub(super) async fn run_request_body_filter(
     failure_mode: FailureMode,
     metrics_enabled: bool,
 ) -> Result<BodyFilterOutcome, FilterError> {
-    let _activity = crate::metrics::FilterActivity::new(http_filter.name());
+    let _activity = crate::metrics::FilterActivity::body(http_filter.name(), &mut ctx.extensions);
     let filter_span = debug_span!(
         "filter",
         "otel.name" = %format_args!("filter:{}:request_body", http_filter.name()),
@@ -645,7 +645,7 @@ pub(super) fn run_response_body_filter(
     failure_mode: FailureMode,
     metrics_enabled: bool,
 ) -> Result<BodyFilterOutcome, FilterError> {
-    let _activity = crate::metrics::FilterActivity::response_body(http_filter.name(), &mut ctx.extensions);
+    let _activity = crate::metrics::FilterActivity::body(http_filter.name(), &mut ctx.extensions);
     let filter_span = debug_span!(
         "filter",
         "otel.name" = %format_args!("filter:{}:response_body", http_filter.name()),
