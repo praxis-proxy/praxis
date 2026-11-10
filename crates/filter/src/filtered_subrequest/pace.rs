@@ -142,3 +142,33 @@ pub(super) async fn finish_plan(plan: Option<PaceReservation>, deadline: Instant
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "test fixtures")]
+#[allow(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
+mod tests {
+    use super::*;
+    use crate::bandwidth::{Schedule, push_upload};
+
+    #[tokio::test]
+    async fn dropping_after_admission_refunds_the_entire_unsent_initial_burst() {
+        let schedule = Schedule::new(1, 1_000_000);
+        let mut extensions = RequestExtensions::new();
+        push_upload(&mut extensions, schedule.prepare(1_000_000));
+        let in_transport = Arc::new(AtomicBool::new(true));
+        let upload = Upload::from_extensions(
+            &mut extensions,
+            Instant::now() + std::time::Duration::from_secs(1),
+            &in_transport,
+        )
+        .unwrap();
+        let bytes = upload.prepare(1_000_000).await.unwrap();
+        assert!(bytes > 0);
+        assert!(in_transport.load(Ordering::Acquire));
+        drop(upload);
+        assert!(
+            schedule.prepare(1_000_000).delay().is_zero(),
+            "admission never commits unsent bytes"
+        );
+    }
+}

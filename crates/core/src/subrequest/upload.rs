@@ -172,7 +172,7 @@ mod tests {
     struct Control(Mutex<Vec<usize>>);
     impl UploadControl for Control {
         fn prepare(&self, available: usize) -> Pin<Box<dyn Future<Output = Result<usize, String>> + Send + '_>> {
-            Box::pin(async move { Ok(available) })
+            Box::pin(async move { Ok(available.min(3)) })
         }
 
         fn sent(&self, bytes: usize) {
@@ -279,5 +279,44 @@ mod tests {
             .is_err()
         );
         assert_eq!(*control.0.lock().unwrap(), vec![3]);
+    }
+    #[tokio::test]
+    async fn controlled_upload_reaches_a_real_upstream_in_bounded_prefixes() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        use super::super::{SubRequest, SubRequestClient, SubRequestConnector};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let peer = crate::egress::PeerSpec::plain(listener.local_addr().unwrap());
+        let backend = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut received = Vec::new();
+            let mut buf = [0_u8; 1024];
+            while !received.ends_with(b"abcdefghij") {
+                let bytes = stream.read(&mut buf).await.unwrap();
+                assert!(bytes != 0);
+                received.extend_from_slice(buf.get(..bytes).unwrap());
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                .await
+                .unwrap();
+        });
+        praxis_tls::provider::install();
+        let control = Arc::new(Control::default());
+        let observer: Arc<dyn UploadControl> = Arc::<Control>::clone(&control);
+        let client = SubRequestClient::new(SubRequestConnector::new(1, None)).with_upload_control(observer);
+        let request = SubRequest {
+            method: http::Method::POST,
+            uri: "/".parse().unwrap(),
+            headers: HeaderMap::new(),
+            body: Bytes::from_static(b"abcdefghij"),
+        };
+        let response = client
+            .execute(&peer, &request, 100, Duration::from_secs(2), None)
+            .await
+            .unwrap();
+        assert_eq!(response.body, "ok");
+        assert_eq!(*control.0.lock().unwrap(), vec![3, 3, 3, 1]);
+        backend.await.unwrap();
     }
 }

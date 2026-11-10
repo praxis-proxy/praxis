@@ -532,14 +532,14 @@ impl Session for HyperSession {
             self.push(frame).await?;
             within(self.write_timeout, Phase::Write, accepted)
                 .await?
-                .map_err(|_| EgressError::Io("upstream did not accept the controlled body prefix".into()))
+                .map_err(|_closed| EgressError::Io("upstream did not accept the controlled body prefix".into()))
         }
         .await;
-        if let Some(ticket) = self.pending_body.take() {
+        if let Some(completed) = self.pending_body.take() {
             if result.is_err() {
-                ticket.cancel();
+                completed.cancel();
             }
-            self.body_sent = self.body_sent.saturating_add(ticket.accepted_bytes());
+            self.body_sent = self.body_sent.saturating_add(completed.accepted_bytes());
         }
         result
     }
