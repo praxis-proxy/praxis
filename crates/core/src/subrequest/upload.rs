@@ -264,23 +264,25 @@ mod tests {
     async fn cancelled_controlled_write_commits_only_accepted_progress() {
         let control = Control::default();
         let mut session = PartialSession::default();
-        assert!(
-            tokio::time::timeout(
-                Duration::from_millis(5),
-                send_prefix(
-                    &mut session,
-                    Bytes::from_static(b"abcdefghij"),
-                    &control,
-                    Instant::now() + Duration::from_secs(1),
-                    None
-                )
-            )
-            .await
-            .is_err()
-        );
+        tokio::time::timeout(
+            Duration::from_millis(5),
+            send_prefix(
+                &mut session,
+                Bytes::from_static(b"abcdefghij"),
+                &control,
+                Instant::now() + Duration::from_secs(1),
+                None,
+            ),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(*control.0.lock().unwrap(), vec![3]);
     }
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one real exchange verifies producer-to-consumer prefix delivery"
+    )]
     async fn controlled_upload_reaches_a_real_upstream_in_bounded_prefixes() {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
