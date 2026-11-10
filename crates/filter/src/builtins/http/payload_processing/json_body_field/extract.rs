@@ -40,6 +40,11 @@ pub(super) fn extract_fields(
     if mappings.is_empty() {
         return false;
     }
+    // Serde's IgnoredAny skips strings without validating their UTF-8.
+    if std::str::from_utf8(bytes).is_err() {
+        debug!(body_len = bytes.len(), "JSON body is not valid UTF-8; not promoting");
+        return false;
+    }
 
     let mut found: HashMap<String, String> = HashMap::with_capacity(needed.len());
 

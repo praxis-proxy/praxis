@@ -66,9 +66,9 @@ pub enum BodyMode {
     /// [`FilterAction::Release`] or end-of-stream is reached.
     ///
     /// When `max_bytes` is `Some`, requests exceeding the limit
-    /// receive 413. When `None` and no global body size ceiling is
-    /// configured, body buffering is unbounded; a warning is emitted
-    /// at pipeline build time in that case.
+    /// receive 413. All buffering obeys `body_limits.max_buffer_bytes`
+    /// (64 MiB by default), including runtime-selected modes. `None`
+    /// inherits the applicable ceiling; no insecure option removes it.
     ///
     /// ```
     /// use praxis_filter::BodyMode;
@@ -93,8 +93,8 @@ pub enum BodyMode {
     /// [`Stream`]: BodyMode::Stream
     /// [`FilterAction::Release`]: crate::FilterAction::Release
     StreamBuffer {
-        /// Optional maximum body size in bytes. `None` means
-        /// unbounded buffering (a warning is emitted at build time).
+        /// Requested maximum buffered bytes, clamped to the configured buffering cap.
+        /// `None` inherits the applicable transfer limit or buffering cap.
         max_bytes: Option<usize>,
     },
 

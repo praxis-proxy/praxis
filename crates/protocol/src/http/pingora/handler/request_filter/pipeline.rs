@@ -16,8 +16,8 @@ use pingora_proxy::Session;
 #[cfg(feature = "pingora")]
 use praxis_core::connectivity::normalize_mapped_ipv4;
 #[cfg(feature = "pingora")]
-use praxis_filter::BodyMode;
-use praxis_filter::{FilterAction, FilterError, FilterPipeline, Rejection, Request};
+use praxis_filter::{BodyMode, Rejection};
+use praxis_filter::{FilterAction, FilterError, FilterPipeline, Request};
 #[cfg(feature = "pingora")]
 use tracing::{Instrument as _, error};
 
@@ -36,6 +36,7 @@ use super::{
     header_mutations::apply_pending_header_mutations,
     request_utils::templated_route,
 };
+use crate::http::body_limit::{BodyLimitPhase, body_limit_rejection};
 
 // -----------------------------------------------------------------------------
 // PipelineResult
@@ -113,7 +114,7 @@ pub(in crate::http) async fn execute(
         return Ok(true);
     }
 
-    if let Some(handled) = super::validation::handle_max_forwards(session).await {
+    if let Some(handled) = super::validation::handle_max_forwards(session, ctx).await {
         if handled {
             snapshot_for_early_exit(session, ctx);
         }
@@ -153,18 +154,12 @@ pub(in crate::http) async fn execute(
     ctx.request_body_mode = caps.request_body_mode;
     ctx.response_body_mode = caps.response_body_mode;
 
-    // Request-head phase: runs once before any StreamBuffer pre-read and the
-    // main request phase, so a head-only classifier's facts are visible to
-    // body filters during pre-read. Gated on opt-in, so the zero-buffering
-    // fast path is untouched when no filter participates.
-    if pipeline.has_request_head_phase() {
-        let span = ctx.request_span.clone();
-        if super::request_head::execute(pipeline, session, &mut request, ctx)
-            .instrument(span)
-            .await
-        {
-            return Ok(true);
-        }
+    let span = ctx.request_span.clone();
+    if super::request_head::prepare(pipeline, session, &mut request, ctx)
+        .instrument(span)
+        .await
+    {
+        return Ok(true);
     }
 
     if matches!(caps.request_body_mode, BodyMode::StreamBuffer { .. }) {
@@ -382,8 +377,13 @@ pub(in crate::http) async fn run_pipeline(
                 Ok(_) => {
                     if pipeline.body_capabilities().any_selected_upstream_request_body_writer {
                         let adapted_len = working_body.as_ref().map_or(0, Bytes::len);
-                        if adapted_len > selected_upstream_body_limit(pipeline) {
-                            action = Ok(FilterAction::Reject(Rejection::status(413)));
+                        let limit = selected_upstream_body_limit(pipeline);
+                        if adapted_len > limit {
+                            action = Ok(FilterAction::Reject(body_limit_rejection(
+                                limit,
+                                u64::try_from(adapted_len).unwrap_or(u64::MAX),
+                                BodyLimitPhase::SelectedUpstream,
+                            )));
                         } else {
                             adapted_body = Some(AdaptedRequestBody(working_body));
                         }
@@ -458,7 +458,8 @@ pub(in crate::http) async fn run_pipeline(
     // set, so the OTel `http.route` attribute read from the same field
     // later cannot disagree with the metric.
     ctx.metrics_route = templated_route(pipeline, ctx, metrics_route);
-    ctx.response_body_mode = clamp_body_mode_to_ceiling(response_body_mode, baseline_response_body_mode);
+    ctx.response_body_mode =
+        clamp_body_mode_to_ceiling(response_body_mode, baseline_response_body_mode, pipeline.buffer_cap());
 
     // Write back the request-scoped upstream and retry lifecycle on EVERY
     // outcome, not just Continue. A filter ordered after the load_balancer
@@ -476,7 +477,8 @@ pub(in crate::http) async fn run_pipeline(
     match action {
         Ok(FilterAction::Continue | FilterAction::Release | FilterAction::BodyDone) => {
             ctx.rewritten_path = rewritten_path;
-            ctx.request_body_mode = clamp_body_mode_to_ceiling(request_body_mode, baseline_request_body_mode);
+            ctx.request_body_mode =
+                clamp_body_mode_to_ceiling(request_body_mode, baseline_request_body_mode, pipeline.buffer_cap());
             ctx.attempted_endpoints = attempted_endpoints;
             ctx.retry_policy = retry_policy;
             ctx.route_retry_policy = route_retry_policy;
@@ -537,7 +539,7 @@ mod tests {
     #[cfg(not(feature = "pingora"))]
     use praxis_core::connectivity::normalize_mapped_ipv4;
     #[cfg(not(feature = "pingora"))]
-    use praxis_filter::BodyMode;
+    use praxis_filter::{BodyMode, Rejection};
     use praxis_filter::{FilterRegistry, TrustedHeaderMutation};
 
     use super::*;
@@ -686,6 +688,7 @@ mod tests {
         let clamped = clamp_body_mode_to_ceiling(
             BodyMode::StreamBuffer { max_bytes: Some(4096) },
             BodyMode::StreamBuffer { max_bytes: Some(1024) },
+            praxis_core::config::DEFAULT_MAX_BUFFER_BYTES,
         );
         assert_eq!(
             clamped,
@@ -699,6 +702,7 @@ mod tests {
         let clamped = clamp_body_mode_to_ceiling(
             BodyMode::StreamBuffer { max_bytes: None },
             BodyMode::SizeLimit { max_bytes: 512 },
+            praxis_core::config::DEFAULT_MAX_BUFFER_BYTES,
         );
         assert_eq!(
             clamped,
@@ -709,7 +713,11 @@ mod tests {
 
     #[test]
     fn clamp_body_mode_to_ceiling_stream_passes_through_with_ceiling() {
-        let clamped = clamp_body_mode_to_ceiling(BodyMode::Stream, BodyMode::StreamBuffer { max_bytes: Some(1024) });
+        let clamped = clamp_body_mode_to_ceiling(
+            BodyMode::Stream,
+            BodyMode::StreamBuffer { max_bytes: Some(1024) },
+            praxis_core::config::DEFAULT_MAX_BUFFER_BYTES,
+        );
         assert_eq!(
             clamped,
             BodyMode::Stream,
@@ -719,7 +727,11 @@ mod tests {
 
     #[test]
     fn clamp_body_mode_to_ceiling_stream_passes_through_without_ceiling() {
-        let clamped = clamp_body_mode_to_ceiling(BodyMode::Stream, BodyMode::Stream);
+        let clamped = clamp_body_mode_to_ceiling(
+            BodyMode::Stream,
+            BodyMode::Stream,
+            praxis_core::config::DEFAULT_MAX_BUFFER_BYTES,
+        );
         assert_eq!(
             clamped,
             BodyMode::Stream,
@@ -732,6 +744,7 @@ mod tests {
         let clamped = clamp_body_mode_to_ceiling(
             BodyMode::SizeLimit { max_bytes: 8192 },
             BodyMode::SizeLimit { max_bytes: 2048 },
+            praxis_core::config::DEFAULT_MAX_BUFFER_BYTES,
         );
         assert_eq!(
             clamped,
@@ -745,6 +758,7 @@ mod tests {
         let clamped = clamp_body_mode_to_ceiling(
             BodyMode::StreamBuffer { max_bytes: Some(4096) },
             BodyMode::StreamBuffer { max_bytes: None },
+            praxis_core::config::DEFAULT_MAX_BUFFER_BYTES,
         );
         assert_eq!(
             clamped,
@@ -758,11 +772,88 @@ mod tests {
         let clamped = clamp_body_mode_to_ceiling(
             BodyMode::StreamBuffer { max_bytes: Some(512) },
             BodyMode::StreamBuffer { max_bytes: Some(1024) },
+            praxis_core::config::DEFAULT_MAX_BUFFER_BYTES,
         );
         assert_eq!(
             clamped,
             BodyMode::StreamBuffer { max_bytes: Some(512) },
             "runtime limit within baseline ceiling should be unchanged"
+        );
+    }
+
+    #[test]
+    fn runtime_modes_obey_configured_caps_without_capping_stream_totals() {
+        for cap in [1, 65_537, 67_108_865, 1_073_741_824] {
+            for baseline in [
+                BodyMode::Stream,
+                BodyMode::SizeLimit { max_bytes: usize::MAX },
+                BodyMode::StreamBuffer { max_bytes: None },
+            ] {
+                for requested in [None, Some(1), Some(cap), Some(usize::MAX)] {
+                    assert_eq!(
+                        clamp_body_mode_to_ceiling(BodyMode::StreamBuffer { max_bytes: requested }, baseline, cap),
+                        BodyMode::StreamBuffer {
+                            max_bytes: Some(cap.min(requested.unwrap_or(cap)))
+                        }
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn configured_buffer_caps_preserve_streaming_and_zero_transfer_limits() {
+        for cap in [1, 65_537, 67_108_865, 1_073_741_824] {
+            assert_eq!(
+                clamp_body_mode_to_ceiling(BodyMode::Stream, BodyMode::Stream, cap),
+                BodyMode::Stream
+            );
+            assert_eq!(
+                clamp_body_mode_to_ceiling(BodyMode::SizeLimit { max_bytes: usize::MAX }, BodyMode::Stream, cap),
+                BodyMode::SizeLimit { max_bytes: usize::MAX }
+            );
+            assert_eq!(
+                clamp_body_mode_to_ceiling(
+                    BodyMode::StreamBuffer { max_bytes: None },
+                    BodyMode::SizeLimit { max_bytes: 0 },
+                    cap
+                ),
+                BodyMode::StreamBuffer { max_bytes: Some(0) }
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_buffer_modes_cannot_override_the_hard_ceiling() {
+        let hard = praxis_core::config::DEFAULT_MAX_BUFFER_BYTES;
+        for baseline in [
+            BodyMode::Stream,
+            BodyMode::SizeLimit { max_bytes: usize::MAX },
+            BodyMode::StreamBuffer { max_bytes: None },
+            BodyMode::StreamBuffer {
+                max_bytes: Some(usize::MAX),
+            },
+        ] {
+            for requested in [None, Some(hard), Some(hard + 1), Some(usize::MAX)] {
+                assert_eq!(
+                    clamp_body_mode_to_ceiling(
+                        BodyMode::StreamBuffer { max_bytes: requested },
+                        baseline,
+                        praxis_core::config::DEFAULT_MAX_BUFFER_BYTES
+                    ),
+                    BodyMode::StreamBuffer { max_bytes: Some(hard) },
+                    "runtime buffering remains bounded with baseline {baseline:?}"
+                );
+            }
+        }
+        assert_eq!(
+            clamp_body_mode_to_ceiling(
+                BodyMode::SizeLimit { max_bytes: usize::MAX },
+                BodyMode::Stream,
+                praxis_core::config::DEFAULT_MAX_BUFFER_BYTES
+            ),
+            BodyMode::SizeLimit { max_bytes: usize::MAX },
+            "a non-buffering cumulative limit is independent of the buffer ceiling"
         );
     }
 
@@ -947,6 +1038,66 @@ mod tests {
 
     struct SelectedUpstreamUppercaseFilter;
 
+    /// Expands or empties the selected-upstream body to test its final limit.
+    struct SelectedUpstreamResizeFilter;
+
+    /// Attempts unbounded runtime upgrades during both header phases.
+    struct WidenBodyModesFilter;
+
+    #[async_trait::async_trait]
+    impl praxis_filter::HttpFilter for WidenBodyModesFilter {
+        fn name(&self) -> &'static str {
+            "widen_body_modes"
+        }
+
+        async fn on_request(
+            &self,
+            ctx: &mut praxis_filter::HttpFilterContext<'_>,
+        ) -> Result<FilterAction, FilterError> {
+            ctx.set_request_body_mode(BodyMode::StreamBuffer { max_bytes: None });
+            ctx.set_response_body_mode(BodyMode::StreamBuffer { max_bytes: None });
+            Ok(FilterAction::Continue)
+        }
+
+        async fn on_response(
+            &self,
+            ctx: &mut praxis_filter::HttpFilterContext<'_>,
+        ) -> Result<FilterAction, FilterError> {
+            ctx.set_response_body_mode(BodyMode::StreamBuffer { max_bytes: None });
+            Ok(FilterAction::Continue)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl praxis_filter::HttpFilter for SelectedUpstreamResizeFilter {
+        fn name(&self) -> &'static str {
+            "selected_upstream_resize"
+        }
+
+        async fn on_request(&self, _: &mut praxis_filter::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+            Ok(FilterAction::Continue)
+        }
+
+        fn selected_upstream_request_body_access(&self) -> praxis_filter::BodyAccess {
+            praxis_filter::BodyAccess::ReadWrite
+        }
+
+        fn request_body_mode(&self) -> BodyMode {
+            BodyMode::StreamBuffer { max_bytes: Some(4) }
+        }
+
+        async fn on_selected_upstream_request_body(
+            &self,
+            _: &mut praxis_filter::HttpFilterContext<'_>,
+            body: &mut Option<Bytes>,
+        ) -> Result<praxis_filter::SelectedUpstreamBodyOutcome, FilterError> {
+            *body = body.as_ref().and_then(|bytes| {
+                (bytes.as_ref() != b"-").then(|| Bytes::from([bytes.as_ref(), bytes.as_ref()].concat()))
+            });
+            Ok(praxis_filter::SelectedUpstreamBodyOutcome::Continue)
+        }
+    }
+
     #[async_trait::async_trait]
     impl praxis_filter::HttpFilter for SelectedUpstreamUppercaseFilter {
         fn name(&self) -> &'static str {
@@ -1106,6 +1257,62 @@ mod tests {
             Some(VecDeque::from([Bytes::from_static(b"original")])),
             "canonical pre-read body is left intact and untouched"
         );
+    }
+
+    #[tokio::test]
+    async fn selected_upstream_final_output_respects_effective_limit() {
+        let mut pipeline = participant_pipeline("selected_upstream_resize", || Box::new(SelectedUpstreamResizeFilter));
+        pipeline.apply_body_limits(Some(4), None, false).unwrap();
+        for (original, expected) in [
+            (b"x".as_slice(), Some(b"xx".as_slice())),
+            (b"xy", Some(b"xyxy")),
+            (b"xyz", None),
+            (b"-", Some(b"")),
+        ] {
+            let mut ctx = make_ctx();
+            ctx.pre_read_body = Some(VecDeque::from([Bytes::copy_from_slice(original)]));
+            ctx.upstream = Some(make_test_upstream());
+            let result = run_pipeline(&pipeline, make_request(), &mut ctx).await.unwrap();
+            if let Some(expected) = expected {
+                assert!(matches!(result.action, FilterAction::Continue));
+                assert_eq!(ctx.adapted_request_body_len, Some(expected.len()));
+                let actual: Vec<u8> = ctx
+                    .adapted_request_body
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .flat_map(|chunk| chunk.iter().copied())
+                    .collect();
+                assert_eq!(actual, expected);
+            } else {
+                assert!(matches!(result.action, FilterAction::Reject(rejection) if rejection.status == 413));
+                assert!(ctx.adapted_request_body.is_none());
+            }
+            assert_eq!(ctx.pre_read_body.unwrap().front().unwrap().as_ref(), original);
+        }
+    }
+
+    #[tokio::test]
+    async fn header_phase_runtime_upgrades_preserve_independent_ceilings() {
+        let mut pipeline = participant_pipeline("widen_body_modes", || Box::new(WidenBodyModesFilter));
+        pipeline.apply_body_limits(Some(4), Some(7), false).unwrap();
+        let mut ctx = make_ctx();
+        ctx.request_body_mode = pipeline.body_capabilities().request_body_mode;
+        ctx.response_body_mode = pipeline.body_capabilities().response_body_mode;
+        let result = run_pipeline(&pipeline, make_request(), &mut ctx).await.unwrap();
+        assert!(matches!(result.action, FilterAction::Continue));
+        assert_eq!(ctx.request_body_mode, BodyMode::StreamBuffer { max_bytes: Some(4) });
+        assert_eq!(ctx.response_body_mode, BodyMode::StreamBuffer { max_bytes: Some(7) });
+        let mut response = praxis_filter::Response {
+            status: http::StatusCode::OK,
+            headers: HeaderMap::new(),
+        };
+        let (action, _) =
+            super::super::super::response_filter::run_response_filters(&pipeline, &mut ctx, &mut response)
+                .await
+                .unwrap();
+        assert!(matches!(action.unwrap(), FilterAction::Continue));
+        assert_eq!(ctx.response_body_mode, BodyMode::StreamBuffer { max_bytes: Some(7) });
     }
 
     #[tokio::test]

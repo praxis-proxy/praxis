@@ -118,6 +118,101 @@ async fn request_trailers_survive_streaming_and_pre_read_to_http2() {
 }
 
 #[tokio::test]
+async fn large_preread_trailers_survive_both_ingress_versions_to_http2() {
+    for ingress_h2 in [false, true] {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let (backend, mut captured) = trailer_backend(false, &[200]).await;
+            let filter = "\n      - filter: json_body_field\n        field: model\n        header: X-Model\n        max_body_bytes: 2097152\n";
+            let yaml = with_cluster(&routed_yaml(backend, filter), "            http:\n              version: h2\n");
+            let proxy = Proxy::start(&yaml).await;
+            let body = format!(r#"{{"padding":"{}","model":"m1"}}"#, "x".repeat(1_048_576));
+            if ingress_h2 {
+                send_large_h2_with_trailers(&proxy, &body).await;
+            } else {
+                send_large_h1_with_trailers(&proxy, &body).await;
+            }
+            let (actual, trailers) = captured.recv().await.unwrap();
+            assert_eq!(actual, body.as_bytes(), "ingress_h2={ingress_h2}");
+            assert_eq!(trailers.get("x-checksum").unwrap(), "mib-complete");
+            assert_eq!(trailers.get("x-ext-tenant").unwrap(), "public");
+            assert_eq!(trailers.len(), 2, "trailer fields arrive exactly once");
+        }).await.expect("large request plus real upstream trailers deadline");
+    }
+}
+
+/// Send the generated body as HTTP/2 DATA frames followed by trailers.
+async fn send_large_h2_with_trailers(proxy: &Proxy, body: &str) {
+    let socket = TcpStream::connect(proxy.addr).await.unwrap();
+    let (mut client, connection) = h2::client::handshake(socket).await.unwrap();
+    let driver = tokio::spawn(async move {
+        let _result = connection.await;
+    });
+    let request = http::Request::post("/").header("host", "a").body(()).unwrap();
+    let (response, mut sender) = client.send_request(request, false).unwrap();
+    send_large_h2_chunks(&mut sender, body).await;
+    let mut trailers = http::HeaderMap::new();
+    trailers.insert("x-checksum", "mib-complete".parse().unwrap());
+    trailers.insert("x-ext-tenant", "public".parse().unwrap());
+    sender.send_trailers(trailers).unwrap();
+    let response = response.await.unwrap();
+    assert_eq!(response.status(), 200);
+    let mut body = response.into_body();
+    while let Some(chunk) = body.data().await {
+        assert!(
+            chunk.expect("response DATA must not reset").is_empty(),
+            "response has no content"
+        );
+    }
+    assert!(
+        body.trailers().await.expect("response must not reset").is_none(),
+        "response has no trailers"
+    );
+    assert!(body.is_end_stream(), "zero-body response reaches a clean EOS");
+    driver.abort();
+    let _closed = driver.await;
+}
+
+/// Send the generated body in flow-controlled HTTP/2 DATA frames.
+async fn send_large_h2_chunks(sender: &mut h2::SendStream<Bytes>, body: &str) {
+    let mut offset = 0;
+    while offset < body.len() {
+        sender.reserve_capacity(8191);
+        let capacity = std::future::poll_fn(|cx| sender.poll_capacity(cx))
+            .await
+            .unwrap()
+            .unwrap();
+        if capacity == 0 {
+            continue;
+        }
+        let end = (offset + capacity.min(8191)).min(body.len());
+        sender
+            .send_data(Bytes::copy_from_slice(body.as_bytes().get(offset..end).unwrap()), false)
+            .unwrap();
+        offset = end;
+    }
+}
+
+/// Send the same body and trailers as a chunked HTTP/1 request.
+async fn send_large_h1_with_trailers(proxy: &Proxy, body: &str) {
+    use std::fmt::Write as _;
+
+    let mut request =
+        "POST / HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\nTrailer: x-checksum, x-ext-tenant\r\n\r\n"
+            .to_owned();
+    for chunk in body.as_bytes().chunks(1009) {
+        write!(
+            request,
+            "{:x}\r\n{}\r\n",
+            chunk.len(),
+            std::str::from_utf8(chunk).unwrap()
+        )
+        .unwrap();
+    }
+    request.push_str("0\r\nx-checksum: mib-complete\r\nx-ext-tenant: public\r\n\r\n");
+    assert_eq!(proxy.send(&request).await.status, 200);
+}
+
+#[tokio::test]
 async fn reserved_request_trailers_are_rejected_streaming_and_pre_read_to_http2() {
     for filter in [
         "",
@@ -660,29 +755,40 @@ async fn head_response_carries_no_body() {
 }
 
 #[tokio::test]
-async fn oversized_body_is_rejected_with_413() {
+async fn oversized_declared_body_is_rejected_before_upload() {
     let backend = Backend::start(Reply::Fixed(ok("x"))).await;
     let yaml = format!(
         "{}\nbody_limits:\n  max_request_bytes: 16\n",
         routed_yaml(backend.addr, "")
     );
     let proxy = Proxy::start(&yaml).await;
-    let body = "x".repeat(64);
-
     let response = proxy
-        .send(&format!(
-            "POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 64\r\n\r\n{body}"
-        ))
+        .send("POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 64\r\nExpect: 100-continue\r\n\r\n")
         .await;
 
-    assert_eq!(response.status, 413, "a body over the limit is refused");
+    assert_eq!(
+        response.status, 413,
+        "the oversized declaration is refused before upload"
+    );
+    assert_eq!(
+        response.body, r#"{"error":"request body too large"}"#,
+        "header admission uses the shared JSON rejection"
+    );
+    assert!(
+        backend.requests().is_empty(),
+        "header admission must not contact the upstream"
+    );
 }
 
 #[tokio::test]
 async fn early_answer_reaches_the_client_while_the_upstream_ignores_the_body() {
     let early = b"HTTP/1.1 413 Payload Too Large\r\nContent-Length: 8\r\n\r\ntoo much".to_vec();
     let backend = Backend::start(Reply::Early(early)).await;
-    let proxy = Proxy::start(&routed_yaml(backend.addr, "")).await;
+    let yaml = format!(
+        "{}\nbody_limits:\n  max_request_bytes: {LARGE_BODY_BYTES}\n",
+        routed_yaml(backend.addr, "")
+    );
+    let proxy = Proxy::start(&yaml).await;
     let (mut reader, writer) = TcpStream::connect(proxy.addr).await.unwrap().into_split();
     let upload = tokio::spawn(write_large_body(writer, LARGE_BODY_BYTES));
 
@@ -707,6 +813,7 @@ async fn upstream_that_stops_reading_the_body_is_a_write_timeout() {
         "            endpoints:",
         "            write_timeout_ms: 200\n            endpoints:",
     );
+    let yaml = format!("{yaml}\nbody_limits:\n  max_request_bytes: {LARGE_BODY_BYTES}\n");
     let proxy = Proxy::start(&yaml).await;
     let (mut reader, writer) = TcpStream::connect(proxy.addr).await.unwrap().into_split();
     let upload = tokio::spawn(write_large_body(writer, LARGE_BODY_BYTES));
@@ -1062,6 +1169,123 @@ async fn no_content_and_not_modified_carry_no_body_on_either_protocol() {
             "a {status} ends its HTTP/2 stream with the headers"
         );
     }
+}
+
+#[tokio::test]
+async fn not_modified_http1_metadata_and_keepalive() {
+    let head = b"HTTP/1.1 304 Not Modified\r\nETag: \"v1\"\r\nContent-Length: 1073741824\r\n\r\n";
+    let backend = Backend::start(Reply::Fixed(head.to_vec())).await;
+    let proxy = Proxy::start(&routed_yaml(backend.addr, "")).await;
+    let (mut reader, mut writer) = TcpStream::connect(proxy.addr).await.unwrap().into_split();
+    writer
+        .write_all(b"GET / HTTP/1.1\r\nHost: a\r\nIf-None-Match: \"v1\"\r\n\r\n")
+        .await
+        .unwrap();
+    let first = tokio::time::timeout(Duration::from_secs(10), read_until(&mut reader, b"\r\n\r\n"))
+        .await
+        .expect("first 304 head must arrive");
+    assert_not_modified_metadata(&RawResponse::parse(&first));
+    writer
+        .write_all(b"GET / HTTP/1.1\r\nHost: a\r\nIf-None-Match: \"v1\"\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let second = tokio::time::timeout(Duration::from_secs(10), read_to_close(&mut reader))
+        .await
+        .expect("next 304 must complete on the same connection");
+    assert_not_modified_metadata(&RawResponse::parse(&second));
+}
+
+/// A 304 length describes the selected representation, not a response body.
+fn assert_not_modified_metadata(response: &RawResponse) {
+    assert_eq!(response.status, 304, "304 status must reach the client");
+    assert_eq!(response.header("etag"), Some("\"v1\""), "validator must survive");
+    assert_eq!(
+        response.header("content-length"),
+        Some("1073741824"),
+        "the hypothetical length must survive without becoming a body length"
+    );
+    assert!(response.body.is_empty(), "304 must not emit representation bytes");
+    assert!(
+        response.header("transfer-encoding").is_none(),
+        "304 must not be chunked"
+    );
+}
+
+#[tokio::test]
+async fn not_modified_http1_sanitizes_invalid_or_duplicate_lengths() {
+    for (headers, expected) in [
+        ("", None),
+        ("Content-Length: 0\r\n", Some("0")),
+        ("Content-Length: 18446744073709551615\r\n", Some("18446744073709551615")),
+        ("Content-Length: 18446744073709551616\r\n", None),
+        ("Content-Length: -1\r\n", None),
+        ("Content-Length: +1\r\n", None),
+        ("Content-Length: \r\n", None),
+        ("Content-Length: 1, 1\r\n", None),
+        ("Content-Length: 1\r\nContent-Length: 1\r\n", None),
+        ("Content-Length: 1\r\nContent-Length: 2\r\n", None),
+    ] {
+        let upstream = format!("HTTP/1.1 304 Not Modified\r\n{headers}\r\n");
+        let backend = Backend::start(Reply::Fixed(upstream.into_bytes())).await;
+        let proxy = Proxy::start(&routed_yaml(backend.addr, "")).await;
+        let response = proxy
+            .send("GET / HTTP/1.1\r\nHost: a\r\nIf-None-Match: \"v1\"\r\n\r\n")
+            .await;
+        assert_eq!(response.status, 304, "case {headers:?} must remain bodyless");
+        assert_eq!(response.header("content-length"), expected, "case {headers:?}");
+        assert!(response.body.is_empty(), "case {headers:?} must not emit a body");
+        assert!(response.header("transfer-encoding").is_none(), "case {headers:?}");
+    }
+}
+
+#[tokio::test]
+async fn not_modified_hypothetical_length_survives_http10_and_http2() {
+    let head = b"HTTP/1.1 304 Not Modified\r\nETag: \"v1\"\r\nContent-Length: 1073741824\r\n\r\n";
+    let backend = Backend::start(Reply::Fixed(head.to_vec())).await;
+    let proxy = Proxy::start(&routed_yaml(backend.addr, "")).await;
+    let h1 = proxy
+        .send("GET / HTTP/1.0\r\nHost: a\r\nIf-None-Match: \"v1\"\r\n\r\n")
+        .await;
+    assert_not_modified_metadata(&h1);
+    let h2 = tokio::time::timeout(
+        Duration::from_secs(10),
+        h2_exchange_with_condition(proxy.addr, Method::GET, "/", Some("\"v1\"")),
+    )
+    .await
+    .expect("conditional HTTP/2 response must complete");
+    assert_eq!(h2.head.status, 304, "304 reaches the HTTP/2 client");
+    assert_eq!(
+        h2.head.headers.get("content-length").unwrap(),
+        "1073741824",
+        "HTTP/2 preserves the hypothetical length"
+    );
+    assert!(h2.ended_with_head, "HTTP/2 304 must end with its headers");
+    assert!(
+        h2.body.is_empty() && h2.error.is_none(),
+        "HTTP/2 must complete without body bytes"
+    );
+    assert!(h2.trailers.is_none(), "HTTP/2 304 must not emit trailers");
+}
+
+#[tokio::test]
+async fn head_and_no_content_length_framing_are_unchanged() {
+    let head = b"HTTP/1.1 200 OK\r\nContent-Length: 1073741824\r\n\r\n";
+    let backend = Backend::start(Reply::Fixed(head.to_vec())).await;
+    let proxy = Proxy::start(&routed_yaml(backend.addr, "")).await;
+    let response = proxy.send("HEAD / HTTP/1.1\r\nHost: a\r\n\r\n").await;
+    assert_eq!(
+        response.header("content-length"),
+        Some("1073741824"),
+        "HEAD metadata survives"
+    );
+    assert!(response.body.is_empty(), "HEAD emits no body");
+    let head = b"HTTP/1.1 204 No Content\r\nContent-Length: 1073741824\r\n\r\n";
+    let backend = Backend::start(Reply::Fixed(head.to_vec())).await;
+    let proxy = Proxy::start(&routed_yaml(backend.addr, "")).await;
+    let response = proxy.send("GET / HTTP/1.1\r\nHost: a\r\n\r\n").await;
+    assert_eq!(response.status, 204, "204 reaches the client");
+    assert!(response.header("content-length").is_none(), "204 cannot carry a length");
+    assert!(response.body.is_empty(), "204 emits no body");
 }
 
 #[tokio::test]
@@ -1434,11 +1658,7 @@ fn pipelines(config: &Config, registry: &FilterRegistry) -> ListenerPipelines {
         )
         .unwrap();
         pipeline
-            .apply_body_limits(
-                config.body_limits.max_request_bytes,
-                config.body_limits.max_response_bytes,
-                config.insecure_options.allow_unbounded_body,
-            )
+            .configure_body_limits(&config.body_limits, config.insecure_options.allow_unbounded_body)
             .unwrap();
         pipeline.set_allow_private_upstreams(config.insecure_options.allow_private_upstreams);
         built.insert(listener.name.clone(), Arc::new(pipeline));
@@ -1513,14 +1733,21 @@ struct H2Reply {
 /// One HTTP/2 request with prior knowledge to `addr`, read to the end of
 /// its response stream.
 async fn h2_exchange(addr: SocketAddr, method: Method, path: &str) -> H2Reply {
+    h2_exchange_with_condition(addr, method, path, None).await
+}
+
+/// Send an HTTP/2 request, optionally adding a conditional validator.
+async fn h2_exchange_with_condition(addr: SocketAddr, method: Method, path: &str, etag: Option<&str>) -> H2Reply {
     let tcp = TcpStream::connect(addr).await.unwrap();
     let (mut client, connection) = h2::client::handshake(tcp).await.unwrap();
     drop(tokio::spawn(connection));
-    let request = http::Request::builder()
+    let mut request = http::Request::builder()
         .method(method)
-        .uri(format!("http://example.test{path}"))
-        .body(())
-        .unwrap();
+        .uri(format!("http://example.test{path}"));
+    if let Some(etag) = etag {
+        request = request.header("if-none-match", etag);
+    }
+    let request = request.body(()).unwrap();
     let (response, _stream) = client.send_request(request, true).unwrap();
     let response = response.await.unwrap();
     let ended_with_head = response.body().is_end_stream();

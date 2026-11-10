@@ -21,13 +21,13 @@ features. The FIPS build leaves out what is not yet FIPS compliant:
 |---|---|---|
 | Make targets | `release`, `container` | `release-fips`, `container-fips` |
 | Cargo features | defaults | `pingora,config-reload,admin-api` |
-| `policy` filter (policy engine) | yes | no: its dependencies carry their own cryptography |
+| `policy` filter (policy engine) | yes | no by default; opt-in on the FIPS backend, see [The policy filter on FIPS](#the-policy-filter-on-fips) |
 | Base image | Alpine, praxis built with upstream Rust | `ubi9/ubi-minimal`, praxis built with Red Hat's `rust-toolset` on `ubi9/ubi`, both pinned by digest and signature-verified |
 | OpenSSL | Alpine's, dynamically linked | UBI's, dynamically linked (`openssl-libs` and `openssl-fips-provider-so`), the validated module on a FIPS host |
-| Published tags | `<version>`, `<major>.<minor>`, `latest`, `sha-<hash>`, `nightly` (see [image tags](../release.md#image-tags)) | the same with a `-fips` suffix (`0.7.0-fips`, `latest-fips`) |
+| Published tags | `<version>`, `<major>.<minor>`, `latest`, `sha-<hash>`, `nightly` (see [image tags](../release.md#image-tags)) | the same with a `-fips` suffix (`0.8.0-fips`, `latest-fips`) |
 
-The FIPS build rejects a configuration that uses the `policy` filter at
-startup. Everything else, including TLS listeners, mTLS, SNI, the admin API
+The default FIPS build rejects a configuration that uses the `policy`
+filter at startup. Everything else, including TLS listeners, mTLS, SNI, the admin API
 and hot reload, works as in the standard build.
 
 The binary links `libcrypto.so.3` and `libssl.so.3` dynamically. The only
@@ -91,17 +91,25 @@ turns it on. It is a check, not a switch. With it on, praxis refuses to start:
 
 - unless all three signals above are present, and names each one that is missing;
 - when a listener's TLS configuration is not FIPS-approved by rustls;
-- when the binary registers the `policy` filter, as the standard build does:
-  the policy engine verifies JWTs with aws-lc-rs and its OAuth and Valkey
-  plugins hash with the RustCrypto `hmac` and `sha2` crates, none of which
-  is the system OpenSSL. Use the FIPS build.
+- when the binary registers a `policy` filter that fails its compiled FIPS
+  assessment. The standard build does: its policy engine verifies JWTs with
+  aws-lc-rs and hashes with the RustCrypto `hmac` and `sha2` crates, none of
+  which is the system OpenSSL. A build that opts into Policy on the FIPS
+  backend passes only when every compiled Policy builtin uses that backend,
+  no host policy plugin factory is registered, and the experimental Policy
+  rate limiter (`policy-experimental-ratelimit`) is left out, since that
+  combination has not been validated.
+
+The check covers what is compiled in, not whether the host can run it.
+Policy itself checks that at filter construction, on startup and on every
+reload; see [The policy filter on FIPS](#the-policy-filter-on-fips).
 
 Upstream connections always require Extended Master Secret and use the same
 provider, so they are FIPS whenever the listeners are. Without the variable,
 praxis starts either way and only logs the status.
 
 ```console
-podman run --rm -e PRAXIS_REQUIRE_FIPS=1 ghcr.io/praxis-proxy/praxis:0.7.0-fips
+podman run --rm -e PRAXIS_REQUIRE_FIPS=1 ghcr.io/praxis-proxy/praxis:0.8.0-fips
 ```
 
 On a host that is not in FIPS mode this exits immediately with:
@@ -237,6 +245,70 @@ Three things the checks cannot supply belong in any claim:
   party the claim is made to (Red Hat for a Red Hat product, an assessor
   otherwise), and should be settled with them in writing.
 
+## The policy filter on FIPS
+
+The default FIPS build leaves the `policy` filter out. A build that opts
+into it on the FIPS backend (`policy-crypto-fips`, with
+`policy-api-key-fips` or `policy-jwt-fips`) relies on the host for its
+provider setup:
+
+- **Configure OpenSSL before praxis starts.** The FIPS provider must be
+  active, through the host's FIPS mode or `OPENSSL_CONF`, before the first
+  policy document loads. Praxis never loads or enables a provider itself.
+- **FIPS JWT needs FIPS defaults.** `policy-jwt-fips` verifies signatures
+  with OpenSSL calls that carry no property query, so the process default
+  must reach only the FIPS module: `default_properties = fips=yes`, as a
+  FIPS-mode host sets. Policy enforces this when it loads JWT configuration,
+  and a provider that is merely loaded beside the default one is refused.
+  Configure the running host, not the build: cargo's own TLS can fail under
+  FIPS-only defaults.
+- **No other `jsonwebtoken` provider.** Policy installs its OpenSSL provider
+  for `jsonwebtoken` on the first JWT load. A provider installed earlier in
+  the process, by host code or a dependency, is refused with a provider
+  conflict. Later loads, including reloads, reuse Policy's own.
+
+A failure in any of these fails filter construction with a
+`policy.crypto_failed` error naming the remedy, and Policy logs the
+`policy_crypto_failure` alarm. At startup praxis exits; on a reload the
+previous pipeline keeps serving. A missing SHA-256 provider is a startup
+failure, never an API-key request answered with 401.
+
+To build one, name a profile: `make container-fips FIPS_POLICY_PROFILE=jwt`
+(or `engine`, `api-key`, `both`). The image is tagged
+`<version>-fips-policy-<profile>`, apart from the published policy-free one;
+`make fips-runtime-probe FIPS_POLICY_PROFILE=jwt` then sends API-key, JWT and
+DPoP traffic through it. See
+[`examples/configs/security/policy-jwt-fips.yaml`](../../examples/configs/security/policy-jwt-fips.yaml).
+
+| Profile | Policy features | Status |
+|---|---|---|
+| `none` (published image) | none | supported |
+| `engine` | `policy-engine,policy-crypto-fips` | supported |
+| `api-key` | `policy-api-key-fips` | supported |
+| `jwt` | `policy-jwt-fips` | supported |
+| `both` | `policy-api-key-fips,policy-jwt-fips` | supported |
+| any of the above plus `policy-experimental-ratelimit` | adds the Limitador rate limiter | unvalidated; refused under `PRAXIS_REQUIRE_FIPS` |
+
+The limiter combination is unvalidated because Limitador enables `uuid`'s
+`fast-rng` feature, which switches every `uuid` v4 in the process, Policy's
+included, from the OS RNG (`getrandom`) to `rand 0.10`'s `chacha20` RNG.
+Praxis already links `rand` for request ids, but not for Policy's ids. The
+feature edge is Limitador's own dependency declaration, so neither Praxis
+nor Policy can turn it off. No denied crate enters the graph; the change of
+RNG behind Policy's ids has not been reviewed, so a build with both features
+refuses to start when FIPS is required.
+
+JWT under FIPS accepts RS256/384/512, PS256/384/512 and ES256/384 on RSA
+2048-8192 or P-256/P-384 keys, and refuses HMAC, EdDSA and
+`decoding_key: { kind: secret }` at load.
+
+Every DPoP-enabled trusted issuer (`dpop.mode` of `optional` or
+`required`), FIPS or not, must set `dpop.external_base_url` to the URL
+clients address, such as `https://api.example.com`. Without it the
+proof's `htu` would be compared against a URL rebuilt from the
+client-sent `Host` header, so the filter refuses to build and names the
+plugin and the issuer.
+
 ## Scope and exemptions
 
 Crypto-adjacent components, and why each is acceptable in the FIPS image or
@@ -250,7 +322,7 @@ kept out of it:
 | ahash, crc32fast, blake2, digest | hash maps, gzip checksums, Pingora cache keys | not security functions |
 | x509-parser (parsing only, no `verify` feature) | peer certificate fields in the Pingora fork; praxis's own SPIFFE use is outside the FIPS feature set | parse only |
 | subtle, zeroize | constant-time comparison, wiping | helpers |
-| policy engine (`policy` filter) | JWT, OAuth, Valkey builtins carry aws-lc, sha2 and hmac | not in the FIPS build |
+| policy engine (`policy` filter) | the default bundle's JWT, OAuth, Valkey builtins carry aws-lc, sha2 and hmac | not in the default FIPS build; the opt-in FIPS selections hash and verify through OpenSSL |
 | `basic_auth` filter (feature `basic-auth-filter`) | password hashing through OpenSSL's SHA-256 (EVP) | not in the FIPS build (the feature is off by default); ready to join it |
 | sha1, rcgen, ring | test utilities and fixtures | development only, absent from the shipped binary and its manifest |
 

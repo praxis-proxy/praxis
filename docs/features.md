@@ -156,7 +156,7 @@ deployment guidance.
 - **Credential injection**: per-cluster API key injection
   into upstream request headers with environment variable
   or inline values; client credential stripping
-- **Policy engine** (`policy`, feature `policy-engine`,
+- **Policy engine** (`policy`, feature `policy-builtins`,
   on by default): independently validated user, agent,
   and workload identity; APL authorization with
   pluggable decision points (Cedar, CEL, OPA) including
@@ -164,7 +164,11 @@ deployment guidance.
   token per upstream; field redaction and session taint
   across tool calls; out-of-band approval; an audit
   event per decision; and inference authorization on the
-  model in the request body
+  model in the request body. The default bundle also
+  carries Policy's experimental rate limiter. Narrower
+  builds name `policy-engine` or individual builtins
+  (`policy-api-key`, `policy-jwt`, ...) plus one crypto
+  backend; see [Build features](operating/build-features.md#selecting-policy-features)
 
 ## Observability
 

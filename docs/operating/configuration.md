@@ -129,6 +129,19 @@ rather than silently adopted as the baseline.
   `insecure_options.allow_private_upstreams` while TCP
   listeners exist. The TCP service captures these at
   startup.
+- A change to a bound HTTP listener's `forward_proxy`
+  block (`forward-proxy` builds; including adding or
+  removing the block), removal of a bound listener that
+  has one, or a change to
+  `insecure_options.allow_private_upstreams` while a
+  bound listener has an enabled block. The CONNECT
+  runtime (not yet in this release; the block is parsed
+  and validated but accepts no CONNECT) captures the
+  CONNECT gate, destination rules, tunnel timeouts, and
+  the private-address setting when the handler starts.
+  These reloads are refused now so that applying only
+  the new pipeline can never leave CONNECT open with
+  the egress filters removed once it lands.
 
 Stateful filters (rate limiter, circuit breaker) reset
 their state on reload. Operators should expect a brief
@@ -494,19 +507,64 @@ size. These apply across all body modes (Stream,
 StreamBuffer). When a filter also declares a per-filter
 `max_bytes`, the smaller of the two limits is enforced.
 Requests exceeding the limit receive 413 (Payload Too
-Large).
+Large), subject to the gRPC mapping below.
+
+Request-body limit failures log a warning with the limit,
+bytes seen, and rejection phase. Body-phase failures return
+a JSON 413 response, or a gRPC Trailers-Only response when
+the `grpc_status` filter has armed the request. A declared
+`Content-Length` above the effective input limit is rejected
+before reading the body or sending 100 Continue and returns JSON 413.
+This includes matching comma-separated lengths accepted by the HTTP parser.
+
+For a local HTTP/1 response that closes the connection
+with an unread upload, the Pingora backend sends the
+response, records request completion, shuts down the write
+side, and discards remaining body data. Streaming body
+rejections release the upstream connection before sending
+the response. Access logs and request duration metrics
+exclude the subsequent cleanup time. Cleanup has a
+30-second deadline and a 128 MiB discard budget;
+downstream read timeouts still apply. The budget is checked
+between native body reads, so the last chunk can cross it.
+This also covers early responses
+such as 401, 403, and 429. HTTP/2 uses its native stream
+cleanup. Clients should stop uploading after a rejection.
+Overload admission failures still close promptly.
+
+Rejected uploads retain any listener and runtime connection
+permits until cleanup finishes. Account for this grace period
+when sizing `max_connections`: stalled rejected uploads can
+occupy those slots for up to 30 seconds. A configured
+`downstream_read_timeout_ms` can end a stalled read sooner.
 
 ```yaml
 body_limits:
-  max_request_bytes: 10485760    # 10 MiB
-  max_response_bytes: 5242880    # 5 MiB
+  max_buffer_bytes: 67108864    # 64 MiB, per accumulated body
+  max_request_bytes: 10485760    # 10 MiB, cumulative request bytes
+  max_response_bytes: 5242880    # 5 MiB, cumulative response bytes
 ```
 
-Both default to 10 MiB (10,485,760 bytes) when
-omitted. Setting either to `null` removes the ceiling
+`max_request_bytes` and `max_response_bytes` default to
+10 MiB (10,485,760 bytes) when omitted. Setting either to
+`null` removes the ceiling
 but requires `insecure_options.allow_unbounded_body:
 true`; without that flag, startup fails with a
-validation error.
+validation error. `max_buffer_bytes` defaults to 64 MiB and can be
+raised or lowered with a positive integer byte count. Zero, null,
+and values beyond an addressable allocation are rejected. It caps
+static and runtime-selected buffering, nested pipelines, buffered
+subrequest responses, and iterative-router state. Incremental
+streams use only their cumulative transfer limits.
+
+For a 128 MiB buffered request, set `max_buffer_bytes: 134217728`,
+`max_request_bytes: 134217728`, and raise the relevant filter's
+inspection limit (for example `json_body_field.max_body_bytes`).
+Raise `max_response_bytes` too if responses need the extra capacity.
+The smallest applicable limit wins; `allow_unbounded_body` does not
+remove the buffering cap. Reloads update new requests while in-flight
+requests keep their pinned limits. This bounds accumulated bytes,
+not parsed-object memory or aggregate memory across concurrent requests.
 
 ## Metrics
 
@@ -768,8 +826,35 @@ In-flight requests have a grace period of
 then cancels remaining async tasks; the rest of the budget
 bounds the wait for blocking work. A setting of `60`
 therefore still gives requests at most five seconds to
-finish. Drain traffic before SIGTERM when requests need
-longer; see [Diagnostics](diagnostics.md#draining-before-shutdown).
+finish. This limit also applies to streaming responses and
+SSE; a stream that has not completed when the grace period
+ends can be cut short. Drain traffic before SIGTERM when
+requests need longer; see
+[Diagnostics](diagnostics.md#draining-before-shutdown).
+
+The full grace period is spent even when nothing is in
+flight. The requests cut when it ends are the
+long-running ones: streaming and SSE responses, slow
+uploads and downloads, and WebSocket or other upgraded
+connections. Clients of those see the connection or
+stream close before the request completes and should be
+ready to reconnect, retrying only idempotent requests.
+
+On Kubernetes, `terminationGracePeriodSeconds` only caps
+this window. A larger value does not extend it. A
+smaller one, once any `preStop` hook time is taken out,
+lets the kubelet kill the container before the grace
+period ends. Streams still open when the window ends are
+closed on every pod deletion, rolling update, and node
+drain.
+
+On the experimental hyper backend, HTTP listeners let
+in-flight connections finish for up to
+`shutdown_timeout_secs` minus a 1 s reserve, so
+`shutdown_timeout_secs: 1` leaves them no drain time.
+Active TCP forwarding stops as soon as the signal
+arrives. See
+[Hyper Backend](../architecture/hyper-backend.md#runtime-and-shutdown).
 
 Once runtime shutdown completes, Praxis flushes queued
 log lines and attempts to export pending OTLP spans, then

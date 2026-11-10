@@ -17,7 +17,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- Update the Pingora fork dependencies to v0.11.4.
+
+### Security
+
+- LLM policies now apply HTTP authorization, delegation and request assertions
+  to accepted unclassified requests without a model when
+  `llm.require_model: false`. Adding a body to a discovery request no longer
+  skips the HTTP policy. Move inference-only global rules into `llm:` routes
+  or `global.defaults.llm`; MCP-only and classified non-entity MCP admission
+  retain their existing behavior.
+- Policy credential stripping, delegation and asserted headers now survive
+  preceding ordered body-filter mutations, including stripped headers
+  introduced during earlier pre-read passes.
+
+## [0.8.0] - 2026-11-06
+
 ### Added
+
+- Policy rate limiting (experimental): the policy filter runs a policy's
+  `rate_limits:` before identity resolution, keyed on the client address,
+  and after it, keyed on the resolved identity, each once per request. A
+  denial returns 429 with `Retry-After` (or 400, 401 or 503), fixed text and
+  only the limit counters, never the limiter's own message, and does not
+  reach the upstream. Counters are per replica and reset on reload. See the
+  example `security/policy-rate-limit.yaml`.
+- Query-parameter credentials for the policy filter
+  (`credential: { kind: query_param, name: ... }` with `read_query`), with
+  the example `security/policy-query-credential.yaml`. A repeated or
+  percent-encoded repeated parameter is denied as ambiguous. Query strings
+  can appear in access logs outside Policy; prefer a header where the client
+  can send one.
 
 - Implicit cluster references: an inline load-balancer cluster that shares
   its name with a top-level cluster may omit its endpoints, which are
@@ -35,6 +67,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `runtime.overload_gauges` publishes `praxis_overload_pressure`
   for cgroup memory, anonymous resident memory, CPU stall time,
   connections, and file descriptors. The gauges do not shed load.
+- A `forward_proxy` block on `protocol: http` listeners, behind the
+  experimental `forward-proxy` cargo feature (off by default; config
+  surface for CONNECT-based forward proxying): destination allowlisting with
+  wildcard host patterns and optional ports, tunnel idle timeout and
+  optional max duration. Validation rejects the block on TCP listeners
+  and requires egress control (a non-empty `allow_destinations` list or
+  an `ip_acl`/`policy` filter without `conditions` in the listener's
+  chains); the check is structural — that the configured control actually
+  restricts egress remains the operator's responsibility. Destination
+  patterns ending in a numeric label (`*.0.1`) are rejected so no pattern
+  can match an IP literal. A reload that changes a bound listener's
+  `forward_proxy` block, removes a listener that has one, or changes
+  `insecure_options.allow_private_upstreams` while a bound listener has
+  an enabled block, is rejected. The CONNECT runtime is a follow-up
+  change; the block is inert until it lands.
 - An experimental network backend behind the `hyper` feature, off by
   default: the proxy data path, TCP forwarder, admin surface and sub-request
   client on hyper 1.x. See `docs/architecture/hyper-backend.md`.
@@ -46,6 +93,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   handshakes remain healthy when that deadline expires without a response.
   Rust consumers matching `HealthCheckType` exhaustively must handle the new
   `Tls` variant even when the feature is disabled.
+- Granular Policy Engine Cargo features. `policy-builtins` (on by default)
+  is the complete bundle; a `--no-default-features` build names
+  `policy-engine` or individual builtins (`policy-api-key`, `policy-jwt`,
+  `policy-oauth`, `policy-cedar`, ...) plus exactly one shared crypto backend,
+  `policy-crypto-default` or `policy-crypto-fips`. A policy naming a plugin
+  kind the build did not compile in fails to load. `praxis --version` lists
+  the compiled Policy features. See `docs/operating/build-features.md`.
+- The default build includes Policy's experimental rate limiter
+  (`ratelimit/limitador`, feature `policy-experimental-ratelimit`). It counts
+  nothing unless a policy declares the plugin and lists it under
+  `rate_limits:`, and loading such a policy logs a warning at startup and on
+  every reload. Because the default build now carries an experimental
+  feature, it logs the experimental-features warning at startup, which now
+  names each experimental feature compiled in.
+- Opt-in Policy FIPS profiles: `FIPS_POLICY_PROFILE=engine|api-key|jwt|both`
+  selects Policy on its OpenSSL FIPS backend for every FIPS Make target,
+  including `container-fips` (a separately tagged image) and
+  `fips-runtime-probe`, which then sends API-key, JWT and DPoP traffic
+  through the image. `make test-fips-provider` runs a profile's suites on
+  Red Hat's FIPS module on any host. The default FIPS build and image stay
+  policy-free. New example: `security/policy-jwt-fips.yaml`.
+- `make fips-deps` also checks the FIPS unit-test graph: test edges may not
+  unify crypto features into `jsonwebtoken`, Policy, rustls or openssl, never
+  bring in `aws-lc-rs`, and bring in another denied crate only with a
+  recorded reason.
 - The policy filter registers the `env` secret provider, so a policy
   document's `secrets:` block using `env` now loads instead of failing at
   startup. Any other provider kind, including `file` and `vault`, is still
@@ -54,9 +126,46 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
-- The policy engine is updated to PPE 0.5.0, which tightens OAuth
-  `delegate(...)` by default: a token-exchange response must name an
-  access-token or JWT `issued_token_type`, unrequested scopes outside
+- Clarify that the default Pingora shutdown grace period is capped at five
+  seconds, including for streaming responses, regardless of a larger
+  `shutdown_timeout_secs` value.
+- Bodyless requests on LLM policies, such as `GET /v1/models`, now run HTTP
+  authorization, delegation and request assertions before they reach the
+  upstream: a matching `http:` route, or the `global` rules otherwise.
+  Before, a valid identity alone admitted them. Migration: a global rule
+  that requires `llm.request` now denies discovery; move inference-only
+  rules into `llm:` routes or `global.defaults.llm`. A startup warning
+  names the `llm.require_model: false` and `require_protocol_metadata:
+  false` fallbacks, which still admit on identity alone.
+- The policy filter refuses to build when a JWT trusted issuer enables DPoP
+  (`dpop.mode: optional` or `required`) without `dpop.external_base_url`,
+  so the proof's `htu` never depends on the client-sent `Host` header. The
+  error names the plugin and the issuer. Set the URL clients address, such
+  as `https://api.example.com`. A reload with such a document is rejected
+  and the previous pipeline keeps serving.
+- A Policy crypto backend failure (no SHA-256 provider, non-FIPS OpenSSL
+  defaults under FIPS JWT, or another `jsonwebtoken` provider installed
+  first) now fails policy filter construction with a `policy.crypto_failed`
+  error naming the remedy, at startup and on reload, instead of surfacing
+  as request-time denials.
+- `PRAXIS_REQUIRE_FIPS` judges a registered `policy` filter by Policy's
+  compiled crypto capability report instead of refusing it outright. It
+  still refuses the default build, any host policy plugin factory, and the
+  unvalidated combination of `policy-experimental-ratelimit` with
+  `policy-crypto-fips`. The default FIPS build stays policy-free.
+- Default accumulated bodies and buffered subrequest responses to a 64 MiB
+  cap, configurable through `body_limits.max_buffer_bytes`. The cap covers
+  explicit filter limits, runtime-selected buffering, nested pipelines, and
+  iterative-router state, including after reload. Request and response transfer
+  limits retain their 10 MiB defaults and remain independent for streams.
+  Larger JSON, policy, gRPC-Web, and iterative-router buffer settings are
+  accepted subject to the configured cap.
+- Keep Pingora uploads open while runtime-selected buffering withholds
+  non-final chunks, instead of sending a premature upstream end marker.
+
+- The policy engine is updated to PPE 0.6.0. Its OAuth `delegate(...)`
+  validation is stricter by default: a token-exchange response must name
+  an access-token or JWT `issued_token_type`, unrequested scopes outside
   `allowed_extra_scopes` are refused, and a minted JWT's `aud` and `sub`
   must match. `strict_response_validation: false` turns these checks off.
   JWTs with an unsupported `crit` header are rejected, an `env` secret
@@ -67,6 +176,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   name, rejecting duplicates with `KvRegistryError::AlreadyRegistered`.
 - `KvStoreRegistry::get_or_create_memory` deliberately creates an
   in-memory store.
+- **Breaking:** every `sticky_sessions` cluster now requires a `storage`
+  field, and startup fails with `missing field 'storage'` when it is
+  omitted. The only value is `local`, which keeps session bindings in the
+  proxy process: they are not shared between replicas and do not survive a
+  restart, so stickiness behind a load balancer is per-process. That was
+  already the behaviour; it is now a stated choice rather than a silent
+  default. Add `storage: local` to each cluster to keep the current
+  behaviour. See `docs/filters/http/traffic_management/sticky_sessions.md`.
+- `FilterPipeline::build_with_chains` takes a new required
+  `top_level_clusters: &[Cluster]` argument. Rust callers pass the
+  config's top-level `clusters:` list, or `&[]` when none exists.
 
 ### Removed
 
@@ -74,13 +194,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   store for any unknown name. Use `get` to look up a configured store, or
   `get_or_create_memory` to choose memory explicitly.
 
-### Changed
-
-- `FilterPipeline::build_with_chains` takes a new required
-  `top_level_clusters: &[Cluster]` argument. Rust callers pass the
-  config's top-level `clusters:` list, or `&[]` when none exists.
-
 ### Fixed
+
+- Pingora sub-request connections now respect the cluster
+  `idle_timeout_ms` when returned to the pool, avoiding reuse of idle
+  connections silently dropped by NAT or firewall state.
+- The policy filter resolves `http.client_address` through
+  `trusted_proxies` on every request path.
+- On inference requests a `ratelimit.post_identity` limiter can bind
+  `llm.model_id`, `llm.provider` and `custom.llm.*`; such a limiter used to
+  deny every request.
+- Remove forbidden `Content-Length` and `Transfer-Encoding` headers from
+  204 responses after response filters run, preserving valid downstream
+  framing for the following response.
+
+- Preserve valid `Content-Length` metadata on Hyper HTTP/1 304 responses
+  while keeping them bodyless, including responses with huge hypothetical
+  lengths.
+
+- Count an original request-body prefix once across Pingora retries while
+  continuing to count newly received tail bytes. Stale-connection retries also
+  respect the 64 KiB original and final transformed body retention ceiling.
+  Requests whose streaming writer output was not retained now return the
+  upstream error instead of retrying with an unsafe reconstruction.
+
+- Decode `grpc-web-text` request bodies during pre-read inspection before
+  forwarding them to HTTP/2 backends. Invalid base64 now follows the filter
+  rejection policy even before request-phase state is initialized.
+
+- Flush small HTTP/1.1 server-sent events promptly when the upstream supplies
+  `Content-Length`. Body-bearing event streams use chunked downstream framing;
+  the upstream length still detects truncated responses.
 
 - A delegated credential is sent with its own prefix rather than always
   `Bearer `, so a Vault credential with no `scheme_prefix` goes out bare
@@ -89,6 +233,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   views that request-body and response policy hooks receive, rather than
   reaching those plugins and PDPs in plaintext.
 
+- Request-body limit rejections log structured warnings and return JSON 413
+  responses across buffering and streaming paths. Body-phase rejections
+  for requests armed by `grpc_status` return gRPC Trailers-Only responses
+  instead. Oversized declared Content-Length values, including validated
+  matching comma-separated lengths, are rejected before reading the body
+  or sending 100 Continue. Local body-limit rejections are not retried upstream,
+  even when 413 is configured as retriable. HEAD rejection responses retain
+  representation headers without sending payload bytes, including over HTTP/2.
+  Streaming rejections also cancel HTTP/2 upstream streams promptly instead of
+  waiting for an upstream response or allowing it to replace the rejection.
+- Early HTTP/1 responses with unread uploads use Pingora's write-side
+  shutdown and bounded cleanup before closing, including authentication
+  and rate-limit rejections and successful terminal responses. Cleanup has
+  a 30-second deadline and a 128 MiB discard budget checked between body
+  reads. Streaming rejections release the upstream before responding;
+  access logs and request duration metrics are recorded before downstream
+  cleanup. Expected client-error filter rejections no longer produce a
+  duplicate Pingora error log.
 - The FIPS runtime probe selects the Pingora backend when compiling its
   listener tests with default features disabled.
 - The Hyper backend rejects reserved client trailer names before forwarding
@@ -102,6 +264,55 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   to HTTP/2 upstreams, and rejects unsupported HTTP/1 uploads with trailers.
 - The Hyper backend rejects strict HTTP/2 TLS upstreams that do not negotiate
   `h2` through ALPN. Automatic HTTP version selection still allows HTTP/1.1.
+
+### Security
+
+- `trusted_proxies` in the policy and `forwarded_headers` filters matches a
+  proxy range only within its address family. `0.0.0.0/0` no longer trusts
+  IPv6 peers (nor `::/0` IPv4 ones), so on a dual-stack listener a direct
+  client of the other family cannot set `X-Forwarded-For` to choose its
+  client address.
+- Updated `ctutils` to address `RUSTSEC-2026-0385`.
+- The policy filter no longer forwards a delegated token while the caller's
+  credential sits where it cannot be stripped from the upstream request,
+  such as a query parameter. That request now receives HTTP 500
+  (`policy.unstrippable_credential`) instead of reaching the upstream with
+  both credentials. A policy that reads a query credential and also
+  delegates fails to load.
+- Every policy hook now sees the request as the client sent it: the raw
+  query, the effective client address as `http.client_address` (the TCP
+  peer, or with `trusted_proxies` the rightmost untrusted `X-Forwarded-For`
+  hop; absent when a trusted chain cannot be resolved because of a malformed
+  hop, which denies address-keyed rate limits), the validated bare host as
+  `http.host` (lowercased, no port), and a scheme taken from the downstream
+  TLS state, never from `X-Forwarded-Proto`. Before, response and body-phase hooks rebuilt
+  this from a request that earlier phases could already have changed, and
+  the scheme was usually missing. Place `policy` before `path_rewrite`,
+  `url_rewrite` and header-rewriting filters.
+- A policy with request assertions but no `http.request` rules and no
+  entity routes now applies its header set and strip rules instead of
+  admitting the request on identity alone.
+- A delegation where no minted token forms a valid upstream header now
+  receives HTTP 500 (`policy.delegation_failed`) instead of forwarding the
+  inbound credential.
+- With `PRAXIS_REQUIRE_FIPS` set, building the policy filter refuses a build
+  that is not FIPS-capable (such as a host plugin factory registered after
+  startup), so that reload fails and the previous pipeline stays in place.
+
+- Apply the policy filter's configured failure mode when a classified tool
+  response is malformed JSON or lacks both a result and a valid JSON-RPC error.
+  Policies with tool response hooks no longer silently skip those inputs;
+  fail-closed pipelines stop delivery before the buffered payload escapes.
+- Validate the complete input's UTF-8 before `json_body` rewrites or
+  `json_body_field` header promotion. Invalid bytes in ignored JSON values
+  can no longer produce trusted metadata or bypass the configured invalid-input
+  behavior.
+- Disable TLS session resumption on listeners with client authentication
+  and TLS hot-reload. A handshake authenticated before a CA/CRL reload
+  could finish afterward and cache stale authentication, allowing new
+  connections to bypass the updated trust. New connections now perform
+  full certificate verification; static mTLS and non-mTLS listeners
+  retain resumption.
 
 ## [0.7.5] - 2026-10-21
 
@@ -299,6 +510,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 Releases 0.1.0 through 0.7.3 came out before this file existed; their notes
 are on [GitHub Releases](https://github.com/praxis-proxy/praxis/releases).
 
-[Unreleased]: https://github.com/praxis-proxy/praxis/compare/v0.7.5...HEAD
+[Unreleased]: https://github.com/praxis-proxy/praxis/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/praxis-proxy/praxis/compare/v0.7.5...v0.8.0
 [0.7.5]: https://github.com/praxis-proxy/praxis/compare/v0.7.4...v0.7.5
 [0.7.4]: https://github.com/praxis-proxy/praxis/compare/v0.7.3...v0.7.4

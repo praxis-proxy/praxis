@@ -18,7 +18,7 @@
 //! [`BodyCapabilities`]: crate::body::BodyCapabilities
 //! [`FilterPipeline::from_filters`]: super::FilterPipeline
 
-use praxis_core::config::{ABSOLUTE_MAX_BODY_BYTES, ResponseCondition};
+use praxis_core::config::{DEFAULT_MAX_BUFFER_BYTES, ResponseCondition};
 
 use super::filter::PipelineFilter;
 use crate::{
@@ -329,10 +329,10 @@ fn accumulate_request_body(caps: &mut BodyCapabilities, filter: &dyn crate::filt
 /// The contributed mode is promoted defensively: a participant that
 /// declared a non-buffering `request_body_mode` (rejected by validation,
 /// but not relied on here) still forces a bounded `StreamBuffer` capped at
-/// [`ABSOLUTE_MAX_BODY_BYTES`] so the phase never runs against an
+/// [`DEFAULT_MAX_BUFFER_BYTES`] so the phase never runs against an
 /// unbuffered or unbounded body.
 ///
-/// [`ABSOLUTE_MAX_BODY_BYTES`]: praxis_core::config::ABSOLUTE_MAX_BODY_BYTES
+/// [`DEFAULT_MAX_BUFFER_BYTES`]: praxis_core::config::DEFAULT_MAX_BUFFER_BYTES
 fn accumulate_selected_upstream_request_body(caps: &mut BodyCapabilities, filter: &dyn crate::filter::HttpFilter) {
     let access = filter.selected_upstream_request_body_access();
     if access == BodyAccess::None {
@@ -368,10 +368,10 @@ fn selected_upstream_body_mode(filter: &dyn crate::filter::HttpFilter) -> BodyMo
 /// phase reaches the binding router.
 ///
 /// The contributed mode is promoted defensively to a bounded `StreamBuffer`
-/// capped at [`ABSOLUTE_MAX_BODY_BYTES`], mirroring the selected-upstream
+/// capped at [`DEFAULT_MAX_BUFFER_BYTES`], mirroring the selected-upstream
 /// phase, so the barrier never runs against an unbuffered or unbounded body.
 ///
-/// [`ABSOLUTE_MAX_BODY_BYTES`]: praxis_core::config::ABSOLUTE_MAX_BODY_BYTES
+/// [`DEFAULT_MAX_BUFFER_BYTES`]: praxis_core::config::DEFAULT_MAX_BUFFER_BYTES
 #[cfg(feature = "bound-upstream-request-body")]
 fn accumulate_bound_upstream_request_body(caps: &mut BodyCapabilities, filter: &dyn crate::filter::HttpFilter) {
     let access = filter.bound_upstream_request_body_access();
@@ -396,7 +396,7 @@ fn buffered_body_mode(filter: &dyn crate::filter::HttpFilter) -> BodyMode {
     match filter.request_body_mode() {
         BodyMode::StreamBuffer { max_bytes: Some(limit) } => BodyMode::StreamBuffer { max_bytes: Some(limit) },
         _ => BodyMode::StreamBuffer {
-            max_bytes: Some(ABSOLUTE_MAX_BODY_BYTES),
+            max_bytes: Some(DEFAULT_MAX_BUFFER_BYTES),
         },
     }
 }
@@ -908,7 +908,7 @@ mod tests {
         assert_eq!(
             caps.request_body_mode,
             BodyMode::StreamBuffer {
-                max_bytes: Some(ABSOLUTE_MAX_BODY_BYTES),
+                max_bytes: Some(DEFAULT_MAX_BUFFER_BYTES),
             },
             "a non-bounded selected participant must fall back to the finite absolute ceiling"
         );
@@ -1032,7 +1032,7 @@ mod tests {
         assert_eq!(
             caps.request_body_mode,
             BodyMode::StreamBuffer {
-                max_bytes: Some(ABSOLUTE_MAX_BODY_BYTES),
+                max_bytes: Some(DEFAULT_MAX_BUFFER_BYTES),
             },
             "a non-bounded bound participant must fall back to the finite absolute ceiling"
         );

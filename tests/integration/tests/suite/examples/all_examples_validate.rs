@@ -22,6 +22,20 @@ fn every_example_resolves_its_pipelines() {
     let mut validated = 0;
     let mut failures = Vec::new();
     for path in yaml_files(&root) {
+        #[cfg(not(feature = "policy-builtins"))]
+        if let Some(name) = path.file_name().and_then(|name| name.to_str())
+            && name.starts_with("policy-")
+        {
+            let api_key_example = name == "policy-api-key.yaml"
+                && cfg!(any(
+                    feature = "policy-api-key-fips",
+                    all(feature = "policy-api-key", feature = "policy-crypto-default"),
+                    all(feature = "policy-api-key", feature = "policy-crypto-fips")
+                ));
+            if !api_key_example {
+                continue;
+            }
+        }
         #[cfg(not(feature = "tls-health-check"))]
         if path.file_name().is_some_and(|name| name == "tls-health-check.yaml") {
             continue;
