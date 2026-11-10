@@ -3681,6 +3681,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "praxis-tests-rollout"
+version = "0.8.0"
+dependencies = [
+ "chrono",
+ "clap",
+ "praxis-test-utils",
+ "serde_json",
+ "tempfile",
+ "yaml_serde",
+]
+
+[[package]]
 name = "praxis-tests-schema"
 version = "0.8.0"
 dependencies = [
@@ -6209,6 +6221,7 @@ dependencies = [
  "praxis-proxy",
  "praxis-proxy-benchmarks",
  "praxis-proxy-core",
+ "praxis-tests-rollout",
  "quote",
  "regex",
  "serde",

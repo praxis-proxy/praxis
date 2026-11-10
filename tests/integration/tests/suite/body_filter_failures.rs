@@ -112,7 +112,7 @@ impl HttpFilter for ErrorAtResponseEofFilter {
     }
 
     fn response_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional)
     }
 
     fn response_trailer_access(&self) -> bool {

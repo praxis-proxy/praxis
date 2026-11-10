@@ -29,6 +29,7 @@ dev = [
     "praxis/default",
     "dep:praxis-core",
     "dep:praxis-proxy-benchmarks",
+    "dep:praxis-tests-rollout",
     "dep:quote",
     "dep:serde_yaml",
     "dep:syn",
@@ -50,6 +51,7 @@ plotters = { workspace = true, optional = true }
 praxis = { workspace = true, optional = true }
 praxis-core = { workspace = true, optional = true }
 praxis-proxy-benchmarks = { workspace = true, optional = true }
+praxis-tests-rollout = { workspace = true, optional = true }
 quote = { workspace = true, optional = true }
 regex = { workspace = true }
 serde = { workspace = true }
