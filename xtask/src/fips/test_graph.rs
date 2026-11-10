@@ -151,7 +151,9 @@ fn listing(context: &Context, packages: &[&str], edges: &str, feature_flags: &[S
         .args(context.cargo_flags())
         .args(packages)
         // Plain output: CARGO_TERM_COLOR=always would wrap the `(*)` marker in escapes `parse` cannot strip.
-        .args(["-e", edges, "--prefix", "none", "--format", "{p}|{f}", "--color", "never"])
+        .args([
+            "-e", edges, "--prefix", "none", "--format", "{p}|{f}", "--color", "never",
+        ])
         .args(feature_flags)
         .output()
         .map_err(|err| format!("cargo could not be run: {err}"))?;

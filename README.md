@@ -67,7 +67,11 @@ See [SUPPORT.md](SUPPORT.md) for the full list of channels: where to
 ask questions, propose enhancements, report bugs, and report security
 vulnerabilities.
 
+Check the [CNCF Praxis Calendar] to see our community calls and other online
+meetups.
+
 [discussion forums]:https://github.com/praxis-proxy/praxis/discussions
+[CNCF Praxis Calendar]:https://app.lfx.dev/projects/praxis/calendar
 
 ## License
 
