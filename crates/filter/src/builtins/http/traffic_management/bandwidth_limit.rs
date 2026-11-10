@@ -117,6 +117,23 @@ impl TryFrom<u8> for Ipv6PrefixLength {
 // -----------------------------------------------------------------------------
 
 /// Paces request and response bodies, or TCP payload bytes.
+///
+/// Configure `mode: per_connection` to share budgets across requests and HTTP/2
+/// streams on one downstream connection, or `mode: per_ip` to share them across
+/// source addresses. At least one of `upload_bytes_per_sec` and
+/// `download_bytes_per_sec` must be positive; an omitted direction is unlimited.
+/// `burst_bytes` defaults to zero, pacing from the first byte. Larger chunks
+/// release in bounded portions as allowance refills.
+///
+/// In `per_ip` mode, optional `ipv6_prefix_len` (0 through 128) groups IPv6
+/// addresses by that prefix. Omit it to use the full address. IPv4-mapped IPv6
+/// addresses always use their normalized IPv4 address. Prefix grouping does not
+/// change IPv4 keys and is rejected with `per_connection` mode.
+///
+/// HTTP hosts must provide a stable [`DownstreamConnectionId`]; a missing
+/// identity or source address closes the connection instead of weakening the
+/// selected sharing mode. TCP hosts use [`crate::TcpConnectState`] with the
+/// bandwidth-aware connect executor.
 pub struct BandwidthLimitFilter {
     /// How keys are chosen.
     mode: BandwidthMode,
