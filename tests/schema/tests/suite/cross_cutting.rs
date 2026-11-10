@@ -207,3 +207,78 @@ filter_chains:
         "status_code should be turned on"
     );
 }
+
+#[test]
+fn reject_repeated_metrics_label_dimension() {
+    for (first, second) in [("true", "false"), ("false", "true"), ("true", "true")] {
+        let yaml = format!(
+            r#"
+metrics:
+  labels:
+    status_code: {first}
+    status_code: {second}
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#
+        );
+        let err = Config::from_yaml(&yaml)
+            .err()
+            .unwrap_or_else(|| panic!("status_code: {first} then {second} must not load"));
+        assert!(
+            err.to_string().contains("status_code"),
+            "the error should name the repeated dimension, got: {err}"
+        );
+    }
+}
+
+#[test]
+fn accept_every_dimension_set_once() {
+    let yaml = r#"
+metrics:
+  labels:
+    cluster: false
+    endpoint: false
+    listener: false
+    method: false
+    route: false
+    status_class: false
+    status_code: true
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+    let config = Config::from_yaml(yaml).unwrap();
+    for label in [
+        praxis_core::config::MetricLabel::Cluster,
+        praxis_core::config::MetricLabel::Endpoint,
+        praxis_core::config::MetricLabel::Listener,
+        praxis_core::config::MetricLabel::Method,
+        praxis_core::config::MetricLabel::Route,
+        praxis_core::config::MetricLabel::StatusClass,
+    ] {
+        assert!(
+            !config.metrics.labels.is_enabled(label),
+            "{label:?} was set to false and should be off"
+        );
+    }
+    assert!(
+        config
+            .metrics
+            .labels
+            .is_enabled(praxis_core::config::MetricLabel::StatusCode),
+        "status_code was set to true and should be on"
+    );
+}

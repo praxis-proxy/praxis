@@ -581,6 +581,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `disabled` is rejected at startup with a message naming its replacement;
   configs that never set `metrics.labels` are unaffected. Migrate
   `disabled: [route, endpoint]` to `route: false` and `endpoint: false`.
+  A dimension set more than once is rejected rather than resolved to the
+  last value, matching how every other config struct treats a repeated
+  field.
 - Clarify that the default Pingora shutdown grace period is capped at five
   seconds, including for streaming responses, regardless of a larger
   `shutdown_timeout_secs` value.
