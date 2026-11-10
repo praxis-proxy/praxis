@@ -479,15 +479,15 @@ private_doc_tests = "allow"
 
 # Pin the upload writer hook until the Pingora fork publishes it.
 [patch.crates-io]
-quixotic-plecostomus-cache = { git = "https://github.com/rkaplan-hub/pingora.git", rev = "88559112219cdd0ba0f18e541f38e1b82acbfa86" }
-quixotic-plecostomus-core = { git = "https://github.com/rkaplan-hub/pingora.git", rev = "88559112219cdd0ba0f18e541f38e1b82acbfa86" }
-quixotic-plecostomus-error = { git = "https://github.com/rkaplan-hub/pingora.git", rev = "88559112219cdd0ba0f18e541f38e1b82acbfa86" }
-quixotic-plecostomus-header-serde = { git = "https://github.com/rkaplan-hub/pingora.git", rev = "88559112219cdd0ba0f18e541f38e1b82acbfa86" }
-quixotic-plecostomus-http = { git = "https://github.com/rkaplan-hub/pingora.git", rev = "88559112219cdd0ba0f18e541f38e1b82acbfa86" }
-quixotic-plecostomus-lru = { git = "https://github.com/rkaplan-hub/pingora.git", rev = "88559112219cdd0ba0f18e541f38e1b82acbfa86" }
-quixotic-plecostomus-pool = { git = "https://github.com/rkaplan-hub/pingora.git", rev = "88559112219cdd0ba0f18e541f38e1b82acbfa86" }
-quixotic-plecostomus-proxy = { git = "https://github.com/rkaplan-hub/pingora.git", rev = "88559112219cdd0ba0f18e541f38e1b82acbfa86" }
-quixotic-plecostomus-runtime = { git = "https://github.com/rkaplan-hub/pingora.git", rev = "88559112219cdd0ba0f18e541f38e1b82acbfa86" }
-quixotic-plecostomus-rustls = { git = "https://github.com/rkaplan-hub/pingora.git", rev = "88559112219cdd0ba0f18e541f38e1b82acbfa86" }
-quixotic-plecostomus-rustls-openssl = { git = "https://github.com/rkaplan-hub/pingora.git", rev = "88559112219cdd0ba0f18e541f38e1b82acbfa86" }
-quixotic-plecostomus-timeout = { git = "https://github.com/rkaplan-hub/pingora.git", rev = "88559112219cdd0ba0f18e541f38e1b82acbfa86" }
+quixotic-plecostomus-cache = { git = "https://github.com/rkaplan-hub/pingora.git", rev = "5c933247cda0223f3adf2b875a7aa6016794baa4" }
+quixotic-plecostomus-core = { git = "https://github.com/rkaplan-hub/pingora.git", rev = "5c933247cda0223f3adf2b875a7aa6016794baa4" }
+quixotic-plecostomus-error = { git = "https://github.com/rkaplan-hub/pingora.git", rev = "5c933247cda0223f3adf2b875a7aa6016794baa4" }
+quixotic-plecostomus-header-serde = { git = "https://github.com/rkaplan-hub/pingora.git", rev = "5c933247cda0223f3adf2b875a7aa6016794baa4" }
+quixotic-plecostomus-http = { git = "https://github.com/rkaplan-hub/pingora.git", rev = "5c933247cda0223f3adf2b875a7aa6016794baa4" }
+quixotic-plecostomus-lru = { git = "https://github.com/rkaplan-hub/pingora.git", rev = "5c933247cda0223f3adf2b875a7aa6016794baa4" }
+quixotic-plecostomus-pool = { git = "https://github.com/rkaplan-hub/pingora.git", rev = "5c933247cda0223f3adf2b875a7aa6016794baa4" }
+quixotic-plecostomus-proxy = { git = "https://github.com/rkaplan-hub/pingora.git", rev = "5c933247cda0223f3adf2b875a7aa6016794baa4" }
+quixotic-plecostomus-runtime = { git = "https://github.com/rkaplan-hub/pingora.git", rev = "5c933247cda0223f3adf2b875a7aa6016794baa4" }
+quixotic-plecostomus-rustls = { git = "https://github.com/rkaplan-hub/pingora.git", rev = "5c933247cda0223f3adf2b875a7aa6016794baa4" }
+quixotic-plecostomus-rustls-openssl = { git = "https://github.com/rkaplan-hub/pingora.git", rev = "5c933247cda0223f3adf2b875a7aa6016794baa4" }
+quixotic-plecostomus-timeout = { git = "https://github.com/rkaplan-hub/pingora.git", rev = "5c933247cda0223f3adf2b875a7aa6016794baa4" }

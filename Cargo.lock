@@ -3902,7 +3902,7 @@ checksum = "a1d01941d82fa2ab50be1e79e6714289dd7cde78eba4c074bc5a4374f650dfe0"
 [[package]]
 name = "quixotic-plecostomus-cache"
 version = "0.11.4"
-source = "git+https://github.com/rkaplan-hub/pingora.git?rev=88559112219cdd0ba0f18e541f38e1b82acbfa86#88559112219cdd0ba0f18e541f38e1b82acbfa86"
+source = "git+https://github.com/rkaplan-hub/pingora.git?rev=5c933247cda0223f3adf2b875a7aa6016794baa4#5c933247cda0223f3adf2b875a7aa6016794baa4"
 dependencies = [
  "ahash 0.8.12",
  "arrayvec 0.7.8",
@@ -3937,7 +3937,7 @@ dependencies = [
 [[package]]
 name = "quixotic-plecostomus-core"
 version = "0.11.4"
-source = "git+https://github.com/rkaplan-hub/pingora.git?rev=88559112219cdd0ba0f18e541f38e1b82acbfa86#88559112219cdd0ba0f18e541f38e1b82acbfa86"
+source = "git+https://github.com/rkaplan-hub/pingora.git?rev=5c933247cda0223f3adf2b875a7aa6016794baa4#5c933247cda0223f3adf2b875a7aa6016794baa4"
 dependencies = [
  "ahash 0.8.12",
  "async-trait",
@@ -3990,12 +3990,12 @@ dependencies = [
 [[package]]
 name = "quixotic-plecostomus-error"
 version = "0.11.4"
-source = "git+https://github.com/rkaplan-hub/pingora.git?rev=88559112219cdd0ba0f18e541f38e1b82acbfa86#88559112219cdd0ba0f18e541f38e1b82acbfa86"
+source = "git+https://github.com/rkaplan-hub/pingora.git?rev=5c933247cda0223f3adf2b875a7aa6016794baa4#5c933247cda0223f3adf2b875a7aa6016794baa4"
 
 [[package]]
 name = "quixotic-plecostomus-header-serde"
 version = "0.11.4"
-source = "git+https://github.com/rkaplan-hub/pingora.git?rev=88559112219cdd0ba0f18e541f38e1b82acbfa86#88559112219cdd0ba0f18e541f38e1b82acbfa86"
+source = "git+https://github.com/rkaplan-hub/pingora.git?rev=5c933247cda0223f3adf2b875a7aa6016794baa4#5c933247cda0223f3adf2b875a7aa6016794baa4"
 dependencies = [
  "bytes",
  "http",
@@ -4010,7 +4010,7 @@ dependencies = [
 [[package]]
 name = "quixotic-plecostomus-http"
 version = "0.11.4"
-source = "git+https://github.com/rkaplan-hub/pingora.git?rev=88559112219cdd0ba0f18e541f38e1b82acbfa86#88559112219cdd0ba0f18e541f38e1b82acbfa86"
+source = "git+https://github.com/rkaplan-hub/pingora.git?rev=5c933247cda0223f3adf2b875a7aa6016794baa4#5c933247cda0223f3adf2b875a7aa6016794baa4"
 dependencies = [
  "bytes",
  "http",
@@ -4020,9 +4020,9 @@ dependencies = [
 [[package]]
 name = "quixotic-plecostomus-lru"
 version = "0.11.4"
-source = "git+https://github.com/rkaplan-hub/pingora.git?rev=88559112219cdd0ba0f18e541f38e1b82acbfa86#88559112219cdd0ba0f18e541f38e1b82acbfa86"
+source = "git+https://github.com/rkaplan-hub/pingora.git?rev=5c933247cda0223f3adf2b875a7aa6016794baa4#5c933247cda0223f3adf2b875a7aa6016794baa4"
 dependencies = [
- "ahash 0.8.12",
+ "ahash 0.7.8",
  "arrayvec 0.7.8",
  "async-channel",
  "flurry",
@@ -4036,7 +4036,7 @@ dependencies = [
 [[package]]
 name = "quixotic-plecostomus-pool"
 version = "0.11.4"
-source = "git+https://github.com/rkaplan-hub/pingora.git?rev=88559112219cdd0ba0f18e541f38e1b82acbfa86#88559112219cdd0ba0f18e541f38e1b82acbfa86"
+source = "git+https://github.com/rkaplan-hub/pingora.git?rev=5c933247cda0223f3adf2b875a7aa6016794baa4#5c933247cda0223f3adf2b875a7aa6016794baa4"
 dependencies = [
  "crossbeam-queue",
  "dashmap",
@@ -4051,7 +4051,7 @@ dependencies = [
 [[package]]
 name = "quixotic-plecostomus-proxy"
 version = "0.11.4"
-source = "git+https://github.com/rkaplan-hub/pingora.git?rev=88559112219cdd0ba0f18e541f38e1b82acbfa86#88559112219cdd0ba0f18e541f38e1b82acbfa86"
+source = "git+https://github.com/rkaplan-hub/pingora.git?rev=5c933247cda0223f3adf2b875a7aa6016794baa4#5c933247cda0223f3adf2b875a7aa6016794baa4"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4073,7 +4073,7 @@ dependencies = [
 [[package]]
 name = "quixotic-plecostomus-runtime"
 version = "0.11.4"
-source = "git+https://github.com/rkaplan-hub/pingora.git?rev=88559112219cdd0ba0f18e541f38e1b82acbfa86#88559112219cdd0ba0f18e541f38e1b82acbfa86"
+source = "git+https://github.com/rkaplan-hub/pingora.git?rev=5c933247cda0223f3adf2b875a7aa6016794baa4#5c933247cda0223f3adf2b875a7aa6016794baa4"
 dependencies = [
  "log",
  "once_cell",
@@ -4086,7 +4086,7 @@ dependencies = [
 [[package]]
 name = "quixotic-plecostomus-rustls"
 version = "0.11.4"
-source = "git+https://github.com/rkaplan-hub/pingora.git?rev=88559112219cdd0ba0f18e541f38e1b82acbfa86#88559112219cdd0ba0f18e541f38e1b82acbfa86"
+source = "git+https://github.com/rkaplan-hub/pingora.git?rev=5c933247cda0223f3adf2b875a7aa6016794baa4#5c933247cda0223f3adf2b875a7aa6016794baa4"
 dependencies = [
  "log",
  "no_debug",
@@ -4101,7 +4101,7 @@ dependencies = [
 [[package]]
 name = "quixotic-plecostomus-rustls-openssl"
 version = "0.4.1"
-source = "git+https://github.com/rkaplan-hub/pingora.git?rev=88559112219cdd0ba0f18e541f38e1b82acbfa86#88559112219cdd0ba0f18e541f38e1b82acbfa86"
+source = "git+https://github.com/rkaplan-hub/pingora.git?rev=5c933247cda0223f3adf2b875a7aa6016794baa4#5c933247cda0223f3adf2b875a7aa6016794baa4"
 dependencies = [
  "foreign-types",
  "once_cell",
@@ -4114,7 +4114,7 @@ dependencies = [
 [[package]]
 name = "quixotic-plecostomus-timeout"
 version = "0.11.4"
-source = "git+https://github.com/rkaplan-hub/pingora.git?rev=88559112219cdd0ba0f18e541f38e1b82acbfa86#88559112219cdd0ba0f18e541f38e1b82acbfa86"
+source = "git+https://github.com/rkaplan-hub/pingora.git?rev=5c933247cda0223f3adf2b875a7aa6016794baa4#5c933247cda0223f3adf2b875a7aa6016794baa4"
 dependencies = [
  "once_cell",
  "parking_lot",
