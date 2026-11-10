@@ -66,7 +66,7 @@ pub(super) fn build_sub_filter_context<'a>(
         executed_branch_filters: Vec::new(),
         executed_filter_indices: Vec::new(),
         extra_request_headers: Vec::new(),
-        filter_metadata: HashMap::new(),
+        filter_metadata: crate::FilterMetadata::default(),
         filter_results: HashMap::new(),
         filter_state: HashMap::new(),
         health_registry: runtime.health_registry,

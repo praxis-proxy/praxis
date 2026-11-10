@@ -49,7 +49,7 @@ pub(crate) fn make_ctx(req: &Request) -> HttpFilterContext<'_> {
         extra_request_headers: Vec::new(),
         request_headers_to_remove: Vec::new(),
         request_headers_to_set: Vec::new(),
-        filter_metadata: std::collections::HashMap::new(),
+        filter_metadata: praxis_filter::FilterMetadata::default(),
         prior_pre_read_mutations: Vec::new(),
         grpc_completion: None,
         pre_read_mutations: Vec::new(),

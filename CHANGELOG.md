@@ -26,6 +26,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Changed
 
 - Update the Pingora fork dependencies to v0.11.4.
+- **Breaking:** `HttpFilterContext::filter_metadata` is now a
+  `FilterMetadata` instead of a `HashMap<String, String>`. Its `insert`
+  enforces the same key, value and entry limits as `set_metadata` and returns
+  `Result<Option<String>, MetadataRejected>`, so writes through the field can
+  no longer bypass them; `get` returns `Option<&str>`, and there is no
+  `entry`, `get_mut` or `iter_mut`. Custom Rust filters that hold large or
+  growing state in `filter_metadata` should move it to `insert_filter_state`.
+  `get_metadata` and `set_metadata` are unchanged.
 - **Breaking:** `BodyAccess::ReadOnly` and `BodyAccess::ReadWrite` now require
   an explicit `BodyRequirement::Optional` or `BodyRequirement::Required`.
   Custom Rust filters must choose whether their body processing may be skipped
