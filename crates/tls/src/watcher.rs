@@ -141,23 +141,18 @@ impl CertWatcher {
         shutdown: tokio::sync::watch::Receiver<bool>,
         file_hashes: Vec<Option<[u8; 32]>>,
     ) -> std::thread::JoinHandle<()> {
-        std::thread::spawn(move || {
-            let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-                Ok(rt) => rt,
-                Err(err) => {
-                    tracing::warn!(error = %err, "failed to start certificate watcher runtime; hot reload disabled");
-                    return;
-                },
-            };
-            rt.block_on(watch_loop(current, pair, verifier_reload, file_hashes, shutdown));
-        })
+        spawn_watcher(move || watch_loop(current, pair, verifier_reload, file_hashes, shutdown))
     }
 
     /// Spawn the watcher in polling-only mode.
     ///
     /// Use this when filesystem notifications are unavailable or unwanted.
-    /// The watcher reads and hashes the watched files every
-    /// [`CERTIFICATE_POLL_INTERVAL`] and reloads any change it finds.
+    /// The watcher reads and hashes the watched files every ten seconds and
+    /// reloads any change it finds.
+    ///
+    /// This exists for the polling integration test; production callers use
+    /// [`CertWatcher::spawn`], which also handles filesystem notifications.
+    #[doc(hidden)]
     pub fn spawn_polling(
         current: Arc<ArcSwap<CertifiedKey>>,
         pair: CertKeyPair,
@@ -165,25 +160,29 @@ impl CertWatcher {
         shutdown: tokio::sync::watch::Receiver<bool>,
         file_hashes: Vec<Option<[u8; 32]>>,
     ) -> std::thread::JoinHandle<()> {
-        std::thread::spawn(move || {
-            let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-                Ok(rt) => rt,
-                Err(err) => {
-                    tracing::warn!(error = %err, "failed to start certificate watcher runtime; hot reload disabled");
-                    return;
-                },
-            };
+        spawn_watcher(move || {
             let (_notifications, events) = mpsc::channel(1);
-            rt.block_on(watch_events(
-                current,
-                pair,
-                verifier_reload,
-                file_hashes,
-                shutdown,
-                events,
-            ));
+            watch_events(current, pair, verifier_reload, file_hashes, shutdown, events)
         })
     }
+}
+
+/// Run a watcher future on a dedicated current-thread runtime.
+fn spawn_watcher<F, Fut>(make_future: F) -> std::thread::JoinHandle<()>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + 'static,
+{
+    std::thread::spawn(move || {
+        let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            Ok(rt) => rt,
+            Err(err) => {
+                tracing::warn!(error = %err, "failed to start certificate watcher runtime; hot reload disabled");
+                return;
+            },
+        };
+        rt.block_on(make_future());
+    })
 }
 
 /// How the watch loop should react to a change on the shutdown channel.
