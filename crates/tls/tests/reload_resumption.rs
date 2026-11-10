@@ -20,7 +20,7 @@ use std::{
 };
 
 use praxis_tls::{
-    CaConfig, CertKeyPair, ClientCertMode, ListenerTls, setup,
+    CaConfig, ClientCertMode, ListenerTls, setup,
     watcher::{CertWatcher, ClientVerifierReload},
 };
 use rcgen::{CertificateParams, Issuer, KeyPair};
@@ -279,15 +279,8 @@ fn polling_reloads_the_listener_verifier_without_notifications() {
     let server = setup::build_reloadable_server_config(&fixture.tls, false).expect("server");
     let ca = fixture.tls.client_ca.clone().expect("client CA");
     let verifier = server.verifier_handle.clone().expect("verifier");
-    // A missing certificate directory makes notify setup fail, leaving polling
-    // as the only reload path. The verifier itself still watches real files.
-    let missing = tempfile::tempdir().expect("temp dir").path().join("missing");
-    let pair = CertKeyPair {
-        cert_path: missing.join("cert.pem").to_string_lossy().into_owned(),
-        key_path: missing.join("key.pem").to_string_lossy().into_owned(),
-        default: false,
-        server_names: Vec::new(),
-    };
+    let pair = fixture.tls.certificates.first().cloned().expect("certificate pair");
+    let crl_path = ca.crl_paths.first().cloned().expect("CRL path");
     let reload = ClientVerifierReload {
         ca_path: ca.ca_path,
         crl_paths: ca.crl_paths,
@@ -295,8 +288,12 @@ fn polling_reloads_the_listener_verifier_without_notifications() {
         trusted_spiffe_ids: fixture.tls.trusted_spiffe_ids.clone(),
         swap_handle: verifier,
     };
+    // The server loaded the empty CRL. Leave a malformed file for the first
+    // poll to reject, so the retry path, not another successful load,
+    // installs the repaired CRL.
+    std::fs::write(&crl_path, b"not a CRL").expect("write malformed CRL");
     let (stop, shutdown) = tokio::sync::watch::channel(false);
-    let watcher = CertWatcher::spawn(
+    let watcher = CertWatcher::spawn_polling(
         Arc::clone(&server.cert_handle),
         pair,
         Some(reload),
@@ -307,8 +304,12 @@ fn polling_reloads_the_listener_verifier_without_notifications() {
     let client = fixture.client(&TLS13, Some(&fixture.revoked));
     assert!(
         handshake(&server.config, &client, None).is_ok(),
-        "the client must be trusted before the CRL rotates"
+        "the malformed CRL must not replace the verifier that trusts the client"
     );
+
+    // Repair the file before the next poll; the retry seeded by the failed
+    // malformed load must install it.
+    std::thread::sleep(Duration::from_millis(250));
     fixture.revoke();
 
     let deadline = Instant::now()
@@ -327,11 +328,17 @@ fn polling_reloads_the_listener_verifier_without_notifications() {
         }
         std::thread::sleep(Duration::from_millis(200));
     }
+    let anonymous = fixture.client(&TLS13, None);
+    let anonymous_result = handshake(&server.config, &anonymous, None);
     stop.send(true).expect("stop the watcher");
     drop(watcher.join());
     assert!(
         rejected,
-        "polling must install the revoked CRL on the listener verifier; last: {last}"
+        "polling must install the repaired CRL on the listener verifier; last: {last}"
+    );
+    assert!(
+        anonymous_result.is_err(),
+        "Require mode must reject an anonymous client after the watcher swap"
     );
 }
 

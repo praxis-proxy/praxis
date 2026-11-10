@@ -192,8 +192,23 @@ pub fn build_reloadable_server_config(
     tls: &ListenerTls,
     advertise_http_alpn: bool,
 ) -> Result<ReloadableServerConfig, TlsError> {
+    build_reloadable_server_config_with(tls, advertise_http_alpn, || {})
+}
+
+/// Build a reloadable config, running `between_snapshot_and_load` after the
+/// startup digest snapshot.
+///
+/// The hook exists so tests can rotate a file in the exact window the watcher
+/// baseline is meant to protect: after the snapshot, before the load.
+#[cfg(feature = "config-reload")]
+fn build_reloadable_server_config_with(
+    tls: &ListenerTls,
+    advertise_http_alpn: bool,
+    between_snapshot_and_load: impl FnOnce(),
+) -> Result<ReloadableServerConfig, TlsError> {
     // Snapshot before the load so a rotation during it still differs from the baseline.
     let startup_hashes = startup_file_hashes(tls);
+    between_snapshot_and_load();
     let builder = build_config_builder(tls)?;
 
     let (builder, verifier_handle) = if tls.client_cert_mode == ClientCertMode::None {
@@ -485,6 +500,63 @@ mod tests {
             config.alpn_protocols,
             vec![b"h2".to_vec(), b"http/1.1".to_vec()],
             "ALPN should include h2 and http/1.1"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "config-reload")]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "builds the listener fixture and asserts the snapshot/load boundary"
+    )]
+    fn reloadable_baseline_is_taken_before_the_load() {
+        let certs = gen_test_certs();
+        let tls = ListenerTls {
+            certificates: vec![CertKeyPair {
+                cert_path: certs.cert_path.to_str().expect("cert path").to_owned(),
+                default: false,
+                key_path: certs.key_path.to_str().expect("key path").to_owned(),
+                server_names: Vec::new(),
+            }],
+            cipher_suites: None,
+            client_ca: None,
+            client_cert_mode: ClientCertMode::None,
+            trusted_spiffe_ids: Vec::new(),
+            hot_reload: None,
+            min_version: None,
+        };
+        let baseline = startup_file_hashes(&tls);
+        let replacement = gen_test_certs();
+        let replacement_cert = std::fs::read(&replacement.cert_path).expect("replacement cert");
+        let replacement_key = std::fs::read(&replacement.key_path).expect("replacement key");
+        let expected = loader::load_cert_and_key(&CertKeyPair {
+            cert_path: replacement.cert_path.to_str().expect("cert path").to_owned(),
+            default: false,
+            key_path: replacement.key_path.to_str().expect("key path").to_owned(),
+            server_names: Vec::new(),
+        })
+        .expect("load replacement")
+        .0;
+
+        let built = build_reloadable_server_config_with(&tls, false, || {
+            std::fs::write(&certs.cert_path, &replacement_cert).expect("write cert");
+            std::fs::write(&certs.key_path, &replacement_key).expect("write key");
+        })
+        .expect("build reloadable config");
+
+        assert_eq!(
+            built.startup_hashes, baseline,
+            "the baseline must describe the pre-load files"
+        );
+        assert_ne!(
+            built.startup_hashes,
+            startup_file_hashes(&tls),
+            "a rotation between the snapshot and the load must leave a stale baseline"
+        );
+        assert_eq!(
+            built.cert_handle.load().cert,
+            expected,
+            "the load must install the rotated certificate"
         );
     }
 
