@@ -35,13 +35,47 @@ impl FilterPipeline {
     ///
     /// Returns [`FilterError`] if any filter rejects or fails.
     pub async fn execute_tcp_connect(&self, ctx: &mut TcpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        self.execute_tcp_connect_inner(
+            ctx,
+            #[cfg(feature = "bandwidth")]
+            None,
+        )
+        .await
+    }
+
+    /// Run TCP connect filters with optional connection-owned pacing state.
+    ///
+    /// # Errors
+    /// Returns a closed filter failure without changing existing context literals.
+    #[cfg(feature = "bandwidth")]
+    pub async fn execute_tcp_connect_with_state(
+        &self,
+        ctx: &mut TcpFilterContext<'_>,
+        state: &mut crate::TcpConnectState,
+    ) -> Result<FilterAction, FilterError> {
+        self.execute_tcp_connect_inner(ctx, Some(state)).await
+    }
+
+    /// Dispatch the compatible hook or its opt-in stateful counterpart.
+    async fn execute_tcp_connect_inner(
+        &self,
+        ctx: &mut TcpFilterContext<'_>,
+        #[cfg(feature = "bandwidth")] mut state: Option<&mut crate::TcpConnectState>,
+    ) -> Result<FilterAction, FilterError> {
         for pf in &self.filters {
             let tcp_filter = match &pf.filter {
                 AnyFilter::Tcp(f) => f.as_ref(),
                 AnyFilter::Http(_) => continue,
             };
             trace!(filter = tcp_filter.name(), "on_connect");
-            match tcp_filter.on_connect(ctx).await {
+            #[cfg(feature = "bandwidth")]
+            let result = match state.as_deref_mut() {
+                Some(state) => tcp_filter.on_connect_with_state(ctx, state).await,
+                None => tcp_filter.on_connect(ctx).await,
+            };
+            #[cfg(not(feature = "bandwidth"))]
+            let result = tcp_filter.on_connect(ctx).await;
+            match result {
                 Ok(
                     FilterAction::Continue
                     | FilterAction::Release
@@ -536,8 +570,6 @@ mod tests {
             connect_time: std::time::Instant::now(),
             bytes_in: 0,
             bytes_out: 0,
-            #[cfg(feature = "bandwidth")]
-            bandwidth: None,
         }
     }
 }

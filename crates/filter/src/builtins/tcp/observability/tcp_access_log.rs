@@ -129,8 +129,6 @@ mod tests {
             connect_time: Instant::now(),
             bytes_in: 0,
             bytes_out: 0,
-            #[cfg(feature = "bandwidth")]
-            bandwidth: None,
         };
         let action = filter.on_connect(&mut ctx).await.unwrap();
         assert!(matches!(action, FilterAction::Continue), "on_connect should continue");
@@ -150,8 +148,6 @@ mod tests {
             connect_time: Instant::now(),
             bytes_in: 1024,
             bytes_out: 2048,
-            #[cfg(feature = "bandwidth")]
-            bandwidth: None,
         };
         filter.on_disconnect(&mut ctx).await.unwrap();
     }

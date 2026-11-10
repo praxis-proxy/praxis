@@ -30,10 +30,26 @@ use crate::{
     bandwidth::{
         AcquireError, Acquired, BandwidthGrant, BandwidthTable, BudgetKey, ConnectionAlive, DownloadLimited,
         DownstreamConnectionId, InFlightGuard, Schedule, TcpBandwidthPacer, pointer_key, push_download,
-        push_download_schedule, push_upload,
+        push_download_schedule, push_upload, request_connection_close,
     },
     factory::parse_filter_config,
 };
+
+// -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
+/// Logged when a new address cannot be tracked.
+const CLOSE_TABLE_FULL: &str = "bandwidth limit tracking table is full";
+
+/// Logged when `per_ip` has no client address.
+const CLOSE_MISSING_ADDRESS: &str = "bandwidth limit per_ip has no client address";
+
+/// Logged when `per_ip` cannot parse the client address.
+const CLOSE_UNPARSEABLE_ADDRESS: &str = "bandwidth limit per_ip could not parse the client address";
+
+/// Logged when a host has not supplied a downstream connection identity.
+const CLOSE_MISSING_CONNECTION: &str = "bandwidth limit per_connection has no downstream connection identity";
 
 // -----------------------------------------------------------------------------
 // Configuration
@@ -75,6 +91,25 @@ struct BandwidthLimitConfig {
     /// Burst capacity in bytes. Zero paces from the first byte.
     #[serde(default)]
     burst_bytes: u64,
+
+    /// Optional IPv6 network prefix shared by addresses in per-IP mode.
+    #[serde(default)]
+    ipv6_prefix_len: Option<Ipv6PrefixLength>,
+}
+
+/// Valid IPv6 prefix length, including the complete-address /128 default.
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(try_from = "u8")]
+struct Ipv6PrefixLength(u8);
+
+impl TryFrom<u8> for Ipv6PrefixLength {
+    type Error = &'static str;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        (value <= 128)
+            .then_some(Self(value))
+            .ok_or("bandwidth_limit: ipv6_prefix_len must be between 0 and 128")
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -85,6 +120,9 @@ struct BandwidthLimitConfig {
 pub struct BandwidthLimitFilter {
     /// How keys are chosen.
     mode: BandwidthMode,
+
+    /// Optional IPv6 prefix grouping; absent keeps full source addresses.
+    ipv6_prefix_len: Option<Ipv6PrefixLength>,
 
     /// Identity of this filter instance inside the request extensions.
     instance: u64,
@@ -123,6 +161,10 @@ struct BandwidthAttachments {
     /// One entry per filter instance.
     items: Vec<BandwidthAttachment>,
 }
+
+/// Counter checkpoints for nested bodies, bounded by the existing subrequest depth.
+#[derive(Default)]
+struct BodyScopes(Vec<Vec<(u64, u64, u64)>>);
 
 /// A body chunk to pace.
 #[derive(Clone, Copy)]
@@ -175,16 +217,52 @@ impl BandwidthLimitFilter {
         let cfg: BandwidthLimitConfig = parse_filter_config("bandwidth_limit", config)?;
         validate_rates(&cfg)?;
         let table = BandwidthTable::new(cfg.upload_bytes_per_sec, cfg.download_bytes_per_sec, cfg.burst_bytes);
-        Ok(Self::from_table(cfg.mode, Arc::new(table)))
+        let mut filter = Self::from_table(cfg.mode, Arc::new(table));
+        filter.ipv6_prefix_len = cfg.ipv6_prefix_len;
+        Ok(filter)
     }
 
     /// Wrap a table that this instance owns.
     fn from_table(mode: BandwidthMode, table: Arc<BandwidthTable>) -> Self {
         Self {
             mode,
+            ipv6_prefix_len: None,
             instance: pointer_key(Arc::as_ptr(&table).addr()),
             table,
             fallback_ids: AtomicU64::new(1),
+        }
+    }
+
+    /// Start a fresh body while preserving the parent's per-body counters.
+    pub(crate) fn enter_body_scope(extensions: &mut RequestExtensions) {
+        let counters = extensions
+            .get::<BandwidthAttachments>()
+            .map_or_else(Vec::new, |attachments| {
+                attachments
+                    .items
+                    .iter()
+                    .map(|item| (item.instance, item.paced_upload, item.paced_download))
+                    .collect()
+            });
+        extensions.get_or_insert_with(BodyScopes::default).0.push(counters);
+        Self::reset_body_counters(extensions, &[]);
+    }
+
+    /// Restore the parent counters without replacing any shared byte budget.
+    pub(crate) fn leave_body_scope(extensions: &mut RequestExtensions) {
+        if let Some(counters) = extensions.get_mut::<BodyScopes>().and_then(|scopes| scopes.0.pop()) {
+            Self::reset_body_counters(extensions, &counters);
+        }
+    }
+
+    /// Restore known parent counters and reset attachments introduced by the nested body.
+    fn reset_body_counters(extensions: &mut RequestExtensions, counters: &[(u64, u64, u64)]) {
+        if let Some(attachments) = extensions.get_mut::<BandwidthAttachments>() {
+            for item in &mut attachments.items {
+                let saved = counters.iter().find(|saved| saved.0 == item.instance);
+                item.paced_upload = saved.map_or(0, |saved| saved.1);
+                item.paced_download = saved.map_or(0, |saved| saved.2);
+            }
         }
     }
 
@@ -193,35 +271,55 @@ impl BandwidthLimitFilter {
         if attached(&ctx.extensions, self.instance) {
             return Ok(());
         }
-        let key = self.http_key(ctx)?;
+        let key = self
+            .http_key(ctx)
+            .map_err(|reason| close_http(&mut ctx.extensions, reason))?;
         let lease = connection_lease(ctx, key);
-        let acquired = self.table.acquire(key, lease).map_err(acquire_failed)?;
+        let acquired = self.table.acquire(key, lease).map_err(|error| {
+            request_connection_close(&mut ctx.extensions, CLOSE_TABLE_FULL);
+            acquire_failed(error)
+        })?;
         store_attachment(&mut ctx.extensions, self.instance, acquired);
         Ok(())
     }
 
     /// Choose the HTTP budget key.
-    fn http_key(&self, ctx: &HttpFilterContext<'_>) -> Result<BudgetKey, FilterAction> {
+    fn http_key(&self, ctx: &HttpFilterContext<'_>) -> Result<BudgetKey, &'static str> {
         match self.mode {
-            BandwidthMode::PerConnection => Ok(BudgetKey::Connection(self.connection_id(ctx))),
+            BandwidthMode::PerConnection => Self::connection_id(ctx).map(BudgetKey::Connection),
             BandwidthMode::PerIp => {
                 if let Some(ip) = ctx.client_addr {
-                    Ok(BudgetKey::Ip(ip))
+                    Ok(BudgetKey::Ip(self.group_ip(ip)))
                 } else {
                     warn!("bandwidth_limit: per_ip requires a client address; closing the connection");
-                    Err(close_action(CLOSE_MISSING_ADDRESS))
+                    Err(CLOSE_MISSING_ADDRESS)
                 }
             },
         }
     }
 
-    /// Connection id from the protocol, or a request-local fallback.
-    fn connection_id(&self, ctx: &HttpFilterContext<'_>) -> u64 {
-        if let Some(id) = ctx.extensions.get::<DownstreamConnectionId>() {
-            return id.0;
+    /// Require the host's stable downstream identity rather than weakening the scope.
+    fn connection_id(ctx: &HttpFilterContext<'_>) -> Result<u64, &'static str> {
+        ctx.extensions
+            .get::<DownstreamConnectionId>()
+            .map(|id| id.0)
+            .ok_or_else(|| {
+                warn_missing_connection_id();
+                CLOSE_MISSING_CONNECTION
+            })
+    }
+
+    /// Normalize mapped IPv4 and optionally group native IPv6 source addresses.
+    fn group_ip(&self, ip: IpAddr) -> IpAddr {
+        let ip = normalize_mapped_ipv4(ip);
+        match (ip, self.ipv6_prefix_len) {
+            (IpAddr::V6(address), Some(prefix)) => {
+                let shift = 128_u32.saturating_sub(u32::from(prefix.0));
+                let mask = u128::MAX.checked_shl(shift).unwrap_or(0);
+                IpAddr::V6(std::net::Ipv6Addr::from(address.to_bits() & mask))
+            },
+            _ => ip,
         }
-        warn_missing_connection_id();
-        self.fallback_ids.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Reserve this chunk on the attached schedule.
@@ -239,28 +337,28 @@ impl BandwidthLimitFilter {
     }
 
     /// Install this connection's leg on the TCP pacer.
-    fn install_tcp(ctx: &mut TcpFilterContext<'_>, acquired: Acquired) {
-        let pacer = ctx
+    fn install_tcp(state: &mut crate::TcpConnectState, acquired: Acquired) {
+        let pacer = state
             .bandwidth
             .get_or_insert_with(|| Arc::new(TcpBandwidthPacer::empty()));
         pacer.push(acquired);
     }
 
     /// Budget key for a TCP connection.
-    fn tcp_key(&self, ctx: &TcpFilterContext<'_>) -> Result<BudgetKey, FilterAction> {
+    fn tcp_key(&self, ctx: &TcpFilterContext<'_>) -> Result<BudgetKey, &'static str> {
         match self.mode {
             BandwidthMode::PerConnection => {
                 Ok(BudgetKey::Connection(self.fallback_ids.fetch_add(1, Ordering::Relaxed)))
             },
             BandwidthMode::PerIp => {
                 if let Some(ip) = peer_ip(ctx.remote_addr) {
-                    Ok(BudgetKey::Ip(ip))
+                    Ok(BudgetKey::Ip(self.group_ip(ip)))
                 } else {
                     warn!(
                         remote = ctx.remote_addr,
                         "bandwidth_limit: per_ip could not parse the client address; closing the connection"
                     );
-                    Err(close_action(CLOSE_UNPARSEABLE_ADDRESS))
+                    Err(CLOSE_UNPARSEABLE_ADDRESS)
                 }
             },
         }
@@ -324,17 +422,28 @@ impl TcpFilter for BandwidthLimitFilter {
         "bandwidth_limit"
     }
 
-    async fn on_connect(&self, ctx: &mut TcpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+    async fn on_connect(&self, _ctx: &mut TcpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Err("bandwidth_limit: use the bandwidth-aware TCP connect executor".into())
+    }
+
+    async fn on_connect_with_state(
+        &self,
+        ctx: &mut TcpFilterContext<'_>,
+        state: &mut crate::TcpConnectState,
+    ) -> Result<FilterAction, FilterError> {
         let key = match self.tcp_key(ctx) {
             Ok(key) => key,
-            Err(action) => return Ok(action),
+            Err(reason) => return Ok(close_http(&mut state.extensions, reason)),
         };
         match self.table.acquire(key, None) {
             Ok(acquired) => {
-                Self::install_tcp(ctx, acquired);
+                Self::install_tcp(state, acquired);
                 Ok(FilterAction::Continue)
             },
-            Err(error) => Ok(acquire_failed(error)),
+            Err(error) => {
+                request_connection_close(&mut state.extensions, CLOSE_TABLE_FULL);
+                Ok(acquire_failed(error))
+            },
         }
     }
 }
@@ -346,6 +455,9 @@ fn validate_rates(cfg: &BandwidthLimitConfig) -> Result<(), FilterError> {
     }
     if cfg.upload_bytes_per_sec == Some(0) || cfg.download_bytes_per_sec == Some(0) {
         return Err("bandwidth_limit: byte rates must be greater than 0".into());
+    }
+    if cfg.ipv6_prefix_len.is_some() && cfg.mode != BandwidthMode::PerIp {
+        return Err("bandwidth_limit: ipv6_prefix_len requires mode per_ip".into());
     }
     Ok(())
 }
@@ -436,7 +548,7 @@ fn take_grant(extensions: &mut RequestExtensions, instance: u64, chunk: &PaceChu
         return None;
     }
     *paced = paced.saturating_add(charge);
-    Some(schedule.reserve(charge))
+    Some(schedule.prepare(charge))
 }
 
 impl BandwidthAttachment {
@@ -467,22 +579,20 @@ fn acquire_failed(error: AcquireError) -> FilterAction {
 fn warn_missing_connection_id() {
     static WARNED: AtomicBool = AtomicBool::new(false);
     if !WARNED.swap(true, Ordering::Relaxed) {
-        warn!("bandwidth_limit: missing downstream connection id; pacing this request alone");
+        warn!("bandwidth_limit: missing downstream connection id; closing instead of creating a per-request budget");
     }
 }
 
-/// Logged when a new address cannot be tracked.
-const CLOSE_TABLE_FULL: &str = "bandwidth limit tracking table is full";
-
-/// Logged when `per_ip` has no client address.
-const CLOSE_MISSING_ADDRESS: &str = "bandwidth limit per_ip has no client address";
-
-/// Logged when `per_ip` cannot parse the client address.
-const CLOSE_UNPARSEABLE_ADDRESS: &str = "bandwidth limit per_ip could not parse the client address";
-
 /// Rejection the protocol turns into a close with no response body.
 fn close_action(reason: &'static str) -> FilterAction {
-    FilterAction::Reject(Rejection::status(503).closing(reason))
+    warn!(%reason, "bandwidth_limit: closing connection");
+    FilterAction::Reject(Rejection::status(503))
+}
+
+/// Retain trusted close metadata outside the released `Rejection` literal.
+fn close_http(extensions: &mut RequestExtensions, reason: &'static str) -> FilterAction {
+    request_connection_close(extensions, reason);
+    close_action(reason)
 }
 
 /// Parse a TCP peer string into a normalized address.
@@ -542,7 +652,6 @@ mod tests {
             connect_time: std::time::Instant::now(),
             bytes_in: 0,
             bytes_out: 0,
-            bandwidth: None,
         }
     }
 
@@ -559,9 +668,9 @@ mod tests {
             .expect("the filter attached an upload schedule")
     }
 
-    fn close_reason_of(action: FilterAction) -> Option<&'static str> {
+    fn close_reason_of(action: FilterAction, extensions: &RequestExtensions) -> Option<&'static str> {
         match action {
-            FilterAction::Reject(rejection) => connection_close_reason(&rejection),
+            FilterAction::Reject(_) => connection_close_reason(extensions),
             FilterAction::Continue
             | FilterAction::Release
             | FilterAction::BodyDone
@@ -585,6 +694,65 @@ mod tests {
             Err(err) => err,
             Ok(_) => panic!("config should be rejected: {yaml}"),
         }
+    }
+
+    #[test]
+    fn ipv6_grouping_is_opt_in_and_normalizes_mapped_ipv4() {
+        let full = parse("mode: per_ip\nupload_bytes_per_sec: 1000\n");
+        let grouped = parse("mode: per_ip\nupload_bytes_per_sec: 1000\nipv6_prefix_len: 64\n");
+        let first: IpAddr = "2001:db8:1234:5678::1".parse().unwrap();
+        let second: IpAddr = "2001:db8:1234:5678::2".parse().unwrap();
+        assert_ne!(
+            full.group_ip(first),
+            full.group_ip(second),
+            "default budgets use complete addresses"
+        );
+        assert_eq!(
+            grouped.group_ip(first),
+            grouped.group_ip(second),
+            "an explicit prefix shares one budget"
+        );
+        assert_ne!(
+            grouped.group_ip(first),
+            grouped.group_ip("2001:db8:1234:5679::1".parse().unwrap())
+        );
+        assert_eq!(
+            grouped.group_ip("::ffff:192.0.2.1".parse().unwrap()),
+            "192.0.2.1".parse::<IpAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn ipv6_prefix_configuration_is_validated() {
+        assert!(
+            parse_error("mode: per_ip\nupload_bytes_per_sec: 1\nipv6_prefix_len: 129")
+                .to_string()
+                .contains("128")
+        );
+        assert!(
+            parse_error("mode: per_connection\nupload_bytes_per_sec: 1\nipv6_prefix_len: 64")
+                .to_string()
+                .contains("per_ip")
+        );
+        let all = parse("mode: per_ip\nupload_bytes_per_sec: 1\nipv6_prefix_len: 0");
+        assert_eq!(
+            all.group_ip("2001:db8::1".parse().unwrap()),
+            "::".parse::<IpAddr>().unwrap()
+        );
+        let exact = parse("mode: per_ip\nupload_bytes_per_sec: 1\nipv6_prefix_len: 128");
+        let ip = "2001:db8::1".parse().unwrap();
+        assert_eq!(exact.group_ip(ip), ip);
+    }
+
+    #[tokio::test]
+    async fn missing_connection_identity_is_rejected_instead_of_weakening_the_budget() {
+        let filter = parse("mode: per_connection\nupload_bytes_per_sec: 1000");
+        let request = make_request(Method::POST, "/");
+        let mut ctx = make_filter_context(&request);
+        assert_eq!(
+            close_reason_of(filter.on_request(&mut ctx).await.unwrap(), &ctx.extensions),
+            Some(CLOSE_MISSING_CONNECTION)
+        );
     }
 
     #[test]
@@ -688,7 +856,7 @@ mod tests {
         let mut ctx = make_filter_context(&req);
         let action = filter.on_request(&mut ctx).await.unwrap();
         assert_eq!(
-            close_reason_of(action),
+            close_reason_of(action, &ctx.extensions),
             Some(CLOSE_MISSING_ADDRESS),
             "a missing address closes the connection"
         );
@@ -698,9 +866,10 @@ mod tests {
     async fn per_ip_with_an_unparseable_address_closes_the_connection() {
         let filter = parse("mode: per_ip\nupload_bytes_per_sec: 1000\n");
         let mut ctx = tcp_ctx("not-an-address");
-        let action = filter.on_connect(&mut ctx).await.unwrap();
+        let mut state = crate::TcpConnectState::default();
+        let action = filter.on_connect_with_state(&mut ctx, &mut state).await.unwrap();
         assert_eq!(
-            close_reason_of(action),
+            close_reason_of(action, &state.extensions),
             Some(CLOSE_UNPARSEABLE_ADDRESS),
             "an unparseable address closes the connection"
         );
@@ -719,7 +888,7 @@ mod tests {
         second.client_addr = Some(IpAddr::from([10, 0, 0, 2]));
         let action = filter.on_request(&mut second).await.unwrap();
         assert_eq!(
-            close_reason_of(action),
+            close_reason_of(action, &second.extensions),
             Some(CLOSE_TABLE_FULL),
             "a full table closes the new address"
         );
@@ -756,18 +925,53 @@ mod tests {
     async fn tcp_per_ip_installs_a_shared_pacer() {
         let filter = parse("mode: per_ip\nupload_bytes_per_sec: 1000\nburst_bytes: 1000\n");
         let mut ctx = tcp_ctx("192.0.2.10:40000");
-        expect_continue(&filter.on_connect(&mut ctx).await.unwrap());
-        let pacer = ctx.bandwidth.as_ref().unwrap();
+        let mut state = crate::TcpConnectState::default();
+        expect_continue(&filter.on_connect_with_state(&mut ctx, &mut state).await.unwrap());
+        let pacer = state.bandwidth.as_ref().unwrap();
         let first = pacer.reserve_upload_at(1_000, RESERVED_AT);
         assert_eq!(first.delay(), Duration::ZERO, "the burst covers the first upload");
         first.commit();
 
         let mut again = tcp_ctx("192.0.2.10:40001");
-        expect_continue(&filter.on_connect(&mut again).await.unwrap());
-        let second = again.bandwidth.as_ref().unwrap().reserve_upload_at(1, RESERVED_AT);
+        let mut again_state = crate::TcpConnectState::default();
+        expect_continue(
+            &filter
+                .on_connect_with_state(&mut again, &mut again_state)
+                .await
+                .unwrap(),
+        );
+        let second = again_state
+            .bandwidth
+            .as_ref()
+            .unwrap()
+            .reserve_upload_at(1, RESERVED_AT);
         assert!(
             second.delay() > Duration::ZERO,
             "the same address shares the upload budget"
+        );
+    }
+    #[tokio::test]
+    async fn repeated_nested_buffered_bodies_charge_again_without_resetting_the_shared_budget() {
+        let filter = parse("mode: per_connection\nupload_bytes_per_sec: 1000\nburst_bytes: 2000\n");
+        let req = make_request(Method::POST, "/");
+        let mut ctx = make_filter_context(&req);
+        ctx.extensions.insert(DownstreamConnectionId(22));
+        ctx.request_body_mode = BodyMode::StreamBuffer { max_bytes: Some(10000) };
+        expect_continue(&filter.on_request(&mut ctx).await.unwrap());
+        for _step in 0..2 {
+            BandwidthLimitFilter::enter_body_scope(&mut ctx.extensions);
+            let mut body = Some(Bytes::from(vec![1_u8; 1000]));
+            expect_continue(&filter.on_request_body(&mut ctx, &mut body, true).await.unwrap());
+            let plan = crate::bandwidth::take_upload(&mut ctx.extensions).unwrap();
+            assert_eq!(plan.remaining(), 1000, "each body must be charged independently");
+            plan.commit();
+            BandwidthLimitFilter::leave_body_scope(&mut ctx.extensions);
+        }
+        let mut body = Some(Bytes::from_static(b"x"));
+        expect_continue(&filter.on_request_body(&mut ctx, &mut body, true).await.unwrap());
+        assert!(
+            upload_pace_delay(&ctx.extensions).is_some_and(|wait| !wait.is_zero()),
+            "both nested bodies depleted the same burst"
         );
     }
 }

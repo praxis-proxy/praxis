@@ -155,6 +155,8 @@ pub use builtins::{PolicyFilter, PolicyPluginFactoryFn, fips_crypto_blocker, reg
 pub fn fips_crypto_blocker() -> Option<String> {
     Some("this build has no Policy crypto capability evidence for a `policy` filter".to_owned())
 }
+#[cfg(feature = "bandwidth")]
+pub use bandwidth::{take_download as take_download_pace, take_upload as take_upload_pace};
 pub use condition::{should_execute, should_execute_response, should_execute_response_ref};
 pub use context::{
     HttpFilterContext, PendingHeaderResult, Request, Response, StreamTermination, StreamTerminationCause,
@@ -191,6 +193,8 @@ pub use praxis_core::{
 pub use praxis_tls::TlsPeerIdentity;
 pub use registry::{FilterRegistry, SecurityClass};
 pub use results::{FilterResultSet, matches_filter_result};
+#[cfg(feature = "bandwidth")]
+pub use tcp_filter::TcpConnectState;
 pub use tcp_filter::{TcpFilter, TcpFilterContext};
 pub use trace_context::TraceContext;
 

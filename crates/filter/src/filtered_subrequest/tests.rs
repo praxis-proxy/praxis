@@ -4766,7 +4766,7 @@ async fn subrequest_pace_waits_for_both_directions() {
         .run(
             &pipeline,
             &request,
-            crate::RequestExtensions::default(),
+            paced_extensions(),
             started + Duration::from_secs(5),
         )
         .await
@@ -4822,7 +4822,7 @@ async fn subrequest_pace_streaming_waits_for_both_directions() {
         .run(
             &pipeline,
             &request,
-            crate::RequestExtensions::default(),
+            paced_extensions(),
             started + Duration::from_secs(5),
         )
         .await
@@ -4870,25 +4870,21 @@ async fn subrequest_pace_refunds_when_the_deadline_cannot_cover() {
         body: bytes::Bytes::from(upload.clone()),
     };
     let started = Instant::now();
-    let Err(error) = executor
+    let response = executor
         .run(
             &pipeline,
             &request,
-            crate::RequestExtensions::default(),
+            paced_extensions(),
             started + Duration::from_millis(200),
         )
         .await
-    else {
-        panic!("a reservation longer than the step deadline must not be sent");
-    };
+        .expect("admission timeout is a local response");
     backend.abort();
 
-    assert!(
-        error
-            .to_string()
-            .contains("bandwidth reservation exceeds the step deadline"),
-        "the deadline miss must be reported, got {error}"
-    );
+    let crate::CalloutResponse::Buffered(response) = response else {
+        panic!("local timeout is buffered");
+    };
+    assert_eq!(response.status, 504, "pacing timeout must be local");
     assert!(
         !contains_slice(&captured.lock().unwrap(), &upload),
         "the 8 KB upload must not be sent before its reservation"
@@ -5116,4 +5112,11 @@ mod adaptation_cancellation {
         );
         assert_eq!(clean.buffered_request_body.as_deref(), Some(b"clean".as_slice()));
     }
+}
+
+#[cfg(feature = "bandwidth")]
+fn paced_extensions() -> crate::RequestExtensions {
+    let mut extensions = crate::RequestExtensions::new();
+    extensions.insert(crate::DownstreamConnectionId(1));
+    extensions
 }

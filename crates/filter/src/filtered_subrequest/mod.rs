@@ -141,6 +141,8 @@ struct ParentUpstreamStates(Vec<ParentUpstreamState>);
 /// cannot take it as its own.
 #[cfg(feature = "upstream-binding")]
 fn enter_nested_upstream_scope(extensions: &mut RequestExtensions, inherits_binding: bool) {
+    #[cfg(feature = "bandwidth")]
+    crate::BandwidthLimitFilter::enter_body_scope(extensions);
     let (binding, frozen) = if inherits_binding {
         (
             extensions.get::<BoundUpstream>().cloned(),
@@ -168,12 +170,16 @@ fn enter_nested_upstream_scope(extensions: &mut RequestExtensions, inherits_bind
 /// nested pipeline only starts without the parent's upstream selection.
 #[cfg(not(feature = "upstream-binding"))]
 fn enter_nested_upstream_scope(extensions: &mut RequestExtensions, _inherits_binding: bool) {
+    #[cfg(feature = "bandwidth")]
+    crate::BandwidthLimitFilter::enter_body_scope(extensions);
     extensions.remove::<SelectedClusterApplication>();
 }
 
 /// Remove nested routing state and restore the most recent parent checkpoint.
 #[cfg(feature = "upstream-binding")]
 fn restore_parent_upstream_scope(extensions: &mut RequestExtensions) {
+    #[cfg(feature = "bandwidth")]
+    crate::BandwidthLimitFilter::leave_body_scope(extensions);
     extensions.remove::<SelectedClusterApplication>();
     let Some(mut states) = extensions.remove::<ParentUpstreamStates>() else {
         return;
@@ -205,6 +211,8 @@ fn restore_parent_upstream_scope(extensions: &mut RequestExtensions) {
 /// the nested pipeline's upstream selection.
 #[cfg(not(feature = "upstream-binding"))]
 fn restore_parent_upstream_scope(extensions: &mut RequestExtensions) {
+    #[cfg(feature = "bandwidth")]
+    crate::BandwidthLimitFilter::leave_body_scope(extensions);
     extensions.remove::<SelectedClusterApplication>();
 }
 
@@ -1006,11 +1014,16 @@ impl FilteredSubrequestExecutor {
             if transport_budget.is_zero() {
                 return Ok(RawResponse::Rejected(Rejection::status(504)));
             }
-            // The body filters have reserved upload bytes. Wait before the
-            // dial so an IRR step or bound outbound chain cannot outrun the
-            // limit. A reservation the deadline cannot cover is not sent.
+            // The transport admits prefixes only after it has a connection.
+            // DNS elapsed time is already part of each absolute release time.
+            in_transport_inner.store(false, Ordering::Release);
             #[cfg(feature = "bandwidth")]
-            pace::pace_upload(&mut filter_ctx.extensions, step_deadline).await?;
+            let upload = pace::Upload::from_extensions(&mut filter_ctx.extensions, step_deadline, &in_transport_inner);
+            #[cfg(feature = "bandwidth")]
+            let request_client = upload.as_ref().map_or_else(|| self.client.clone(), |upload| upload.client(&self.client));
+            #[cfg(not(feature = "bandwidth"))]
+            let request_client = &self.client;
+            in_transport_inner.store(true, Ordering::Release);
 
             match filter_ctx.subrequest_response_mode {
                 SubRequestResponseMode::Streaming => {
@@ -1047,8 +1060,7 @@ impl FilteredSubrequestExecutor {
                             break;
                         }
                         response = match peer {
-                            Ok(peer) => self
-                                .client
+                            Ok(peer) => request_client
                                 .send_streaming(peer, &request, attempt_budget, limits.clone(), Some(&framework_headers))
                                 .await,
                             Err(error) => Err(SubRequestError::Connect(error.to_string())),
@@ -1061,6 +1073,8 @@ impl FilteredSubrequestExecutor {
                         }
                         break;
                     }
+                    #[cfg(feature = "bandwidth")]
+                    if upload.as_ref().and_then(|upload| upload.take_error()).is_some() { return Ok(RawResponse::Rejected(Rejection::status(504))); }
                     in_transport_inner.store(false, Ordering::Release);
                     match response {
                         Ok(response) => {
@@ -1145,13 +1159,14 @@ impl FilteredSubrequestExecutor {
                             break;
                         }
                         let outcome = match peer {
-                            Ok(peer) => match self
-                                .client
+                            Ok(peer) => match request_client
                                 .execute(peer, &request, self.max_response_bytes.min(pipeline.response_buffer_limit()), attempt_budget, Some(&framework_headers))
                                 .await
                             {
                                 Ok(response) => (response, ResponseOrigin::Upstream, None),
                                 Err(error) => {
+                                    #[cfg(feature = "bandwidth")]
+                                    if upload.as_ref().and_then(|upload| upload.take_error()).is_some() { return Ok(RawResponse::Rejected(Rejection::status(504))); }
                                     let (status, kind) = classify_transport_failure(&error);
                                     warn!(step = label, %error, status, "filtered sub-request buffered transport failure");
                                     let response =
@@ -1358,6 +1373,17 @@ impl FilteredSubrequestExecutor {
                         actual: Some(response.body.len()),
                         limit,
                     }));
+                }
+                #[cfg(feature = "bandwidth")]
+                {
+                    cancel_bandwidth(&mut filter_ctx.extensions);
+                    crate::reserve_generated_download(
+                        &mut filter_ctx.extensions,
+                        u64::try_from(response.body.len()).unwrap_or(u64::MAX),
+                    );
+                    pace::pace_download(&mut filter_ctx.extensions, step_deadline)
+                        .await
+                        .map_err(|error| FilteredSubrequestError::capture(error, &mut filter_ctx))?;
                 }
                 let snapshot = crate::Response {
                     status: http::StatusCode::from_u16(response.status).unwrap_or(http::StatusCode::BAD_GATEWAY),

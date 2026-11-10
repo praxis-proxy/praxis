@@ -24,7 +24,7 @@ use tokio_rustls::rustls::ProtocolVersion;
 use tracing::debug;
 
 use super::{
-    body::{BodyFrame, BodySender, RequestBody},
+    body::{BodyFrame, BodySender, RequestBody, WriteTicket},
     connection::{Connection, Exchange, Protocol, ResponseFuture},
     describe,
     pool::PoolKey,
@@ -140,6 +140,12 @@ pub struct HyperSession {
     /// How far the request got.
     outbound: Outbound,
 
+    /// Accepted payload from completed controlled prefixes.
+    body_sent: u64,
+
+    /// Current controlled prefix, including progress visible during cancellation.
+    pending_body: Option<Arc<WriteTicket>>,
+
     /// Per-read limit, until the caller takes over pacing.
     read_timeout: Option<Duration>,
 
@@ -165,6 +171,8 @@ impl HyperSession {
             interim: None,
             key,
             outbound: Outbound::Unsent,
+            body_sent: 0,
+            pending_body: None,
             read_timeout: peer.connection.read_timeout,
             sni: Arc::clone(&peer.sni),
             trailers: None,
@@ -176,6 +184,7 @@ impl HyperSession {
     /// stream and on HTTP/1 leaves the connection to hyper to close unless
     /// the exchange had finished.
     fn abandon(&mut self) {
+        self.cancel_pending_request_body();
         self.outbound = Outbound::Done;
         self.inbound = Inbound::Closed;
         self.interim = None;
@@ -511,6 +520,41 @@ impl Session for HyperSession {
             BodyFrame::Data(chunk)
         };
         self.push(frame).await
+    }
+
+    async fn send_request_body_controlled(&mut self, chunk: Bytes, end_of_stream: bool) -> Result<(), EgressError> {
+        if matches!(self.outbound, Outbound::Head(_)) {
+            self.dispatch_streaming()?;
+        }
+        let (frame, ticket, accepted) = BodyFrame::controlled(chunk, end_of_stream);
+        self.pending_body = Some(ticket);
+        let result = async {
+            self.push(frame).await?;
+            within(self.write_timeout, Phase::Write, accepted)
+                .await?
+                .map_err(|_| EgressError::Io("upstream did not accept the controlled body prefix".into()))
+        }
+        .await;
+        if let Some(ticket) = self.pending_body.take() {
+            if result.is_err() {
+                ticket.cancel();
+            }
+            self.body_sent = self.body_sent.saturating_add(ticket.accepted_bytes());
+        }
+        result
+    }
+
+    fn cancel_pending_request_body(&mut self) {
+        if let Some(ticket) = &self.pending_body {
+            ticket.cancel();
+        }
+    }
+
+    fn request_body_bytes_sent(&self) -> Option<u64> {
+        Some(
+            self.body_sent
+                .saturating_add(self.pending_body.as_ref().map_or(0, |ticket| ticket.accepted_bytes())),
+        )
     }
 
     async fn finish_request(&mut self) -> Result<(), EgressError> {

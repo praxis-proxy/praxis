@@ -67,9 +67,8 @@ otel = [
 cloud-events-filter = [
     "dep:url",
 ]
-# The `bandwidth_limit` filter. Off by default; experimental. The server
-# feature of the same name also turns on `experimental`. Without it the
-# filter is not registered and the protocol does not wait on reservations.
+# Library support for the off-by-default `bandwidth_limit` filter.
+# Listener adapters opt in separately; the server integration is in part 2.
 bandwidth = []
 
 # Logical upstream binding: the router publishes the matched cluster as a

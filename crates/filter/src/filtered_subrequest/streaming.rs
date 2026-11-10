@@ -42,6 +42,15 @@ pub struct CalloutResponseTooLarge {
     pub limit: usize,
 }
 
+/// One logical callback output, paired with its own independent byte charges.
+struct PendingOutput {
+    /// Remaining bytes of this logical output chunk.
+    body: Bytes,
+    /// Unsent bytes remain prepared rather than committed.
+    #[cfg(feature = "bandwidth")]
+    plan: Option<crate::PaceReservation>,
+}
+
 /// Streaming body implementation for a filtered sub-request's response.
 pub(crate) struct FilteredStreamingBody {
     /// Upstream streaming body handle. `None` after cancellation.
@@ -53,7 +62,9 @@ pub(crate) struct FilteredStreamingBody {
     /// Completion-hook body output held until the caller selects a transition.
     deferred_completion_output: Option<Bytes>,
     /// Per-callback local output waiting to be pulled downstream.
-    pending_chunks: VecDeque<Bytes>,
+    pending_chunks: VecDeque<PendingOutput>,
+    /// Callout admission ceiling checked before waiting on any logical output.
+    remaining_limit: Option<(usize, usize)>,
     /// Transport byte ceiling that ended this stream, when it overflowed.
     transport_overflow_limit: Option<usize>,
 }
@@ -67,6 +78,7 @@ impl FilteredStreamingBody {
             finished: false,
             deferred_completion_output: None,
             pending_chunks: VecDeque::new(),
+            remaining_limit: None,
             transport_overflow_limit: None,
         }
     }
@@ -200,39 +212,114 @@ impl FilteredStreamingBody {
         Ok(body)
     }
 
-    /// Queue bytes only after their reservation has been released.
-    fn enqueue_filtered(&mut self, body: Option<Bytes>) -> Option<Bytes> {
+    /// Collect emitted and callback bytes without confusing their independent charges.
+    fn enqueue_filtered(&mut self, body: Option<Bytes>) {
         let emitted = self
             .continuation
             .extensions
             .get_mut::<PendingStreamChunks>()
             .map_or_else(VecDeque::new, PendingStreamChunks::drain_chunks);
-        self.pending_chunks.extend(emitted);
-        self.pending_chunks.extend(body.filter(|bytes| !bytes.is_empty()));
-        self.pending_chunks.pop_front()
+        for body in emitted {
+            #[cfg(feature = "bandwidth")]
+            let plan = crate::bandwidth::generated_download_plan(
+                &self.continuation.extensions,
+                u64::try_from(body.len()).unwrap_or(u64::MAX),
+            );
+            self.pending_chunks.push_back(PendingOutput {
+                body,
+                #[cfg(feature = "bandwidth")]
+                plan,
+            });
+        }
+        if let Some(body) = body.filter(|body| !body.is_empty()) {
+            #[cfg(feature = "bandwidth")]
+            let plan = crate::bandwidth::take_download(&mut self.continuation.extensions);
+            self.pending_chunks.push_back(PendingOutput {
+                body,
+                #[cfg(feature = "bandwidth")]
+                plan,
+            });
+        } else {
+            crate::cancel_download_pace(&mut self.continuation.extensions);
+        }
     }
 
-    /// Hold filtered bytes on the waiting future so cancellation drops unsent output.
+    /// Admit the complete logical output before a wait can consume its allowance.
+    fn check_output_limit(&mut self, bytes: usize) -> Result<(), FilterError> {
+        if let Some((_, limit)) = self.remaining_limit.filter(|(remaining, _)| bytes > *remaining) {
+            crate::cancel_download_pace(&mut self.continuation.extensions);
+            return Err(Box::new(CalloutResponseTooLarge { limit }));
+        }
+        Ok(())
+    }
+
+    /// Keep queued bytes and the active permit on the future so cancellation refunds them.
     #[cfg_attr(
         not(feature = "bandwidth"),
-        expect(clippy::unused_async, reason = "awaits pacing only with the bandwidth feature")
+        expect(clippy::unused_async, reason = "only bandwidth admission waits")
     )]
-    async fn release_filtered(&mut self, body: Option<Bytes>) -> Result<Option<Bytes>, FilterError> {
+    async fn release_pending(&mut self) -> Result<Option<Bytes>, FilterError> {
+        let mut pending = std::mem::take(&mut self.pending_chunks);
+        let Some(output) = pending.pop_front() else {
+            return Ok(None);
+        };
+        self.check_output_limit(output.body.len())?;
+        #[cfg(feature = "bandwidth")]
+        let mut output = output;
+        #[cfg(feature = "bandwidth")]
+        if let Some(plan) = output.plan.as_mut() {
+            let (bytes, permit) = plan
+                .acquire_prefix(output.body.len(), Some(self.continuation.step_deadline))
+                .await?;
+            let prefix = output.body.split_to(bytes);
+            permit.commit_bytes(bytes);
+            if !output.body.is_empty() {
+                pending.push_front(output);
+            }
+            self.pending_chunks = pending;
+            return Ok(Some(prefix));
+        }
+        self.pending_chunks = pending;
+        Ok(Some(output.body))
+    }
+
+    /// Pace completion only after the outer callout ceiling has accepted all its output.
+    #[cfg_attr(
+        not(feature = "bandwidth"),
+        expect(clippy::unused_async, reason = "only bandwidth admission waits")
+    )]
+    async fn release_completion(&mut self, body: Option<Bytes>) -> Result<Option<Bytes>, FilterError> {
         let emitted = self
             .continuation
             .extensions
             .get_mut::<PendingStreamChunks>()
             .map(PendingStreamChunks::take_pending);
+        let emitted_len = emitted.as_ref().map_or(0, PendingStreamChunks::len_bytes);
+        let total = emitted_len.saturating_add(body.as_ref().map_or(0, Bytes::len));
+        self.check_output_limit(total)?;
         #[cfg(feature = "bandwidth")]
-        super::pace::pace_download(&mut self.continuation.extensions, self.continuation.step_deadline).await?;
+        {
+            let plan = crate::bandwidth::generated_download_plan(
+                &self.continuation.extensions,
+                u64::try_from(emitted_len).unwrap_or(u64::MAX),
+            );
+            super::pace::finish_plan(plan, self.continuation.step_deadline).await?;
+            super::pace::pace_download(&mut self.continuation.extensions, self.continuation.step_deadline).await?;
+        }
         if let Some(emitted) = emitted {
             self.continuation.extensions.insert(emitted);
         }
+        Ok(body.filter(|bytes| !bytes.is_empty()))
+    }
+
+    /// Release a normal callback incrementally, retaining completion output for its caller.
+    async fn release_filtered(&mut self, body: Option<Bytes>) -> Result<Option<Bytes>, FilterError> {
         if self.finished {
-            self.deferred_completion_output = body.filter(|bytes| !bytes.is_empty());
+            self.deferred_completion_output = self.release_completion(body).await?;
             return Ok(None);
         }
-        Ok(self.enqueue_filtered(body))
+        self.enqueue_filtered(body);
+        Box::pin(self.release_pending()).await
     }
 
     /// Complete the step after a response-body filter failure.
@@ -252,7 +339,7 @@ impl FilteredStreamingBody {
             .into()
         })?;
         self.finished = true;
-        self.deferred_completion_output = self.paced_completion(completion).await?;
+        self.deferred_completion_output = Box::pin(self.paced_completion(completion)).await?;
         Ok(None)
     }
 
@@ -272,7 +359,7 @@ impl FilteredStreamingBody {
             .insert(StreamTermination::new(termination_cause(&e)));
         let completion = self.complete_step()?;
         self.finished = true;
-        self.deferred_completion_output = self.paced_completion(completion).await?;
+        self.deferred_completion_output = Box::pin(self.paced_completion(completion)).await?;
         Ok(None)
     }
 
@@ -283,13 +370,17 @@ impl FilteredStreamingBody {
     )]
     async fn paced_completion(&mut self, completion: Option<Bytes>) -> Result<Option<Bytes>, FilterError> {
         let output = self.handled_completion_output(completion);
-        if output.is_some() {
-            #[cfg(feature = "bandwidth")]
-            super::pace::pace_download(&mut self.continuation.extensions, self.continuation.step_deadline).await?;
+        let handled = self
+            .continuation
+            .extensions
+            .get::<StreamTermination>()
+            .is_some_and(StreamTermination::is_handled);
+        if handled {
+            self.release_completion(output).await
         } else {
             crate::cancel_download_pace(&mut self.continuation.extensions);
+            Ok(None)
         }
-        Ok(output)
     }
 
     /// Read the next upstream chunk, preserving its transport error.
@@ -325,15 +416,15 @@ impl FilteredStreamingBody {
 #[async_trait]
 impl StreamingResponseBody for FilteredStreamingBody {
     async fn next_chunk(&mut self) -> Result<Option<Bytes>, FilterError> {
-        if let Some(chunk) = self.pending_chunks.pop_front() {
-            return Ok(Some(chunk));
+        if !self.pending_chunks.is_empty() {
+            return Box::pin(self.release_pending()).await;
         }
         if self.finished {
             return Ok(None);
         }
 
         loop {
-            let next = self.read_upstream_chunk().await?;
+            let next = Box::pin(self.read_upstream_chunk()).await?;
 
             let body = match next {
                 Ok(Some(chunk)) => match self.filter_upstream_chunk(chunk) {
@@ -480,6 +571,25 @@ impl CalloutStreamingBody {
         }
     }
 
+    /// Set the remaining ceiling before the inner body can pace or emit bytes.
+    async fn next_bounded_chunk(&mut self) -> Result<Option<Bytes>, FilterError> {
+        let result = {
+            let inner = self
+                .inner
+                .as_mut()
+                .ok_or_else(|| -> FilterError { "filtered_subrequest: streaming body has no active source".into() })?;
+            inner.remaining_limit = Some((
+                self.max_response_bytes.saturating_sub(self.emitted_bytes),
+                self.max_response_bytes,
+            ));
+            inner.next_chunk().await
+        };
+        if result.is_err() {
+            self.finished = true;
+        }
+        result
+    }
+
     /// Account one outgoing chunk against the response byte ceiling, ending the
     /// stream if it does not fit.
     ///
@@ -568,11 +678,8 @@ impl StreamingResponseBody for CalloutStreamingBody {
             if self.finished {
                 return Ok(None);
             }
-            let inner = self
-                .inner
-                .as_mut()
-                .ok_or_else(|| -> FilterError { "filtered_subrequest: streaming body has no active source".into() })?;
-            match inner.next_chunk().await? {
+            let chunk = self.next_bounded_chunk().await?;
+            match chunk {
                 Some(chunk) => return self.checked(chunk),
                 None => self.drain_completion()?,
             }
@@ -673,7 +780,8 @@ mod tests {
         ctx.emit_stream_chunk(Bytes::from_static(b"one")).unwrap();
         ctx.emit_stream_chunk(Bytes::from_static(b"two")).unwrap();
         let schedule = crate::bandwidth::Schedule::new(1, 0);
-        crate::bandwidth::push_download(&mut ctx.extensions, schedule.reserve(1000));
+        crate::bandwidth::push_download_schedule(&mut ctx.extensions, Arc::clone(&schedule));
+        crate::bandwidth::push_download(&mut ctx.extensions, schedule.prepare(1000));
         let continuation = super::super::continuation::FilteredSubrequestContinuation::capture(
             Arc::new(crate::FilterPipeline::from_filters(vec![])),
             snapshot.clone(),
@@ -713,6 +821,92 @@ mod tests {
         );
         drop(completion);
         backend.abort();
+    }
+
+
+    #[cfg(feature = "bandwidth")]
+    fn paced_output(
+        rate: u64,
+        burst: u64,
+        emitted: usize,
+        callback: usize,
+    ) -> (FilteredStreamingBody, Arc<crate::bandwidth::Schedule>) {
+        let snapshot = crate::test_utils::make_request(http::Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&snapshot);
+        let schedule = crate::bandwidth::Schedule::new(rate, burst);
+        crate::bandwidth::push_download_schedule(&mut ctx.extensions, Arc::clone(&schedule));
+        ctx.enable_stream_chunk_emission(10000);
+        if emitted != 0 {
+            ctx.emit_stream_chunk(Bytes::from(vec![b'e'; emitted])).unwrap();
+        }
+        if callback != 0 {
+            crate::bandwidth::push_download(&mut ctx.extensions, schedule.prepare(u64::try_from(callback).unwrap()));
+        }
+        let continuation = super::super::continuation::FilteredSubrequestContinuation::capture(
+            Arc::new(crate::FilterPipeline::from_filters(vec![])),
+            snapshot.clone(),
+            crate::Response {
+                headers: HeaderMap::new(),
+                status: http::StatusCode::OK,
+            },
+            &mut ctx,
+            false,
+            Instant::now() + Duration::from_secs(1),
+        );
+        let mut body = FilteredStreamingBody {
+            upstream: None,
+            continuation,
+            finished: false,
+            deferred_completion_output: None,
+            pending_chunks: VecDeque::new(),
+            remaining_limit: None,
+            transport_overflow_limit: None,
+        };
+        body.enqueue_filtered((callback != 0).then(|| Bytes::from(vec![b'b'; callback])));
+        (body, schedule)
+    }
+
+    #[cfg(feature = "bandwidth")]
+    #[tokio::test]
+    async fn emitted_output_is_paced_independently_of_the_callback_body() {
+        for callback in [0, 100] {
+            let (mut body, _schedule) = paced_output(1000, 0, 100, callback);
+            let started = Instant::now();
+            let mut bytes = Vec::new();
+            while !body.pending_chunks.is_empty() {
+                bytes.extend_from_slice(&body.release_pending().await.unwrap().unwrap());
+            }
+            assert_eq!(bytes.len(), 100 + callback);
+            assert!(
+                started.elapsed() >= Duration::from_millis(u64::try_from(90 + callback).unwrap()),
+                "emitted bytes and the callback body each consume shared allowance"
+            );
+            assert!(bytes.starts_with(&[b'e'; 100]));
+        }
+    }
+
+    #[cfg(feature = "bandwidth")]
+    #[tokio::test]
+    async fn oversized_callout_output_fails_before_pacing_and_preserves_the_shared_burst() {
+        let (mut body, schedule) = paced_output(1, 100, 0, 200);
+        body.remaining_limit = Some((50, 50));
+        let started = Instant::now();
+        let error = body.release_pending().await.unwrap_err();
+        assert_eq!(error.downcast_ref::<CalloutResponseTooLarge>().unwrap().limit, 50);
+        assert!(started.elapsed() < Duration::from_millis(50));
+        assert!(
+            schedule.prepare(100).delay().is_zero(),
+            "unreleased output cannot consume the burst"
+        );
+    }
+
+    #[cfg(feature = "bandwidth")]
+    #[tokio::test]
+    async fn oversized_emitted_output_reports_the_configured_limit_before_a_bandwidth_deadline() {
+        let (mut body, _schedule) = paced_output(1, 0, 100, 0);
+        body.remaining_limit = Some((10, 50));
+        let error = body.release_pending().await.unwrap_err();
+        assert_eq!(error.downcast_ref::<CalloutResponseTooLarge>().unwrap().limit, 50);
     }
 
     #[test]

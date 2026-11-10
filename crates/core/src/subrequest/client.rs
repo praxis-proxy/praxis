@@ -111,6 +111,9 @@ pub struct SubRequestClient<C: Connector = backend::Connector> {
 
     /// Trust anchors from `runtime.upstream_ca_file`, when one is configured.
     upstream_ca: Option<Arc<CachedCaCerts>>,
+
+    /// Optional per-exchange prefix admission and accepted-write accounting.
+    upload_control: Option<Arc<dyn super::UploadControl>>,
 }
 
 impl<C: Connector> SubRequestClient<C> {
@@ -133,6 +136,7 @@ impl<C: Connector> SubRequestClient<C> {
             connector,
             max_response_bytes: crate::config::DEFAULT_MAX_BUFFER_BYTES,
             upstream_ca: None,
+            upload_control: None,
         }
     }
 
@@ -147,7 +151,16 @@ impl<C: Connector> SubRequestClient<C> {
             connector,
             max_response_bytes: max_response_bytes.min(crate::config::MAX_BUFFER_BYTES),
             upstream_ca: None,
+            upload_control: None,
         }
+    }
+
+    /// Clone this client with admission control scoped to one outbound exchange.
+    #[must_use]
+    pub fn with_upload_control(&self, control: Arc<dyn super::UploadControl>) -> Self {
+        let mut client = self.clone();
+        client.upload_control = Some(control);
+        client
     }
 
     /// Trust `ca` when a cluster does not set its own CA.
@@ -396,6 +409,9 @@ impl<C: Connector> SubRequestClient<C> {
             },
             None => None,
         };
+        if let Some(guard) = circuit_guard.as_mut() {
+            guard.observe_upload(self.upload_control.clone());
+        }
         if abandon_neutral && let Some(guard) = circuit_guard.as_mut() {
             guard.abandon_as_neutral();
         }
@@ -445,7 +461,11 @@ impl<C: Connector> SubRequestClient<C> {
             })?
             .map_err(|err| charge(&mut circuit_guard, transport_error(err)))?;
 
-        if !request.body.is_empty() {
+        if let Some(control) = &self.upload_control {
+            super::upload::send_controlled(&mut session, request.body.clone(), control, deadline, write_timeout)
+                .await
+                .map_err(|err| charge(&mut circuit_guard, err))?;
+        } else if !request.body.is_empty() {
             let body_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
             if body_budget.is_zero() {
                 session.shutdown().await;

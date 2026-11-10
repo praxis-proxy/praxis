@@ -8,7 +8,7 @@
 
 use std::{sync::Arc, time::Duration};
 
-use crate::{Rejection, RequestExtensions};
+use crate::RequestExtensions;
 
 /// Watch handle that records no connection when bandwidth limiting is absent.
 #[derive(Clone)]
@@ -60,8 +60,8 @@ pub fn settle_download_write(_extensions: &mut RequestExtensions, _wrote: bool) 
 /// The bandwidth filter is the only writer of that cause, and it is absent
 /// without the `bandwidth` feature, so this stays `None` in that build.
 #[must_use]
-pub fn connection_close_reason(rejection: &Rejection) -> Option<&'static str> {
-    rejection.close_reason
+pub fn connection_close_reason(_extensions: &RequestExtensions) -> Option<&'static str> {
+    None
 }
 
 /// Nothing to reserve without the `bandwidth` feature.

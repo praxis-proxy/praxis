@@ -84,6 +84,11 @@ impl PendingStreamChunks {
         }
     }
 
+    /// Total queued output used for admission before any bandwidth wait.
+    pub(crate) fn len_bytes(&self) -> usize {
+        self.retained_bytes
+    }
+
     /// Consume the accounting wrapper and return its FIFO queue.
     pub(crate) fn into_chunks(self) -> VecDeque<bytes::Bytes> {
         self.chunks

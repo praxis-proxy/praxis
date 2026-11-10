@@ -553,7 +553,10 @@ fn filter_name_from_register_call(expr: &syn::Expr) -> Option<String> {
         return None;
     };
     let function_name = func.path.segments.last()?.ident.to_string();
-    if !function_name.starts_with("register_http") && !function_name.starts_with("register_tcp") {
+    if !function_name.starts_with("register_http")
+        && !function_name.starts_with("register_tcp")
+        && function_name != "register_dual_security"
+    {
         return None;
     }
     call.args.iter().nth(1).and_then(extract_str_literal)

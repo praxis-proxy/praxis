@@ -196,6 +196,13 @@ impl Session for PingoraSession {
             .map_err(|err| io_error(&err))
     }
 
+    fn request_body_bytes_sent(&self) -> Option<u64> {
+        match &self.inner {
+            HttpSession::H1(session) => Some(u64::try_from(session.body_bytes_sent()).unwrap_or(u64::MAX)),
+            HttpSession::H2(_) | HttpSession::Custom(_) => None,
+        }
+    }
+
     async fn finish_request(&mut self) -> Result<(), EgressError> {
         self.inner
             .finish_request_body()

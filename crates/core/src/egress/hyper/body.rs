@@ -7,13 +7,17 @@
 
 use std::{
     pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicU8, Ordering},
+    },
     task::{Context, Poll, ready},
 };
 
 use bytes::Bytes;
 use http::HeaderMap;
 use hyper::body::{Body, Frame, SizeHint};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -21,6 +25,13 @@ use tokio::sync::mpsc;
 
 /// Frames buffered between a session and the connection writing them.
 const CHANNEL_CAPACITY: usize = 2; // frames
+
+/// Prefix still owned by its cancellable producer.
+const WRITE_PENDING: u8 = 0;
+/// Prefix accepted by hyper's body consumer.
+const WRITE_ACCEPTED: u8 = 1;
+/// Producer cancelled before consumer acceptance.
+const WRITE_CANCELLED: u8 = 2;
 
 // -----------------------------------------------------------------------------
 // RequestBody
@@ -30,6 +41,40 @@ const CHANNEL_CAPACITY: usize = 2; // frames
 ///
 /// [`RequestBody`]: RequestBody
 pub(super) type BodySender = mpsc::Sender<BodyFrame>;
+
+/// Atomic ownership handoff between cancellation and hyper's body consumer.
+#[derive(Debug)]
+pub(super) struct WriteTicket {
+    /// Zero is pending, one accepted, and two cancelled.
+    state: AtomicU8,
+    /// Payload bytes accepted when hyper wins the handoff.
+    bytes: u64,
+}
+
+impl WriteTicket {
+    /// Prevent a still-queued prefix from being emitted after its permit is refunded.
+    pub(super) fn cancel(&self) {
+        let _previous =
+            self.state
+                .compare_exchange(WRITE_PENDING, WRITE_CANCELLED, Ordering::AcqRel, Ordering::Acquire);
+    }
+
+    /// Claim the prefix exactly when hyper consumes its body frame.
+    fn accept(&self) -> bool {
+        self.state
+            .compare_exchange(WRITE_PENDING, WRITE_ACCEPTED, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    /// Accepted bytes stay observable even if the acknowledgement receiver is dropped.
+    pub(super) fn accepted_bytes(&self) -> u64 {
+        if self.state.load(Ordering::Acquire) == WRITE_ACCEPTED {
+            self.bytes
+        } else {
+            0
+        }
+    }
+}
 
 /// One step of a streamed request body.
 #[derive(Debug)]
@@ -42,12 +87,47 @@ pub(super) enum BodyFrame {
 
     /// Trailers, which end the body.
     Trailers(HeaderMap),
+
+    /// A controlled prefix acknowledged only at the body consumer.
+    Controlled {
+        /// Body payload.
+        chunk: Bytes,
+        /// Whether this prefix terminates the body.
+        end: bool,
+        /// Atomic cancellation/progress record.
+        ticket: Arc<WriteTicket>,
+        /// Notifies the producer once ownership has moved to hyper.
+        accepted: oneshot::Sender<()>,
+    },
 }
 
 impl BodyFrame {
+    /// Construct a prefix with observable, cancellation-safe ownership transfer.
+    pub(super) fn controlled(chunk: Bytes, end: bool) -> (Self, Arc<WriteTicket>, oneshot::Receiver<()>) {
+        let ticket = Arc::new(WriteTicket {
+            state: AtomicU8::new(WRITE_PENDING),
+            bytes: u64::try_from(chunk.len()).unwrap_or(u64::MAX),
+        });
+        let (accepted, receiver) = oneshot::channel();
+        (
+            Self::Controlled {
+                chunk,
+                end,
+                ticket: Arc::clone(&ticket),
+                accepted,
+            },
+            ticket,
+            receiver,
+        )
+    }
+
     /// Whether nothing follows this frame.
     pub(super) const fn ends_body(&self) -> bool {
-        !matches!(self, Self::Data(_))
+        match self {
+            Self::Data(_) => false,
+            Self::Last(_) | Self::Trailers(_) => true,
+            Self::Controlled { end, .. } => *end,
+        }
     }
 }
 
@@ -156,6 +236,19 @@ fn next_frame(frame: Option<BodyFrame>, ended: &mut bool) -> Option<Result<Frame
         BodyFrame::Data(chunk) => Some(Ok(Frame::data(chunk))),
         BodyFrame::Last(chunk) => (!chunk.is_empty()).then(|| Ok(Frame::data(chunk))),
         BodyFrame::Trailers(trailers) => Some(Ok(Frame::trailers(trailers))),
+        BodyFrame::Controlled {
+            chunk,
+            ticket,
+            accepted,
+            ..
+        } => {
+            if !ticket.accept() {
+                *ended = true;
+                return Some(Err(RequestBodyAborted));
+            }
+            let _received = accepted.send(());
+            Some(Ok(Frame::data(chunk)))
+        },
     }
 }
 
@@ -286,5 +379,26 @@ mod tests {
 
         assert!(body.frame().await.is_none(), "an empty last frame yields no data frame");
         assert!(body.is_end_stream(), "the body is over");
+    }
+    #[tokio::test]
+    async fn cancelled_controlled_prefix_never_reaches_the_consumer() {
+        let (sender, mut body) = RequestBody::channel();
+        let (frame, ticket, acknowledged) = BodyFrame::controlled(Bytes::from_static(b"unsent"), false);
+        sender.send(frame).await.unwrap();
+        ticket.cancel();
+        assert!(matches!(body.frame().await, Some(Err(RequestBodyAborted))));
+        assert!(acknowledged.await.is_err());
+        assert_eq!(ticket.accepted_bytes(), 0);
+    }
+
+    #[tokio::test]
+    async fn accepted_controlled_prefix_survives_cancellation_of_its_acknowledgement() {
+        let (sender, mut body) = RequestBody::channel();
+        let (frame, ticket, acknowledged) = BodyFrame::controlled(Bytes::from_static(b"sent"), false);
+        sender.send(frame).await.unwrap();
+        drop(acknowledged);
+        assert_eq!(body.frame().await.unwrap().unwrap().into_data().unwrap(), "sent");
+        ticket.cancel();
+        assert_eq!(ticket.accepted_bytes(), 4, "accepted bytes cannot be refunded");
     }
 }

@@ -1,264 +1,403 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Praxis Contributors
 
-//! Virtual-time byte schedule.
+//! Byte schedules with refundable, bounded write permits.
 //!
-//! Each direction keeps a theoretical arrival time. A reservation
-//! moves that time forward by the byte cost immediately, then the
-//! caller waits until the new time. Idle time refills at most
-//! `burst_bytes`. A zero burst paces from the first byte and does
-//! not accumulate credit.
+//! Body hooks prepare charges without spending capacity. Writers reserve a
+//! bounded prefix, wait for its absolute release time, then commit only bytes
+//! accepted by the writer. Cancelled plans never debit a budget.
 
 use std::{
     sync::{Arc, Mutex, MutexGuard, PoisonError},
     time::{Duration, Instant},
 };
 
-/// One direction's byte schedule.
+use tokio::sync::watch;
+
+/// One direction's shared byte budget.
 pub(crate) struct Schedule {
-    /// Monotonic origin for this schedule.
+    /// Monotonic origin used by release timestamps.
     epoch: Instant,
-
-    /// Bytes per second. Always greater than zero.
+    /// Positive byte rate.
     rate: u64,
-
-    /// Burst capacity in nanoseconds. Zero means no burst.
+    /// Initial and refilling burst in nanoseconds.
     burst_ns: i128,
-
-    /// Theoretical arrival time, guarded so streams can share it.
+    /// Maximum bytes released in one write.
+    quantum: u64,
+    /// Short-held state lock, never retained while waiting or writing.
     inner: Mutex<ScheduleInner>,
+    /// Wakes writers when the active prefix is settled.
+    changed: watch::Sender<()>,
 }
 
-/// Mutable schedule state.
+/// Planned debt and the independent record of bytes actually written.
 struct ScheduleInner {
-    /// Theoretical arrival time in nanoseconds since [`Schedule::epoch`].
+    /// Planned arrival time, including outstanding prefix reservations.
     tat: i128,
-
-    /// Whether [`ScheduleInner::tat`] has been initialized.
+    /// Whether planned arrival time has been initialized.
     initialized: bool,
-
-    /// Grants not yet committed or dropped.
+    /// Reservations that still have to be committed or refunded.
     outstanding: u64,
-
-    /// Cost of cancelled grants still covered by a later outstanding grant.
-    pending_refund_ns: i128,
-
-    /// Cost of grants marked sent. Zero means a full cancel restores a fresh schedule.
-    committed_ns: i128,
+    /// Generation changes when idle refill supersedes the planned debt.
+    generation: u64,
+    /// Arrival time derived only from accepted writes.
+    committed_tat: Option<i128>,
+    /// At most one prefix is handed to a writer at a time.
+    active: bool,
 }
 
-/// A reserved slice of a [`Schedule`].
-///
-/// Drop returns the reservation unless [`Self::commit`] was called.
-/// A later outstanding grant keeps the hole covered until it commits
-/// or drops, so cancelled bytes are reclaimed whatever the drop order.
-/// Bytes already sent must be committed so a later failure does not
-/// return them.
+/// Prepared charge or owned reservation for one bounded prefix.
 pub(crate) struct BandwidthGrant {
-    /// Schedule that owns the reservation.
-    schedule: Arc<Schedule>,
-
-    /// Nanoseconds added to the theoretical arrival time.
+    /// Shared owner of this charge.
+    pub(super) schedule: Arc<Schedule>,
+    /// Bytes still represented by this charge.
+    pub(super) bytes: u64,
+    /// Nanoseconds charged by this reservation.
     cost_ns: i128,
-
-    /// Theoretical arrival time after this reservation.
+    /// Absolute planned release timestamp relative to the schedule origin.
     tat_after: i128,
+    /// Time the body hook prepared these bytes.
+    created_at: i128,
+    /// Generation against which the prefix was reserved.
+    generation: u64,
+    /// Prepared charges do not occupy the schedule until split into a prefix.
+    reserved: bool,
+    /// Whether this prefix is currently handed to a writer.
+    acquired: bool,
+    /// Deterministic clock for model tests using `reserve_at`.
+    synthetic_now: Option<i128>,
+}
 
-    /// How long the caller should wait before sending the bytes.
-    delay: Duration,
-
-    /// Set once the bytes have been sent.
-    committed: bool,
+/// Why an owned prefix cannot be handed to its writer yet.
+pub(super) enum Admission {
+    /// Every applicable budget is ready.
+    Ready,
+    /// An absolute monotonic release time has not arrived.
+    At(Instant),
+    /// Another writer owns this budget's active prefix.
+    Busy(watch::Receiver<()>),
+    /// The requested release timestamp cannot be represented.
+    Overflow,
 }
 
 impl Schedule {
-    /// Create a schedule that refills `rate` bytes per second.
-    ///
-    /// `burst_bytes == 0` is the no-burst mode: the first byte waits,
-    /// and idle time does not create a free allowance.
+    /// Create an independent upload or download budget.
     pub(crate) fn new(rate: u64, burst_bytes: u64) -> Arc<Self> {
+        let (changed, _receiver) = watch::channel(());
+        let quantum = if burst_bytes == 0 {
+            rate.div_ceil(100).max(1)
+        } else {
+            burst_bytes
+        };
         Arc::new(Self {
             epoch: Instant::now(),
             rate,
             burst_ns: bytes_to_ns(burst_bytes, rate),
+            quantum: quantum.min(16_384),
             inner: Mutex::new(ScheduleInner {
                 tat: 0,
                 initialized: false,
                 outstanding: 0,
-                pending_refund_ns: 0,
-                committed_ns: 0,
+                generation: 0,
+                committed_tat: None,
+                active: false,
             }),
+            changed,
         })
     }
 
-    /// Reserve `bytes` against the current time.
-    pub(crate) fn reserve(self: &Arc<Self>, bytes: u64) -> BandwidthGrant {
-        self.reserve_at(bytes, self.now_ns())
+    /// Prepare bytes without occupying capacity before a transport exists.
+    pub(crate) fn prepare(self: &Arc<Self>, bytes: u64) -> BandwidthGrant {
+        self.grant(bytes, self.now_ns(), None)
     }
 
-    /// Reserve `bytes` as if the current time were `now` nanoseconds.
+    /// Reserve bytes immediately; production writers call this only for prefixes.
+    #[cfg(test)]
+    pub(crate) fn reserve(self: &Arc<Self>, bytes: u64) -> BandwidthGrant {
+        let mut grant = self.prepare(bytes);
+        grant.reserve();
+        grant
+    }
+
+    /// Reserve with an explicit clock for deterministic accounting models.
+    #[cfg(test)]
     pub(crate) fn reserve_at(self: &Arc<Self>, bytes: u64, now: i128) -> BandwidthGrant {
-        if bytes == 0 || self.rate == 0 {
-            return empty_grant(self);
-        }
-        let cost_ns = bytes_to_ns(bytes, self.rate);
-        let mut inner = self.lock();
-        let base = normalized_base(inner.tat, inner.initialized, now, self.burst_ns);
-        inner.initialized = true;
-        let tat_after = base.saturating_add(cost_ns);
-        inner.tat = tat_after;
-        inner.outstanding = inner.outstanding.saturating_add(1);
-        drop(inner);
+        let mut grant = self.grant(bytes, now, Some(now));
+        grant.reserve();
+        grant
+    }
+
+    /// Construct a non-debiting charge that retains its preparation timestamp.
+    fn grant(self: &Arc<Self>, bytes: u64, now: i128, synthetic_now: Option<i128>) -> BandwidthGrant {
         BandwidthGrant {
             schedule: Arc::clone(self),
-            cost_ns,
-            tat_after,
-            delay: delay_between(now, tat_after),
-            committed: false,
+            bytes,
+            cost_ns: bytes_to_ns(bytes, self.rate),
+            tat_after: 0,
+            created_at: now,
+            generation: 0,
+            reserved: false,
+            acquired: false,
+            synthetic_now,
         }
     }
 
-    /// Whether a brand-new full burst would match this schedule.
+    /// Whether a new full budget is equivalent to the remaining allowance.
     pub(crate) fn is_fresh(&self) -> bool {
         self.is_fresh_at(self.now_ns())
     }
 
-    /// [`Self::is_fresh`] at a caller-supplied time.
+    /// Check freshness using the supplied monotonic clock.
     pub(crate) fn is_fresh_at(&self, now: i128) -> bool {
         let inner = self.lock();
-        if !inner.initialized {
-            return true;
-        }
-        inner.tat <= now.saturating_sub(self.burst_ns)
+        !inner.active
+            && inner.outstanding == 0
+            && (!inner.initialized || inner.tat <= now.saturating_sub(self.burst_ns))
     }
 
-    /// Account for a grant that was sent or cancelled.
-    fn settle_grant(&self, cost_ns: i128, tat_after: i128, committed: bool) {
-        let mut inner = self.lock();
-        inner.outstanding = inner.outstanding.saturating_sub(1);
-        if committed {
-            note_commit(&mut inner, cost_ns);
-        } else {
-            note_cancel(&mut inner, cost_ns, tat_after);
-        }
-        drop(inner);
-    }
-
-    /// Nanoseconds since this schedule was created.
+    /// Nanoseconds since this budget was created.
     fn now_ns(&self) -> i128 {
         i128::try_from(self.epoch.elapsed().as_nanos()).unwrap_or(i128::MAX)
     }
 
-    /// Lock the theoretical arrival time, recovering from a poisoned mutex.
+    /// Lock accounting without retaining the guard across external operations.
     fn lock(&self) -> MutexGuard<'_, ScheduleInner> {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
 impl BandwidthGrant {
-    /// How long to wait before the reserved bytes may be sent.
+    /// Remaining wait computed at use time, including time spent resolving DNS.
     pub(crate) fn delay(&self) -> Duration {
-        self.delay
+        let now = self.now_ns();
+        delay_between(now, self.release_ns(now))
     }
 
-    /// Mark the bytes as sent so drop does not refund them.
+    /// Maximum prefix supported by this budget, including no-burst progress.
+    pub(super) fn quantum(&self) -> u64 {
+        self.schedule.quantum
+    }
+
+    /// Coalesce prepared charges from repeated body callbacks on one budget.
+    pub(super) fn merge(&mut self, mut other: Self) -> Result<(), Self> {
+        if !Arc::ptr_eq(&self.schedule, &other.schedule) {
+            return Err(other);
+        }
+        self.refund();
+        other.refund();
+        self.bytes = self.bytes.saturating_add(other.bytes);
+        self.cost_ns = bytes_to_ns(self.bytes, self.schedule.rate);
+        self.created_at = self.created_at.min(other.created_at);
+        Ok(())
+    }
+
+    /// Take a bounded prefix while leaving the unsent tail as a non-debiting plan.
+    pub(super) fn split_prefix(&mut self, bytes: u64) -> Self {
+        self.refund();
+        let taken = self.bytes.min(bytes);
+        self.bytes = self.bytes.saturating_sub(taken);
+        self.cost_ns = bytes_to_ns(self.bytes, self.schedule.rate);
+        let mut prefix = self.schedule.grant(taken, self.created_at, self.synthetic_now);
+        prefix.reserve();
+        prefix
+    }
+
+    /// Try to acquire exclusive ownership of this prefix's write allowance.
+    pub(super) fn try_acquire(&mut self) -> Admission {
+        let now = self.now_ns();
+        let mut inner = self.schedule.lock();
+        let release = self.release_with(&inner, now);
+        if inner.active {
+            return Admission::Busy(self.schedule.changed.subscribe());
+        }
+        if release > now {
+            return self
+                .schedule
+                .epoch
+                .checked_add(delay_between(0, release))
+                .map_or(Admission::Overflow, Admission::At);
+        }
+        inner.active = true;
+        drop(inner);
+        self.acquired = true;
+        Admission::Ready
+    }
+
+    /// Release a claim before waiting on another budget, preventing lock-order stalls.
+    pub(super) fn unclaim(&mut self) {
+        if self.acquired {
+            self.schedule.lock().active = false;
+            self.acquired = false;
+            self.schedule.changed.send_replace(());
+        }
+    }
+
+    /// Commit bytes accepted by the writer; dropping the rest refunds it.
     pub(crate) fn commit(mut self) {
-        self.committed = true;
+        if self.cost_ns == 0 {
+            return;
+        }
+        self.reserve();
+        let now = self.now_ns();
+        let mut inner = self.schedule.lock();
+        inner.committed_tat = Some(self.accepted_release(&inner, now));
+        inner.outstanding = inner.outstanding.saturating_sub(1);
+        finish_planning(&mut inner);
+        if self.acquired {
+            inner.active = false;
+        }
+        self.reserved = false;
+        self.acquired = false;
+        drop(inner);
+        self.schedule.changed.send_replace(());
+    }
+
+    /// Rebuild non-refundable debt from accepted writes using the actual clock.
+    fn accepted_release(&self, inner: &ScheduleInner, now: i128) -> i128 {
+        if self.schedule.burst_ns == 0 {
+            return inner
+                .committed_tat
+                .unwrap_or(0)
+                .max(self.created_at)
+                .saturating_add(self.cost_ns)
+                .max(now);
+        }
+        normalized_base(
+            inner.committed_tat.unwrap_or(0),
+            inner.committed_tat.is_some(),
+            now,
+            self.schedule.burst_ns,
+        )
+        .saturating_add(self.cost_ns)
+    }
+
+    /// Keep only the accepted portion of a prefix; dropping an empty write refunds it.
+    pub(super) fn commit_partial(mut self, bytes: u64) {
+        if bytes == 0 {
+            return;
+        }
+        self.bytes = self.bytes.min(bytes);
+        self.cost_ns = bytes_to_ns(self.bytes, self.schedule.rate);
+        self.commit();
+    }
+
+    /// Record this prefix in planned debt exactly once.
+    fn reserve(&mut self) {
+        if self.reserved || self.cost_ns == 0 {
+            return;
+        }
+        let mut inner = self.schedule.lock();
+        let floor = self.created_at.saturating_sub(self.schedule.burst_ns);
+        if inner.initialized && floor > inner.tat {
+            inner.generation = inner.generation.wrapping_add(1);
+        }
+        let base = normalized_base(inner.tat, inner.initialized, self.created_at, self.schedule.burst_ns);
+        inner.tat = base.saturating_add(self.cost_ns);
+        inner.initialized = true;
+        inner.outstanding = inner.outstanding.saturating_add(1);
+        self.tat_after = inner.tat;
+        self.generation = inner.generation;
+        drop(inner);
+        self.reserved = true;
+    }
+
+    /// Release only debt belonging to this reservation's still-current generation.
+    fn refund(&mut self) {
+        if !self.reserved {
+            return;
+        }
+        let mut inner = self.schedule.lock();
+        inner.outstanding = inner.outstanding.saturating_sub(1);
+        if self.generation == inner.generation && inner.tat == self.tat_after {
+            inner.tat = inner.tat.saturating_sub(self.cost_ns);
+            if let Some(committed) = inner.committed_tat {
+                inner.tat = inner.tat.max(committed);
+            }
+        }
+        finish_planning(&mut inner);
+        if self.acquired {
+            inner.active = false;
+        }
+        self.reserved = false;
+        self.acquired = false;
+        drop(inner);
+        self.schedule.changed.send_replace(());
+    }
+
+    /// Planned release, bounded below by the non-refundable accepted-write ledger.
+    fn release_ns(&self, now: i128) -> i128 {
+        self.release_with(&self.schedule.lock(), now)
+    }
+
+    /// Calculate release while the caller already holds the accounting lock.
+    fn release_with(&self, inner: &ScheduleInner, now: i128) -> i128 {
+        let planned = if self.reserved {
+            self.tat_after
+        } else {
+            normalized_base(inner.tat, inner.initialized, self.created_at, self.schedule.burst_ns)
+                .saturating_add(self.cost_ns)
+        };
+        let committed = if self.schedule.burst_ns == 0 {
+            inner
+                .committed_tat
+                .unwrap_or(0)
+                .max(self.created_at)
+                .saturating_add(self.cost_ns)
+        } else {
+            normalized_base(
+                inner.committed_tat.unwrap_or(0),
+                inner.committed_tat.is_some(),
+                now,
+                self.schedule.burst_ns,
+            )
+            .saturating_add(self.cost_ns)
+        };
+        planned.max(committed)
+    }
+
+    /// Clock selected by production or a deterministic model test.
+    fn now_ns(&self) -> i128 {
+        self.synthetic_now.unwrap_or_else(|| self.schedule.now_ns())
     }
 }
 
 impl Drop for BandwidthGrant {
     fn drop(&mut self) {
-        if self.cost_ns == 0 {
-            return;
-        }
-        self.schedule.settle_grant(self.cost_ns, self.tat_after, self.committed);
+        self.refund();
     }
 }
 
-/// Record a sent grant and release cancelled bytes once nothing is in flight.
-fn note_commit(inner: &mut ScheduleInner, cost_ns: i128) {
-    inner.committed_ns = inner.committed_ns.saturating_add(cost_ns);
+/// Once all reservations settle, retain only bytes that really reached the writer.
+fn finish_planning(inner: &mut ScheduleInner) {
     if inner.outstanding == 0 {
-        reclaim_finished(inner, 0);
+        inner.tat = inner.committed_tat.unwrap_or(0);
+        inner.initialized = inner.committed_tat.is_some();
     }
 }
 
-/// Return a cancelled grant. A non-tail grant stays pending while a later one is outstanding.
-fn note_cancel(inner: &mut ScheduleInner, cost_ns: i128, tat_after: i128) {
-    if inner.outstanding == 0 {
-        reclaim_finished(inner, cost_ns);
-        return;
-    }
-    if inner.tat == tat_after {
-        inner.tat = inner.tat.saturating_sub(cost_ns);
-        return;
-    }
-    inner.pending_refund_ns = inner.pending_refund_ns.saturating_add(cost_ns);
-}
-
-/// Remove cancelled cost. A schedule with nothing sent becomes fresh again.
-fn reclaim_finished(inner: &mut ScheduleInner, extra: i128) {
-    if inner.committed_ns == 0 {
-        inner.tat = 0;
-        inner.pending_refund_ns = 0;
-        inner.initialized = false;
-        return;
-    }
-    let reclaim = extra.saturating_add(inner.pending_refund_ns);
-    inner.tat = inner.tat.saturating_sub(reclaim);
-    inner.pending_refund_ns = 0;
-}
-
-/// A grant that does not change the schedule.
-fn empty_grant(schedule: &Arc<Schedule>) -> BandwidthGrant {
-    BandwidthGrant {
-        schedule: Arc::clone(schedule),
-        cost_ns: 0,
-        tat_after: 0,
-        delay: Duration::ZERO,
-        committed: true,
-    }
-}
-
-/// Arrival time after applying the burst floor.
-///
-/// An uninitialized schedule starts a full burst behind `now`.
-/// Idle time never moves the time further back than that floor,
-/// so a no-burst schedule snaps to `now` and a burst schedule
-/// refills only up to `burst_bytes`.
+/// Apply burst refill without manufacturing an allowance in no-burst mode.
 fn normalized_base(tat: i128, initialized: bool, now: i128, burst_ns: i128) -> i128 {
     let floor = now.saturating_sub(burst_ns);
     if initialized { tat.max(floor) } else { floor }
 }
 
-/// Wait from `now` until `tat_after`.
-fn delay_between(now: i128, tat_after: i128) -> Duration {
-    let Some(delta) = tat_after.checked_sub(now) else {
-        return Duration::MAX;
-    };
+/// Positive difference between monotonic timestamps.
+fn delay_between(now: i128, release: i128) -> Duration {
+    let delta = release.saturating_sub(now);
     if delta <= 0 {
         return Duration::ZERO;
     }
     u64::try_from(delta).map_or(Duration::MAX, Duration::from_nanos)
 }
 
-/// Convert bytes at `rate` bytes per second into nanoseconds.
-///
-/// A positive byte count that rounds to zero becomes one nanosecond
-/// so a tiny chunk is not free. A zero byte count stays zero.
+/// Round a nonempty charge upward so high rates cannot make bytes free.
 fn bytes_to_ns(bytes: u64, rate: u64) -> i128 {
     if bytes == 0 || rate == 0 {
         return 0;
     }
-    let nanos = u128::from(bytes).saturating_mul(1_000_000_000) / u128::from(rate);
-    let nanos = if nanos == 0 { 1 } else { nanos };
-    i128::try_from(nanos).unwrap_or(i128::MAX)
+    let numerator = u128::from(bytes).saturating_mul(1_000_000_000);
+    i128::try_from(numerator.div_ceil(u128::from(rate))).unwrap_or(i128::MAX)
 }
-
-// -----------------------------------------------------------------------------
-// Tests
-// -----------------------------------------------------------------------------
 
 #[cfg(test)]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
@@ -271,6 +410,30 @@ fn bytes_to_ns(bytes: u64, rate: u64) -> i128 {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancelling_a_pre_refill_grant_does_not_create_a_second_burst() {
+        let schedule = Schedule::new(100, 100);
+        let old = schedule.reserve_at(100, 0);
+        let current = schedule.reserve_at(100, 2_000_000_000);
+        drop(old);
+        current.commit();
+        assert_eq!(schedule.reserve_at(100, 2_000_000_000).delay(), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn a_wait_uses_only_the_time_left_until_its_absolute_release() {
+        let schedule = Schedule::new(1000, 0);
+        let mut grant = schedule.reserve_at(1000, 0);
+        grant.synthetic_now = Some(600_000_000);
+        assert_eq!(
+            grant.delay(),
+            Duration::from_millis(400),
+            "DNS time is not charged twice"
+        );
+        grant.synthetic_now = Some(1_100_000_000);
+        assert!(grant.delay().is_zero(), "a past release time does not sleep again");
+    }
 
     #[test]
     fn no_burst_paces_the_first_byte() {

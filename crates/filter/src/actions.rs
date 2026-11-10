@@ -314,12 +314,6 @@ pub struct Rejection {
     /// returning a normal terminal response may opt into reuse.
     pub preserve_keepalive: bool,
 
-    /// Why the protocol drops the connection instead of writing this rejection.
-    ///
-    /// `None` writes the rejection to the client. [`Self::closing`] sets it.
-    /// A response header cannot.
-    pub close_reason: Option<&'static str>,
-
     /// HTTP status code.
     pub status: u16,
 }
@@ -342,7 +336,6 @@ impl Rejection {
             header_map: None,
             body: None,
             preserve_keepalive: false,
-            close_reason: None,
         }
     }
 
@@ -355,15 +348,6 @@ impl Rejection {
     /// Add a header to the rejection response.
     pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.headers.push((name.into(), value.into()));
-        self
-    }
-
-    /// Drop the connection and log `reason` instead of writing this rejection.
-    ///
-    /// The reason is part of the rejection value. An operator-configured
-    /// header cannot ask for the same close.
-    pub fn closing(mut self, reason: &'static str) -> Self {
-        self.close_reason = Some(reason);
         self
     }
 
@@ -467,7 +451,6 @@ mod tests {
         );
         assert!(r.body.is_none(), "body should default to None");
         assert!(!r.preserve_keepalive, "rejections should close by default");
-        assert!(r.close_reason.is_none(), "a plain rejection is written to the client");
     }
 
     #[test]
