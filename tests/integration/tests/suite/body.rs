@@ -563,7 +563,7 @@ impl HttpFilter for ResponseBodyRejectFilter {
     }
 
     fn response_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional)
     }
 
     fn response_body_mode(&self) -> BodyMode {
@@ -627,7 +627,7 @@ impl HttpFilter for BodyUppercaseFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadWrite
+        BodyAccess::ReadWrite(praxis_filter::BodyRequirement::Optional)
     }
 
     async fn on_request_body(
@@ -668,7 +668,7 @@ impl HttpFilter for ReleaseFirstChunkFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional)
     }
 
     async fn on_request_body(
@@ -698,7 +698,7 @@ impl HttpFilter for BufferWithoutReleaseFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional)
     }
 
     async fn on_request_body(
@@ -734,7 +734,7 @@ impl HttpFilter for PreReadUppercaseFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadWrite
+        BodyAccess::ReadWrite(praxis_filter::BodyRequirement::Optional)
     }
 
     async fn on_request_body(
@@ -769,7 +769,7 @@ impl HttpFilter for TinyBufferFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional)
     }
 
     async fn on_request_body(
@@ -799,7 +799,7 @@ impl HttpFilter for BodyRejectFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional)
     }
 
     async fn on_request_body(
@@ -832,7 +832,7 @@ impl HttpFilter for AsyncBodyFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadWrite
+        BodyAccess::ReadWrite(praxis_filter::BodyRequirement::Optional)
     }
 
     async fn on_request_body(
@@ -866,7 +866,7 @@ impl HttpFilter for ResponseBodyUppercaseFilter {
     }
 
     fn response_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadWrite
+        BodyAccess::ReadWrite(praxis_filter::BodyRequirement::Optional)
     }
 
     fn on_response_body(
@@ -912,7 +912,7 @@ impl HttpFilter for ErrorOnBodyFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional)
     }
 
     async fn on_request_body(

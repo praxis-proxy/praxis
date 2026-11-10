@@ -79,7 +79,7 @@ impl HttpFilter for MetadataWriterFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional)
     }
 
     async fn on_request_body(

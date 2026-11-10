@@ -14,7 +14,8 @@ use praxis_filter::{
     Rejection,
 };
 use praxis_test_utils::{
-    Backend, free_port, http_get, http_send, parse_body, parse_header, parse_status, start_full_proxy_with_registry,
+    Backend, GrpcBackend, free_port, http_get, http_send, parse_body, parse_header, parse_status,
+    start_full_proxy_with_registry, start_grpc_backend,
 };
 
 // ---------------------------------------------------------------------------
@@ -31,7 +32,7 @@ impl HttpFilter for RejectResponseBodyFilter {
     }
 
     fn response_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional)
     }
 
     async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
@@ -84,7 +85,7 @@ impl HttpFilter for ErrorResponseBodyFilter {
     }
 
     fn response_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional)
     }
 
     async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
@@ -101,6 +102,41 @@ impl HttpFilter for ErrorResponseBodyFilter {
     }
 }
 
+/// Response-body filter that fails only on the synthetic end-of-stream hook.
+struct ErrorAtResponseEofFilter;
+
+#[async_trait::async_trait]
+impl HttpFilter for ErrorAtResponseEofFilter {
+    fn name(&self) -> &'static str {
+        "test_error_at_response_eof"
+    }
+
+    fn response_body_access(&self) -> BodyAccess {
+        BodyAccess::ReadOnly
+    }
+
+    fn response_trailer_access(&self) -> bool {
+        true
+    }
+
+    async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Continue)
+    }
+
+    fn on_response_body(
+        &self,
+        _ctx: &mut HttpFilterContext<'_>,
+        _body: &mut Option<Bytes>,
+        end_of_stream: bool,
+    ) -> Result<FilterAction, FilterError> {
+        if end_of_stream {
+            Err("test_error_at_response_eof: synthetic EOF failed".to_owned().into())
+        } else {
+            Ok(FilterAction::Continue)
+        }
+    }
+}
+
 /// Response-body filter that buffers with a tiny StreamBuffer ceiling.
 struct TinyBufferResponseFilter;
 
@@ -111,7 +147,7 @@ impl HttpFilter for TinyBufferResponseFilter {
     }
 
     fn response_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional)
     }
 
     fn response_body_mode(&self) -> BodyMode {
@@ -133,7 +169,7 @@ impl HttpFilter for ErrorRequestBodyFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional)
     }
 
     async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
@@ -161,6 +197,11 @@ fn registry() -> FilterRegistry {
     reg.register(
         "test_error_response_body",
         FilterFactory::Http(Arc::new(|_| Ok(Box::new(ErrorResponseBodyFilter)))),
+    )
+    .unwrap();
+    reg.register(
+        "test_error_at_response_eof",
+        FilterFactory::Http(Arc::new(|_| Ok(Box::new(ErrorAtResponseEofFilter)))),
     )
     .unwrap();
     reg.register(
@@ -211,6 +252,38 @@ filter_chains:
           - name: backend
             endpoints:
               - "127.0.0.1:{backend_port}"
+"#
+    )
+}
+
+/// Proxy YAML for a filter that exercises the HTTP/2 response-trailer path.
+fn h2_proxy_yaml(proxy_port: u16, backend_port: u16, filter_name: &str) -> String {
+    format!(
+        r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains: [main]
+
+insecure_options:
+  allow_private_endpoints: true
+  allow_private_upstreams: true
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: {filter_name}
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:{backend_port}"
+            http:
+              version: h2
 "#
     )
 }
@@ -273,6 +346,35 @@ fn response_body_filter_error_does_not_deliver_body() {
     assert!(
         !body.contains("confidential-payload"),
         "an errored response body must not reach the client: {body:?}"
+    );
+}
+
+#[test]
+fn synthetic_eof_filter_error_aborts_h2_trailer_delivery() {
+    let backend = start_grpc_backend(GrpcBackend::ok().body(b"\x00\x00\x00\x00\x02hi".as_slice()));
+    let proxy_port = free_port();
+    let config = Config::from_yaml(&h2_proxy_yaml(proxy_port, backend.port(), "test_error_at_response_eof"))
+        .expect("HTTP/2 proxy config should parse");
+    let reg = registry();
+    let _proxy = start_full_proxy_with_registry(&config, &reg);
+
+    let raw = http_send(
+        &format!("127.0.0.1:{proxy_port}"),
+        "POST /pkg.Svc/Method HTTP/1.1\r\n\
+         Host: localhost\r\n\
+         Content-Type: application/grpc\r\n\
+         Content-Length: 0\r\n\
+         Connection: close\r\n\r\n",
+    );
+
+    assert_eq!(
+        parse_status(&raw),
+        200,
+        "the upstream status is committed before EOF: {raw}"
+    );
+    assert!(
+        !raw.to_ascii_lowercase().contains("grpc-status:"),
+        "a synthetic EOF failure must abort before forwarding HTTP/2 trailers: {raw}"
     );
 }
 

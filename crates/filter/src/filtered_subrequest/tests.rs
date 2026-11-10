@@ -1044,7 +1044,7 @@ impl crate::HttpFilter for SelectedUpstreamRejectFilter {
     }
 
     fn selected_upstream_request_body_access(&self) -> crate::BodyAccess {
-        crate::BodyAccess::ReadOnly
+        crate::BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn request_body_mode(&self) -> crate::BodyMode {
@@ -1090,7 +1090,7 @@ impl crate::HttpFilter for SelectedUpstreamExpandFilter {
     }
 
     fn selected_upstream_request_body_access(&self) -> crate::BodyAccess {
-        crate::BodyAccess::ReadWrite
+        crate::BodyAccess::ReadWrite(crate::BodyRequirement::Optional)
     }
 
     fn request_body_mode(&self) -> crate::BodyMode {
@@ -1146,7 +1146,7 @@ impl crate::HttpFilter for SelectedProviderRecorderFilter {
     }
 
     fn selected_upstream_request_body_access(&self) -> crate::BodyAccess {
-        crate::BodyAccess::ReadOnly
+        crate::BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn request_body_mode(&self) -> crate::BodyMode {
@@ -1944,7 +1944,7 @@ impl crate::HttpFilter for SessionStoreRecorderFilter {
     }
 
     fn response_body_access(&self) -> crate::BodyAccess {
-        crate::BodyAccess::ReadWrite
+        crate::BodyAccess::ReadWrite(crate::BodyRequirement::Optional)
     }
 
     fn on_response_body(
@@ -2411,7 +2411,7 @@ impl crate::HttpFilter for TerminalEventFilter {
     }
 
     fn response_body_access(&self) -> crate::BodyAccess {
-        crate::BodyAccess::ReadWrite
+        crate::BodyAccess::ReadWrite(crate::BodyRequirement::Optional)
     }
 
     fn on_response_body(
@@ -2447,7 +2447,7 @@ impl crate::HttpFilter for BoundedCompletionFilter {
     }
 
     fn response_body_access(&self) -> crate::BodyAccess {
-        crate::BodyAccess::ReadWrite
+        crate::BodyAccess::ReadWrite(crate::BodyRequirement::Optional)
     }
 
     fn on_response_body(
@@ -2485,7 +2485,7 @@ impl crate::HttpFilter for SuppressionProbeFilter {
     }
 
     fn response_body_access(&self) -> crate::BodyAccess {
-        crate::BodyAccess::ReadOnly
+        crate::BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn on_response_body(
@@ -2518,7 +2518,7 @@ impl crate::HttpFilter for RejectOnCompletionFilter {
     }
 
     fn response_body_access(&self) -> crate::BodyAccess {
-        crate::BodyAccess::ReadWrite
+        crate::BodyAccess::ReadWrite(crate::BodyRequirement::Optional)
     }
 
     fn on_response_body(
@@ -3425,7 +3425,7 @@ impl crate::HttpFilter for BodyExpandingFilter {
     }
 
     fn response_body_access(&self) -> crate::BodyAccess {
-        crate::BodyAccess::ReadWrite
+        crate::BodyAccess::ReadWrite(crate::BodyRequirement::Optional)
     }
 
     fn on_response_body(
@@ -4079,7 +4079,7 @@ impl crate::HttpFilter for SelectedUpstreamBodyHijackFilter {
     }
 
     fn selected_upstream_request_body_access(&self) -> crate::BodyAccess {
-        crate::BodyAccess::ReadOnly
+        crate::BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn request_body_mode(&self) -> crate::BodyMode {
@@ -4147,7 +4147,7 @@ impl crate::HttpFilter for SelectedUpstreamStateExpandFilter {
     }
 
     fn selected_upstream_request_body_access(&self) -> crate::BodyAccess {
-        crate::BodyAccess::ReadOnly
+        crate::BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn request_body_mode(&self) -> crate::BodyMode {
@@ -4971,7 +4971,7 @@ mod adaptation_cancellation {
             if self.bound {
                 crate::BodyAccess::None
             } else {
-                crate::BodyAccess::ReadWrite
+                crate::BodyAccess::ReadWrite(crate::BodyRequirement::Optional)
             }
         }
 
@@ -4987,7 +4987,7 @@ mod adaptation_cancellation {
         #[cfg(feature = "bound-upstream-request-body")]
         fn bound_upstream_request_body_access(&self) -> crate::BodyAccess {
             if self.bound {
-                crate::BodyAccess::ReadWrite
+                crate::BodyAccess::ReadWrite(crate::BodyRequirement::Optional)
             } else {
                 crate::BodyAccess::None
             }

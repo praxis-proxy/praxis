@@ -435,6 +435,25 @@ inspects or modifies the body. Use `ReadOnly` if you
 inspect but do not modify, and `ReadWrite` only if you
 mutate chunks in place.
 
+Every body-access declaration also states whether the
+processing is optional or required:
+
+```rust
+fn request_body_access(&self) -> BodyAccess {
+    BodyAccess::ReadOnly(BodyRequirement::Required)
+}
+```
+
+`Required` means an explicitly permitted opaque WebSocket
+upgrade must be refused when this selected filter would
+otherwise need HTTP body processing. Use `Optional` when
+missing body hooks for an opaque upgraded connection is
+acceptable, as for a best-effort observer. The default
+`BodyAccess::None` needs no requirement. This is a Rust API
+change: external filters that return `ReadOnly` or
+`ReadWrite` must now provide `BodyRequirement::Optional`
+or `BodyRequirement::Required`.
+
 ### Choose the right body mode
 
 - `Stream`: lowest latency; chunks flow through as they

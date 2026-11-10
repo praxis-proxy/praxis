@@ -36,8 +36,8 @@ pub mod tls_probe;
 pub use example_config::{allow_loopback_endpoints, example_config_path, load_example_config, patch_yaml};
 pub use fips::{FIPS_HOST_ENV, approved_mode, assert_fips_host_if_declared, expect_approved_mode, fips_host};
 pub use load::{
-    LoadReport, collect_responses, concurrent_gets, idle_keepalive_connections, is_closed_by_peer, open_requests,
-    read_raw_responses,
+    ContinuousLoadDriver, ContinuousLoadReport, ContinuousLoadSnapshot, LoadReport, collect_responses, concurrent_gets,
+    idle_keepalive_connections, is_closed_by_peer, open_requests, read_raw_responses,
 };
 pub use net::*;
 pub use payload::PayloadSpec;

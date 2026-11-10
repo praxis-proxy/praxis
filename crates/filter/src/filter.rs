@@ -349,10 +349,10 @@ pub trait HttpFilter: Send + Sync {
     /// Declares what access this filter needs to request bodies.
     ///
     /// Return [`BodyAccess::None`] (the default) when the filter
-    /// does not inspect or modify request bodies. Return
-    /// [`BodyAccess::ReadOnly`] to receive body chunks in
-    /// [`on_request_body`] without modification rights, or
-    /// [`BodyAccess::ReadWrite`] to mutate body bytes in place.
+    /// does not inspect or modify request bodies. Otherwise choose
+    /// [`BodyAccess::ReadOnly`] or [`BodyAccess::ReadWrite`] with an explicit
+    /// [`crate::BodyRequirement`]. Access rights, requirement, and delivery mode are
+    /// independent declarations.
     ///
     /// This declares the *pre-read* request-body hook, which runs before the
     /// request phase selects an upstream. A filter whose body operation can run
@@ -369,10 +369,9 @@ pub trait HttpFilter: Send + Sync {
     /// Declares what access this filter needs to response bodies.
     ///
     /// Return [`BodyAccess::None`] (the default) when the filter
-    /// does not inspect or modify response bodies. Return
-    /// [`BodyAccess::ReadOnly`] to receive body chunks in
-    /// [`on_response_body`] without modification rights, or
-    /// [`BodyAccess::ReadWrite`] to mutate body bytes in place.
+    /// does not inspect or modify response bodies. Otherwise choose
+    /// [`BodyAccess::ReadOnly`] or [`BodyAccess::ReadWrite`] with an explicit
+    /// [`crate::BodyRequirement`].
     ///
     /// [`on_response_body`]: HttpFilter::on_response_body
     fn response_body_access(&self) -> BodyAccess {
@@ -386,10 +385,8 @@ pub trait HttpFilter: Send + Sync {
     /// phase has chosen an upstream cluster, giving a filter a final
     /// opportunity to inspect or rewrite the request body for the
     /// specific upstream it is about to be forwarded to. Return
-    /// [`BodyAccess::None`] (the default) to opt out,
-    /// [`BodyAccess::ReadOnly`] to observe the body in
-    /// [`on_selected_upstream_request_body`], or
-    /// [`BodyAccess::ReadWrite`] to mutate it.
+    /// [`BodyAccess::None`] (the default) to opt out, or declare read-only or
+    /// read-write access with an explicit [`crate::BodyRequirement`].
     ///
     /// A participating filter must declare a bounded
     /// [`BodyMode::StreamBuffer`] via [`request_body_mode`] so the
@@ -417,10 +414,8 @@ pub trait HttpFilter: Send + Sync {
     /// published. It gives a filter a
     /// chance to inspect or rewrite the request body against the frozen
     /// logical binding, before an endpoint is selected. Return
-    /// [`BodyAccess::None`] (the default) to opt out,
-    /// [`BodyAccess::ReadOnly`] to observe the body in
-    /// [`on_bound_upstream_request_body`], or [`BodyAccess::ReadWrite`] to
-    /// mutate it.
+    /// [`BodyAccess::None`] (the default) to opt out, or declare read-only or
+    /// read-write access with an explicit [`crate::BodyRequirement`].
     ///
     /// A participating filter must declare a bounded
     /// [`BodyMode::StreamBuffer`] via [`request_body_mode`] so the complete

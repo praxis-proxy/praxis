@@ -946,7 +946,7 @@ mod tests {
         }
 
         fn response_body_access(&self) -> crate::BodyAccess {
-            crate::BodyAccess::ReadOnly
+            crate::BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
         }
 
         fn on_response_body(
