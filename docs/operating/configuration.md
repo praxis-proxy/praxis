@@ -557,6 +557,12 @@ series that differed only by that dimension collapsed
 into one. Setting one to the value it already has changes
 nothing.
 
+Each dimension may appear at most once. YAML keeps the
+last value for a repeated key, so a second
+`status_code:` line further down would silently override
+the first; Praxis rejects the config instead, naming the
+repeated dimension.
+
 The exception is `cluster` on the two per-cluster health
 gauges (`praxis_upstream_healthy_endpoints` and
 `praxis_upstream_total_endpoints`), which keep the label

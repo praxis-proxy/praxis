@@ -39,9 +39,12 @@
 //! requests with the template, for per-endpoint observability without
 //! unbounded cardinality.
 
-use std::collections::{BTreeMap, HashMap};
+use std::{
+    collections::{BTreeMap, HashMap},
+    fmt,
+};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de};
 
 // -----------------------------------------------------------------------------
 // MetricsConfig
@@ -189,6 +192,10 @@ impl MetricLabel {
 /// // Writing a dimension's own default changes nothing.
 /// let labels: MetricLabelsConfig = serde_yaml::from_str("route: true").unwrap();
 /// assert_eq!(labels, MetricLabelsConfig::default());
+///
+/// // Setting one dimension twice is an error, not a last-one-wins.
+/// let repeated = "status_code: true\nstatus_code: false";
+/// assert!(serde_yaml::from_str::<MetricLabelsConfig>(repeated).is_err());
 /// ```
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(try_from = "MetricLabelsRaw", into = "BTreeMap<MetricLabel, bool>")]
@@ -229,11 +236,37 @@ impl From<MetricLabelsConfig> for BTreeMap<MetricLabel, bool> {
 }
 
 /// Raw deserialization target for [`MetricLabelsConfig`].
-#[derive(Deserialize)]
-#[serde(transparent)]
 struct MetricLabelsRaw {
-    /// Dimension name to setting, before validation.
-    entries: BTreeMap<String, serde_yaml::Value>,
+    /// The raw `dimension: setting` pairs, in the order the operator wrote them.
+    entries: Vec<(String, serde_yaml::Value)>,
+}
+
+impl<'de> Deserialize<'de> for MetricLabelsRaw {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_map(MetricLabelsRawVisitor)
+    }
+}
+
+/// Collects the `metrics.labels` entries, rejecting a repeated dimension.
+struct MetricLabelsRawVisitor;
+
+impl<'de> de::Visitor<'de> for MetricLabelsRawVisitor {
+    type Value = MetricLabelsRaw;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a map of metric label dimensions to true or false")
+    }
+
+    fn visit_map<A: de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut entries: Vec<(String, serde_yaml::Value)> = Vec::new();
+        while let Some((key, value)) = map.next_entry::<String, serde_yaml::Value>()? {
+            if entries.iter().any(|(seen, _)| *seen == key) {
+                return Err(de::Error::custom(format!("metrics.labels.{key}: set more than once")));
+            }
+            entries.push((key, value));
+        }
+        Ok(MetricLabelsRaw { entries })
+    }
 }
 
 impl TryFrom<MetricLabelsRaw> for MetricLabelsConfig {
@@ -503,6 +536,62 @@ mod tests {
             let parsed: Result<MetricLabelsConfig, _> = serde_yaml::from_str(yaml);
             assert!(parsed.is_err(), "{yaml} names no dimension, so it must not parse");
         }
+    }
+
+    #[test]
+    fn repeated_dimensions_are_rejected() {
+        // YAML keeps the last value for a repeated key, so `true` above
+        // `false` would silently disable a dimension the operator enabled.
+        // Both orders and a repeat of the same value are editing mistakes.
+        for yaml in [
+            "status_code: true\nstatus_code: false",
+            "status_code: false\nstatus_code: true",
+            "status_code: true\nstatus_code: true",
+            "route: false\nroute: false",
+        ] {
+            let parsed: Result<MetricLabelsConfig, _> = serde_yaml::from_str(yaml);
+            let err = parsed.expect_err("a dimension set twice must not resolve to one of the two");
+            assert!(
+                err.to_string().contains("set more than once"),
+                "{yaml} should report the repeat, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn repeated_dimension_error_names_the_dimension() {
+        let parsed: Result<MetricLabelsConfig, _> =
+            serde_yaml::from_str("route: true\nstatus_code: true\nstatus_code: false");
+        let err = parsed.expect_err("the repeated dimension must fail the parse");
+        assert!(
+            err.to_string().contains("status_code"),
+            "the error should name the repeated dimension, not the whole block, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validation_reports_the_first_entry_written() {
+        // Entries are validated in the order the operator wrote them, so the
+        // error names the first bad line rather than the one that happens to
+        // sort first.
+        for (yaml, expected, ignored) in [
+            ("zebra: true\nalpha: true", "zebra", "alpha"),
+            ("route: 5\nbogus: true", "route", "bogus"),
+        ] {
+            let parsed: Result<MetricLabelsConfig, _> = serde_yaml::from_str(yaml);
+            let err = parsed.expect_err("both entries are invalid").to_string();
+            assert!(err.contains(expected), "{yaml} should report {expected} first, got: {err}");
+            assert!(!err.contains(ignored), "{yaml} should stop before {ignored}, got: {err}");
+        }
+    }
+
+    #[test]
+    fn distinct_dimensions_are_not_mistaken_for_repeats() {
+        let labels: MetricLabelsConfig =
+            serde_yaml::from_str("route: false\nstatus_code: true\nendpoint: false").unwrap();
+        assert!(!labels.is_enabled(MetricLabel::Route), "route was turned off");
+        assert!(labels.is_enabled(MetricLabel::StatusCode), "status_code was turned on");
+        assert!(!labels.is_enabled(MetricLabel::Endpoint), "endpoint was turned off");
     }
 
     #[test]

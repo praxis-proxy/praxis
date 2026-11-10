@@ -69,6 +69,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `disabled` is rejected at startup with a message naming its replacement;
   configs that never set `metrics.labels` are unaffected. Migrate
   `disabled: [route, endpoint]` to `route: false` and `endpoint: false`.
+  A dimension set more than once is rejected rather than resolved to the
+  last value, matching how every other config struct treats a repeated
+  field.
 - The policy engine is updated to PPE 0.5.0, which tightens OAuth
   `delegate(...)` by default: a token-exchange response must name an
   access-token or JWT `issued_token_type`, unrequested scopes outside
