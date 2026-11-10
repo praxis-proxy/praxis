@@ -23,6 +23,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Security
 
+- HTTP/2 listeners now set their per-connection resource limits explicitly
+  (decoded header-list size, concurrent streams, maximum received frame size,
+  send buffer, and reset-stream churn) following RFC 9113 §10.5, rather than
+  relying on the `h2` crate's defaults. The enforced behaviour is unchanged;
+  the limits are now pinned and documented so a dependency update cannot
+  loosen them unnoticed.
 - LLM policies now apply HTTP authorization, delegation and request assertions
   to accepted unclassified requests without a model when
   `llm.require_model: false`. Adding a body to a discovery request no longer

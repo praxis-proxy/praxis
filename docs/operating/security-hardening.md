@@ -191,6 +191,18 @@ relying on the bind address.
   listeners to cap concurrent connections. HTTP
   listeners reject excess requests with 503 and
   `Retry-After`; TCP listeners close immediately.
+- **HTTP/2 resource limits**: HTTP/2 listeners apply
+  fixed per-connection bounds (`h2_server_options` in
+  `crates/protocol/src/http/pingora/handler/server_options.rs`)
+  following RFC 9113 §10.5: a 64 KiB decoded header
+  list, 128 concurrent streams, a 16 KiB maximum
+  received frame, a 400 KiB send buffer, and limits on
+  reset-stream churn. A client exceeding one of these
+  has the offending stream or the connection
+  terminated (`REFUSED_STREAM`, `FLOW_CONTROL_ERROR`,
+  or GOAWAY `ENHANCE_YOUR_CALM`) while other clients
+  are unaffected. These values are not yet
+  operator-tunable.
 - **Path-based gating is not a boundary against
   normalizing upstreams**: filter conditions
   (`when: { path_prefix: … }`) and `router` route

@@ -55,6 +55,7 @@ mod cors;
 mod cors_validation;
 mod filter_leakage;
 mod forwarded_headers;
+mod h2_limits;
 mod header_injection;
 mod hop_by_hop;
 mod host_header;
