@@ -56,6 +56,7 @@ mod health_checks;
 mod hedged_requests;
 mod hostname_upstream;
 mod http_active_requests;
+mod http_query;
 #[cfg(feature = "iterative-request-router")]
 mod iterative_request_router_circuit_breaker;
 #[cfg(feature = "iterative-request-router")]

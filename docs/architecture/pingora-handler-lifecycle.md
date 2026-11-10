@@ -346,8 +346,8 @@ Source: `upstream_request.rs`, `hop_by_hop.rs`,
 Called when Pingora cannot establish an upstream
 connection. Implements retry logic:
 
-- Only retries idempotent requests (GET, HEAD,
-  OPTIONS).
+- Automatically retries GET, HEAD, OPTIONS, and QUERY;
+  other methods require explicit retry opt-in.
 - Skips retry when the effective body size
   (`max(request_body_bytes, mutated_request_body_len)`)
   exceeds the 64 KiB Pingora retry buffer limit.
@@ -523,7 +523,8 @@ for `max(original downstream body, final adapted body)`.
 
 Constraints:
 
-- **Idempotency** - only GET, HEAD, OPTIONS retry.
+- **Method eligibility** - GET, HEAD, OPTIONS, and QUERY retry automatically;
+  other methods require explicit retry opt-in.
 - **Body size** - the effective body size (larger of
   original and mutated lengths) must not exceed
   Pingora's 64 KiB retry buffer.

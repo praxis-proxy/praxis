@@ -940,7 +940,8 @@ the ramp. See
 
 A route may set `hedge_policy` to race one idempotent client request across
 healthy endpoints in its cluster. The proxy must be built with the
-`hedged-requests` feature. `initial_requests` start at once. Each later copy
+`hedged-requests` feature. GET, HEAD, OPTIONS, and QUERY are eligible.
+`initial_requests` start at once. Each later copy
 waits `per_try_timeout_ms`, unless nothing is left in flight, in which case
 the next copy starts immediately while `max_attempts` and the budget allow
 it. A 2xx, 3xx, or 4xx response is terminal: it is returned and the other

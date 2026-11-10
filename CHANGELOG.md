@@ -36,6 +36,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- Treat HTTP QUERY as eligible for automatic retries on both network backends
+  and for configured hedged requests. Existing attempt, body replay, and
+  transport safety limits still apply. Add forwarding, replay, and resource
+  discovery coverage and an HTTP QUERY example with explicit CORS/CSRF settings.
 - Clarify that the default Pingora shutdown grace period is capped at five
   seconds, including for streaming responses, regardless of a larger
   `shutdown_timeout_secs` value.

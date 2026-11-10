@@ -67,14 +67,38 @@ the framework level:
   rejected from client requests (400), stripped before
   forwarding to backends, and stripped from backend
   responses before reaching clients.
-- **Retry safety**: retries apply only to idempotent
-  requests, with one deliberate exception. A stale pooled
-  connection (Pingora `ReusedOnly`), where the peer closed
-  an idle keepalive before processing the request, is safe
-  to replay for any method because the backend ran no side
-  effect. A truncated replay buffer is never retried.
+- **Retry safety**: GET, HEAD, OPTIONS, and QUERY are eligible for automatic
+  retries under the configured policy. Other methods require
+  `allow_non_idempotent`. Pingora's separate `ReusedOnly` path requires a
+  reused connection and an intact replay buffer, regardless of method.
+  A fresh-connection EOF on that path is not retried. A truncated replay
+  buffer is never retried.
 
 [RFC 9110 Section 7.6.1]:https://datatracker.ietf.org/doc/html/rfc9110#section-7.6.1
+
+## HTTP QUERY
+
+Both network backends forward [RFC 10008] QUERY requests, including the
+request body, over HTTP/1.1 and HTTP/2. QUERY uses the normal body path;
+body filters and configured hedging can request buffering as usual.
+
+QUERY is safe and idempotent, so it joins GET, HEAD, and OPTIONS in the
+automatic replay policy. Retry conditions, attempt and budget limits,
+deadlines, and body replay limits still apply. Replaying a consumed request
+body is limited to 64 KiB; larger requests can still be forwarded. Configured
+hedging on Pingora also admits QUERY under its existing attempt and body limits.
+
+The origin implements the query operation and validates its media type and
+content. Praxis forwards the origin's `Accept-Query`, `Allow`, and redirect
+responses. QUERY's cacheability does not add a response cache to Praxis.
+
+For browser use, explicitly add QUERY to the CORS `allow_methods` list and
+allow the request's `Content-Type` header. The CSRF filter keeps its existing
+defaults: QUERY requires a trusted origin unless explicitly included in
+`safe_methods`. See the functional
+[HTTP QUERY example](../../examples/configs/traffic-management/http-query.yaml).
+
+[RFC 10008]: https://www.rfc-editor.org/rfc/rfc10008.html
 
 ## Related
 
