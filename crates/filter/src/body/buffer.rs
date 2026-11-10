@@ -87,6 +87,9 @@ impl BodyBuffer {
 
     /// Consume the buffer and return the complete body.
     pub fn freeze(mut self) -> Bytes {
+        if self.bytes.is_empty() {
+            return Bytes::new();
+        }
         Bytes::from_owner(BufferedBody {
             bytes: std::mem::take(&mut self.bytes).into_boxed_slice(),
             accounting: self.accounting.clone(),
@@ -216,13 +219,15 @@ mod tests {
 
     #[test]
     fn buffer_empty_freeze_returns_empty_bytes() {
-        let buf = BodyBuffer::new(1024);
-
-        assert_eq!(buf.total_bytes(), 0, "empty buffer should have zero bytes");
-
-        let frozen = buf.freeze();
-
-        assert!(frozen.is_empty(), "freezing empty buffer should yield empty Bytes");
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            let buf = BodyBuffer::new(1024);
+            assert_eq!(buf.total_bytes(), 0, "empty buffer should have zero bytes");
+            let frozen = buf.freeze();
+            assert!(frozen.is_empty(), "freezing empty buffer should yield empty Bytes");
+            assert!(handle.render().contains("praxis_body_buffer_bytes 0"));
+        });
     }
 
     #[test]

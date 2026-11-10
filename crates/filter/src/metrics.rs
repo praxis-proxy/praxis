@@ -165,9 +165,9 @@ pub(crate) fn record_cloud_events_skipped(reason: &'static str) {
 /// Counts a filter hook while it runs, including time awaiting external work.
 pub(crate) struct FilterActivity(metrics::Gauge);
 
-/// Request-owned handles avoid repeated registry access on response chunks.
+/// Request-owned handles avoid repeated registry access on body chunks.
 #[derive(Default)]
-struct ResponseBodyActivity {
+struct BodyActivity {
     /// One recorder handle for each registered filter type in this request.
     gauges: std::collections::HashMap<&'static str, metrics::Gauge>,
 }
@@ -184,9 +184,9 @@ impl FilterActivity {
         Self(gauge)
     }
 
-    /// Resolve a response-body handle lazily and reuse it for this request.
-    pub(crate) fn response_body(filter: &'static str, extensions: &mut crate::RequestExtensions) -> Self {
-        let handles = extensions.get_or_insert_with(ResponseBodyActivity::default);
+    /// Resolve a body-hook handle lazily and reuse it for this request.
+    pub(crate) fn body(filter: &'static str, extensions: &mut crate::RequestExtensions) -> Self {
+        let handles = extensions.get_or_insert_with(BodyActivity::default);
         let gauge = handles
             .gauges
             .entry(filter)
