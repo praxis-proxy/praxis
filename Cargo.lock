@@ -19,6 +19,17 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "ahash"
+version = "0.7.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "891477e0c6a8957309ee5c45a6368af3ae14bb510732d2684ffa19af310920f9"
+dependencies = [
+ "getrandom 0.2.17",
+ "once_cell",
+ "version_check",
+]
+
+[[package]]
+name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5a15f179cd60c4584b8a8c596927aadc462e27f2ca70c04e0071964a73ba7a75"
@@ -1437,7 +1448,7 @@ version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf5efcf77a4da27927d3ab0509dec5b0954bb3bc59da5a1de9e52642ebd4cdf9"
 dependencies = [
- "ahash",
+ "ahash 0.8.12",
  "num_cpus",
  "parking_lot",
  "seize",
@@ -1732,6 +1743,9 @@ name = "hashbrown"
 version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a9ee70c43aaf417c914396645a0fa852624801b24ebb7ae78fe8272889ac888"
+dependencies = [
+ "ahash 0.7.8",
+]
 
 [[package]]
 name = "hashbrown"
@@ -3888,10 +3902,9 @@ checksum = "a1d01941d82fa2ab50be1e79e6714289dd7cde78eba4c074bc5a4374f650dfe0"
 [[package]]
 name = "quixotic-plecostomus-cache"
 version = "0.11.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a846a0ab5b483914551ecfab7922da86909cda6c3f76648789434912d32acf38"
+source = "git+https://github.com/rkaplan-hub/pingora.git?rev=88559112219cdd0ba0f18e541f38e1b82acbfa86#88559112219cdd0ba0f18e541f38e1b82acbfa86"
 dependencies = [
- "ahash",
+ "ahash 0.8.12",
  "arrayvec 0.7.8",
  "async-trait",
  "blake2",
@@ -3924,10 +3937,9 @@ dependencies = [
 [[package]]
 name = "quixotic-plecostomus-core"
 version = "0.11.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d31d0e7c6cc1e59bf60d56bb18a3852aab815a1cb4def6b4580a33b64d4541f"
+source = "git+https://github.com/rkaplan-hub/pingora.git?rev=88559112219cdd0ba0f18e541f38e1b82acbfa86#88559112219cdd0ba0f18e541f38e1b82acbfa86"
 dependencies = [
- "ahash",
+ "ahash 0.8.12",
  "async-trait",
  "brotli",
  "bstr",
@@ -3978,14 +3990,12 @@ dependencies = [
 [[package]]
 name = "quixotic-plecostomus-error"
 version = "0.11.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a76f53bd72ce9a7e1ce66ecd1196bdca3ce602f7963e7e5da6d2b7069465b10"
+source = "git+https://github.com/rkaplan-hub/pingora.git?rev=88559112219cdd0ba0f18e541f38e1b82acbfa86#88559112219cdd0ba0f18e541f38e1b82acbfa86"
 
 [[package]]
 name = "quixotic-plecostomus-header-serde"
 version = "0.11.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f6169b0102aff5e460cbfb342b047c7b534c2dcfbc62520e42a628d1cf3f26e4"
+source = "git+https://github.com/rkaplan-hub/pingora.git?rev=88559112219cdd0ba0f18e541f38e1b82acbfa86#88559112219cdd0ba0f18e541f38e1b82acbfa86"
 dependencies = [
  "bytes",
  "http",
@@ -4000,8 +4010,7 @@ dependencies = [
 [[package]]
 name = "quixotic-plecostomus-http"
 version = "0.11.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e8b706dc57349a6a5e56e585568402a8f1556af06eb6ab3f40603d3037afffed"
+source = "git+https://github.com/rkaplan-hub/pingora.git?rev=88559112219cdd0ba0f18e541f38e1b82acbfa86#88559112219cdd0ba0f18e541f38e1b82acbfa86"
 dependencies = [
  "bytes",
  "http",
@@ -4011,14 +4020,13 @@ dependencies = [
 [[package]]
 name = "quixotic-plecostomus-lru"
 version = "0.11.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "60550ff682553ac8aa53d4d7e2f9589714a5f21e593386d00213a211d195bc87"
+source = "git+https://github.com/rkaplan-hub/pingora.git?rev=88559112219cdd0ba0f18e541f38e1b82acbfa86#88559112219cdd0ba0f18e541f38e1b82acbfa86"
 dependencies = [
- "ahash",
+ "ahash 0.8.12",
  "arrayvec 0.7.8",
  "async-channel",
  "flurry",
- "hashbrown 0.17.1",
+ "hashbrown 0.12.3",
  "log",
  "parking_lot",
  "rand 0.10.3",
@@ -4028,8 +4036,7 @@ dependencies = [
 [[package]]
 name = "quixotic-plecostomus-pool"
 version = "0.11.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e1b5196e83cca914c2070903c7ecae61a352393813ee7d8d8fda953a360d8d4e"
+source = "git+https://github.com/rkaplan-hub/pingora.git?rev=88559112219cdd0ba0f18e541f38e1b82acbfa86#88559112219cdd0ba0f18e541f38e1b82acbfa86"
 dependencies = [
  "crossbeam-queue",
  "dashmap",
@@ -4044,8 +4051,7 @@ dependencies = [
 [[package]]
 name = "quixotic-plecostomus-proxy"
 version = "0.11.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "debf4670cfffb2a9cbda8b95f3eb13f85b4a6d7611a984a4765b79c05da67acf"
+source = "git+https://github.com/rkaplan-hub/pingora.git?rev=88559112219cdd0ba0f18e541f38e1b82acbfa86#88559112219cdd0ba0f18e541f38e1b82acbfa86"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4067,8 +4073,7 @@ dependencies = [
 [[package]]
 name = "quixotic-plecostomus-runtime"
 version = "0.11.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b741fc2c0885703483f49ba522fde516515a3ebf6c434558d2533df0905a7e4"
+source = "git+https://github.com/rkaplan-hub/pingora.git?rev=88559112219cdd0ba0f18e541f38e1b82acbfa86#88559112219cdd0ba0f18e541f38e1b82acbfa86"
 dependencies = [
  "log",
  "once_cell",
@@ -4081,8 +4086,7 @@ dependencies = [
 [[package]]
 name = "quixotic-plecostomus-rustls"
 version = "0.11.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "73314b19a16e57d2b8538c8d9b1d123ef5080244e38092417d2df6e86f823cc2"
+source = "git+https://github.com/rkaplan-hub/pingora.git?rev=88559112219cdd0ba0f18e541f38e1b82acbfa86#88559112219cdd0ba0f18e541f38e1b82acbfa86"
 dependencies = [
  "log",
  "no_debug",
@@ -4097,8 +4101,7 @@ dependencies = [
 [[package]]
 name = "quixotic-plecostomus-rustls-openssl"
 version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a6a3a34cedce4e2fa3139daae891222fde83957801bf0de8ecc8c09ffaf8796"
+source = "git+https://github.com/rkaplan-hub/pingora.git?rev=88559112219cdd0ba0f18e541f38e1b82acbfa86#88559112219cdd0ba0f18e541f38e1b82acbfa86"
 dependencies = [
  "foreign-types",
  "once_cell",
@@ -4111,8 +4114,7 @@ dependencies = [
 [[package]]
 name = "quixotic-plecostomus-timeout"
 version = "0.11.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "39a87584d90963472790ad0a72590974cf966793b047fecf8866d6f9debb351d"
+source = "git+https://github.com/rkaplan-hub/pingora.git?rev=88559112219cdd0ba0f18e541f38e1b82acbfa86#88559112219cdd0ba0f18e541f38e1b82acbfa86"
 dependencies = [
  "once_cell",
  "parking_lot",

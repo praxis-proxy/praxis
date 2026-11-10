@@ -313,8 +313,7 @@ mod tests {
             headers: HeaderMap::new(),
             body: Bytes::from_static(b"abcdefghij"),
         };
-        let response = client
-            .execute(&peer, &request, 100, Duration::from_secs(2), None)
+        let response = Box::pin(client.execute(&peer, &request, 100, Duration::from_secs(2), None))
             .await
             .unwrap();
         assert_eq!(response.body, "ok");
