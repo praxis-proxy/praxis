@@ -78,6 +78,61 @@ fn drain_marks_http1_and_spares_http2_and_upgrades() {
 }
 
 #[test]
+#[cfg(not(feature = "hyper"))]
+#[cfg_attr(
+    coverage,
+    ignore = "spawns the praxis binary; deadlocks on exit under llvm-cov instrumentation"
+)]
+fn drain_does_not_close_after_an_informational_response() {
+    let upstream = start_upstream(false);
+    let port = free_port();
+    let admin_port = free_port();
+    let admin = format!("127.0.0.1:{admin_port}");
+    let mut proxy = PraxisProcess::spawn(&proxy_config(port, admin_port, upstream.port()), &admin);
+
+    wait_for_ready(&admin, 200, "the proxy must serve before the drain starts");
+    proxy.signal("TERM");
+    wait_for_ready(&admin, 503, "the drain must fail readiness immediately");
+
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect to the proxy");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("read timeout");
+    stream
+        .write_all(
+            b"POST / HTTP/1.1\r\n\
+              Host: localhost\r\n\
+              Expect: 100-continue\r\n\
+              Content-Length: 0\r\n\r\n",
+        )
+        .expect("write request");
+    let interim = read_head_exact(&mut stream);
+    assert!(
+        interim.starts_with("HTTP/1.1 100"),
+        "the proxy must forward the interim response during drain: {interim}"
+    );
+    assert!(
+        !interim.to_ascii_lowercase().contains("connection: close"),
+        "RFC 9112 §9.6: an informational response must not close the connection: {interim}"
+    );
+    let final_head = read_head_exact(&mut stream);
+    assert!(
+        final_head.starts_with("HTTP/1.1 200"),
+        "the final response must still arrive: {final_head}"
+    );
+    assert!(
+        final_head.to_ascii_lowercase().contains("connection: close"),
+        "RFC 9112 §9.6: the final response during drain must close the connection: {final_head}"
+    );
+
+    let status = proxy.wait_for_exit(Duration::from_secs(90));
+    assert!(
+        status.is_some_and(|status| status.success()),
+        "the delayed handoff must exit cleanly"
+    );
+}
+
+#[test]
 #[cfg_attr(
     coverage,
     ignore = "spawns the praxis binary; deadlocks on exit under llvm-cov instrumentation"
@@ -339,6 +394,9 @@ fn start_upstream(hold_responses: bool) -> Upstream {
                             echo_upgraded(&mut stream);
                             return;
                         }
+                        if request.contains("expect: 100-continue") {
+                            let _continued = stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n");
+                        }
                         let (released, wake) = &*hold;
                         let mut released = released.lock().expect("wait for the upstream release");
                         while !*released {
@@ -437,6 +495,20 @@ fn assert_upgrade_survives_drain(port: u16) {
         .read_exact(&mut echoed)
         .expect("data must flow through the upgraded tunnel during drain");
     assert_eq!(&echoed, message, "the upgraded tunnel must echo data during drain");
+}
+
+/// Read exactly one response head, leaving any following bytes unread.
+#[cfg(not(feature = "hyper"))]
+fn read_head_exact(stream: &mut TcpStream) -> String {
+    let mut response = Vec::new();
+    let mut byte = [0_u8; 1];
+    while !response.ends_with(b"\r\n\r\n") {
+        match stream.read(&mut byte) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => response.push(byte[0]),
+        }
+    }
+    String::from_utf8_lossy(&response).into_owned()
 }
 
 /// Read through the response header terminator.

@@ -406,6 +406,27 @@ fn response_over_stream_buffer_ceiling_is_not_delivered() {
 }
 
 #[test]
+fn head_rejection_sends_no_body() {
+    let backend_port = Backend::fixed("should-not-be-reached").start();
+    let proxy_port = free_port();
+    let config = Config::from_yaml(&proxy_yaml(proxy_port, backend_port, "test_reject_response_phase")).unwrap();
+    let reg = registry();
+    let _proxy = start_full_proxy_with_registry(&config, &reg);
+
+    let raw = http_send(
+        &format!("127.0.0.1:{proxy_port}"),
+        "HEAD / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(parse_status(&raw), 429, "a HEAD rejection must keep its status");
+    let body = raw.split_once("\r\n\r\n").map(|(_, body)| body).unwrap_or_default();
+    assert!(body.is_empty(), "a HEAD rejection must not send a body, got {body:?}");
+    assert!(
+        raw.to_ascii_lowercase().contains("retry-after: 7"),
+        "a HEAD rejection must keep its response headers: {raw:?}"
+    );
+}
+
+#[test]
 fn request_body_filter_error_rejects_request() {
     let backend_port = Backend::fixed("should-not-be-reached").start();
     let proxy_port = free_port();

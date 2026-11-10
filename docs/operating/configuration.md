@@ -883,8 +883,10 @@ in-flight connections finish for up to
 `shutdown_timeout_secs` minus `shutdown_drain_delay_secs`
 and a 1 s reserve, so `shutdown_timeout_secs: 1` leaves
 them no drain time.
-Active TCP forwarding stops as soon as the signal
-arrives. See
+Active TCP forwarding may continue during a nonzero
+`shutdown_drain_delay_secs` after SIGTERM, stops when the
+runtime signals services to shut down, and can stop
+earlier if SIGINT ends the delay. See
 [Hyper Backend](../architecture/hyper-backend.md#runtime-and-shutdown).
 
 Once runtime shutdown completes, Praxis flushes queued

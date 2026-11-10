@@ -147,7 +147,11 @@ pub(in crate::http) fn add_drain_connection_close(
         ctx.client_http_version,
         Some(http::Version::HTTP_10 | http::Version::HTTP_11)
     );
-    if lifecycle.phase() == praxis_core::server::LifecyclePhase::Draining && is_http1 && !ctx.connection_upgraded {
+    if lifecycle.phase() == praxis_core::server::LifecyclePhase::Draining
+        && is_http1
+        && !ctx.connection_upgraded
+        && !response.status.is_informational()
+    {
         session.set_keepalive(None);
         response.remove_header("Connection");
         response.insert_header("Connection", "close")?;
