@@ -499,10 +499,6 @@ mod tests {
 
     #[test]
     fn superseded_label_list_keys_are_rejected() {
-        // `disabled` shipped as a list and was replaced by per-dimension
-        // settings; `enabled` is the obvious wrong guess at its counterpart.
-        // Neither names a dimension, so both must fail rather than be ignored,
-        // whatever the diagnostic ends up saying.
         for yaml in ["disabled: [route, endpoint]", "enabled: [status_code]", "disabled: []"] {
             let parsed: Result<MetricLabelsConfig, _> = serde_yaml::from_str(yaml);
             assert!(parsed.is_err(), "{yaml} names no dimension, so it must not parse");
