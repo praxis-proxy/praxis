@@ -3,7 +3,7 @@
 
 //! Isolated admission and hook state for each request and policy filter.
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use ppe::praxis_policy_core::{context::PluginContextTable, identity::IdentityPayload};
 
@@ -30,12 +30,30 @@ pub(super) struct RequestState {
     pub(super) identity: Option<IdentityPayload>,
     /// The model of an admitted inference request.
     pub(super) inference_model: Option<String>,
+    /// Whether the admitted inference response was identified as an event stream.
+    pub(super) streamed_inference_response: bool,
+    /// Upstream response headers captured after this filter's header-phase work.
+    pub(super) response_headers: HashMap<String, String>,
+    /// Upstream response status captured with [`Self::response_headers`].
+    pub(super) response_status: Option<u16>,
+    /// Whether metadata-only inference response policy has already run.
+    pub(super) metadata_response_dispatch: MetadataResponseDispatch,
     /// Whether this instance admitted the request.
     pub(super) admitted: bool,
     /// Which rate-limit stages have run.
     pub(super) limits: LimitStages,
     /// The context table between hook invocations.
     table: TableSlot,
+}
+
+/// Metadata-only inference response dispatch lifecycle.
+#[derive(Default)]
+pub(super) enum MetadataResponseDispatch {
+    /// No response context has been dispatched.
+    #[default]
+    Pending,
+    /// Response context was dispatched or permanently resolved without a hook.
+    Complete,
 }
 
 /// The rate-limit stages that have run for this instance, each at most once.

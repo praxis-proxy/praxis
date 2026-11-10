@@ -538,7 +538,7 @@ impl HttpFilter for IterativeRequestRouterFilter {
     }
 
     fn request_body_access(&self) -> crate::body::BodyAccess {
-        crate::body::BodyAccess::ReadOnly
+        crate::body::BodyAccess::ReadOnly(crate::BodyRequirement::Required)
     }
 
     fn request_body_mode(&self) -> crate::body::BodyMode {

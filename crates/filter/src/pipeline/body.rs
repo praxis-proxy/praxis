@@ -309,7 +309,7 @@ fn accumulate_request_body(caps: &mut BodyCapabilities, filter: &dyn crate::filt
     let access = filter.request_body_access();
     if access != BodyAccess::None {
         caps.needs_request_body = true;
-        if access == BodyAccess::ReadWrite {
+        if access.is_writable() {
             caps.any_request_body_writer = true;
         }
         merge_body_mode(&mut caps.request_body_mode, filter.request_body_mode());
@@ -340,7 +340,7 @@ fn accumulate_selected_upstream_request_body(caps: &mut BodyCapabilities, filter
     }
     caps.needs_selected_upstream_request_body = true;
     caps.needs_request_body = true;
-    if access == BodyAccess::ReadWrite {
+    if access.is_writable() {
         caps.any_selected_upstream_request_body_writer = true;
         caps.any_request_body_writer = true;
     }
@@ -379,7 +379,7 @@ fn accumulate_bound_upstream_request_body(caps: &mut BodyCapabilities, filter: &
         return;
     }
     caps.needs_request_body = true;
-    if access == BodyAccess::ReadWrite {
+    if access.is_writable() {
         caps.any_request_body_writer = true;
     }
     merge_body_mode(&mut caps.request_body_mode, buffered_body_mode(filter));
@@ -413,7 +413,7 @@ fn accumulate_response_body(
         if !response_conditions.is_empty() {
             caps.any_response_body_condition = true;
         }
-        if access == BodyAccess::ReadWrite {
+        if access.is_writable() {
             caps.any_response_body_writer = true;
         }
         merge_body_mode(&mut caps.response_body_mode, filter.response_body_mode());
@@ -626,7 +626,7 @@ mod tests {
             }
 
             fn response_body_access(&self) -> BodyAccess {
-                BodyAccess::ReadOnly
+                BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
             }
         }
 
@@ -674,7 +674,7 @@ mod tests {
             }
 
             fn request_body_access(&self) -> BodyAccess {
-                BodyAccess::ReadWrite
+                BodyAccess::ReadWrite(crate::BodyRequirement::Optional)
             }
 
             fn request_body_mode(&self) -> BodyMode {
@@ -830,7 +830,7 @@ mod tests {
         let filter = PipelineFilter::new(
             0,
             AnyFilter::Http(Box::new(SelectedUpstreamCapFilter {
-                access: BodyAccess::ReadWrite,
+                access: BodyAccess::ReadWrite(crate::BodyRequirement::Optional),
                 mode: BodyMode::StreamBuffer { max_bytes: Some(4096) },
             })),
             vec![],
@@ -866,7 +866,7 @@ mod tests {
         let filter = PipelineFilter::new(
             0,
             AnyFilter::Http(Box::new(SelectedUpstreamCapFilter {
-                access: BodyAccess::ReadOnly,
+                access: BodyAccess::ReadOnly(crate::BodyRequirement::Optional),
                 mode: BodyMode::StreamBuffer { max_bytes: Some(2048) },
             })),
             vec![],
@@ -897,7 +897,7 @@ mod tests {
         let filter = PipelineFilter::new(
             0,
             AnyFilter::Http(Box::new(SelectedUpstreamCapFilter {
-                access: BodyAccess::ReadOnly,
+                access: BodyAccess::ReadOnly(crate::BodyRequirement::Optional),
                 mode: BodyMode::Stream,
             })),
             vec![],
@@ -925,7 +925,7 @@ mod tests {
             filters: vec![PipelineFilter::new(
                 100,
                 AnyFilter::Http(Box::new(SelectedUpstreamCapFilter {
-                    access: BodyAccess::ReadWrite,
+                    access: BodyAccess::ReadWrite(crate::BodyRequirement::Optional),
                     mode: BodyMode::StreamBuffer { max_bytes: Some(4096) },
                 })),
                 vec![],
@@ -968,7 +968,7 @@ mod tests {
         let filter = PipelineFilter::new(
             0,
             AnyFilter::Http(Box::new(BoundUpstreamCapFilter {
-                access: BodyAccess::ReadWrite,
+                access: BodyAccess::ReadWrite(crate::BodyRequirement::Optional),
                 mode: BodyMode::StreamBuffer { max_bytes: Some(4096) },
             })),
             vec![],
@@ -997,7 +997,7 @@ mod tests {
         let filter = PipelineFilter::new(
             0,
             AnyFilter::Http(Box::new(BoundUpstreamCapFilter {
-                access: BodyAccess::ReadOnly,
+                access: BodyAccess::ReadOnly(crate::BodyRequirement::Optional),
                 mode: BodyMode::StreamBuffer { max_bytes: Some(2048) },
             })),
             vec![],
@@ -1021,7 +1021,7 @@ mod tests {
         let filter = PipelineFilter::new(
             0,
             AnyFilter::Http(Box::new(BoundUpstreamCapFilter {
-                access: BodyAccess::ReadOnly,
+                access: BodyAccess::ReadOnly(crate::BodyRequirement::Optional),
                 mode: BodyMode::Stream,
             })),
             vec![],
@@ -1050,7 +1050,7 @@ mod tests {
             filters: vec![PipelineFilter::new(
                 100,
                 AnyFilter::Http(Box::new(BoundUpstreamCapFilter {
-                    access: BodyAccess::ReadWrite,
+                    access: BodyAccess::ReadWrite(crate::BodyRequirement::Optional),
                     mode: BodyMode::StreamBuffer { max_bytes: Some(4096) },
                 })),
                 vec![],
@@ -1093,7 +1093,7 @@ mod tests {
         let participant = PipelineFilter::new(
             0,
             AnyFilter::Http(Box::new(BoundUpstreamCapFilter {
-                access: BodyAccess::ReadWrite,
+                access: BodyAccess::ReadWrite(crate::BodyRequirement::Optional),
                 mode: BodyMode::StreamBuffer { max_bytes: Some(4096) },
             })),
             vec![],
@@ -1110,8 +1110,8 @@ mod tests {
         let pf = PipelineFilter::new(
             0,
             AnyFilter::Http(Box::new(DualPhaseCapFilter {
-                pre_read: BodyAccess::ReadOnly,
-                bound: BodyAccess::ReadOnly,
+                pre_read: BodyAccess::ReadOnly(crate::BodyRequirement::Optional),
+                bound: BodyAccess::ReadOnly(crate::BodyRequirement::Optional),
                 mode: BodyMode::StreamBuffer { max_bytes: Some(4096) },
             })),
             vec![],
@@ -1137,8 +1137,8 @@ mod tests {
         let pf = PipelineFilter::new(
             0,
             AnyFilter::Http(Box::new(DualPhaseCapFilter {
-                pre_read: BodyAccess::ReadOnly,
-                bound: BodyAccess::ReadOnly,
+                pre_read: BodyAccess::ReadOnly(crate::BodyRequirement::Optional),
+                bound: BodyAccess::ReadOnly(crate::BodyRequirement::Optional),
                 mode: BodyMode::StreamBuffer { max_bytes: Some(4096) },
             })),
             vec![bound_upstream_condition()],
@@ -1166,8 +1166,8 @@ mod tests {
             let filters = vec![PipelineFilter::new(
                 0,
                 AnyFilter::Http(Box::new(DualPhaseCapFilter {
-                    pre_read: BodyAccess::ReadWrite,
-                    bound: BodyAccess::ReadWrite,
+                    pre_read: BodyAccess::ReadWrite(crate::BodyRequirement::Optional),
+                    bound: BodyAccess::ReadWrite(crate::BodyRequirement::Optional),
                     mode: BodyMode::StreamBuffer { max_bytes: Some(4096) },
                 })),
                 conditions,
@@ -1195,8 +1195,8 @@ mod tests {
         let pre_read = PipelineFilter::new(
             0,
             AnyFilter::Http(Box::new(DualPhaseCapFilter {
-                pre_read: BodyAccess::ReadOnly,
-                bound: BodyAccess::ReadWrite,
+                pre_read: BodyAccess::ReadOnly(crate::BodyRequirement::Optional),
+                bound: BodyAccess::ReadWrite(crate::BodyRequirement::Optional),
                 mode: BodyMode::StreamBuffer { max_bytes: Some(4096) },
             })),
             vec![],
@@ -1215,8 +1215,8 @@ mod tests {
         let bound = PipelineFilter::new(
             0,
             AnyFilter::Http(Box::new(DualPhaseCapFilter {
-                pre_read: BodyAccess::ReadOnly,
-                bound: BodyAccess::ReadWrite,
+                pre_read: BodyAccess::ReadOnly(crate::BodyRequirement::Optional),
+                bound: BodyAccess::ReadWrite(crate::BodyRequirement::Optional),
                 mode: BodyMode::StreamBuffer { max_bytes: Some(4096) },
             })),
             vec![bound_upstream_condition()],

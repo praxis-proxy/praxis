@@ -20,6 +20,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Changed
 
 - Update the Pingora fork dependencies to v0.11.4.
+- **Breaking:** `BodyAccess::ReadOnly` and `BodyAccess::ReadWrite` now require
+  an explicit `BodyRequirement::Optional` or `BodyRequirement::Required`.
+  Custom Rust filters must choose whether their body processing may be skipped
+  when admitting a transport that bypasses HTTP body hooks. `BodyAccess::None`
+  remains the default. Pipeline introspection exposes this declaration as
+  `requirement: "optional"` or `"required"`, omitted when there is no body access.
+
+### Fixed
+
+- **Breaking:** statically buffered request pipelines now reject a finite
+  `body_limits.max_request_bytes` above `body_limits.max_buffer_bytes` at
+  startup, config validation, and reload, naming both fields and byte values.
+  Lower the request limit or raise the buffer cap to correct the configuration.
+  Streaming requests can still use transfer limits above the buffering cap.
 
 ### Fixed
 
@@ -47,6 +61,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- The `policy` filter accepts trusted metadata-only inference response context
+  from host filters and dispatches it through `cmf.llm_output` at end of stream.
+  With `body_access: read_only`, or for SSE responses, response content is not
+  buffered. Non-SSE responses under `body_access: read_write` stay buffered and
+  are evaluated as content. Plugin-written custom values reach downstream
+  response filters.
 - Policy rate limiting (experimental): the policy filter runs a policy's
   `rate_limits:` before identity resolution, keyed on the client address,
   and after it, keyed on the resolved identity, each once per request. A
@@ -91,7 +111,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `forward_proxy` block, removes a listener that has one, or changes
   `insecure_options.allow_private_upstreams` while a bound listener has
   an enabled block, is rejected. The CONNECT runtime is a follow-up
-  change; the block is inert until it lands.
+ change; the block is inert until it lands.
 - An experimental network backend behind the `hyper` feature, off by
   default: the proxy data path, TCP forwarder, admin surface and sub-request
   client on hyper 1.x. See `docs/architecture/hyper-backend.md`.

@@ -35,7 +35,6 @@ use crate::{
     FilterError,
     actions::{FilterAction, Rejection, SelectedUpstreamBodyOutcome},
     any_filter::AnyFilter,
-    body::BodyAccess,
     condition::should_execute_bound_selected,
     context::{EffectiveHeaders, HttpFilterContext},
     trace_context::{TraceContext, ensure_trace_context},
@@ -64,9 +63,9 @@ impl FilterPipeline {
             if (tracked && executed.get(index) != Some(&true)) || done.get(index) == Some(&true) {
                 return false;
             }
-            self.filters.get(index).is_some_and(|filter| {
-                matches!(&filter.filter, AnyFilter::Http(http) if http.request_body_access() == BodyAccess::ReadWrite)
-            })
+            self.filters.get(index).is_some_and(
+                |filter| matches!(&filter.filter, AnyFilter::Http(http) if http.request_body_access().is_writable()),
+            )
         })
     }
 
@@ -904,13 +903,13 @@ mod replay_writer_tests {
             if self.selected_only {
                 BodyAccess::None
             } else {
-                BodyAccess::ReadWrite
+                BodyAccess::ReadWrite(crate::BodyRequirement::Optional)
             }
         }
 
         fn selected_upstream_request_body_access(&self) -> BodyAccess {
             if self.selected_only {
-                BodyAccess::ReadWrite
+                BodyAccess::ReadWrite(crate::BodyRequirement::Optional)
             } else {
                 BodyAccess::None
             }

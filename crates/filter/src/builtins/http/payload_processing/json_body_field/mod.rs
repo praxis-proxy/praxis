@@ -161,7 +161,7 @@ impl HttpFilter for JsonBodyFieldFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(crate::BodyRequirement::Required)
     }
 
     fn request_body_mode(&self) -> BodyMode {
