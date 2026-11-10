@@ -55,6 +55,9 @@ pub struct FilterIntrospection {
 pub struct BodyAccessInfo {
     /// Access level (`none` / `read_only` / `read_write`).
     pub access: &'static str,
+    /// Processing requirement (`optional` / `required`), absent for no body access.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requirement: Option<&'static str>,
     /// Delivery mode (`stream` / `stream_buffer` / `size_limit`).
     pub mode: &'static str,
     /// Optional byte limit for buffered / size-limited modes.
@@ -213,6 +216,13 @@ fn body_info(access: BodyAccess, mode: BodyMode) -> BodyAccessInfo {
             BodyAccess::ReadOnly(_) => "read_only",
             BodyAccess::ReadWrite(_) => "read_write",
         },
+        requirement: match access {
+            BodyAccess::None => None,
+            BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
+            | BodyAccess::ReadWrite(crate::BodyRequirement::Optional) => Some("optional"),
+            BodyAccess::ReadOnly(crate::BodyRequirement::Required)
+            | BodyAccess::ReadWrite(crate::BodyRequirement::Required) => Some("required"),
+        },
         mode: mode_name,
         max_bytes,
     }
@@ -264,6 +274,26 @@ mod tests {
         assert_eq!(info.access, "read_only", "ReadOnly maps to read_only");
         assert_eq!(info.mode, "stream_buffer", "StreamBuffer maps to stream_buffer");
         assert_eq!(info.max_bytes, Some(64), "max_bytes should round-trip");
+    }
+
+    #[test]
+    fn body_info_serializes_processing_requirements() {
+        for (access, expected) in [
+            (BodyAccess::None, None),
+            (BodyAccess::ReadOnly(crate::BodyRequirement::Optional), Some("optional")),
+            (
+                BodyAccess::ReadWrite(crate::BodyRequirement::Optional),
+                Some("optional"),
+            ),
+            (BodyAccess::ReadOnly(crate::BodyRequirement::Required), Some("required")),
+            (
+                BodyAccess::ReadWrite(crate::BodyRequirement::Required),
+                Some("required"),
+            ),
+        ] {
+            let json = serde_json::to_value(body_info(access, BodyMode::Stream)).unwrap();
+            assert_eq!(json.get("requirement").and_then(serde_json::Value::as_str), expected);
+        }
     }
 
     #[test]
