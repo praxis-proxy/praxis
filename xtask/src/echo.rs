@@ -81,6 +81,7 @@ fn build_config(args: &Args) -> Config {
 /// Build the echo listener bound to `address`.
 fn echo_listener(address: &str) -> Listener {
     Listener {
+        upgrade_policy: None,
         address: address.into(),
         cluster: None,
         downstream_keepalive_timeout_ms: None,
