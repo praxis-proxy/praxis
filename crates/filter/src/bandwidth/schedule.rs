@@ -173,9 +173,21 @@ impl BandwidthGrant {
         delay_between(now, self.release_ns(now))
     }
 
-    /// Maximum prefix supported by this budget, including no-burst progress.
+    /// Release available burst immediately, then use short refill-sized prefixes.
     pub(super) fn quantum(&self) -> u64 {
-        self.schedule.quantum
+        let now = self.now_ns();
+        let inner = self.schedule.lock();
+        let base = normalized_base(inner.tat, inner.initialized, now, self.schedule.burst_ns);
+        let credit = u128::try_from(now.saturating_sub(base)).unwrap_or_default();
+        drop(inner);
+        let available = credit
+            .saturating_mul(u128::from(self.schedule.rate))
+            .saturating_div(1_000_000_000);
+        let refill = self.schedule.rate.div_ceil(100).max(1);
+        u64::try_from(available)
+            .unwrap_or(u64::MAX)
+            .max(refill)
+            .min(self.schedule.quantum)
     }
 
     /// Coalesce prepared charges from repeated body callbacks on one budget.

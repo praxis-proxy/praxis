@@ -578,30 +578,55 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one release trace checks first-byte latency and every intermediate interval"
+    )]
     async fn oversized_output_releases_the_initial_prefix_then_refilled_prefixes() {
+        let started = Instant::now();
         let schedule = Schedule::new(100, 10);
         let mut plan = PaceReservation {
             grants: vec![schedule.prepare(40)],
             output_bytes: None,
         };
-        let started = Instant::now();
         let (first, permit) = plan.acquire_prefix(40, None).await.unwrap();
-        assert_eq!(
-            first, 10,
-            "the initial burst is a prefix, never the complete oversized chunk"
-        );
+        let first_at = started.elapsed();
+        assert_eq!(first, 10, "initial burst must be released before the tail");
         assert!(
-            started.elapsed() < Duration::from_millis(50),
+            first_at < Duration::from_millis(100),
             "initial allowance makes immediate progress"
         );
+        let mut releases = vec![(first_at, 0_usize)];
+        let mut released = first;
         permit.commit_bytes(first);
-        let (second, permit) = plan.acquire_prefix(30, None).await.unwrap();
-        assert_eq!(second, 10);
+        while plan.remaining() != 0 {
+            let (bytes, permit) = plan
+                .acquire_prefix(usize::try_from(plan.remaining()).unwrap(), None)
+                .await
+                .unwrap();
+            let at = started.elapsed();
+            assert!(bytes <= 10, "each prefix stays within the burst ceiling");
+            let total = released.saturating_add(bytes);
+            for (prior, before) in &releases {
+                let refill = at
+                    .saturating_sub(*prior)
+                    .as_nanos()
+                    .saturating_mul(100)
+                    .saturating_div(1_000_000_000);
+                assert!(
+                    u128::try_from(total.saturating_sub(*before)).unwrap() <= 10_u128.saturating_add(refill),
+                    "released bytes must fit every observed time interval"
+                );
+            }
+            releases.push((at, released));
+            released = total;
+            permit.commit_bytes(bytes);
+        }
+        assert_eq!(released, 40);
         assert!(
-            started.elapsed() >= Duration::from_millis(90),
-            "the next prefix needs a refill"
+            started.elapsed() >= Duration::from_millis(250),
+            "the tail consumes refilled allowance"
         );
-        permit.commit_bytes(second);
     }
 
     #[tokio::test]
