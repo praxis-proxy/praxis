@@ -25,8 +25,8 @@ use serde::Deserialize;
 use tracing::warn;
 
 use crate::{
-    BodyAccess, BodyMode, FilterAction, FilterError, HttpFilter, HttpFilterContext, Rejection, RequestExtensions,
-    TcpFilter, TcpFilterContext,
+    BodyAccess, BodyMode, BodyRequirement, FilterAction, FilterError, HttpFilter, HttpFilterContext, Rejection,
+    RequestExtensions, TcpFilter, TcpFilterContext,
     bandwidth::{
         AcquireError, Acquired, BandwidthGrant, BandwidthTable, BudgetKey, ConnectionAlive, DownloadLimited,
         DownstreamConnectionId, InFlightGuard, Schedule, TcpBandwidthPacer, pointer_key, push_download,
@@ -390,7 +390,7 @@ impl HttpFilter for BandwidthLimitFilter {
 
     fn request_body_access(&self) -> BodyAccess {
         if self.table.has_upload() {
-            BodyAccess::ReadOnly
+            BodyAccess::ReadOnly(BodyRequirement::Required)
         } else {
             BodyAccess::None
         }
@@ -398,7 +398,7 @@ impl HttpFilter for BandwidthLimitFilter {
 
     fn response_body_access(&self) -> BodyAccess {
         if self.table.has_download() {
-            BodyAccess::ReadOnly
+            BodyAccess::ReadOnly(BodyRequirement::Required)
         } else {
             BodyAccess::None
         }
