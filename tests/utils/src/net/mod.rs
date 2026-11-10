@@ -5,6 +5,7 @@
 //! checks, mock backends, HTTP clients, and TLS utilities.
 
 pub mod backend;
+pub mod h2_frames;
 pub mod http1;
 pub mod http2;
 pub mod http_client;
@@ -23,6 +24,10 @@ pub use backend::{
     start_request_counting_backend, start_reserved_header_response_backend, start_response_header_backend,
     start_reused_connection_kill_backend, start_slow_backend, start_stateful_backend, start_tagged_header_echo_backend,
     start_uri_echo_backend, start_websocket_echo_backend,
+};
+pub use h2_frames::{
+    ACK, END_HEADERS, END_STREAM, ENHANCE_YOUR_CALM, FLOW_CONTROL_ERROR, H2TestConnection, PREFACE, REFUSED_STREAM,
+    RawFrame, encode_headers, frame_bytes, frame_type, request_block,
 };
 pub use http_client::{
     GrpcCallResult, h2c_get, h2c_get_absolute, h2c_get_authority_only, h2c_grpc_call, http_delete, http_get,

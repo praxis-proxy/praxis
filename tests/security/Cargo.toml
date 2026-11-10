@@ -17,8 +17,11 @@ hyper = ["praxis-test-utils/hyper"]
 workspace = true
 
 [dev-dependencies]
+h2 = { workspace = true }
+http = { workspace = true }
 praxis-core = { workspace = true }
 praxis-filter = { workspace = true }
 praxis-test-utils = { workspace = true }
 rustls = { workspace = true }
 serde_yaml = { workspace = true }
+tokio = { workspace = true, features = ["net", "time"] }

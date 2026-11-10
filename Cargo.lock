@@ -3685,10 +3685,13 @@ dependencies = [
 name = "praxis-tests-security"
 version = "0.8.0"
 dependencies = [
+ "h2",
+ "http",
  "praxis-proxy-core",
  "praxis-proxy-filter",
  "praxis-test-utils",
  "rustls",
+ "tokio",
  "yaml_serde",
 ]
 
