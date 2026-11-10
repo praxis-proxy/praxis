@@ -383,7 +383,7 @@ fn unquoted_tokens_read_response_content(value: &str) -> bool {
 
 /// Whether a policy attribute belongs to the unavailable response body.
 fn content_key(key: &str) -> bool {
-    ["completion", "result"]
+    ["completion", "result", "llm.output"]
         .iter()
         .any(|prefix| key == *prefix || key.strip_prefix(prefix).is_some_and(|suffix| suffix.starts_with('.')))
 }
@@ -439,6 +439,25 @@ routes:
         assert!(!filtered.contains("completion.tokens"));
         assert!(!filtered.contains("result:"));
         assert!(!filtered.contains("pre_invocation:"));
+    }
+
+    #[test]
+    fn drops_canonical_llm_output_rules() {
+        let yaml = format!(
+            r#"{PLUGINS}
+routes:
+  - llm: "*"
+    authorization:
+      post_invocation:
+        - "require(llm.output.tokens.total <= 100)"
+        - "run(metadata)"
+"#,
+        );
+        let filtered = metadata_only_policy(&yaml)
+            .expect("filter policy")
+            .expect("metadata rule remains");
+        assert!(!filtered.contains("llm.output.tokens"));
+        assert!(filtered.contains("run(metadata)"));
     }
 
     #[test]

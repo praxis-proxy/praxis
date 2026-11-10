@@ -3624,22 +3624,52 @@ impl Plugin for ResponseContextPlugin {
 }
 
 impl HookHandler<CmfHook> for ResponseContextPlugin {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the test handler records request state and exposes each response input independently"
+    )]
     async fn handle(
         &self,
         _payload: &MessagePayload,
         extensions: &Extensions,
-        _ctx: &mut PluginContext,
+        ctx: &mut PluginContext,
     ) -> PluginResult<MessagePayload> {
+        if extensions.custom.is_none() {
+            ctx.set_local("request_quota", json!({"reserved": 50}));
+            ctx.set_local("response_invocations", json!(0));
+            return PluginResult::allow();
+        }
         let observed = extensions
             .custom
             .as_ref()
             .and_then(|custom| custom.get("quota_input"))
             .cloned()
             .unwrap_or(serde_json::Value::Null);
+        let request_quota = ctx
+            .get_local("request_quota")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let response_invocations = ctx
+            .get_local("response_invocations")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or_default()
+            + 1;
+        ctx.set_local("response_invocations", json!(response_invocations));
         let mut modified = extensions.cow_copy();
-        modified.custom.get_or_insert_default().insert(
+        let custom = modified.custom.get_or_insert_default();
+        custom.insert(
             "quota_output".to_owned(),
             json!({"engine": "ppe", "observed": observed}),
+        );
+        custom.insert("request_quota".to_owned(), request_quota);
+        custom.insert("response_invocations".to_owned(), json!(response_invocations));
+        let http = extensions.http.as_deref();
+        custom.insert(
+            "response_http".to_owned(),
+            json!({
+                "status": http.and_then(|http| http.status),
+                "quota": http.and_then(|http| http.response_headers.get("x-quota-state")),
+            }),
         );
         PluginResult::modify_extensions(modified)
     }
@@ -3653,7 +3683,7 @@ impl PluginFactory for ResponseContextFactory {
         let adapter: Arc<dyn AnyHookHandler> = Arc::new(TypedHandlerAdapter::<CmfHook, _>::new(Arc::clone(&plugin)));
         Ok(PluginInstance {
             plugin,
-            handlers: vec![("cmf.llm_output", adapter)],
+            handlers: vec![("cmf.llm_input", Arc::clone(&adapter)), ("cmf.llm_output", adapter)],
         })
     }
 }
@@ -4883,6 +4913,7 @@ fn write_llm_response_context_config(deny: bool) -> (TempDir, String) {
       - cmf.llm_output
     capabilities:
       - metadata_only_response
+      - read_headers
     mode: sequential
     on_error: fail
 global:
@@ -4900,6 +4931,41 @@ routes:
     );
     std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
     (dir, cfg_path.to_str().expect("utf8 path").to_owned())
+}
+
+/// Write a hook-dispatch policy whose plugin-local state crosses LLM phases.
+fn write_llm_hook_response_context_config() -> (TempDir, String) {
+    let (dir, path) = write_llm_response_context_config(false);
+    let yaml = std::fs::read_to_string(&path)
+        .expect("read response-context policy")
+        .replace(
+            "    hooks:\n      - cmf.llm_output\n    capabilities:",
+            "    hooks:\n      - cmf.llm_input\n      - cmf.llm_output\n    capabilities:",
+        );
+    let mut document: serde_yaml::Value = serde_yaml::from_str(&yaml).expect("parse response-context policy");
+    let root = document.as_mapping_mut().expect("policy document is a mapping");
+    root.remove("global");
+    root.remove("routes");
+    root.insert(
+        serde_yaml::Value::String("engine_settings".to_owned()),
+        serde_yaml::from_str("dispatch: hooks").expect("parse engine settings"),
+    );
+    std::fs::write(&path, serde_yaml::to_string(&document).expect("render hook policy"))
+        .expect("write hook-dispatch response-context policy");
+    (dir, path)
+}
+
+/// Write metadata-only rules that depend on upstream response facts.
+fn write_llm_response_fact_config() -> (TempDir, String) {
+    let (dir, path) = write_llm_response_context_config(false);
+    let yaml = std::fs::read_to_string(&path)
+        .expect("read response-context policy")
+        .replace(
+            "        - \"require(completion.tokens.total > 100)\"",
+            "        - \"require(http.status == 429)\"\n        - \"require(http.response_headers.server == 'quota')\"",
+        );
+    std::fs::write(&path, yaml).expect("write response-fact policy");
+    (dir, path)
 }
 
 /// Build a policy filter with custom inference options.
@@ -5455,6 +5521,31 @@ fn build_read_write_filter(config_path: String) -> PolicyFilter {
     .expect("filter should construct")
 }
 
+/// Build a read-write inference filter whose hook policy needs no LLM route.
+fn build_hook_read_write_filter(config_path: String) -> PolicyFilter {
+    let llm = super::config::LlmOptions {
+        require_route: false,
+        ..Default::default()
+    };
+    PolicyFilter::new(
+        PolicyFilterConfig {
+            config_path,
+            allow_private_idp: false,
+            trusted_private_endpoints: vec![],
+            trusted_proxies: vec![],
+            body_access: BodyAccessMode::ReadWrite,
+            require_protocol_metadata: true,
+            init_timeout_secs: 30,
+            max_buffer_bytes: 10_485_760,
+            llm,
+            context_headers: HashMap::default(),
+            context_meta: ContextMetaConfig::default(),
+        },
+        None,
+    )
+    .expect("hook-dispatch filter should construct")
+}
+
 /// Run an inference request admitted by the test policy.
 async fn admit_inference(filter: &PolicyFilter, ctx: &mut crate::HttpFilterContext<'_>) {
     let mut request = Some(bytes::Bytes::from_static(INFERENCE_REQUEST));
@@ -5892,8 +5983,8 @@ async fn a_streamed_response_releases_the_buffer_on_the_first_chunk() {
     reason = "the regression covers both SSE delivery phases and the published PPE output"
 )]
 async fn metadata_only_response_context_runs_through_ppe_without_buffering_sse() {
-    let (_dir, path) = write_llm_response_context_config(false);
-    let filter = build_read_write_filter(path);
+    let (_dir, path) = write_llm_hook_response_context_config();
+    let filter = build_hook_read_write_filter(path);
 
     let req = request_for_alice();
     let mut ctx = make_filter_context(&req);
@@ -5904,9 +5995,13 @@ async fn metadata_only_response_context_runs_through_ppe_without_buffering_sse()
     )])));
 
     let mut response = crate::test_utils::make_response();
+    response.status = http::StatusCode::TOO_MANY_REQUESTS;
     response
         .headers
         .insert("content-type", HeaderValue::from_static("text/event-stream"));
+    response
+        .headers
+        .insert("x-quota-state", HeaderValue::from_static("limited"));
     ctx.response_header = Some(&mut response);
     let response_action = filter.on_response(&mut ctx).await.expect("response header phase ran");
     assert!(matches!(response_action, FilterAction::Continue));
@@ -5933,6 +6028,123 @@ async fn metadata_only_response_context_runs_through_ppe_without_buffering_sse()
         output.get("quota_output"),
         Some(&json!({"engine": "ppe", "observed": {"tokens": 42}})),
     );
+    assert_eq!(output.get("request_quota"), Some(&json!({"reserved": 50})));
+    assert_eq!(output.get("response_invocations"), Some(&json!(1)));
+    assert_eq!(
+        output.get("response_http"),
+        Some(&json!({"status": 429, "quota": "limited"})),
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the regression verifies header dispatch and a defensive EOF do not double invoke"
+)]
+async fn pingora_zero_length_response_dispatches_metadata_policy_on_headers_once() {
+    let (_dir, path) = write_llm_response_context_config(false);
+    let filter = build_read_write_filter(path);
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    admit_inference(&filter, &mut ctx).await;
+    ctx.extensions.insert(PolicyResponseContext::default());
+
+    let mut response = crate::test_utils::make_response();
+    response
+        .headers
+        .insert(http::header::CONTENT_LENGTH, HeaderValue::from_static("0"));
+    ctx.response_header = Some(&mut response);
+    let action = filter.on_response(&mut ctx).await.expect("response header phase ran");
+    assert!(matches!(action, FilterAction::Continue));
+    assert_eq!(
+        ctx.extensions
+            .get::<PolicyResponseOutput>()
+            .and_then(|output| output.get("response_invocations")),
+        Some(&json!(1)),
+    );
+
+    ctx.response_header = None;
+    let mut body = None;
+    let action = filter
+        .on_response_body(&mut ctx, &mut body, true)
+        .expect("defensive EOF callback ran");
+    assert!(matches!(action, FilterAction::Continue));
+    assert_eq!(
+        ctx.extensions
+            .get::<PolicyResponseOutput>()
+            .and_then(|output| output.get("response_invocations")),
+        Some(&json!(1)),
+        "a defensive body EOF must not dispatch metadata policy twice",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn hyper_no_content_response_dispatches_metadata_policy_on_headers() {
+    let (_dir, path) = write_llm_response_context_config(false);
+    let filter = build_filter(path);
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    admit_inference(&filter, &mut ctx).await;
+    ctx.extensions.insert(PolicyResponseContext::default());
+
+    let mut response = crate::test_utils::make_response();
+    response.status = http::StatusCode::NO_CONTENT;
+    ctx.response_header = Some(&mut response);
+    let action = filter.on_response(&mut ctx).await.expect("response header phase ran");
+
+    assert!(matches!(action, FilterAction::Continue));
+    let output = ctx
+        .extensions
+        .get::<PolicyResponseOutput>()
+        .expect("204 completion publishes metadata policy output during the header phase");
+    assert_eq!(output.get("response_invocations"), Some(&json!(1)));
+    assert_eq!(
+        output.get("response_http"),
+        Some(&json!({"status": 204, "quota": null})),
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the regression exercises both the matching and rejecting response-fact cases"
+)]
+async fn metadata_only_rules_read_response_status_and_headers() {
+    for (status, server, allowed) in [
+        (http::StatusCode::TOO_MANY_REQUESTS, "quota", true),
+        (http::StatusCode::OK, "origin", false),
+    ] {
+        let (_dir, path) = write_llm_response_fact_config();
+        let filter = build_read_write_filter(path);
+        let req = request_for_alice();
+        let mut ctx = make_filter_context(&req);
+        admit_inference(&filter, &mut ctx).await;
+        ctx.extensions.insert(PolicyResponseContext::default());
+
+        let mut response = crate::test_utils::make_response();
+        response.status = status;
+        response
+            .headers
+            .insert("content-type", HeaderValue::from_static("text/event-stream"));
+        response
+            .headers
+            .insert("server", HeaderValue::from_str(server).expect("server header"));
+        ctx.response_header = Some(&mut response);
+        let response_action = filter.on_response(&mut ctx).await.expect("response header phase ran");
+        assert!(matches!(response_action, FilterAction::Continue));
+        ctx.response_header = None;
+        let mut body = Some(bytes::Bytes::from_static(b"data: [DONE]\n\n"));
+        let body_action = filter
+            .on_response_body(&mut ctx, &mut body, true)
+            .expect("metadata response rules ran");
+        assert!(matches!(body_action, FilterAction::Continue));
+
+        let violation = ctx
+            .extensions
+            .get::<PolicyResponseOutput>()
+            .and_then(PolicyResponseOutput::violation);
+        assert_eq!(violation.is_none(), allowed, "status={status}, server={server}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

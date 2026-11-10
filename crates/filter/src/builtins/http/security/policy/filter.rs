@@ -59,7 +59,7 @@ use super::{
     llm::{ParsedLlmRequest, ParsedLlmResponse, request_message, response_message},
     request_facts::{RequestFacts, RequestView},
     request_headers,
-    request_state::{state, state_mut},
+    request_state::{MetadataResponseDispatch, state, state_mut},
     response_rules::{ensure_supported_entity_results, metadata_only_policy},
     transport::PolicyHttpTransport,
 };
@@ -1880,20 +1880,27 @@ impl PolicyFilter {
         reason = "response-phase dispatch shares the fallible hook signature with content evaluation"
     )]
     fn dispatch_llm_response_context(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        let Some(context) = ctx.extensions.get::<PolicyResponseContext>() else {
+        let Some(host_custom) = ctx
+            .extensions
+            .get::<PolicyResponseContext>()
+            .map(PolicyResponseContext::custom)
+        else {
             return Ok(FilterAction::Continue);
         };
-        let Some(manager) = self.response_context_mgr.as_ref() else {
-            let host_custom = context.custom();
+        if state(ctx)
+            .is_some_and(|state| matches!(state.metadata_response_dispatch, MetadataResponseDispatch::Complete))
+        {
+            return Ok(FilterAction::Continue);
+        }
+        state_mut(ctx).metadata_response_dispatch = MetadataResponseDispatch::Complete;
+        if self.response_context_mgr.is_none() {
             Self::publish_response_output(ctx, host_custom.as_ref(), ResponseCustomState::Unmodified, None);
             return Ok(FilterAction::Continue);
-        };
+        }
         let Some(model) = state(ctx).and_then(|state| state.inference_model.clone()) else {
-            let host_custom = context.custom();
             Self::publish_response_output(ctx, host_custom.as_ref(), ResponseCustomState::Unmodified, None);
             return Ok(FilterAction::Continue);
         };
-        let host_custom = context.custom();
         let Some(identity) = state(ctx).and_then(|state| state.identity.clone()) else {
             let violation = PluginViolation::new(
                 "llm.response_context_unavailable",
@@ -1909,6 +1916,14 @@ impl PolicyFilter {
         };
         let view = Self::request_view(ctx, &self.cfg.context_headers, &self.trusted_proxies);
         let mut extensions = Self::extensions_from_identity(&view, &identity, ENTITY_LLM, &model, &self.cfg);
+        if let Some(http) = extensions.http.as_ref() {
+            let mut http = (**http).clone();
+            if let Some(state) = state(ctx) {
+                http.response_headers.clone_from(&state.response_headers);
+                http.status = state.response_status;
+            }
+            extensions.http = Some(Arc::new(http));
+        }
         extensions.llm = Some(Arc::new(LLMExtension {
             model_id: Some(model),
             provider: self.cfg.llm.provider.clone(),
@@ -1918,7 +1933,7 @@ impl PolicyFilter {
         let payload = MessagePayload {
             message: Message::with_content(Role::Assistant, Vec::new()),
         };
-        let result = match self.dispatch_metadata_response_cmf(manager, HOOK_CMF_LLM_OUTPUT, payload, extensions) {
+        let result = match self.dispatch_metadata_response_cmf(ctx, payload, extensions) {
             Ok(result) => result,
             Err(error) => {
                 let violation = PluginViolation::new("llm.response_context_unavailable", error.to_string());
@@ -2231,19 +2246,124 @@ impl PolicyFilter {
     )]
     fn dispatch_metadata_response_cmf(
         &self,
-        manager: &Arc<PolicyEngine>,
-        hook: &'static str,
+        ctx: &mut HttpFilterContext<'_>,
         payload: MessagePayload,
         extensions: Extensions,
     ) -> Result<PipelineResult, FilterError> {
-        let manager = Arc::clone(manager);
+        let manager = self
+            .response_context_mgr
+            .as_ref()
+            .ok_or_else(|| -> FilterError { "policy: metadata-only response engine unavailable".into() })?;
+        let mut table = state_mut(ctx).take_table()?;
+        if let Some(table) = table.as_mut() {
+            Self::remap_plugin_local_states(&self.mgr, manager, table);
+        }
+        let response_manager = Arc::clone(manager);
         let invoke = async move {
-            let (result, _background) = manager.invoke_named::<CmfHook>(hook, payload, extensions, None).await;
+            let (result, _background) = response_manager
+                .invoke_named::<CmfHook>(HOOK_CMF_LLM_OUTPUT, payload, extensions, table)
+                .await;
             result
         };
-        block_on_bounded(invoke, self.response_dispatch_timeout).map_err(|error| -> FilterError {
+        let mut result = block_on_bounded(invoke, self.response_dispatch_timeout).map_err(|error| -> FilterError {
             format!("policy: metadata-only response dispatch failed: {error}").into()
+        })?;
+        Self::remap_plugin_local_states(manager, &self.mgr, &mut result.context_table);
+        state_mut(ctx).restore_table(std::mem::take(&mut result.context_table));
+        Ok(result)
+    }
+
+    /// Re-key private state for same-named plugin instances in two engines.
+    fn remap_plugin_local_states(
+        source: &PolicyEngine,
+        destination: &PolicyEngine,
+        table: &mut ppe::praxis_policy_core::context::PluginContextTable,
+    ) {
+        for name in destination.plugin_names() {
+            let Some((source_id, destination_id)) = source
+                .get_plugin(&name)
+                .zip(destination.get_plugin(&name))
+                .map(|(source, destination)| (source.id(), destination.id()))
+            else {
+                continue;
+            };
+            if source_id != destination_id
+                && let Some(local_state) = table.local_states.remove(&source_id)
+            {
+                table.local_states.insert(destination_id, local_state);
+            }
+        }
+    }
+
+    /// Capture the final response facts visible at this filter's header phase.
+    fn snapshot_response_context(ctx: &mut HttpFilterContext<'_>) {
+        let Some(response) = ctx.response_header.as_ref() else {
+            return;
+        };
+        let headers = snapshot_response_headers(&response.headers);
+        let status = response.status.as_u16();
+        let state = state_mut(ctx);
+        state.response_headers = headers;
+        state.response_status = Some(status);
+    }
+
+    /// Whether the final response is complete when its headers are delivered.
+    fn response_ends_at_headers(ctx: &HttpFilterContext<'_>) -> bool {
+        let Some(response) = ctx.response_header.as_ref() else {
+            return false;
+        };
+        if response.status.is_informational() {
+            return false;
+        }
+        if crate::bodyless_response(response.status, &ctx.request.method) {
+            return true;
+        }
+        if response.headers.contains_key(http::header::TRANSFER_ENCODING) {
+            return false;
+        }
+        let mut values = response.headers.get_all(http::header::CONTENT_LENGTH).iter();
+        let Some(first) = values.next() else {
+            return false;
+        };
+        std::iter::once(first).chain(values).all(|value| {
+            value
+                .to_str()
+                .ok()
+                .is_some_and(|value| value.split(',').all(|part| part.trim() == "0"))
         })
+    }
+
+    /// Run the configured generic HTTP response hook, when present.
+    async fn dispatch_http_response_hook(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+    ) -> Result<Option<FilterAction>, FilterError> {
+        let Some(hook) = self.response_hook else {
+            return Ok(None);
+        };
+        let Some(response) = ctx.response_header.as_ref() else {
+            return Ok(None);
+        };
+        let extensions = Self::response_extensions(
+            ctx,
+            snapshot_response_headers(&response.headers),
+            response.status.as_u16(),
+            &self.cfg,
+            &self.trusted_proxies,
+        );
+        let result = self.invoke::<HttpHook>(ctx, hook, HttpPayload, extensions).await?;
+        if !result.continue_processing {
+            tracing::warn!(
+                target: "policy.filter",
+                violation = ?result.violation,
+                "http response deny; replacing the upstream response",
+            );
+            return Ok(Some(FilterAction::Reject(super::error::http_authz_rejection(
+                result.violation.as_ref(),
+            ))));
+        }
+        self.write_response_assertions(ctx, result.modified_extensions.as_ref());
+        Ok(None)
     }
 
     /// Remember an SSE classification until the clean body EOF callback.
@@ -2787,33 +2907,16 @@ impl HttpFilter for PolicyFilter {
 
     async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         self.record_streamed_inference_response(ctx);
-        let Some(hook) = self.response_hook else {
+        if ctx.response_header.is_none() {
             return Ok(FilterAction::Continue);
-        };
-        let Some(response) = ctx.response_header.as_ref() else {
-            return Ok(FilterAction::Continue);
-        };
-        let extensions = Self::response_extensions(
-            ctx,
-            snapshot_response_headers(&response.headers),
-            response.status.as_u16(),
-            &self.cfg,
-            &self.trusted_proxies,
-        );
-
-        let result = self.invoke::<HttpHook>(ctx, hook, HttpPayload, extensions).await?;
-        if !result.continue_processing {
-            tracing::warn!(
-                target: "policy.filter",
-                violation = ?result.violation,
-                "http response deny; replacing the upstream response",
-            );
-            return Ok(FilterAction::Reject(super::error::http_authz_rejection(
-                result.violation.as_ref(),
-            )));
         }
-
-        self.write_response_assertions(ctx, result.modified_extensions.as_ref());
+        if let Some(action) = self.dispatch_http_response_hook(ctx).await? {
+            return Ok(action);
+        }
+        Self::snapshot_response_context(ctx);
+        if Self::response_ends_at_headers(ctx) && self.entity_routes && self.llm_post {
+            return self.dispatch_llm_response_context(ctx);
+        }
         Ok(FilterAction::Continue)
     }
 
