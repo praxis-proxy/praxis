@@ -8,7 +8,10 @@ use std::{cell::Cell, collections::HashSet, fmt};
 use bytes::Bytes;
 use ppe::praxis_policy_core::{
     cmf::{ContentPart, Message, Role},
-    extensions::{CompletionExtension, StopReason, TokenUsage},
+    extensions::{
+        CompletionExtension, LlmInstruction, LlmInstructionRole, LlmRequestParts, StopReason, TokenUsage, ToolChoice,
+        ToolMetadata,
+    },
 };
 
 // -----------------------------------------------------------------------------
@@ -27,6 +30,91 @@ const INPUT_TEXT_TYPES: &[&str] = &["input_text", "text", "output_text", "reason
 /// Fields of a non-message `input` item (tool calls, tool outputs,
 /// reasoning) that carry text, in projection order.
 const INPUT_ITEM_TEXT_FIELDS: &[&str] = &["arguments", "input", "output", "text", "content", "summary"];
+
+/// Top-level Chat Completions keys the parts normalizer models or knows
+/// offer no tool, add no instruction, and leave the completion cap alone.
+///
+/// Any other key, including a case variant of one of these, leaves the parts
+/// absent: a lenient backend may act on what the normalizer cannot see.
+const CHAT_REQUEST_KEYS: &[&str] = &[
+    "model",
+    "messages",
+    "tools",
+    "tool_choice",
+    "functions",
+    "function_call",
+    "max_tokens",
+    "max_completion_tokens",
+    "n",
+    "temperature",
+    "top_p",
+    "stop",
+    "stream",
+    "stream_options",
+    "frequency_penalty",
+    "presence_penalty",
+    "logit_bias",
+    "logprobs",
+    "top_logprobs",
+    "response_format",
+    "seed",
+    "user",
+    "metadata",
+    "parallel_tool_calls",
+    "store",
+    "service_tier",
+    "reasoning_effort",
+];
+
+/// Top-level Anthropic Messages keys, on the terms of [`CHAT_REQUEST_KEYS`].
+///
+/// [`CHAT_REQUEST_KEYS`]: CHAT_REQUEST_KEYS
+const MESSAGES_REQUEST_KEYS: &[&str] = &[
+    "model",
+    "messages",
+    "system",
+    "tools",
+    "tool_choice",
+    "max_tokens",
+    "stop_sequences",
+    "temperature",
+    "top_p",
+    "top_k",
+    "metadata",
+    "stream",
+    "thinking",
+    "service_tier",
+];
+
+/// Keys of a conversation message, across both shapes.
+const MESSAGE_KEYS: &[&str] = &[
+    "role",
+    "content",
+    "name",
+    "tool_calls",
+    "tool_call_id",
+    "function_call",
+    "refusal",
+];
+
+/// Keys of a Chat Completions `{"type": "function", "function": ...}` tool entry.
+const FUNCTION_TOOL_KEYS: &[&str] = &["type", "function"];
+
+/// Keys of a Chat Completions function definition.
+const FUNCTION_KEYS: &[&str] = &["name", "description", "parameters", "strict"];
+
+/// Keys of an Anthropic custom tool.
+const CUSTOM_TOOL_KEYS: &[&str] = &["type", "name", "description", "input_schema", "cache_control"];
+
+/// Keys of a legacy Chat Completions `functions` entry.
+const LEGACY_FUNCTION_KEYS: &[&str] = &["name", "description", "parameters"];
+
+/// Keys of an instruction text block.
+const TEXT_BLOCK_KEYS: &[&str] = &["type", "text", "cache_control"];
+
+/// Message roles that carry no instruction; matched exactly, since a backend may fold
+/// a case variant such as `SYSTEM` into an instruction.
+const NON_INSTRUCTION_ROLES: &[&str] = &["user", "assistant", "tool", "function"];
 
 /// Maximum nesting depth followed into content parts (e.g. a `tool_result`
 /// block whose `content` is itself an array of parts).
@@ -145,6 +233,15 @@ impl ParsedLlmRequest {
         }
 
         parts
+    }
+
+    /// Normalized parts, when every instruction, tool, and limit is understood.
+    ///
+    /// Covers Chat Completions and Anthropic Messages bodies. Any other
+    /// shape, unknown entry, or malformed value leaves the parts absent, so
+    /// an incomplete request is never reported as complete.
+    pub(super) fn parts(&self) -> Option<LlmRequestParts> {
+        normalize_parts(&self.0).ok()
     }
 
     /// Consume the request, yielding the parsed document.
@@ -304,6 +401,247 @@ fn push_call_arguments(parts: &mut Vec<ContentPart>, message: &serde_json::Value
 /// The CMF payload message for an inference request.
 pub(super) fn request_message(parsed: &ParsedLlmRequest) -> Message {
     Message::with_content(Role::User, parsed.content())
+}
+
+// -----------------------------------------------------------------------------
+// Normalized request parts
+// -----------------------------------------------------------------------------
+
+/// A request shape or value the parts normalizer cannot fully account for.
+struct Unsupported;
+
+/// A top-level request object.
+type JsonObject = serde_json::Map<String, serde_json::Value>;
+
+/// Normalize a Chat Completions or Anthropic Messages body.
+fn normalize_parts(body: &serde_json::Value) -> Result<LlmRequestParts, Unsupported> {
+    let object = body.as_object().ok_or(Unsupported)?;
+    let messages = object
+        .get("messages")
+        .and_then(serde_json::Value::as_array)
+        .ok_or(Unsupported)?;
+    if !(keys_within(object, CHAT_REQUEST_KEYS) || keys_within(object, MESSAGES_REQUEST_KEYS)) {
+        return Err(Unsupported);
+    }
+    Ok(LlmRequestParts {
+        instructions: instructions(object.get("system"), messages)?,
+        offered_tools: offered_tools(object)?,
+        tool_choice: tool_choice(object)?,
+        max_tokens: completion_cap(object)?,
+        candidate_count: optional(object, "n", as_u32)?,
+        temperature: optional(object, "temperature", serde_json::Value::as_f64)?,
+        top_p: optional(object, "top_p", serde_json::Value::as_f64)?,
+        stop_sequences: stop_sequences(object)?,
+        stream: optional(object, "stream", serde_json::Value::as_bool)?,
+    })
+}
+
+/// Whether every key of `object` is exactly one of `allowed`.
+fn keys_within(object: &JsonObject, allowed: &[&str]) -> bool {
+    object.keys().all(|key| allowed.contains(&key.as_str()))
+}
+
+/// The object `value`, when it has no key outside `allowed`.
+fn strict_object<'doc>(value: &'doc serde_json::Value, allowed: &[&str]) -> Result<&'doc JsonObject, Unsupported> {
+    value
+        .as_object()
+        .filter(|object| keys_within(object, allowed))
+        .ok_or(Unsupported)
+}
+
+/// Read an optional field; `null` counts as unset, any other unreadable value is unsupported.
+fn optional<'doc, T>(
+    object: &'doc JsonObject,
+    key: &str,
+    read: impl Fn(&'doc serde_json::Value) -> Option<T>,
+) -> Result<Option<T>, Unsupported> {
+    match object.get(key) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(value) => read(value).map(Some).ok_or(Unsupported),
+    }
+}
+
+/// A non-negative integer that fits `u32`.
+fn as_u32(value: &serde_json::Value) -> Option<u32> {
+    value.as_u64().and_then(|number| u32::try_from(number).ok())
+}
+
+/// Effective completion cap: `max_completion_tokens` wins over `max_tokens`.
+fn completion_cap(object: &JsonObject) -> Result<Option<u32>, Unsupported> {
+    let preferred = optional(object, "max_completion_tokens", as_u32)?;
+    let legacy = optional(object, "max_tokens", as_u32)?;
+    Ok(preferred.or(legacy))
+}
+
+/// Ordered instructions: Anthropic's top-level `system`, then system and developer messages.
+fn instructions(
+    system: Option<&serde_json::Value>,
+    messages: &[serde_json::Value],
+) -> Result<Vec<LlmInstruction>, Unsupported> {
+    let mut out = Vec::new();
+    if let Some(system) = system.filter(|value| !value.is_null()) {
+        push_instruction(&mut out, LlmInstructionRole::System, system)?;
+    }
+    for message in messages {
+        strict_object(message, MESSAGE_KEYS)?;
+        let role = match message.get("role").and_then(serde_json::Value::as_str) {
+            Some("system") => LlmInstructionRole::System,
+            Some("developer") => LlmInstructionRole::Developer,
+            Some(role) if NON_INSTRUCTION_ROLES.contains(&role) => continue,
+            Some(_) | None => return Err(Unsupported),
+        };
+        push_instruction(&mut out, role, message.get("content").ok_or(Unsupported)?)?;
+    }
+    Ok(out)
+}
+
+/// Append one instruction per string or text block, keeping block boundaries.
+fn push_instruction(
+    out: &mut Vec<LlmInstruction>,
+    role: LlmInstructionRole,
+    content: &serde_json::Value,
+) -> Result<(), Unsupported> {
+    let texts = match content {
+        serde_json::Value::String(text) => vec![text.as_str()],
+        serde_json::Value::Array(blocks) => blocks.iter().map(text_block).collect::<Result<_, _>>()?,
+        _ => return Err(Unsupported),
+    };
+    out.extend(texts.into_iter().map(|text| LlmInstruction {
+        role,
+        text: text.to_owned(),
+    }));
+    Ok(())
+}
+
+/// The text of a `{"type": "text", "text": ...}` block with no unrecognized key.
+fn text_block(block: &serde_json::Value) -> Result<&str, Unsupported> {
+    let block = strict_object(block, TEXT_BLOCK_KEYS)?;
+    block
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .filter(|kind| *kind == "text")
+        .and_then(|_| block.get("text"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or(Unsupported)
+}
+
+/// Parses one tool entry.
+type ToolReader = fn(&serde_json::Value) -> Result<ToolMetadata, Unsupported>;
+
+/// Every offered tool, from `tools` and the legacy `functions` list.
+fn offered_tools(object: &JsonObject) -> Result<Vec<ToolMetadata>, Unsupported> {
+    let mut tools = Vec::new();
+    let readers: [(&str, ToolReader); 2] = [("tools", tool), ("functions", legacy_function)];
+    for (key, read) in readers {
+        let Some(list) = object.get(key).filter(|value| !value.is_null()) else {
+            continue;
+        };
+        for entry in list.as_array().ok_or(Unsupported)? {
+            tools.push(read(entry)?);
+        }
+    }
+    Ok(tools)
+}
+
+/// A Chat Completions function tool or an Anthropic custom tool.
+fn tool(entry: &serde_json::Value) -> Result<ToolMetadata, Unsupported> {
+    match entry.get("type").map(serde_json::Value::as_str) {
+        Some(Some("function")) => {
+            let function = strict_object(entry, FUNCTION_TOOL_KEYS)?
+                .get("function")
+                .ok_or(Unsupported)?;
+            named_tool(function, "parameters", FUNCTION_KEYS)
+        },
+        Some(Some("custom")) | None => named_tool(entry, "input_schema", CUSTOM_TOOL_KEYS),
+        Some(_) => Err(Unsupported),
+    }
+}
+
+/// An entry of the legacy Chat Completions `functions` list.
+fn legacy_function(entry: &serde_json::Value) -> Result<ToolMetadata, Unsupported> {
+    named_tool(entry, "parameters", LEGACY_FUNCTION_KEYS)
+}
+
+/// Tool metadata from an object carrying `name`, `description`, and a schema field.
+fn named_tool(value: &serde_json::Value, schema_key: &str, allowed: &[&str]) -> Result<ToolMetadata, Unsupported> {
+    let object = strict_object(value, allowed)?;
+    let name = optional(object, "name", serde_json::Value::as_str)?
+        .filter(|name| !name.is_empty())
+        .ok_or(Unsupported)?;
+    Ok(ToolMetadata {
+        name: name.to_owned(),
+        description: optional(object, "description", serde_json::Value::as_str)?.map(str::to_owned),
+        input_schema: object.get(schema_key).filter(|schema| !schema.is_null()).cloned(),
+        ..ToolMetadata::default()
+    })
+}
+
+/// Tool choice from `tool_choice` or the legacy `function_call`; both at once is ambiguous.
+fn tool_choice(object: &JsonObject) -> Result<Option<ToolChoice>, Unsupported> {
+    match (
+        optional(object, "tool_choice", read_tool_choice)?,
+        optional(object, "function_call", read_function_call)?,
+    ) {
+        (Some(_), Some(_)) => Err(Unsupported),
+        (choice, legacy) => Ok(choice.or(legacy)),
+    }
+}
+
+/// A Chat Completions or Anthropic `tool_choice`.
+fn read_tool_choice(value: &serde_json::Value) -> Option<ToolChoice> {
+    if let Some(mode) = value.as_str() {
+        return match mode {
+            "auto" => Some(ToolChoice::Auto),
+            "none" => Some(ToolChoice::None),
+            "required" => Some(ToolChoice::Required),
+            _ => None,
+        };
+    }
+    match value.get("type")?.as_str()? {
+        "function" => forced_tool(value.get("function")?),
+        "tool" => forced_tool(value),
+        "auto" => Some(ToolChoice::Auto),
+        "any" => Some(ToolChoice::Required),
+        "none" => Some(ToolChoice::None),
+        _ => None,
+    }
+}
+
+/// A legacy `function_call`: `"auto"`, `"none"`, or `{"name": ...}`.
+fn read_function_call(value: &serde_json::Value) -> Option<ToolChoice> {
+    match value.as_str() {
+        Some("auto") => Some(ToolChoice::Auto),
+        Some("none") => Some(ToolChoice::None),
+        Some(_) => None,
+        None => forced_tool(value),
+    }
+}
+
+/// A choice that forces the tool named by `value.name`.
+fn forced_tool(value: &serde_json::Value) -> Option<ToolChoice> {
+    value
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .filter(|name| !name.is_empty())
+        .map(|name| ToolChoice::Tool { name: name.to_owned() })
+}
+
+/// Stop sequences from `stop` (string or array) and `stop_sequences`.
+fn stop_sequences(object: &JsonObject) -> Result<Vec<String>, Unsupported> {
+    let mut out = Vec::new();
+    for key in ["stop", "stop_sequences"] {
+        match object.get(key) {
+            None | Some(serde_json::Value::Null) => {},
+            Some(serde_json::Value::String(stop)) => out.push(stop.clone()),
+            Some(serde_json::Value::Array(items)) => {
+                for item in items {
+                    out.push(item.as_str().ok_or(Unsupported)?.to_owned());
+                }
+            },
+            Some(_) => return Err(Unsupported),
+        }
+    }
+    Ok(out)
 }
 
 // -----------------------------------------------------------------------------
@@ -1279,9 +1617,233 @@ mod tests {
         }
     }
 
-    // -----------------------------------------------------------------------
+    #[test]
+    #[expect(clippy::too_many_lines, reason = "one request covering every normalized field")]
+    fn chat_request_parts_are_normalized() {
+        let parts = request(
+            r#"{"model":"gpt-4o","messages":[
+                {"role":"system","content":"be terse"},
+                {"role":"user","content":"hi"},
+                {"role":"developer","content":[{"type":"text","text":"no salaries"}]}
+            ],
+            "tools":[{"type":"function","function":{"name":"search","description":"web","parameters":{"type":"object"}}}],
+            "tool_choice":{"type":"function","function":{"name":"search"}},
+            "max_completion_tokens":512,"n":2,"stop":["END","STOP"],
+            "temperature":0.5,"top_p":0.9,"stream":true}"#,
+        )
+        .parts()
+        .unwrap();
+
+        let instructions: Vec<_> = parts.instructions.iter().map(|i| (i.role, i.text.as_str())).collect();
+        assert_eq!(
+            instructions,
+            [
+                (LlmInstructionRole::System, "be terse"),
+                (LlmInstructionRole::Developer, "no salaries")
+            ],
+        );
+        assert_eq!(parts.offered_tools.len(), 1);
+        assert_eq!(parts.offered_tools[0].name, "search");
+        assert_eq!(parts.offered_tools[0].description.as_deref(), Some("web"));
+        assert!(parts.offered_tools[0].input_schema.is_some());
+        assert_eq!(
+            parts.tool_choice,
+            Some(ToolChoice::Tool {
+                name: "search".to_owned()
+            })
+        );
+        assert_eq!(parts.max_tokens, Some(512));
+        assert_eq!(parts.candidate_count, Some(2));
+        assert_eq!(parts.stop_sequences, ["END", "STOP"]);
+        assert_eq!(parts.temperature, Some(0.5));
+        assert_eq!(parts.top_p, Some(0.9));
+        assert_eq!(parts.stream, Some(true));
+    }
+
+    #[test]
+    fn unset_optional_parts_stay_absent() {
+        let parts = request(r#"{"model":"m","messages":[{"role":"user","content":"hi"}]}"#)
+            .parts()
+            .unwrap();
+        assert!(parts.instructions.is_empty());
+        assert!(parts.offered_tools.is_empty());
+        assert!(parts.stop_sequences.is_empty());
+        assert_eq!(parts.tool_choice, None);
+        assert_eq!(parts.max_tokens, None);
+        assert_eq!(parts.candidate_count, None);
+        assert_eq!(parts.temperature, None);
+        assert_eq!(parts.stream, None);
+    }
+
+    #[test]
+    fn instruction_order_is_preserved() {
+        let forward =
+            request(r#"{"model":"m","messages":[{"role":"system","content":"a"},{"role":"developer","content":"b"}]}"#)
+                .parts()
+                .unwrap();
+        let reversed =
+            request(r#"{"model":"m","messages":[{"role":"developer","content":"b"},{"role":"system","content":"a"}]}"#)
+                .parts()
+                .unwrap();
+        let digest =
+            |parts: &LlmRequestParts| ppe::praxis_policy_apl_cmf::llm::instruction_digest(&parts.instructions).unwrap();
+        assert!(digest(&forward).starts_with("sha256-v1:"));
+        assert_ne!(
+            digest(&forward),
+            digest(&reversed),
+            "reordered instructions must not pin the same digest"
+        );
+    }
+
+    #[test]
+    fn max_completion_tokens_wins_over_max_tokens() {
+        let parts = request(r#"{"model":"m","messages":[],"max_tokens":4096,"max_completion_tokens":256}"#)
+            .parts()
+            .unwrap();
+        assert_eq!(parts.max_tokens, Some(256));
+        let legacy = request(r#"{"model":"m","messages":[],"max_tokens":4096}"#)
+            .parts()
+            .unwrap();
+        assert_eq!(legacy.max_tokens, Some(4096));
+    }
+
+    #[test]
+    fn anthropic_messages_parts_are_normalized() {
+        let parts = request(
+            r#"{"model":"claude","system":[{"type":"text","text":"s1"},{"type":"text","text":"s2"}],
+            "messages":[{"role":"user","content":"hi"}],
+            "tools":[{"name":"get_weather","input_schema":{"type":"object"}}],
+            "tool_choice":{"type":"any"},"max_tokens":1024,"stop_sequences":["\n\nHuman:"]}"#,
+        )
+        .parts()
+        .unwrap();
+        let texts: Vec<_> = parts.instructions.iter().map(|i| i.text.as_str()).collect();
+        assert_eq!(texts, ["s1", "s2"]);
+        assert_eq!(parts.offered_tools[0].name, "get_weather");
+        assert_eq!(parts.tool_choice, Some(ToolChoice::Required));
+        assert_eq!(parts.max_tokens, Some(1024));
+        assert_eq!(parts.stop_sequences, ["\n\nHuman:"]);
+    }
+
+    #[test]
+    fn legacy_functions_are_offered_tools() {
+        let parts = request(
+            r#"{"model":"m","messages":[],"tools":[{"type":"function","function":{"name":"a"}}],
+            "functions":[{"name":"b"}],"stop":"END"}"#,
+        )
+        .parts()
+        .unwrap();
+        let names: Vec<_> = parts.offered_tools.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["a", "b"]);
+        assert_eq!(parts.stop_sequences, ["END"]);
+    }
+
+    #[test]
+    fn an_explicit_empty_tools_array_is_an_empty_list() {
+        let parts = request(r#"{"model":"m","messages":[],"tools":[]}"#).parts().unwrap();
+        assert!(parts.offered_tools.is_empty());
+    }
+
+    #[test]
+    fn inert_top_level_fields_keep_the_parts() {
+        for body in [
+            r#"{"model":"m","messages":[{"role":"user","content":"hi","name":"bob"}],"seed":7,"user":"u",
+            "response_format":{"type":"json_object"},"parallel_tool_calls":false,"store":false}"#,
+            r#"{"model":"m","messages":[],"tools":[{"name":"a","input_schema":{},"cache_control":{"type":"ephemeral"}}],
+            "top_k":5,"thinking":{"type":"disabled"},"max_tokens":16}"#,
+        ] {
+            assert!(request(body).parts().is_some(), "body {body} must keep its parts");
+        }
+    }
+
+    #[test]
+    fn unknown_or_malformed_shapes_leave_parts_absent() {
+        for body in [
+            r#"{"model":"m","messages":[],"tools":[{"type":"web_search_preview"}]}"#,
+            r#"{"model":"m","messages":[],"tools":[{"type":"function","function":{"name":"a"}},{"type":"mcp"}]}"#,
+            r#"{"model":"m","messages":[],"tools":[{"type":"function"}]}"#,
+            r#"{"model":"m","messages":[],"tools":"search"}"#,
+            r#"{"model":"m","messages":[{"role":"system","content":[{"type":"image_url"}]}]}"#,
+            r#"{"model":"m","messages":[{"role":"system"}]}"#,
+            r#"{"model":"m","messages":[{"content":"no role"}]}"#,
+            r#"{"model":"m","messages":[],"max_tokens":-1}"#,
+            r#"{"model":"m","messages":[],"max_completion_tokens":"512"}"#,
+            r#"{"model":"m","messages":[],"max_tokens":5000000000}"#,
+            r#"{"model":"m","messages":[],"n":1.5}"#,
+            r#"{"model":"m","messages":[],"temperature":"hot"}"#,
+            r#"{"model":"m","messages":[],"stop":[1]}"#,
+            r#"{"model":"m","messages":[],"stream":"yes"}"#,
+            r#"{"model":"m","messages":[],"tool_choice":"sometimes"}"#,
+            r#"{"model":"m","messages":[],"tool_choice":"auto","function_call":"none"}"#,
+            r#"{"model":"m","input":"hi"}"#,
+            r#"{"model":"m","messages":[],"instructions":"x"}"#,
+            r#"{"model":"m","prompt":"hi"}"#,
+            "not json",
+        ] {
+            assert!(request(body).parts().is_none(), "body {body} must leave parts absent");
+        }
+    }
+
+    #[test]
+    fn only_exact_known_roles_keep_the_parts() {
+        for role in ["SYSTEM", "System", "Developer", "custom"] {
+            let body = format!(r#"{{"model":"m","messages":[{{"role":"{role}","content":"x"}}]}}"#);
+            assert!(request(&body).parts().is_none(), "role {role} must leave parts absent");
+        }
+        assert!(
+            request(r#"{"model":"m","messages":[{"role":1,"content":"x"}]}"#)
+                .parts()
+                .is_none()
+        );
+        let parts = request(
+            r#"{"model":"m","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":null,
+            "function_call":{"name":"a","arguments":"{}"}},{"role":"function","name":"a","content":"ok"},
+            {"role":"tool","tool_call_id":"t","content":"ok"}]}"#,
+        )
+        .parts()
+        .unwrap();
+        assert!(parts.instructions.is_empty());
+    }
+
+    #[test]
+    fn text_blocks_with_unrecognized_keys_leave_parts_absent() {
+        for body in [
+            r#"{"model":"m","messages":[{"role":"system","content":[{"type":"text","text":"approved","content":"more"}]}]}"#,
+            r#"{"model":"m","system":[{"type":"text","text":"approved","extra":"more"}],"messages":[],"max_tokens":1}"#,
+        ] {
+            assert!(request(body).parts().is_none(), "body {body} must leave parts absent");
+        }
+        let cached = request(
+            r#"{"model":"m","system":[{"type":"text","text":"s","cache_control":{"type":"ephemeral"}}],"messages":[],"max_tokens":1}"#,
+        )
+        .parts()
+        .unwrap();
+        assert_eq!(cached.instructions.len(), 1);
+    }
+
+    #[test]
+    fn unrecognized_keys_leave_parts_absent() {
+        for body in [
+            r#"{"model":"m","messages":[],"future_tool_list":[{"name":"transfer_funds"}]}"#,
+            r#"{"model":"m","messages":[],"mcp_servers":[{"type":"url","url":"https://x","name":"x"}]}"#,
+            r#"{"model":"m","messages":[],"web_search_options":{}}"#,
+            r#"{"model":"m","messages":[],"Tools":[{"name":"transfer_funds"}]}"#,
+            r#"{"model":"m","messages":[],"Max_Tokens":100000}"#,
+            r#"{"model":"m","messages":[],"system":"s","functions":[{"name":"a"}]}"#,
+            r#"{"model":"m","messages":[{"Role":"system","content":"x"}]}"#,
+            r#"{"model":"m","messages":[{"role":"user","Content":"x"}]}"#,
+            r#"{"model":"m","messages":[],"tools":[{"name":"a","Type":"mcp"}]}"#,
+            r#"{"model":"m","messages":[],"tools":[{"type":"function","function":{"name":"a"},"server_url":"x"}]}"#,
+            r#"{"model":"m","messages":[],"tools":[{"type":"function","function":{"name":"a","Parameters":{}}}]}"#,
+            r#"{"model":"m","messages":[],"functions":[{"name":"a","input_schema":{}}]}"#,
+        ] {
+            assert!(request(body).parts().is_none(), "body {body} must leave parts absent");
+        }
+    }
+
+    // -----------------------------------------------------------------------------
     // Test Utilities
-    // -----------------------------------------------------------------------
+    // -----------------------------------------------------------------------------
 
     fn request(json: &str) -> ParsedLlmRequest {
         try_request(json).unwrap()

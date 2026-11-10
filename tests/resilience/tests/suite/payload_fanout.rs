@@ -7,7 +7,7 @@
 
 use std::{
     io::{BufRead as _, BufReader, Read as _, Write as _},
-    net::{TcpListener, TcpStream},
+    net::TcpStream,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -57,9 +57,8 @@ impl Drop for AttemptBackend {
 /// Start a backend returning `status`, or holding the response until cancelled.
 #[cfg(feature = "pingora")]
 fn attempt_backend(status: Option<u16>) -> AttemptBackend {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let (listener, port) = praxis_test_utils::bind_unique_port();
     listener.set_nonblocking(true).unwrap();
-    let port = listener.local_addr().unwrap().port();
     let (accepted_tx, accepted) = mpsc::channel();
     let (sender, attempts) = mpsc::channel();
     let (arrival_sender, arrived) = mpsc::channel();
@@ -321,9 +320,8 @@ mod iterative {
     }
 
     fn child(response_len: usize) -> RepeatingChild {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let (listener, port) = praxis_test_utils::bind_unique_port();
         listener.set_nonblocking(true).unwrap();
-        let port = listener.local_addr().unwrap().port();
         let (accepted_tx, accepted) = mpsc::channel();
         let (sender, received) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));

@@ -564,6 +564,66 @@ mod tests {
     }
 
     #[test]
+    fn incompatible_buffered_request_reload_preserves_live_state() {
+        let (live, old_config, registry, shutdown, meta, cluster_meta) = setup_live_pipelines();
+        let old_pipeline = live.get("web").unwrap().load_full();
+        let old_meta = meta.load_full();
+        let old_cluster_meta = cluster_meta.load_full();
+        let old_token = shutdown.lock().unwrap().clone();
+        let new_config = Config::from_yaml(
+            r#"
+body_limits:
+  max_buffer_bytes: 4096
+  max_request_bytes: 8192
+listeners:
+  - name: web
+    address: "127.0.0.1:9090"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: json_body_field
+        field: model
+        header: x-praxis-model
+      - filter: static_response
+        status: 204
+"#,
+        )
+        .unwrap();
+        let error = reload_pipelines(
+            &new_config,
+            &old_config,
+            &registry,
+            &live,
+            &meta,
+            &cluster_meta,
+            &shutdown,
+            &empty_kv_stores(),
+            &empty_session_stores(),
+            &empty_slow_start_registry(),
+            &empty_subrequest_client(),
+            None,
+            &PipelineComposition::default(),
+        )
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("body_limits.max_request_bytes (8192)"), "{message}");
+        assert!(message.contains("body_limits.max_buffer_bytes (4096)"), "{message}");
+        assert!(Arc::ptr_eq(&live.get("web").unwrap().load_full(), &old_pipeline));
+        assert!(Arc::ptr_eq(&meta.load_full(), &old_meta));
+        assert!(Arc::ptr_eq(&cluster_meta.load_full(), &old_cluster_meta));
+        assert!(
+            !old_token.is_cancelled(),
+            "failed reload must keep the old health tasks"
+        );
+        assert_eq!(
+            old_pipeline.request_body_ceiling(),
+            old_config.body_limits.max_request_bytes
+        );
+        assert_eq!(old_pipeline.buffer_cap(), old_config.body_limits.max_buffer_bytes.get());
+    }
+
+    #[test]
     fn valid_reload_swaps_pipeline() {
         let (live, old_config, registry, shutdown, meta, cluster_meta) = setup_live_pipelines();
         let old_ptr = Arc::as_ptr(&live.get("web").unwrap().load());
@@ -1613,6 +1673,70 @@ filter_chains:
         assert_eq!(old_ptr, current_ptr, "pipeline should be untouched after failure");
     }
 
+    #[cfg(any(feature = "policy-builtins", feature = "policy-crypto-default"))]
+    #[test]
+    fn a_policy_that_fails_construction_keeps_the_previous_policy_serving() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let good = dir.path().join("good.yaml");
+        std::fs::write(&good, "plugins: []\n").unwrap();
+        let (live, old_config, registry, shutdown, meta, cluster_meta) =
+            setup_live_pipelines_from(policy_config(&good));
+        let serving = live.get("web").unwrap().load_full();
+
+        let bad = dir.path().join("bad.yaml");
+        std::fs::write(
+            &bad,
+            "plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks: [identity.resolve]
+    config:
+      trusted_issuers:
+        - issuer: https://idp.test.local
+          audiences: [api]
+          algorithms: [RS256]
+          decoding_key: { kind: pem_file, path: /unused.pem }
+          dpop: { mode: required }
+",
+        )
+        .unwrap();
+        let reload = |config: &Config| {
+            reload_pipelines(
+                config,
+                &old_config,
+                &registry,
+                &live,
+                &meta,
+                &cluster_meta,
+                &shutdown,
+                &empty_kv_stores(),
+                &empty_session_stores(),
+                &empty_slow_start_registry(),
+                &empty_subrequest_client(),
+                None,
+                &PipelineComposition::default(),
+            )
+        };
+        let error = reload(&policy_config(&bad)).expect_err("a refused policy must fail the reload");
+        assert!(
+            error.to_string().contains("dpop.external_base_url"),
+            "the reload error must carry the construction refusal: {error}"
+        );
+        assert!(
+            Arc::ptr_eq(&serving, &live.get("web").unwrap().load_full()),
+            "a failed policy reload must keep the previous pipeline serving"
+        );
+
+        for attempt in 1..=2 {
+            let result = reload(&policy_config(&good));
+            assert!(result.is_ok(), "valid reload {attempt} must succeed: {result:?}");
+        }
+        assert!(
+            !Arc::ptr_eq(&serving, &live.get("web").unwrap().load_full()),
+            "a valid policy reload must swap the pipeline"
+        );
+    }
+
     #[test]
     fn old_cancellation_token_cancelled_on_success() {
         let (live, old_config, registry, shutdown, meta, cluster_meta) = setup_live_pipelines();
@@ -2604,9 +2728,31 @@ filter_chains:
         );
     }
 
-    // -------------------------------------------------------------------------
+    // -----------------------------------------------------------------------------
     // Test Utilities
-    // -------------------------------------------------------------------------
+    // -----------------------------------------------------------------------------
+
+    /// A policy-filter config whose policy document is `policy_path`.
+    #[cfg(any(feature = "policy-builtins", feature = "policy-crypto-default"))]
+    fn policy_config(policy_path: &std::path::Path) -> Config {
+        Config::from_yaml(&format!(
+            r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: policy
+        config_path: "{}"
+      - filter: static_response
+        status: 200
+"#,
+            policy_path.display()
+        ))
+        .unwrap()
+    }
 
     /// Minimal valid config for reload tests.
     fn valid_config() -> Config {

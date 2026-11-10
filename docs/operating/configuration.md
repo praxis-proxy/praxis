@@ -557,6 +557,15 @@ static and runtime-selected buffering, nested pipelines, buffered
 subrequest responses, and iterative-router state. Incremental
 streams use only their cumulative transfer limits.
 
+When a pipeline statically buffers requests (`StreamBuffer`), a finite
+`body_limits.max_request_bytes` must not exceed
+`body_limits.max_buffer_bytes`. Startup, config validation, and reload reject
+that combination with an error naming both fields and values. Lower the request
+limit or raise the buffer cap to accommodate it. This also applies to nested
+pipelines and filters that can release their buffer early. Streaming request
+pipelines may keep higher transfer limits, including when only responses buffer.
+A rejected reload leaves the running configuration intact.
+
 For a 128 MiB buffered request, set `max_buffer_bytes: 134217728`,
 `max_request_bytes: 134217728`, and raise the relevant filter's
 inspection limit (for example `json_body_field.max_body_bytes`).
@@ -831,6 +840,30 @@ SSE; a stream that has not completed when the grace period
 ends can be cut short. Drain traffic before SIGTERM when
 requests need longer; see
 [Diagnostics](diagnostics.md#draining-before-shutdown).
+
+The full grace period is spent even when nothing is in
+flight. The requests cut when it ends are the
+long-running ones: streaming and SSE responses, slow
+uploads and downloads, and WebSocket or other upgraded
+connections. Clients of those see the connection or
+stream close before the request completes and should be
+ready to reconnect, retrying only idempotent requests.
+
+On Kubernetes, `terminationGracePeriodSeconds` only caps
+this window. A larger value does not extend it. A
+smaller one, once any `preStop` hook time is taken out,
+lets the kubelet kill the container before the grace
+period ends. Streams still open when the window ends are
+closed on every pod deletion, rolling update, and node
+drain.
+
+On the experimental hyper backend, HTTP listeners let
+in-flight connections finish for up to
+`shutdown_timeout_secs` minus a 1 s reserve, so
+`shutdown_timeout_secs: 1` leaves them no drain time.
+Active TCP forwarding stops as soon as the signal
+arrives. See
+[Hyper Backend](../architecture/hyper-backend.md#runtime-and-shutdown).
 
 Once runtime shutdown completes, Praxis flushes queued
 log lines and attempts to export pending OTLP spans, then

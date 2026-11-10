@@ -114,7 +114,7 @@ impl ForwardedHeadersFilter {
 
     /// Returns `true` if `ip` matches any trusted proxy CIDR.
     fn is_trusted(&self, ip: &IpAddr) -> bool {
-        self.trusted_proxies.iter().any(|r| r.contains(ip))
+        self.trusted_proxies.iter().any(|r| r.contains_same_family(ip))
     }
 
     /// Inject or append the standard [RFC 7239] `Forwarded` header.
@@ -418,6 +418,27 @@ mod tests {
             .find(|(k, _)| k == "X-Forwarded-For")
             .map(|(_, v)| v.as_str());
         assert_eq!(xff, Some("203.0.113.50"), "XFF should contain client IP");
+    }
+
+    #[tokio::test]
+    async fn an_ipv4_wildcard_does_not_trust_an_ipv6_client() {
+        let f = make_filter(&["0.0.0.0/0"]);
+        let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+        req.headers.insert(
+            http::header::HeaderName::from_static("x-forwarded-for"),
+            "1.2.3.4".parse().unwrap(),
+        );
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.client_addr = Some("2001:db8::7".parse().unwrap());
+
+        drop(f.on_request(&mut ctx).await.unwrap());
+
+        let xff = ctx
+            .extra_request_headers
+            .iter()
+            .find(|(k, _)| k == "X-Forwarded-For")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(xff, Some("2001:db8::7"), "the spoofed hop must not survive");
     }
 
     #[tokio::test]

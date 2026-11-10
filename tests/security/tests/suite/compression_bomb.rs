@@ -17,7 +17,7 @@ use std::{
 
 use praxis_core::config::Config;
 use praxis_test_utils::{
-    H1Completion, free_port, http_send, parse_body, parse_header, parse_status, read_h1_response,
+    H1Completion, bind_unique_port, free_port, http_send, parse_body, parse_header, parse_status, read_h1_response,
     start_backend_with_shutdown, start_full_proxy, start_gzip_encoded_backend, start_proxy, wait_for_tcp,
 };
 
@@ -312,8 +312,8 @@ impl Drop for RecordingBackend {
 
 /// Start a bounded backend that acknowledges only complete bodies.
 fn recording_backend(count: usize) -> RecordingBackend {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
+    // A raw ephemeral bind can steal another test's allocated but not yet bound port.
+    let (listener, port) = bind_unique_port();
     listener.set_nonblocking(true).unwrap();
     let (accepted_tx, accepted) = mpsc::channel();
     let (receipt_tx, receipts) = mpsc::channel();
