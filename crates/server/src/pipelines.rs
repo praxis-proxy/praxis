@@ -204,6 +204,13 @@ pub(crate) fn resolve_pipelines_with_composition(
     let chains = expanded_chains.as_slices();
     let mut pipelines = HashMap::with_capacity(config.listeners.len());
     for listener in &config.listeners {
+        if listener.upgrade_policy.is_some() {
+            return Err(format!(
+                "listener '{}': explicit upgrade_policy requires protocol admission support, which is not available yet",
+                listener.name
+            )
+            .into());
+        }
         #[cfg(feature = "hyper")]
         if listener
             .upgrade_policy
@@ -434,6 +441,27 @@ mod tests {
         fn prepare(&self, extensions: &mut RequestExtensions) {
             extensions.insert(self.clone());
         }
+    }
+
+    /// Explicit denials must not be accepted before adapters enforce them.
+    #[test]
+    fn resolve_pipelines_rejects_unenforced_upgrade_policy() {
+        let mut config = valid_config();
+        config.listeners[0].upgrade_policy = Some(serde_yaml::from_str("default: deny").unwrap());
+        let result = resolve_pipelines(
+            &config,
+            &FilterRegistry::with_builtins(),
+            &empty_health_registry(),
+            &empty_kv_stores(),
+            &empty_session_stores(),
+            &empty_subrequest_client(),
+        );
+        let error = result.err().expect("an unenforced policy must fail startup");
+        assert!(
+            error
+                .to_string()
+                .contains("explicit upgrade_policy requires protocol admission support")
+        );
     }
 
     #[test]

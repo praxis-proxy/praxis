@@ -458,6 +458,7 @@ fn build_config(address: &str, clusters: Vec<Cluster>, filters: Vec<FilterEntry>
         }],
         insecure_options: InsecureOptions::default(),
         listeners: vec![Listener {
+            upgrade_policy: None,
             address: address.to_owned(),
             cluster: None,
             downstream_keepalive_timeout_ms: None,

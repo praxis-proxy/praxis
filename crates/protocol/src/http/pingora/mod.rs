@@ -148,6 +148,7 @@ mod tests {
     /// Build a Listener with the given name and protocol.
     fn make_listener(name: &str, protocol: ProtocolKind) -> Listener {
         Listener {
+            upgrade_policy: None,
             name: name.to_owned(),
             address: "127.0.0.1:8080".to_owned(),
             protocol,
