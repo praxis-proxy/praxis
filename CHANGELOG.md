@@ -20,6 +20,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Changed
 
 - Update the Pingora fork dependencies to v0.11.4.
+- **Breaking:** `BodyAccess::ReadOnly` and `BodyAccess::ReadWrite` now require
+  an explicit `BodyRequirement::Optional` or `BodyRequirement::Required`.
+  Custom Rust filters must choose whether their body processing may be skipped
+  when admitting a transport that bypasses HTTP body hooks. `BodyAccess::None`
+  remains the default. Pipeline introspection exposes this declaration as
+  `requirement: "optional"` or `"required"`, omitted when there is no body access.
 
 ### Fixed
 

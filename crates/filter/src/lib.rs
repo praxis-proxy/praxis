@@ -113,7 +113,7 @@ pub use any_filter::AnyFilter;
 pub use binding::ChainBindingContext;
 #[cfg(feature = "chain-binding")]
 pub use binding::ChainBindingHttpFactory;
-pub use body::{BodyAccess, BodyBuffer, BodyBufferOverflow, BodyCapabilities, BodyMode};
+pub use body::{BodyAccess, BodyBuffer, BodyBufferOverflow, BodyCapabilities, BodyMode, BodyRequirement};
 #[cfg(feature = "basic-auth-filter")]
 pub use builtins::BasicAuthFilter;
 pub use builtins::{

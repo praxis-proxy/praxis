@@ -1095,7 +1095,7 @@ impl crate::HttpFilter for BoundBodyStepFilter {
     }
 
     fn bound_upstream_request_body_access(&self) -> crate::BodyAccess {
-        crate::BodyAccess::ReadOnly
+        crate::BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn request_body_mode(&self) -> crate::BodyMode {
@@ -1124,7 +1124,7 @@ impl crate::HttpFilter for RemoveIterationStateFilter {
     }
 
     fn response_body_access(&self) -> crate::BodyAccess {
-        crate::BodyAccess::ReadOnly
+        crate::BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn on_response_body(
@@ -1751,7 +1751,7 @@ fn request_body_access_returns_read_only() {
     let filter = build_filter();
     assert_eq!(
         filter.request_body_access(),
-        crate::body::BodyAccess::ReadOnly,
+        crate::body::BodyAccess::ReadOnly(crate::BodyRequirement::Required),
         "should return ReadOnly"
     );
 }
@@ -2924,7 +2924,7 @@ impl crate::HttpFilter for StreamBufferResponseFilter {
     }
 
     fn response_body_access(&self) -> crate::BodyAccess {
-        crate::BodyAccess::ReadOnly
+        crate::BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn response_body_mode(&self) -> crate::BodyMode {
@@ -2950,7 +2950,7 @@ impl crate::HttpFilter for StreamBufferRequestFilter {
     }
 
     fn request_body_access(&self) -> crate::BodyAccess {
-        crate::BodyAccess::ReadOnly
+        crate::BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn request_body_mode(&self) -> crate::BodyMode {
@@ -4942,7 +4942,7 @@ impl crate::HttpFilter for SmallBufferResponseFilter {
     }
 
     fn response_body_access(&self) -> crate::BodyAccess {
-        crate::BodyAccess::ReadOnly
+        crate::BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn response_body_mode(&self) -> crate::BodyMode {
@@ -5283,7 +5283,7 @@ impl crate::HttpFilter for ApplicationProbeFilter {
     }
 
     fn request_body_access(&self) -> crate::BodyAccess {
-        crate::BodyAccess::ReadOnly
+        crate::BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn request_body_mode(&self) -> crate::BodyMode {

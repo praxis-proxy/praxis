@@ -901,7 +901,7 @@ fn body_access_is_read_only() {
     let filter = make_filter();
     assert_eq!(
         filter.request_body_access(),
-        crate::body::BodyAccess::ReadOnly,
+        crate::body::BodyAccess::ReadOnly(crate::BodyRequirement::Required),
         "JSON-RPC filter should use ReadOnly body access"
     );
 }

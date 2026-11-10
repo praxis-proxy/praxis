@@ -1245,7 +1245,7 @@ async fn execute_request_body_skips_none_access_filters() {
 #[tokio::test]
 async fn execute_selected_upstream_request_body_discards_a_read_only_edit() {
     let pipeline = make_pipeline(vec![Box::new(SelectedUpstreamTamperFilter {
-        access: BodyAccess::ReadOnly,
+        access: BodyAccess::ReadOnly(crate::BodyRequirement::Optional),
         error: false,
     })]);
     let req = crate::test_utils::make_request(Method::POST, "/upload");
@@ -1271,7 +1271,7 @@ async fn execute_selected_upstream_request_body_discards_a_read_only_edit() {
 #[tokio::test]
 async fn execute_selected_upstream_request_body_undoes_a_fail_open_writer_that_errors() {
     let mut pipeline = make_pipeline(vec![Box::new(SelectedUpstreamTamperFilter {
-        access: BodyAccess::ReadWrite,
+        access: BodyAccess::ReadWrite(crate::BodyRequirement::Optional),
         error: true,
     })]);
     pipeline.filters[0].failure_mode = FailureMode::Open;
@@ -1332,7 +1332,34 @@ async fn execute_selected_upstream_request_body_read_only() {
 
 #[tokio::test]
 async fn execute_selected_upstream_request_body_mutation() {
-    let pipeline = make_pipeline(vec![Box::new(SelectedUpstreamRewriteFilter)]);
+    let pipeline = make_pipeline(vec![Box::new(SelectedUpstreamRewriteFilter(
+        crate::BodyRequirement::Optional,
+    ))]);
+    let req = crate::test_utils::make_request(Method::POST, "/upload");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let mut body = Some(Bytes::from_static(b"hello"));
+    let action = pipeline
+        .execute_http_selected_upstream_request_body(&mut ctx, &mut body)
+        .await
+        .unwrap();
+
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "rewrite filter should continue"
+    );
+    assert_eq!(
+        body,
+        Some(Bytes::from_static(b"HELLO")),
+        "read-write filter should rewrite the selected-upstream body"
+    );
+}
+
+#[tokio::test]
+async fn execute_required_selected_upstream_request_body_mutation() {
+    let pipeline = make_pipeline(vec![Box::new(SelectedUpstreamRewriteFilter(
+        crate::BodyRequirement::Required,
+    ))]);
     let req = crate::test_utils::make_request(Method::POST, "/upload");
     let mut ctx = crate::test_utils::make_filter_context(&req);
 
@@ -1440,7 +1467,9 @@ async fn execute_selected_upstream_request_body_skips_non_participants() {
 
 #[tokio::test]
 async fn execute_selected_upstream_request_body_preserves_canonical_body() {
-    let pipeline = make_pipeline(vec![Box::new(SelectedUpstreamRewriteFilter)]);
+    let pipeline = make_pipeline(vec![Box::new(SelectedUpstreamRewriteFilter(
+        crate::BodyRequirement::Optional,
+    ))]);
     let req = crate::test_utils::make_request(Method::POST, "/upload");
     let mut ctx = crate::test_utils::make_filter_context(&req);
 
@@ -4735,11 +4764,11 @@ impl HttpFilter for BodyLoggingFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn response_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     async fn on_request(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
@@ -4799,11 +4828,11 @@ impl HttpFilter for RequestBodyDoneWithResponseFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn response_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     async fn on_request(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
@@ -4860,7 +4889,7 @@ impl HttpFilter for BodyInspectorFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     async fn on_request_body(
@@ -4891,7 +4920,7 @@ impl HttpFilter for BodyUppercaseFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadWrite
+        BodyAccess::ReadWrite(crate::BodyRequirement::Optional)
     }
 
     async fn on_request_body(
@@ -4923,7 +4952,7 @@ impl HttpFilter for BodyRejectFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     async fn on_request_body(
@@ -4961,7 +4990,7 @@ impl HttpFilter for SelectedUpstreamRecorderFilter {
     }
 
     fn selected_upstream_request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn request_body_mode(&self) -> BodyMode {
@@ -4981,7 +5010,7 @@ impl HttpFilter for SelectedUpstreamRecorderFilter {
 
 /// A selected-upstream request-body filter that uppercases the buffered
 /// body in place (read-write).
-struct SelectedUpstreamRewriteFilter;
+struct SelectedUpstreamRewriteFilter(crate::BodyRequirement);
 
 #[async_trait]
 impl HttpFilter for SelectedUpstreamRewriteFilter {
@@ -4994,7 +5023,7 @@ impl HttpFilter for SelectedUpstreamRewriteFilter {
     }
 
     fn selected_upstream_request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadWrite
+        BodyAccess::ReadWrite(self.0)
     }
 
     fn request_body_mode(&self) -> BodyMode {
@@ -5068,7 +5097,7 @@ impl HttpFilter for SelectedUpstreamRejectFilter {
     }
 
     fn selected_upstream_request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn request_body_mode(&self) -> BodyMode {
@@ -5102,7 +5131,7 @@ impl HttpFilter for ResponseBodyInspectorFilter {
     }
 
     fn response_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn on_response_body(
@@ -5136,7 +5165,7 @@ impl HttpFilter for StreamBufferReleaseFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn request_body_mode(&self) -> BodyMode {
@@ -5179,11 +5208,11 @@ impl HttpFilter for BidirectionalModeFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn response_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn request_body_mode(&self) -> BodyMode {
@@ -5206,7 +5235,7 @@ impl HttpFilter for BoundedStreamBufferFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn request_body_mode(&self) -> BodyMode {
@@ -5261,7 +5290,7 @@ impl HttpFilter for BodyTakeFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadWrite
+        BodyAccess::ReadWrite(crate::BodyRequirement::Optional)
     }
 
     async fn on_request_body(
@@ -5292,7 +5321,7 @@ impl HttpFilter for NullableBodyInspectorFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     async fn on_request_body(
@@ -5322,7 +5351,7 @@ impl HttpFilter for BodyDoneAfterFirstFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     async fn on_request_body(
@@ -5354,7 +5383,7 @@ impl HttpFilter for ResponseBodyDoneAfterFirstFilter {
     }
 
     fn response_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn on_response_body(
@@ -5386,7 +5415,7 @@ impl HttpFilter for StreamBufferBodyDoneFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn request_body_mode(&self) -> BodyMode {
@@ -5477,7 +5506,7 @@ impl HttpFilter for PromoterBodyFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn request_body_mode(&self) -> BodyMode {
@@ -5521,7 +5550,7 @@ impl HttpFilter for GatedRecordingBodyFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn request_body_mode(&self) -> BodyMode {
@@ -6100,11 +6129,11 @@ impl HttpFilter for StatefulFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn response_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     async fn on_request_body(
@@ -6330,11 +6359,11 @@ impl HttpFilter for AllPhaseErrorFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn response_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     async fn on_request_body(
@@ -6865,11 +6894,11 @@ mod filter_duration_metrics_tests {
         }
 
         fn request_body_access(&self) -> BodyAccess {
-            BodyAccess::ReadOnly
+            BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
         }
 
         fn response_body_access(&self) -> BodyAccess {
-            BodyAccess::ReadOnly
+            BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
         }
 
         async fn on_request_body(
@@ -7590,7 +7619,7 @@ mod bound_upstream_body_barrier {
         }
 
         fn bound_upstream_request_body_access(&self) -> BodyAccess {
-            BodyAccess::ReadOnly
+            BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
         }
 
         fn request_body_mode(&self) -> BodyMode {
@@ -7687,7 +7716,7 @@ mod bound_upstream_body_barrier {
         }
 
         fn bound_upstream_request_body_access(&self) -> BodyAccess {
-            BodyAccess::ReadWrite
+            BodyAccess::ReadWrite(crate::BodyRequirement::Optional)
         }
 
         fn request_body_mode(&self) -> BodyMode {
@@ -7964,7 +7993,7 @@ mod bound_upstream_body_barrier {
         let pipeline = make_pipeline(vec![
             binding_router("inference"),
             Box::new(TamperingParticipant {
-                access: BodyAccess::ReadOnly,
+                access: BodyAccess::ReadOnly(crate::BodyRequirement::Optional),
                 error: false,
             }),
         ]);
@@ -7991,7 +8020,7 @@ mod bound_upstream_body_barrier {
         let mut pipeline = make_pipeline(vec![
             binding_router("inference"),
             Box::new(TamperingParticipant {
-                access: BodyAccess::ReadWrite,
+                access: BodyAccess::ReadWrite(crate::BodyRequirement::Optional),
                 error: true,
             }),
             Box::new(after),
@@ -8026,7 +8055,7 @@ mod bound_upstream_body_barrier {
         }
 
         fn bound_upstream_request_body_access(&self) -> BodyAccess {
-            BodyAccess::ReadWrite
+            BodyAccess::ReadWrite(crate::BodyRequirement::Optional)
         }
 
         fn request_body_mode(&self) -> BodyMode {
@@ -8346,7 +8375,7 @@ mod bound_upstream_body_barrier {
         }
 
         fn bound_upstream_request_body_access(&self) -> BodyAccess {
-            BodyAccess::ReadWrite
+            BodyAccess::ReadWrite(crate::BodyRequirement::Optional)
         }
 
         fn request_body_mode(&self) -> BodyMode {

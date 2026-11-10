@@ -465,7 +465,7 @@ impl HttpFilter for PayloadMcpClassifier {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Required)
     }
 
     fn request_body_mode(&self) -> BodyMode {
@@ -730,7 +730,7 @@ impl HttpFilter for EmptyAfterPolicy {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadWrite
+        BodyAccess::ReadWrite(praxis_filter::BodyRequirement::Optional)
     }
 
     async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
