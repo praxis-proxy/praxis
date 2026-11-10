@@ -234,6 +234,15 @@ impl PaceReservation {
         self.grants.iter().map(|grant| grant.bytes).max().unwrap_or(0)
     }
 
+    /// Prepare another body attempt against these same shared budgets.
+    #[must_use]
+    pub fn prepare_again(&self, bytes: u64) -> Self {
+        Self {
+            grants: self.grants.iter().map(|grant| grant.schedule.prepare(bytes)).collect(),
+            output_bytes: None,
+        }
+    }
+
     /// Reserve and acquire one bounded output prefix without holding shared locks.
     ///
     /// # Errors

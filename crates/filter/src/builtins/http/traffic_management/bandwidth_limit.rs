@@ -750,7 +750,7 @@ mod tests {
         let request = make_request(Method::POST, "/");
         let mut ctx = make_filter_context(&request);
         assert_eq!(
-            close_reason_of(filter.on_request(&mut ctx).await.unwrap(), &ctx.extensions),
+            close_reason_of(&filter.on_request(&mut ctx).await.unwrap(), &ctx.extensions),
             Some(CLOSE_MISSING_CONNECTION)
         );
     }
