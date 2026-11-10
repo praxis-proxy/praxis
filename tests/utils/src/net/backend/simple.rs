@@ -457,26 +457,31 @@ fn build_config(address: &str, clusters: Vec<Cluster>, filters: Vec<FilterEntry>
             filters,
         }],
         insecure_options: InsecureOptions::default(),
-        listeners: vec![Listener {
-            upgrade_policy: None,
-            address: address.to_owned(),
-            cluster: None,
-            downstream_keepalive_timeout_ms: None,
-            downstream_read_timeout_ms: None,
-            filter_chains: vec!["backend".to_owned()],
-            forward_proxy: None,
-            max_connections: None,
-            name: "backend".to_owned(),
-            protocol: ProtocolKind::default(),
-            tcp_session_timeout_ms: None,
-            tcp_max_duration_secs: None,
-            tls: None,
-            upstream: None,
-        }],
+        listeners: vec![backend_listener(address)],
         metrics: MetricsConfig::default(),
         runtime: RuntimeConfig::default(),
         shutdown_timeout_secs: 5,
         telemetry: TelemetryConfig::default(),
+    }
+}
+
+/// Build the HTTP listener for the test backend chain.
+fn backend_listener(address: &str) -> Listener {
+    Listener {
+        upgrade_policy: None,
+        address: address.to_owned(),
+        cluster: None,
+        downstream_keepalive_timeout_ms: None,
+        downstream_read_timeout_ms: None,
+        filter_chains: vec!["backend".to_owned()],
+        forward_proxy: None,
+        max_connections: None,
+        name: "backend".to_owned(),
+        protocol: ProtocolKind::default(),
+        tcp_session_timeout_ms: None,
+        tcp_max_duration_secs: None,
+        tls: None,
+        upstream: None,
     }
 }
 
