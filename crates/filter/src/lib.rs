@@ -60,6 +60,7 @@ mod filtered_subrequest;
 mod grpc_response;
 pub mod json_ops;
 pub(crate) mod load_balancing;
+mod metadata;
 mod metrics;
 pub(crate) mod path_match;
 mod pipeline;
@@ -163,6 +164,7 @@ pub use filtered_subrequest::{
 };
 pub use grpc_response::GrpcErrorMapping;
 pub use load_balancing::slow_start::{SlowStartGeneration, SlowStartRegistry};
+pub use metadata::{FilterMetadata, MetadataRejected};
 #[cfg(feature = "upstream-binding")]
 pub use pipeline::catalog::{ClusterApplicationCatalog, ClusterApplicationMetadata, ClusterMetadataDeclaration};
 pub use pipeline::{
@@ -237,7 +239,7 @@ pub(crate) mod test_utils {
             extra_request_headers: Vec::new(),
             request_headers_to_remove: Vec::new(),
             request_headers_to_set: Vec::new(),
-            filter_metadata: std::collections::HashMap::new(),
+            filter_metadata: crate::FilterMetadata::default(),
             prior_pre_read_mutations: Vec::new(),
             pre_read_mutations: Vec::new(),
             structured_metadata: std::collections::HashMap::new(),
