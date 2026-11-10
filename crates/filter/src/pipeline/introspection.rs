@@ -292,7 +292,16 @@ mod tests {
             ),
         ] {
             let json = serde_json::to_value(body_info(access, BodyMode::Stream)).unwrap();
-            assert_eq!(json.get("requirement").and_then(serde_json::Value::as_str), expected);
+            match expected {
+                None => assert!(
+                    json.get("requirement").is_none(),
+                    "no body access must omit requirement"
+                ),
+                Some(expected) => assert_eq!(
+                    json.get("requirement").and_then(serde_json::Value::as_str),
+                    Some(expected)
+                ),
+            }
         }
     }
 

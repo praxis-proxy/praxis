@@ -1332,7 +1332,34 @@ async fn execute_selected_upstream_request_body_read_only() {
 
 #[tokio::test]
 async fn execute_selected_upstream_request_body_mutation() {
-    let pipeline = make_pipeline(vec![Box::new(SelectedUpstreamRewriteFilter)]);
+    let pipeline = make_pipeline(vec![Box::new(SelectedUpstreamRewriteFilter(
+        crate::BodyRequirement::Optional,
+    ))]);
+    let req = crate::test_utils::make_request(Method::POST, "/upload");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let mut body = Some(Bytes::from_static(b"hello"));
+    let action = pipeline
+        .execute_http_selected_upstream_request_body(&mut ctx, &mut body)
+        .await
+        .unwrap();
+
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "rewrite filter should continue"
+    );
+    assert_eq!(
+        body,
+        Some(Bytes::from_static(b"HELLO")),
+        "read-write filter should rewrite the selected-upstream body"
+    );
+}
+
+#[tokio::test]
+async fn execute_required_selected_upstream_request_body_mutation() {
+    let pipeline = make_pipeline(vec![Box::new(SelectedUpstreamRewriteFilter(
+        crate::BodyRequirement::Required,
+    ))]);
     let req = crate::test_utils::make_request(Method::POST, "/upload");
     let mut ctx = crate::test_utils::make_filter_context(&req);
 
@@ -1440,7 +1467,9 @@ async fn execute_selected_upstream_request_body_skips_non_participants() {
 
 #[tokio::test]
 async fn execute_selected_upstream_request_body_preserves_canonical_body() {
-    let pipeline = make_pipeline(vec![Box::new(SelectedUpstreamRewriteFilter)]);
+    let pipeline = make_pipeline(vec![Box::new(SelectedUpstreamRewriteFilter(
+        crate::BodyRequirement::Optional,
+    ))]);
     let req = crate::test_utils::make_request(Method::POST, "/upload");
     let mut ctx = crate::test_utils::make_filter_context(&req);
 
@@ -4862,7 +4891,7 @@ impl HttpFilter for SelectedUpstreamRecorderFilter {
 
 /// A selected-upstream request-body filter that uppercases the buffered
 /// body in place (read-write).
-struct SelectedUpstreamRewriteFilter;
+struct SelectedUpstreamRewriteFilter(crate::BodyRequirement);
 
 #[async_trait]
 impl HttpFilter for SelectedUpstreamRewriteFilter {
@@ -4875,7 +4904,7 @@ impl HttpFilter for SelectedUpstreamRewriteFilter {
     }
 
     fn selected_upstream_request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadWrite(crate::BodyRequirement::Optional)
+        BodyAccess::ReadWrite(self.0)
     }
 
     fn request_body_mode(&self) -> BodyMode {
