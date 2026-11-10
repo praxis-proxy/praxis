@@ -147,7 +147,7 @@ pub struct BandwidthLimitFilter {
     /// Budgets owned by this instance only.
     table: Arc<BandwidthTable>,
 
-    /// Per-request ids used when the protocol did not supply a connection id.
+    /// IDs assigned by the TCP connect hook, once per downstream connection.
     fallback_ids: AtomicU64,
 }
 
@@ -984,7 +984,7 @@ mod tests {
             plan.commit();
             BandwidthLimitFilter::leave_body_scope(&mut ctx.extensions);
         }
-        let mut body = Some(Bytes::from_static(b"x"));
+        let mut body = Some(Bytes::from(vec![1_u8; 1000]));
         expect_continue(&filter.on_request_body(&mut ctx, &mut body, true).await.unwrap());
         assert!(
             upload_pace_delay(&ctx.extensions).is_some_and(|wait| !wait.is_zero()),

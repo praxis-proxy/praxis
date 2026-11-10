@@ -42,7 +42,7 @@ Built-in filters organized by protocol and category.
 
 | Filter | Feature | Description |
 |--------|---------|-------------|
-| [`bandwidth_limit`](http/traffic_management/bandwidth_limit.md) | - | Paces request and response bodies, or TCP payload bytes. |
+| [`bandwidth_limit`](http/traffic_management/bandwidth_limit.md) | `bandwidth` | Paces request and response bodies, or TCP payload bytes. |
 | [`circuit_breaker`](http/traffic_management/circuit_breaker.md) | - | Rejects requests to clusters whose circuit is open. |
 | [`endpoint_selector`](http/traffic_management/endpoint_selector.md) | - | Selects an upstream endpoint from a trusted mutation source. |
 | [`grpc_detection`](http/traffic_management/grpc_detection.md) | - | Detects the gRPC variant from the request `content-type` header and records it for branch-chain routing and observability. |

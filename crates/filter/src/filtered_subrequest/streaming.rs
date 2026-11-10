@@ -364,10 +364,6 @@ impl FilteredStreamingBody {
     }
 
     /// Wait for a completion chunk that will be released, or refund one that will not.
-    #[cfg_attr(
-        not(feature = "bandwidth"),
-        expect(clippy::unused_async, reason = "awaits pacing only with the bandwidth feature")
-    )]
     async fn paced_completion(&mut self, completion: Option<Bytes>) -> Result<Option<Bytes>, FilterError> {
         let output = self.handled_completion_output(completion);
         let handled = self
