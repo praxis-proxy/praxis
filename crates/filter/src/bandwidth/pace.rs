@@ -357,17 +357,6 @@ fn append_charge(charges: &mut Vec<BandwidthGrant>, mut grant: BandwidthGrant) {
     charges.push(grant);
 }
 
-/// Preserve ordering for hosts that still release an entire callback chunk.
-///
-/// Owned prefix writers leave charges prepared until they acquire a prefix.
-pub fn reserve_upload_pace(extensions: &mut RequestExtensions) {
-    if let Some(pace) = extensions.get_mut::<UploadPace>() {
-        for grant in &mut pace.grants {
-            grant.reserve();
-        }
-    }
-}
-
 /// Wait for the current upload grants.
 ///
 /// `Some` is returned even when the wait is zero so the caller can commit
