@@ -41,8 +41,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   Lower the request limit or raise the buffer cap to correct the configuration.
   Streaming requests can still use transfer limits above the buffering cap.
 
-### Fixed
-
 - Poll TLS certificate, key, CA, and CRL files alongside filesystem
   notifications, including when a projected Kubernetes Secret update
   produces no usable notification. Polling applies to single-certificate
