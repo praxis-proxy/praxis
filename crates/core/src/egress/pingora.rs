@@ -196,10 +196,32 @@ impl Session for PingoraSession {
             .map_err(|err| io_error(&err))
     }
 
+    async fn send_request_body_controlled(&mut self, chunk: Bytes, end_of_stream: bool) -> Result<(), EgressError> {
+        match &mut self.inner {
+            HttpSession::H1(session) => session
+                .write_body_controlled(&chunk)
+                .await
+                .map(|_written| ())
+                .map_err(|error| io_error(&error)),
+            HttpSession::H2(session) => session
+                .write_request_body(chunk, end_of_stream)
+                .await
+                .map_err(|error| io_error(&error)),
+            HttpSession::Custom(_) => Err(EgressError::InvalidRequest(
+                "controlled upload requires an HTTP/1 or HTTP/2 session".to_owned(),
+            )),
+        }?;
+        if end_of_stream {
+            self.finish_request().await?;
+        }
+        Ok(())
+    }
+
     fn request_body_bytes_sent(&self) -> Option<u64> {
         match &self.inner {
             HttpSession::H1(session) => Some(u64::try_from(session.body_bytes_sent()).unwrap_or(u64::MAX)),
-            HttpSession::H2(_) | HttpSession::Custom(_) => None,
+            HttpSession::H2(session) => Some(u64::try_from(session.body_bytes_sent()).unwrap_or(u64::MAX)),
+            HttpSession::Custom(_) => None,
         }
     }
 
