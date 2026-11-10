@@ -6,7 +6,7 @@
 use std::{
     io::{Read as _, Write as _},
     net::TcpStream,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 // -----------------------------------------------------------------------------
@@ -38,11 +38,54 @@ pub fn http_send_on_connection(stream: &mut TcpStream, request: &str) -> String 
     read_full_response(stream)
 }
 
+/// Sends a request while distinguishing stale sockets from incomplete responses.
+///
+/// # Errors
+///
+/// Returns I/O failures before any response, or an incomplete-response error
+/// after response bytes have arrived.
+#[cfg(test)]
+pub(crate) fn try_http_send_on_connection(stream: &mut TcpStream, request: &str) -> std::io::Result<String> {
+    stream.write_all(request.as_bytes())?;
+    let (data, result) = read_response(stream);
+    result.map_err(|error| {
+        if data.is_empty() {
+            error
+        } else {
+            std::io::Error::other(format!("incomplete HTTP response: {error}"))
+        }
+    })?;
+    Ok(String::from_utf8_lossy(&data).into_owned())
+}
+
+/// Send a request on an existing connection and read the response before
+/// `deadline`, keeping at most `max_body` body bytes.
+///
+/// A peer that drips bytes cannot extend the exchange past the deadline, and a
+/// response body larger than `max_body` is rejected instead of buffered.
+pub(crate) fn try_http_send_on_connection_until(
+    stream: &mut TcpStream,
+    request: &str,
+    deadline: Instant,
+    max_body: usize,
+) -> std::io::Result<String> {
+    stream.write_all(request.as_bytes())?;
+    let (data, result) = read_response_with(stream, Some(deadline), max_body);
+    result.map_err(|error| {
+        if data.is_empty() {
+            error
+        } else {
+            std::io::Error::other(format!("incomplete HTTP response: {error}"))
+        }
+    })?;
+    Ok(String::from_utf8_lossy(&data).into_owned())
+}
+
 /// Read a complete HTTP/1.1 response from `stream`, returning the raw bytes
 /// as a string.
 ///
 /// Uses whatever framing the response advertises so the read returns as soon
-/// as the message is complete: the terminating zero-length chunk for
+/// as the message is complete: the zero-length chunk and complete trailers for
 /// `Transfer-Encoding: chunked`, exactly `Content-Length` body bytes for a
 /// fixed-size body, and read-to-EOF otherwise (connection-close framing).
 ///
@@ -51,60 +94,219 @@ pub fn http_send_on_connection(stream: &mut TcpStream, request: &str) -> String 
 /// response was already fully received, adding seconds to every such test. The
 /// read timeout set by the caller remains a backstop for misbehaving peers.
 fn read_full_response(stream: &mut TcpStream) -> String {
-    let mut data = Vec::new();
-
-    // Accumulate until the header terminator is seen (or the stream ends).
-    let mut buf = [0_u8; 4096];
-    let header_end = loop {
-        if let Some(pos) = data.windows(4).position(|w| w == b"\r\n\r\n") {
-            break pos + 4;
-        }
-        match stream.read(&mut buf) {
-            Ok(0) | Err(_) => return String::from_utf8_lossy(&data).into_owned(),
-            Ok(n) => data.extend_from_slice(&buf[..n]),
-        }
-    };
-
-    read_body(stream, &mut data, header_end);
+    let (data, _) = read_response(stream);
     String::from_utf8_lossy(&data).into_owned()
 }
 
+/// Retains partial bytes for legacy callers while preserving I/O errors.
+fn read_response(stream: &mut TcpStream) -> (Vec<u8>, std::io::Result<()>) {
+    read_response_with(stream, None, usize::MAX)
+}
+
+/// Limits applied to one response read.
+#[derive(Clone, Copy)]
+struct ReadBudget {
+    /// Total deadline for the exchange, if any.
+    deadline: Option<Instant>,
+    /// Largest body the reader retains.
+    max_body: usize,
+}
+
+/// Reads a response with an optional total deadline and body limit.
+fn read_response_with(
+    stream: &mut TcpStream,
+    deadline: Option<Instant>,
+    max_body: usize,
+) -> (Vec<u8>, std::io::Result<()>) {
+    let mut data = Vec::new();
+    let mut buf = [0_u8; 4096];
+    let header_end = loop {
+        if let Some(pos) = data.windows(4).position(|window| window == b"\r\n\r\n") {
+            break pos + 4;
+        }
+        match read_chunk(stream, &mut buf, deadline) {
+            Ok(0) if data.is_empty() => return (data, Ok(())),
+            Ok(0) => return (data, Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof))),
+            Err(error) => return (data, Err(error)),
+            Ok(count) => data.extend_from_slice(&buf[..count]),
+        }
+    };
+    let budget = ReadBudget { deadline, max_body };
+    let result = read_body(stream, &mut data, header_end, budget);
+    (data, result)
+}
+
+/// Reads one chunk, bounding the wait by the remaining exchange deadline.
+fn read_chunk(stream: &mut TcpStream, buffer: &mut [u8], deadline: Option<Instant>) -> std::io::Result<usize> {
+    if let Some(deadline) = deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "response deadline exceeded",
+            ));
+        }
+        stream.set_read_timeout(Some(remaining))?;
+    }
+    stream.read(buffer)
+}
+
 /// Read the response body into `data`, using whatever framing the already-read
-/// headers advertise: the terminating zero-length chunk for
+/// headers advertise: the zero-length chunk and complete trailers for
 /// `Transfer-Encoding: chunked`, exactly `Content-Length` body bytes for a
 /// fixed-size body, and read-to-EOF otherwise (connection-close framing).
-fn read_body(stream: &mut TcpStream, data: &mut Vec<u8>, header_end: usize) {
+/// Responses with status 204 or 304 finish at the end of their headers.
+fn read_body(stream: &mut TcpStream, data: &mut Vec<u8>, header_end: usize, budget: ReadBudget) -> std::io::Result<()> {
     let headers = String::from_utf8_lossy(&data[..header_end]).into_owned();
+    if matches!(parse_status(&headers), 204 | 304) {
+        return Ok(());
+    }
     let is_chunked = headers.lines().any(|line| {
         let lower = line.to_lowercase();
         lower.starts_with("transfer-encoding:") && lower.contains("chunked")
     });
-    let content_length = headers
-        .lines()
-        .find(|l| l.to_lowercase().starts_with("content-length:"))
-        .and_then(|l| l.split_once(':').map(|(_, v)| v))
-        .and_then(|v| v.trim().parse::<usize>().ok());
+    let content_length = content_length(&headers);
 
     if is_chunked {
-        read_until(stream, data, |d| d[header_end..].windows(5).any(|w| w == b"0\r\n\r\n"));
+        read_chunked(stream, data, header_end, budget)
     } else if let Some(len) = content_length {
-        read_until(stream, data, |d| d.len() >= header_end + len);
+        if len > budget.max_body {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "response body of {len} bytes exceeds the {}-byte limit",
+                    budget.max_body
+                ),
+            ));
+        }
+        read_framed(stream, data, header_end, budget, |d| {
+            d.len().saturating_sub(header_end) >= len
+        })
     } else {
-        read_until(stream, data, |_| false);
+        read_until(stream, data, header_end, budget, |_| false)
+    }
+}
+
+/// Parses the declared body length, if the headers set one.
+fn content_length(headers: &str) -> Option<usize> {
+    headers
+        .lines()
+        .find(|line| line.to_lowercase().starts_with("content-length:"))
+        .and_then(|line| line.split_once(':').map(|(_, value)| value))
+        .and_then(|value| value.trim().parse::<usize>().ok())
+}
+
+/// Reads through the last chunk and trailers without scanning chunk payloads.
+fn read_chunked(
+    stream: &mut TcpStream,
+    data: &mut Vec<u8>,
+    header_end: usize,
+    budget: ReadBudget,
+) -> std::io::Result<()> {
+    let mut buffer = [0_u8; 4096];
+    while !chunked_complete(&data[header_end..])? {
+        let count = read_chunk(stream, &mut buffer, budget.deadline)?;
+        if count == 0 {
+            return Err(std::io::ErrorKind::UnexpectedEof.into());
+        }
+        data.extend_from_slice(&buffer[..count]);
+        if data.len().saturating_sub(header_end) > budget.max_body {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("chunked response exceeds the {}-byte limit", budget.max_body),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Walks size-delimited chunks before looking for the trailer section's end.
+fn chunked_complete(mut body: &[u8]) -> std::io::Result<bool> {
+    loop {
+        let Some(line_end) = body.windows(2).position(|window| window == b"\r\n") else {
+            return Ok(false);
+        };
+        let size = chunk_size(&body[..line_end])?;
+        body = &body[line_end + 2..];
+        if size == 0 {
+            return Ok(body.starts_with(b"\r\n") || body.windows(4).any(|window| window == b"\r\n\r\n"));
+        }
+        let chunk_end = size
+            .checked_add(2)
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "chunk size overflow"))?;
+        if body.len() < chunk_end {
+            return Ok(false);
+        }
+        if &body[size..chunk_end] != b"\r\n" {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "missing chunk CRLF",
+            ));
+        }
+        body = &body[chunk_end..];
+    }
+}
+
+/// Parses the hexadecimal size, leaving optional chunk extensions uninterpreted.
+fn chunk_size(line: &[u8]) -> std::io::Result<usize> {
+    let mut parts = line.splitn(2, |byte| *byte == b';');
+    let token = std::str::from_utf8(parts.next().unwrap_or_default())
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let size = if parts.next().is_some() {
+        token.trim_end_matches([' ', '\t'])
+    } else {
+        token
+    };
+    if size.is_empty() || !size.as_bytes().iter().all(u8::is_ascii_hexdigit) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid chunk size",
+        ));
+    }
+    usize::from_str_radix(size, 16).map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
+/// Rejects EOF before a fixed-length response is complete.
+fn read_framed(
+    stream: &mut TcpStream,
+    data: &mut Vec<u8>,
+    body_start: usize,
+    budget: ReadBudget,
+    done: impl Fn(&[u8]) -> bool,
+) -> std::io::Result<()> {
+    read_until(stream, data, body_start, budget, &done)?;
+    if done(data) {
+        Ok(())
+    } else {
+        Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof))
     }
 }
 
 /// Read 4 KiB chunks from `stream` into `data` until `done` reports the message
 /// is complete or the stream ends. The caller's read timeout is the backstop
 /// for a misbehaving peer that never satisfies `done`.
-fn read_until(stream: &mut TcpStream, data: &mut Vec<u8>, done: impl Fn(&[u8]) -> bool) {
+fn read_until(
+    stream: &mut TcpStream,
+    data: &mut Vec<u8>,
+    body_start: usize,
+    budget: ReadBudget,
+    done: impl Fn(&[u8]) -> bool,
+) -> std::io::Result<()> {
     let mut buf = [0_u8; 4096];
     while !done(data) {
-        match stream.read(&mut buf) {
-            Ok(0) | Err(_) => break,
+        if data.len().saturating_sub(body_start) > budget.max_body {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("response body exceeds the {}-byte limit", budget.max_body),
+            ));
+        }
+        match read_chunk(stream, &mut buf, budget.deadline) {
+            Ok(0) => break,
+            Err(error) => return Err(error),
             Ok(n) => data.extend_from_slice(&buf[..n]),
         }
     }
+    Ok(())
 }
 
 // -----------------------------------------------------------------------------
@@ -551,6 +753,204 @@ pub fn parse_header_all(raw: &str, name: &str) -> Vec<String> {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
 mod tests {
     use super::*;
+
+    /// Complete request consumed by the raw response fixtures.
+    const RAW_GET: &str = "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
+
+    #[test]
+    fn fallible_client_rejects_premature_framed_eof() {
+        for response in [
+            b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\n".as_slice(),
+            b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\nshort".as_slice(),
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nshort\r\n".as_slice(),
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nX-Checksum: value\r\n".as_slice(),
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\n0\r\n\r\n\r\n".as_slice(),
+        ] {
+            let (mut stream, server) = response_socket(response);
+            let error = try_http_send_on_connection(&mut stream, RAW_GET).expect_err("incomplete framed response");
+            assert_eq!(
+                error.kind(),
+                std::io::ErrorKind::Other,
+                "partial responses must not look like a replayable idle close"
+            );
+            assert!(
+                error.to_string().contains("incomplete HTTP response"),
+                "framed EOF must retain its diagnostic"
+            );
+            server.join().expect("server");
+        }
+    }
+
+    #[test]
+    fn fallible_client_rejects_oversized_content_length_without_overflow() {
+        let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\nshort", usize::MAX);
+        let (mut stream, server) = response_socket(response.as_bytes());
+        let error = try_http_send_on_connection(&mut stream, RAW_GET).expect_err("incomplete enormous response");
+        assert!(
+            error.to_string().contains("incomplete HTTP response"),
+            "oversized lengths must fail as incomplete responses"
+        );
+        server.join().expect("server");
+    }
+
+    #[test]
+    fn legacy_client_retains_partial_bytes_on_framed_eof() {
+        let response = b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\nshort";
+        let (mut stream, server) = response_socket(response);
+        assert_eq!(
+            http_send_on_connection(&mut stream, RAW_GET).as_bytes(),
+            response,
+            "legacy callers must retain partial responses"
+        );
+        server.join().expect("server");
+    }
+
+    #[test]
+    fn fallible_client_accepts_complete_framing_and_normal_close() {
+        for response in [
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok".as_slice(),
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nok\r\n0\r\n\r\n".as_slice(),
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2 \t;name=value\r\nok\r\n0\r\nX-Checksum: value\r\n\r\n".as_slice(),
+            b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nok".as_slice(),
+        ] {
+            let (mut stream, server) = response_socket(response);
+            assert_eq!(
+                try_http_send_on_connection(&mut stream, RAW_GET)
+                    .expect("complete response")
+                    .as_bytes(),
+                response,
+                "valid framing must remain successful"
+            );
+            server.join().expect("server");
+        }
+    }
+
+    #[test]
+    fn chunked_framing_requires_boundaries_and_complete_trailers() {
+        let body = b"5;name=value\r\n0\r\n\r\n\r\n1\r\nx\r\n0\r\nX-Checksum: value\r\nAnother: value\r\n\r\n";
+        for length in 0..body.len() {
+            assert!(
+                !chunked_complete(&body[..length]).expect("valid partial framing"),
+                "an incomplete prefix of length {length} must not finish the message"
+            );
+        }
+        assert!(
+            chunked_complete(body).expect("complete framing"),
+            "trailers finish the message"
+        );
+        for invalid in [
+            b"z\r\n".as_slice(),
+            b"+1\r\n",
+            b"1\r\nx!!",
+            b"ffffffffffffffffffffffff\r\n",
+        ] {
+            assert!(
+                chunked_complete(invalid).is_err(),
+                "invalid framing must fail: {invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn chunk_extensions_allow_only_spaces_and_tabs_before_the_semicolon() {
+        for (line, expected) in [
+            (b"2 ;name=value".as_slice(), 2),
+            (b"A \t ;name=value", 10),
+            (b"0\t;name=value", 0),
+        ] {
+            assert_eq!(
+                chunk_size(line).expect("valid chunk extension"),
+                expected,
+                "spaces and tabs before the extension semicolon must preserve the chunk size: {line:?}"
+            );
+        }
+        for line in [
+            b"2 ".as_slice(),
+            b"2\t",
+            b" 2;name=value",
+            b"2\x0b;name=value",
+            b"2\x0c;name=value",
+            b"2\n;name=value",
+        ] {
+            assert!(
+                chunk_size(line).is_err(),
+                "invalid whitespace must remain rejected: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn bodyless_statuses_leave_keepalive_connection_usable() {
+        for response in [
+            b"HTTP/1.1 204 No Content\r\nConnection: keep-alive\r\n\r\n".as_slice(),
+            b"HTTP/1.1 304 Not Modified\r\nConnection: keep-alive\r\n\r\n",
+            b"HTTP/1.1 304 Not Modified\r\nContent-Length: 123\r\n\r\n",
+            b"HTTP/1.1 304 Not Modified\r\nTransfer-Encoding: chunked\r\n\r\n",
+        ] {
+            assert_persistent_response(response);
+        }
+    }
+
+    #[test]
+    fn chunked_trailers_leave_keepalive_connection_usable() {
+        assert_persistent_response(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\n0\r\n\r\n\r\n0\r\nX-End: yes\r\n\r\n",
+        );
+    }
+
+    /// Verifies fragmented responses complete before a server closes its socket.
+    fn assert_persistent_response(response: &[u8]) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listen");
+        let address = listener.local_addr().expect("address");
+        let expected = response.to_vec();
+        let response = expected.clone();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            stream.set_read_timeout(Some(Duration::from_secs(5))).expect("timeout");
+            for _ in 0..2 {
+                let mut request = [0; RAW_GET.len()];
+                stream
+                    .read_exact(&mut request)
+                    .expect("next request without waiting for EOF");
+                for fragment in response.chunks(3) {
+                    stream.write_all(fragment).expect("response fragment");
+                }
+            }
+        });
+        let mut stream = TcpStream::connect(address).expect("connect");
+        stream.set_read_timeout(Some(Duration::from_secs(5))).expect("timeout");
+        for _ in 0..2 {
+            assert_eq!(
+                try_http_send_on_connection(&mut stream, RAW_GET)
+                    .expect("complete response")
+                    .as_bytes(),
+                expected,
+                "framing must preserve the full response and allow the next request"
+            );
+        }
+        server.join().expect("server");
+    }
+
+    /// Returns a socket whose server reads one request then closes its response.
+    fn response_socket(response: &[u8]) -> (TcpStream, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listen");
+        let address = listener.local_addr().expect("address");
+        let response = response.to_vec();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("read timeout");
+            let mut request = [0; RAW_GET.len()];
+            stream.read_exact(&mut request).expect("request");
+            stream.write_all(&response).expect("response");
+        });
+        let stream = TcpStream::connect(address).expect("connect");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("read timeout");
+        (stream, server)
+    }
 
     #[test]
     fn parse_status_valid_http11() {
