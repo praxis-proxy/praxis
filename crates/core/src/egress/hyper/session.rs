@@ -143,6 +143,9 @@ pub struct HyperSession {
     /// Accepted payload from completed controlled prefixes.
     body_sent: u64,
 
+    /// Declared payload length, when HTTP/1 completes without polling another frame.
+    expected_body: Option<u64>,
+
     /// Current controlled prefix, including progress visible during cancellation.
     pending_body: Option<Arc<WriteTicket>>,
 
@@ -172,6 +175,7 @@ impl HyperSession {
             key,
             outbound: Outbound::Unsent,
             body_sent: 0,
+            expected_body: None,
             pending_body: None,
             read_timeout: peer.connection.read_timeout,
             sni: Arc::clone(&peer.sni),
@@ -414,6 +418,7 @@ impl HyperSession {
     /// Feed `frame` to the streamed request body.
     async fn push(&mut self, frame: BodyFrame) -> Result<(), EgressError> {
         let ends = frame.ends_body();
+        let bytes = frame.queued_bytes();
         let sender = match &self.outbound {
             Outbound::Streaming(sender) => sender,
             Outbound::Unsent => return Err(no_request_head()),
@@ -429,6 +434,7 @@ impl HyperSession {
                     EgressError::Io("the upstream connection stopped taking the request body".to_owned())
                 })?;
         }
+        self.body_sent = self.body_sent.saturating_add(bytes);
         if ends {
             self.outbound = Outbound::Done;
         }
@@ -498,6 +504,11 @@ impl Session for HyperSession {
             ));
         }
 
+        self.expected_body = head
+            .headers
+            .get(CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse().ok());
         let request = self.build_request(head)?;
         within(self.write_timeout, Phase::Write, self.connection.ready())
             .await?
@@ -509,7 +520,10 @@ impl Session for HyperSession {
     async fn send_request_body(&mut self, chunk: Bytes, end_of_stream: bool) -> Result<(), EgressError> {
         if matches!(self.outbound, Outbound::Head(_)) {
             if end_of_stream {
-                return self.dispatch(RequestBody::full(chunk));
+                let bytes = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
+                self.dispatch(RequestBody::full(chunk))?;
+                self.body_sent = self.body_sent.saturating_add(bytes);
+                return Ok(());
             }
             self.dispatch_streaming()?;
         }
@@ -558,6 +572,13 @@ impl Session for HyperSession {
     }
 
     async fn finish_request(&mut self) -> Result<(), EgressError> {
+        if self.connection.protocol() == Protocol::Http1
+            && matches!(self.outbound, Outbound::Streaming(_))
+            && self.expected_body == Some(self.body_sent)
+        {
+            self.outbound = Outbound::Done;
+            return Ok(());
+        }
         match self.outbound {
             Outbound::Head(_) => self.dispatch(RequestBody::empty()),
             Outbound::Streaming(_) => self.push(BodyFrame::Last(Bytes::new())).await,

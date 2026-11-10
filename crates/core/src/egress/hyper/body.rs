@@ -121,6 +121,14 @@ impl BodyFrame {
         )
     }
 
+    /// Bytes accepted directly by the queue; controlled frames count at acknowledgement.
+    pub(super) fn queued_bytes(&self) -> u64 {
+        match self {
+            Self::Data(body) | Self::Last(body) => u64::try_from(body.len()).unwrap_or(u64::MAX),
+            Self::Controlled { .. } | Self::Trailers(_) => 0,
+        }
+    }
+
     /// Whether nothing follows this frame.
     pub(super) const fn ends_body(&self) -> bool {
         match self {
