@@ -294,7 +294,7 @@ impl BandwidthGrant {
     }
 
     /// Record this prefix in planned debt exactly once.
-    fn reserve(&mut self) {
+    pub(super) fn reserve(&mut self) {
         if self.reserved || self.cost_ns == 0 {
             return;
         }

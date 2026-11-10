@@ -14,8 +14,8 @@ mod table;
 pub use pace::{
     DownloadLimited, DownstreamConnectionId, PaceReservation, TcpBandwidthPacer, cancel_bandwidth,
     cancel_download_pace, cancel_upload_pace, commit_download_pace, commit_upload_pace, connection_close_reason,
-    download_grants_pending, download_pace_delay, limits_download, reserve_generated_download, settle_bandwidth,
-    settle_download_write, take_download, take_upload, upload_pace_delay,
+    download_grants_pending, download_pace_delay, limits_download, reserve_generated_download, reserve_upload_pace,
+    settle_bandwidth, settle_download_write, take_download, take_upload, upload_pace_delay,
 };
 pub(crate) use pace::{
     generated_download_plan, push_download, push_download_schedule, push_upload, request_connection_close,
