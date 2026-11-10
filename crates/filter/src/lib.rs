@@ -125,7 +125,10 @@ pub use builtins::{
     normalize_rewritten_path, shutdown_access_log_sinks,
 };
 #[cfg(feature = "policy-engine")]
-pub use builtins::{PolicyFilter, PolicyPluginFactoryFn, fips_crypto_blocker, register_policy_plugin_factory};
+pub use builtins::{
+    PolicyFilter, PolicyPluginFactoryFn, PolicyResponseContext, PolicyResponseOutput, fips_crypto_blocker,
+    register_policy_plugin_factory,
+};
 /// Why a `policy` filter registered by another factory cannot run under
 /// `PRAXIS_REQUIRE_FIPS`: this build has no Policy capability evidence for it.
 #[cfg(not(feature = "policy-engine"))]
@@ -146,7 +149,9 @@ pub use credentials::{DeferredCredential, PendingCredentials};
 pub use error_response::{
     ErrorResponseContext, ErrorResponseFormatter, ErrorResponseFormatterHandle, FormattedErrorResponse,
 };
-pub use extensions::{AuthenticatedIdentity, ClientResponseHeadersCommitted, RequestExtensions};
+pub use extensions::{
+    AuthenticatedIdentity, ClientResponseHeadersCommitted, RequestExtensions, ResponseTrailersPending,
+};
 pub use factory::{
     EmptyFilterConfig, FilterFactory, HttpFilterFactory, TcpFilterFactory, http_builtin, parse_filter_config,
     tcp_builtin,
