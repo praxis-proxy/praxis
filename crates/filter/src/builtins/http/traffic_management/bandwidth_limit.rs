@@ -668,7 +668,7 @@ mod tests {
             .expect("the filter attached an upload schedule")
     }
 
-    fn close_reason_of(action: FilterAction, extensions: &RequestExtensions) -> Option<&'static str> {
+    fn close_reason_of(action: &FilterAction, extensions: &RequestExtensions) -> Option<&'static str> {
         match action {
             FilterAction::Reject(_) => connection_close_reason(extensions),
             FilterAction::Continue
@@ -856,7 +856,7 @@ mod tests {
         let mut ctx = make_filter_context(&req);
         let action = filter.on_request(&mut ctx).await.unwrap();
         assert_eq!(
-            close_reason_of(action, &ctx.extensions),
+            close_reason_of(&action, &ctx.extensions),
             Some(CLOSE_MISSING_ADDRESS),
             "a missing address closes the connection"
         );
@@ -869,7 +869,7 @@ mod tests {
         let mut state = crate::TcpConnectState::default();
         let action = filter.on_connect_with_state(&mut ctx, &mut state).await.unwrap();
         assert_eq!(
-            close_reason_of(action, &state.extensions),
+            close_reason_of(&action, &state.extensions),
             Some(CLOSE_UNPARSEABLE_ADDRESS),
             "an unparseable address closes the connection"
         );
@@ -888,7 +888,7 @@ mod tests {
         second.client_addr = Some(IpAddr::from([10, 0, 0, 2]));
         let action = filter.on_request(&mut second).await.unwrap();
         assert_eq!(
-            close_reason_of(action, &second.extensions),
+            close_reason_of(&action, &second.extensions),
             Some(CLOSE_TABLE_FULL),
             "a full table closes the new address"
         );
