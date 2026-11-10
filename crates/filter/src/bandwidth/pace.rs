@@ -234,6 +234,13 @@ impl PaceReservation {
         self.grants.iter().map(|grant| grant.bytes).max().unwrap_or(0)
     }
 
+    /// Accumulate prepared callback charges before their buffered output is released.
+    pub fn append(&mut self, other: Self) {
+        for grant in other.grants {
+            append_charge(&mut self.grants, grant);
+        }
+    }
+
     /// Prepare another body attempt against these same shared budgets.
     pub fn prepare_again(&self, bytes: u64) -> Self {
         Self {
