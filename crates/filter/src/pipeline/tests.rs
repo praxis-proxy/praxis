@@ -3142,7 +3142,6 @@ fn configured_buffered_request_rejects_nested_transfer_above_cap() {
 
 #[test]
 fn configured_buffered_request_rejects_transfer_above_cap_despite_early_release() {
-    // Release depends on request content, so a static limit cannot assume it occurs.
     let mut pipeline = make_pipeline(vec![Box::new(StreamBufferReleaseFilter { marker: b"release" })]);
     let limits = praxis_core::config::BodyLimitsConfig {
         max_buffer_bytes: 4096.try_into().unwrap(),
@@ -3150,7 +3149,10 @@ fn configured_buffered_request_rejects_transfer_above_cap_despite_early_release(
         ..praxis_core::config::BodyLimitsConfig::default()
     };
     let error = pipeline.configure_body_limits(&limits, false).unwrap_err();
-    assert!(error.to_string().contains("body_limits.max_request_bytes (8192)"));
+    assert!(
+        error.to_string().contains("body_limits.max_request_bytes (8192)"),
+        "release depends on request content, so a static limit cannot assume it occurs"
+    );
 }
 
 #[test]
