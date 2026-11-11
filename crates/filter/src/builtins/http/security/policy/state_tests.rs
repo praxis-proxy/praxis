@@ -12,6 +12,7 @@ use std::{
 use http::{HeaderValue, Method};
 use ppe::{
     praxis_policy_core::{
+        extensions::RequestExtension,
         http_hook::{HOOK_HTTP_REQUEST, HOOK_HTTP_RESPONSE, HttpHook, HttpPayload},
         identity::{HOOK_IDENTITY_RESOLVE, IdentityHook, IdentityPayload},
     },
@@ -122,24 +123,24 @@ async fn a_lost_table_fails_later_hooks_instead_of_starting_fresh() {
 // Test Utilities
 // -----------------------------------------------------------------------------
 
-/// `(marker, count after the hook)` for each counter invocation.
-type Seen = Arc<Mutex<Vec<(String, u64)>>>;
+/// Marker, invocation count and request metadata received by each hook.
+type Seen = Arc<Mutex<Vec<(String, u64, Option<Arc<RequestExtension>>)>>>;
 
 /// Counts invocations in the context table's `global_state` and records each
 /// value it saw, tagged with the request's marker header.
 struct Counter {
     /// Plugin config.
     cfg: PluginConfig,
-    /// `(marker, count after this hook)` per invocation.
+    /// Observations from every hook invocation.
     seen: Seen,
 }
 
 impl Counter {
     /// Increment the table's counter and record it.
-    fn bump(&self, ctx: &mut PluginContext, marker: String) {
+    fn bump(&self, ctx: &mut PluginContext, marker: String, ext: &Extensions) {
         let next = ctx.get_global(COUNT).and_then(serde_json::Value::as_u64).unwrap_or(0) + 1;
         ctx.set_global(COUNT, next.into());
-        self.seen.lock().unwrap().push((marker, next));
+        self.seen.lock().unwrap().push((marker, next, ext.request.clone()));
     }
 }
 
@@ -153,11 +154,11 @@ impl HookHandler<IdentityHook> for Counter {
     async fn handle(
         &self,
         payload: &IdentityPayload,
-        _ext: &Extensions,
+        extensions: &Extensions,
         ctx: &mut PluginContext,
     ) -> PluginResult<IdentityPayload> {
         let marker = payload.headers().get("x-marker").cloned().unwrap_or_default();
-        self.bump(ctx, marker);
+        self.bump(ctx, marker, extensions);
         PluginResult::modify_payload(payload.clone())
     }
 }
@@ -174,7 +175,7 @@ impl HookHandler<HttpHook> for Counter {
             .as_ref()
             .and_then(|http| http.request_headers.get("x-marker").cloned())
             .unwrap_or_default();
-        self.bump(ctx, marker);
+        self.bump(ctx, marker, extensions);
         PluginResult::allow()
     }
 }
@@ -227,6 +228,7 @@ fn counter_policy(kind: &'static str) -> (TempDir, String, Seen) {
 /// A filter config over `path`.
 fn config(path: String) -> PolicyFilterConfig {
     PolicyFilterConfig {
+        environment: None,
         config_path: path,
         allow_private_idp: false,
         trusted_private_endpoints: vec![],
@@ -265,11 +267,120 @@ async fn round_trip(pipeline: &FilterPipeline, marker: &str) {
 }
 
 /// The counts recorded for `marker`, in order.
-fn counts(seen: &Mutex<Vec<(String, u64)>>, marker: &str) -> Vec<u64> {
+fn counts(seen: &Seen, marker: &str) -> Vec<u64> {
     seen.lock()
         .unwrap()
         .iter()
-        .filter(|(seen, _)| seen == marker)
-        .map(|(_, count)| *count)
+        .filter(|(seen, ..)| seen == marker)
+        .map(|(_, count, _)| *count)
         .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "linear request/body/response lifecycle and snapshot assertions"
+)]
+async fn request_context_survives_all_hooks_and_body_first_admission() {
+    use praxis_core::time::FixedTimeSource;
+
+    for (kind, body_first) in [("test/context-headers", false), ("test/context-body", true)] {
+        let (_dir, path, seen) = counter_policy(kind);
+        let yaml =
+            format!("- filter: policy\n  config_path: {path}\n  environment: production\n- filter: trace_context\n");
+        let mut entries = serde_yaml::from_str::<Vec<FilterEntry>>(&yaml).unwrap();
+        let pipeline = FilterPipeline::build(&mut entries, &FilterRegistry::with_builtins()).unwrap();
+        for marker in ["first", "second"] {
+            let mut req = make_request(Method::GET, "/");
+            req.headers.insert("x-marker", marker.parse().unwrap());
+            req.headers.insert("x-request-id", marker.parse().unwrap());
+            let mut ctx = make_filter_context(&req);
+            let clock = FixedTimeSource::new(std::time::Duration::from_millis(1_700_000_000_123));
+            ctx.time_source = &clock;
+            if body_first {
+                let action = pipeline
+                    .execute_http_request_body(&mut ctx, &mut None, true)
+                    .await
+                    .unwrap();
+                assert!(matches!(action, FilterAction::BodyDone | FilterAction::Continue));
+            }
+            assert!(matches!(
+                pipeline.execute_http_request(&mut ctx).await.unwrap(),
+                FilterAction::Continue
+            ));
+            let later = FixedTimeSource::new(std::time::Duration::from_secs(1_800_000_000));
+            ctx.time_source = &later;
+            ctx.extensions
+                .get_mut::<crate::trace_context::TraceContext>()
+                .unwrap()
+                .set_request_id("changed".into());
+            let mut response = crate::test_utils::make_response();
+            ctx.response_header = Some(&mut response);
+            assert!(matches!(
+                pipeline.execute_http_response(&mut ctx).await.unwrap(),
+                FilterAction::Continue
+            ));
+            let records = seen.lock().unwrap().clone();
+            let requests: Vec<_> = records
+                .iter()
+                .filter(|(id, ..)| id == marker)
+                .map(|(_, _, request)| request.as_ref().unwrap())
+                .collect();
+            assert_eq!(requests.len(), 3, "identity, authorization, response");
+            for request in &requests {
+                assert_eq!(request.request_id.as_deref(), Some(marker));
+                assert_eq!(request.environment.as_deref(), Some("production"));
+                assert_eq!(request.timestamp.as_deref(), Some("2023-11-14T22:13:20.123Z"));
+                assert_eq!(request.trace_id, requests.first().unwrap().trace_id);
+                assert_eq!(request.trace_id.as_ref().unwrap().len(), 32);
+                assert!(request.span_id.is_none());
+            }
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "three-instance lifecycle with exact hook-order assertions"
+)]
+async fn request_context_missing_trace_and_per_instance_environment() {
+    let (_dir, path, seen) = counter_policy("test/context-environments");
+    let yaml = format!(
+        "- filter: policy\n  config_path: {path}\n  environment: production\n\
+         - filter: policy\n  config_path: {path}\n  environment: staging\n\
+         - filter: policy\n  config_path: {path}\n\
+         - filter: trace_context\n  conditions:\n    - when: {{path_prefix: /traced}}\n"
+    );
+    let mut entries = serde_yaml::from_str::<Vec<FilterEntry>>(&yaml).unwrap();
+    let pipeline = FilterPipeline::build(&mut entries, &FilterRegistry::with_builtins()).unwrap();
+    round_trip(&pipeline, "untraced").await;
+    let records = seen.lock().unwrap().clone();
+    assert_eq!(records.len(), 9);
+    let environments: Vec<_> = records
+        .iter()
+        .map(|(_, _, request)| {
+            if let Some(request) = request {
+                assert!(request.request_id.is_none());
+                assert!(request.trace_id.is_none());
+                assert!(request.timestamp.is_none());
+                assert!(request.span_id.is_none());
+            }
+            request.as_ref().and_then(|request| request.environment.as_deref())
+        })
+        .collect();
+    assert_eq!(
+        environments,
+        [
+            Some("production"),
+            Some("production"),
+            Some("staging"),
+            Some("staging"),
+            None,
+            None,
+            None,
+            Some("staging"),
+            Some("production")
+        ]
+    );
 }

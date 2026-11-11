@@ -6,7 +6,7 @@
 use std::{collections::HashMap, net::IpAddr, sync::Arc};
 
 use http::HeaderMap;
-use ppe::praxis_policy_core::extensions::{HttpExtension, http::SecretHeaderProvenance};
+use ppe::praxis_policy_core::extensions::{HttpExtension, RequestExtension, http::SecretHeaderProvenance};
 use praxis_core::connectivity::CidrRange;
 
 use crate::{Request, client_address::resolve_client_address, filter::HttpFilterContext};
@@ -22,6 +22,8 @@ use crate::{Request, client_address::resolve_client_address, filter::HttpFilterC
 // Deliberately omit Debug: captured headers and queries may contain credentials.
 #[derive(Clone)]
 pub(super) struct RequestFacts {
+    /// Request IDs and timestamp from the first policy callback.
+    request: Option<Arc<RequestExtension>>,
     /// Request method.
     method: String,
     /// Request path, without the query.
@@ -61,6 +63,7 @@ impl RequestFacts {
     /// The facts of `request` on `ctx`'s connection.
     fn of(ctx: &HttpFilterContext<'_>, request: &Request, trusted_proxies: &[CidrRange]) -> Self {
         Self {
+            request: super::request_context::get_request_context(ctx),
             method: request.method.as_str().to_owned(),
             path: request.uri.path().to_owned(),
             query: request.uri.query().map(str::to_owned),
@@ -127,6 +130,14 @@ impl RequestView {
     /// The headers identity resolution and `context_headers` read.
     pub(super) fn headers(&self) -> &HashMap<String, String> {
         &self.headers
+    }
+
+    /// Return the saved request metadata with this policy filter's environment label.
+    pub(super) fn get_request_context_with_environment(
+        &self,
+        environment: Option<&str>,
+    ) -> Option<Arc<RequestExtension>> {
+        super::request_context::with_environment(self.facts.request.as_ref(), environment)
     }
 
     /// Policy HTTP input with the captured request line, query, bare host,
