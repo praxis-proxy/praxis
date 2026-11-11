@@ -17,7 +17,7 @@ use praxis_core::config::FailureMode;
 
 use super::make_pipeline;
 use crate::{
-    BodyAccess, FilterAction, FilterError, HttpFilter, HttpFilterContext,
+    BodyAccess, BodyRequirement, FilterAction, FilterError, HttpFilter, HttpFilterContext,
     any_filter::AnyFilter,
     pipeline::{filter::PipelineFilter, http_utils::run_request_head_filter},
     tcp_filter::{TcpFilter, TcpFilterContext},
@@ -207,11 +207,11 @@ impl HttpFilter for HookProbe {
     }
 
     fn response_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(BodyRequirement::Optional)
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(BodyRequirement::Optional)
     }
 
     fn response_trailer_access(&self) -> bool {

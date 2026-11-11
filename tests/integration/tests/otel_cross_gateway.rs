@@ -223,7 +223,6 @@ fn exported_parentage_links_edge_provider_and_backend() {
         Some("vendor=routed"),
     );
     let retry_trace_id = "77777777777777777777777777777777";
-    // This upstream must refuse connections, so release it only for the retry.
     let retry_response = send_retry_request(retry_edge.addr(), &format!("00-{retry_trace_id}-8888888888888888-01"));
     let mid_proxy_trace_id = "99999999999999999999999999999999";
     let mid_proxy_response = send_retry_request(
