@@ -2556,7 +2556,7 @@ mod tests {
         parent.branches = vec![make_branch_with_filters(
             "sel_branch",
             vec![selected_upstream_filter(
-                BodyAccess::ReadWrite,
+                BodyAccess::ReadWrite(crate::BodyRequirement::Optional),
                 BodyMode::StreamBuffer { max_bytes: Some(4096) },
             )],
         )];
@@ -2577,7 +2577,7 @@ mod tests {
         inner_parent.branches = vec![make_branch_with_filters(
             "inner",
             vec![selected_upstream_filter(
-                BodyAccess::ReadOnly,
+                BodyAccess::ReadOnly(crate::BodyRequirement::Optional),
                 BodyMode::StreamBuffer { max_bytes: Some(4096) },
             )],
         )];
@@ -2617,7 +2617,7 @@ mod tests {
     #[test]
     fn top_level_selected_upstream_body_filter_no_branch_error() {
         let filters = vec![selected_upstream_filter(
-            BodyAccess::ReadWrite,
+            BodyAccess::ReadWrite(crate::BodyRequirement::Optional),
             BodyMode::StreamBuffer { max_bytes: Some(4096) },
         )];
         let mut errors = Vec::new();
@@ -2630,7 +2630,10 @@ mod tests {
 
     #[test]
     fn selected_upstream_body_mode_rejects_stream() {
-        let filters = vec![selected_upstream_filter(BodyAccess::ReadOnly, BodyMode::Stream)];
+        let filters = vec![selected_upstream_filter(
+            BodyAccess::ReadOnly(crate::BodyRequirement::Optional),
+            BodyMode::Stream,
+        )];
         let mut errors = Vec::new();
         check_selected_upstream_body_mode(&filters, &mut errors);
         assert_eq!(
@@ -2648,7 +2651,7 @@ mod tests {
     #[test]
     fn selected_upstream_body_mode_rejects_unbounded_stream_buffer() {
         let filters = vec![selected_upstream_filter(
-            BodyAccess::ReadOnly,
+            BodyAccess::ReadOnly(crate::BodyRequirement::Optional),
             BodyMode::StreamBuffer { max_bytes: None },
         )];
         let mut errors = Vec::new();
@@ -2659,7 +2662,7 @@ mod tests {
     #[test]
     fn selected_upstream_body_mode_rejects_size_limit() {
         let filters = vec![selected_upstream_filter(
-            BodyAccess::ReadOnly,
+            BodyAccess::ReadOnly(crate::BodyRequirement::Optional),
             BodyMode::SizeLimit { max_bytes: 4096 },
         )];
         let mut errors = Vec::new();
@@ -2674,7 +2677,7 @@ mod tests {
     #[test]
     fn selected_upstream_body_mode_accepts_bounded_stream_buffer() {
         let filters = vec![selected_upstream_filter(
-            BodyAccess::ReadWrite,
+            BodyAccess::ReadWrite(crate::BodyRequirement::Optional),
             BodyMode::StreamBuffer { max_bytes: Some(4096) },
         )];
         let mut errors = Vec::new();
@@ -3341,7 +3344,7 @@ mod tests {
             }
 
             fn request_body_access(&self) -> BodyAccess {
-                BodyAccess::ReadOnly
+                BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
             }
         }
 

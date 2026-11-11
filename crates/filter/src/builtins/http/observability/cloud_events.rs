@@ -760,7 +760,7 @@ impl HttpFilter for CloudEventsFilter {
 
     fn response_body_access(&self) -> BodyAccess {
         if self.on == CloudEventsPhase::ResponseComplete {
-            return BodyAccess::ReadOnly;
+            return BodyAccess::ReadOnly(crate::BodyRequirement::Optional);
         }
         BodyAccess::None
     }
@@ -1585,7 +1585,7 @@ mod tests {
             let filter = phase_filter(phase);
             assert_eq!(filter.request_body_access(), crate::BodyAccess::None);
             let expected = if phase == "response_complete" {
-                crate::BodyAccess::ReadOnly
+                crate::BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
             } else {
                 crate::BodyAccess::None
             };

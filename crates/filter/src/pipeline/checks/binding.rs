@@ -1965,8 +1965,8 @@ mod tests {
         // the pre-read contradiction the check rejects.
         let mut pf = dual_phase_body_filter(
             "dual",
-            BodyAccess::ReadOnly,
-            BodyAccess::ReadOnly,
+            BodyAccess::ReadOnly(crate::BodyRequirement::Optional),
+            BodyAccess::ReadOnly(crate::BodyRequirement::Optional),
             BodyMode::StreamBuffer { max_bytes: Some(1024) },
         );
         pf.conditions = vec![bound_condition(Some("openai_responses"), None)];
@@ -1989,8 +1989,8 @@ mod tests {
         // binding router just like any other bound consumer.
         let mut pf = dual_phase_body_filter(
             "dual",
-            BodyAccess::ReadOnly,
-            BodyAccess::ReadOnly,
+            BodyAccess::ReadOnly(crate::BodyRequirement::Optional),
+            BodyAccess::ReadOnly(crate::BodyRequirement::Optional),
             BodyMode::StreamBuffer { max_bytes: Some(1024) },
         );
         pf.conditions = vec![bound_condition(Some("openai_responses"), None)];
@@ -2018,8 +2018,8 @@ mod tests {
         // it declares bound-upstream access.
         let filters = vec![dual_phase_body_filter(
             "dual",
-            BodyAccess::ReadOnly,
-            BodyAccess::ReadWrite,
+            BodyAccess::ReadOnly(crate::BodyRequirement::Optional),
+            BodyAccess::ReadWrite(crate::BodyRequirement::Optional),
             BodyMode::StreamBuffer { max_bytes: Some(1024) },
         )];
         assert!(
@@ -2041,8 +2041,8 @@ mod tests {
         // so binding enablement must flip back on.
         let mut pf = dual_phase_body_filter(
             "dual",
-            BodyAccess::ReadOnly,
-            BodyAccess::ReadWrite,
+            BodyAccess::ReadOnly(crate::BodyRequirement::Optional),
+            BodyAccess::ReadWrite(crate::BodyRequirement::Optional),
             BodyMode::StreamBuffer { max_bytes: Some(1024) },
         );
         pf.conditions = vec![bound_condition(Some("openai_responses"), None)];
@@ -2059,8 +2059,8 @@ mod tests {
         // requirement: its hook runs pre-read, where streaming is allowed.
         let filters = vec![dual_phase_body_filter(
             "dual",
-            BodyAccess::ReadOnly,
-            BodyAccess::ReadWrite,
+            BodyAccess::ReadOnly(crate::BodyRequirement::Optional),
+            BodyAccess::ReadWrite(crate::BodyRequirement::Optional),
             BodyMode::Stream,
         )];
         let mut errors = Vec::new();
@@ -2075,7 +2075,12 @@ mod tests {
     #[test]
     fn dual_phase_with_condition_requires_bounded_buffer() {
         // Deferred to the barrier, the same filter must buffer a bounded body.
-        let mut pf = dual_phase_body_filter("dual", BodyAccess::ReadOnly, BodyAccess::ReadWrite, BodyMode::Stream);
+        let mut pf = dual_phase_body_filter(
+            "dual",
+            BodyAccess::ReadOnly(crate::BodyRequirement::Optional),
+            BodyAccess::ReadWrite(crate::BodyRequirement::Optional),
+            BodyMode::Stream,
+        );
         pf.conditions = vec![bound_condition(Some("openai_responses"), None)];
         let mut errors = Vec::new();
         check_bound_upstream_body_mode(std::slice::from_ref(&pf), &mut errors);
@@ -2090,7 +2095,11 @@ mod tests {
     #[cfg(feature = "bound-upstream-request-body")]
     #[test]
     fn bound_upstream_body_mode_rejects_stream() {
-        let filters = vec![bound_body_filter("bound_body", BodyAccess::ReadOnly, BodyMode::Stream)];
+        let filters = vec![bound_body_filter(
+            "bound_body",
+            BodyAccess::ReadOnly(crate::BodyRequirement::Optional),
+            BodyMode::Stream,
+        )];
         let mut errors = Vec::new();
         check_bound_upstream_body_mode(&filters, &mut errors);
         assert_eq!(errors.len(), 1, "Stream mode must be rejected for a bound participant");
@@ -2106,7 +2115,7 @@ mod tests {
     fn bound_upstream_body_mode_rejects_unbounded_stream_buffer() {
         let filters = vec![bound_body_filter(
             "bound_body",
-            BodyAccess::ReadOnly,
+            BodyAccess::ReadOnly(crate::BodyRequirement::Optional),
             BodyMode::StreamBuffer { max_bytes: None },
         )];
         let mut errors = Vec::new();
@@ -2119,7 +2128,7 @@ mod tests {
     fn bound_upstream_body_mode_accepts_bounded_stream_buffer() {
         let filters = vec![bound_body_filter(
             "bound_body",
-            BodyAccess::ReadWrite,
+            BodyAccess::ReadWrite(crate::BodyRequirement::Optional),
             BodyMode::StreamBuffer { max_bytes: Some(4096) },
         )];
         let mut errors = Vec::new();
@@ -2135,7 +2144,7 @@ mod tests {
     fn bound_upstream_body_mode_rejects_selected_upstream_condition() {
         let mut filter = bound_body_filter(
             "bound_body",
-            BodyAccess::ReadOnly,
+            BodyAccess::ReadOnly(crate::BodyRequirement::Optional),
             BodyMode::StreamBuffer { max_bytes: Some(4096) },
         );
         filter.conditions = vec![selected_upstream_cond(None, Some("openai"))];
@@ -2175,7 +2184,7 @@ mod tests {
             "bound_branch",
             vec![bound_body_filter(
                 "bound_body",
-                BodyAccess::ReadWrite,
+                BodyAccess::ReadWrite(crate::BodyRequirement::Optional),
                 BodyMode::StreamBuffer { max_bytes: Some(4096) },
             )],
         )];
@@ -2198,7 +2207,7 @@ mod tests {
             "inner",
             vec![bound_body_filter(
                 "bound_body",
-                BodyAccess::ReadOnly,
+                BodyAccess::ReadOnly(crate::BodyRequirement::Optional),
                 BodyMode::StreamBuffer { max_bytes: Some(4096) },
             )],
         )];
@@ -2220,7 +2229,7 @@ mod tests {
     fn top_level_bound_upstream_body_filter_no_branch_error() {
         let filters = vec![bound_body_filter(
             "bound_body",
-            BodyAccess::ReadWrite,
+            BodyAccess::ReadWrite(crate::BodyRequirement::Optional),
             BodyMode::StreamBuffer { max_bytes: Some(4096) },
         )];
         let mut errors = Vec::new();
@@ -2271,7 +2280,7 @@ mod tests {
     fn bound_body_hook_without_binding_errors() {
         let filters = vec![bound_body_filter(
             "bound_body",
-            BodyAccess::ReadWrite,
+            BodyAccess::ReadWrite(crate::BodyRequirement::Optional),
             BodyMode::StreamBuffer { max_bytes: Some(4096) },
         )];
         let mut errors = Vec::new();
@@ -3621,7 +3630,7 @@ mod tests {
             "nested",
             vec![bound_body_filter(
                 "bound_body",
-                BodyAccess::ReadOnly,
+                BodyAccess::ReadOnly(crate::BodyRequirement::Optional),
                 BodyMode::StreamBuffer { max_bytes: Some(4096) },
             )],
         )];
@@ -3647,7 +3656,7 @@ mod tests {
     fn top_level_participant_in_a_step_is_rejected() {
         let filters = vec![bound_body_filter(
             "bound_body",
-            BodyAccess::ReadWrite,
+            BodyAccess::ReadWrite(crate::BodyRequirement::Optional),
             BodyMode::StreamBuffer { max_bytes: Some(4096) },
         )];
         let mut step_errors = Vec::new();
@@ -3681,8 +3690,8 @@ mod tests {
         // step. Declaring bound access alone must not get it rejected.
         let filters = vec![dual_phase_body_filter(
             "dual",
-            BodyAccess::ReadOnly,
-            BodyAccess::ReadWrite,
+            BodyAccess::ReadOnly(crate::BodyRequirement::Optional),
+            BodyAccess::ReadWrite(crate::BodyRequirement::Optional),
             BodyMode::StreamBuffer { max_bytes: Some(4096) },
         )];
         let mut errors = Vec::new();
@@ -3700,8 +3709,8 @@ mod tests {
         // step never re-runs, so it must move before the IRR.
         let mut pf = dual_phase_body_filter(
             "dual",
-            BodyAccess::ReadOnly,
-            BodyAccess::ReadWrite,
+            BodyAccess::ReadOnly(crate::BodyRequirement::Optional),
+            BodyAccess::ReadWrite(crate::BodyRequirement::Optional),
             BodyMode::StreamBuffer { max_bytes: Some(4096) },
         );
         pf.conditions = vec![bound_condition(Some("openai_responses"), None)];

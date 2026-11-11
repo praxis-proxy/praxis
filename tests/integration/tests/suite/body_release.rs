@@ -277,8 +277,8 @@ impl HttpFilter for ReleaseProbe {
 
     fn request_body_access(&self) -> BodyAccess {
         match self.direction {
-            Direction::PreRead => BodyAccess::ReadWrite,
-            Direction::Request => BodyAccess::ReadOnly,
+            Direction::PreRead => BodyAccess::ReadWrite(praxis_filter::BodyRequirement::Optional),
+            Direction::Request => BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional),
             Direction::Response => BodyAccess::None,
         }
     }
@@ -292,7 +292,7 @@ impl HttpFilter for ReleaseProbe {
 
     fn response_body_access(&self) -> BodyAccess {
         match self.direction {
-            Direction::Response => BodyAccess::ReadOnly,
+            Direction::Response => BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional),
             Direction::PreRead | Direction::Request => BodyAccess::None,
         }
     }
