@@ -1706,6 +1706,13 @@ fn proc_status_bytes(pid: u32, field: &str) -> u64 {
     kib * 1024
 }
 
+/// Start a metadata test child with bounded native-library allocator arenas.
+/// Glibc's CPU-dependent arena reservations can otherwise consume the startup
+/// headroom without representing payload allocations, especially under coverage.
+pub(super) fn metadata_proxy(yaml: &str, addr: &str) -> PraxisProcess {
+    PraxisProcess::spawn_with_ulimit_and_env(yaml, addr, Some("-S -v 983040"), &[("MALLOC_ARENA_MAX", "2")])
+}
+
 /// Confirm the child actually has the requested address-space limit and
 /// sufficient startup headroom; failed limits or an OS-killed proxy fail.
 fn assert_metadata_limit(process: &PraxisProcess) -> u64 {
@@ -1861,7 +1868,7 @@ fn bodyless_huge_lengths_stay_bounded_and_preserve_connection_framing() {
     let addr = format!("127.0.0.1:{port}");
     let yaml =
         config(port, peer.port, clean.port(), "", "").replace("max_response_bytes: null", "max_response_bytes: 1024");
-    let mut process = PraxisProcess::spawn_with_ulimit(&yaml, &addr, Some("-S -v 983040"));
+    let mut process = metadata_proxy(&yaml, &addr);
     let baseline_vm = assert_metadata_limit(&process);
     let before = sample_process(process.pid()).expect("proxy must survive startup");
     let (_, samples) = measure(process.pid(), || {
@@ -1959,7 +1966,7 @@ fn oversized_trailer_failures_preserve_resources_and_never_dispatch() {
     let yaml = config(port, backend.port, clean.port(), filters, "")
         .replace("max_request_bytes: 67108864", "max_request_bytes: 16")
         .replace("max_response_bytes: null", "max_response_bytes: 1024");
-    let mut process = PraxisProcess::spawn_with_ulimit(&yaml, &addr, Some("-S -v 983040"));
+    let mut process = metadata_proxy(&yaml, &addr);
     let baseline_vm = assert_metadata_limit(&process);
     let before = sample_process(process.pid()).expect("proxy must survive startup");
     let (_, samples) = measure(process.pid(), || {

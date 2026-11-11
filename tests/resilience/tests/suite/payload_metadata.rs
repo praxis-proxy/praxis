@@ -21,7 +21,7 @@ use praxis_test_utils::{
     start_echo_backend,
 };
 
-use super::payload_resources::{config, probe, serialized, stop};
+use super::payload_resources::{config, metadata_proxy, probe, serialized, stop};
 
 /// Per-I/O and synchronization deadline.
 const WAIT: Duration = Duration::from_secs(10);
@@ -38,7 +38,7 @@ const HEADER_GUARD: &str = "      - filter: guardrails\n        rules:\n        
 
 /// Start a real proxy with both address-space containment and startup headroom.
 fn contained_proxy(yaml: &str, addr: &str) -> (PraxisProcess, u64) {
-    let process = PraxisProcess::spawn_with_ulimit(yaml, addr, Some("-S -v 983040"));
+    let process = metadata_proxy(yaml, addr);
     let limits = std::fs::read_to_string(format!("/proc/{}/limits", process.pid())).unwrap();
     let soft = limits
         .lines()
