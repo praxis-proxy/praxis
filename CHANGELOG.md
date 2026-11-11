@@ -25,12 +25,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - Experimental `runtime.overload_actions` (requires
   `runtime.overload_gauges` and the `overload-actions` Cargo feature)
-  purges unused jemalloc pages under memory pressure, disables HTTP/1
+  requests allocator purging under memory pressure when a callback is registered,
+  disables HTTP/1
   keep-alive above 50% pressure with recovery at 40%, and fails
   `/ready` after sustained saturation. It now includes validated per-resource
   bands, server-scoped transport admission, connect/header timeout scaling,
   and idle pool aging, with
   `praxis_overload_action` exposing the applied policy.
+  The Unix binary registers its jemalloc callback automatically; embedded hosts
+  must register an allocator callback themselves.
+  `runtime.overload_purge: false` disables explicit allocator purging while
+  retaining the other overload actions; changing it requires a restart.
 
 ### Changed
 
@@ -43,6 +48,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `requirement: "optional"` or `"required"`, omitted when there is no body access.
 
 ### Fixed
+
+- Config watcher shutdown releases the live overload controller even when a
+  downstream reload validator stalls; completed late builds cannot publish.
+  Reloads now warn when changing the restart-only `runtime.overload_purge` flag.
 
 - **Breaking:** statically buffered request pipelines now reject a finite
   `body_limits.max_request_bytes` above `body_limits.max_buffer_bytes` at

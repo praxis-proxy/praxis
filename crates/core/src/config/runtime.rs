@@ -295,6 +295,12 @@ pub struct RuntimeConfig {
     #[serde(default)]
     pub overload_actions: bool,
 
+    /// Allow the allocator purge action when overload actions are enabled.
+    /// Set false to disable explicit purging without disabling other actions.
+    /// Startup-only; jemalloc's own decay policy remains independent.
+    #[serde(default = "default_overload_purge")]
+    pub overload_purge: bool,
+
     /// Validated usage thresholds for each overload resource (startup only).
     #[serde(default)]
     pub overload_thresholds: crate::overload::Bands,
@@ -420,6 +426,7 @@ impl Default for RuntimeConfig {
             shed_on_fd_pressure: default_shed_on_fd_pressure(),
             overload_gauges: false,
             overload_actions: false,
+            overload_purge: true,
             overload_thresholds: crate::overload::Bands::default(),
             subrequest_pool_size: default_subrequest_pool_size(),
             threads: 0,
@@ -435,6 +442,11 @@ impl Default for RuntimeConfig {
 
 /// Serde default for [`RuntimeConfig::shed_on_fd_pressure`].
 fn default_shed_on_fd_pressure() -> bool {
+    true
+}
+
+/// Preserve explicit purging unless the operator disables that action.
+fn default_overload_purge() -> bool {
     true
 }
 
@@ -474,6 +486,15 @@ fn default_upstream_keepalive_pool_size() -> Option<usize> {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn purge_defaults_on_and_can_be_disabled_independently() {
+        assert!(RuntimeConfig::default().overload_purge);
+        let runtime: RuntimeConfig =
+            serde_yaml::from_str("overload_gauges: true\noverload_actions: true\noverload_purge: false\n").unwrap();
+        assert!(runtime.overload_actions);
+        assert!(!runtime.overload_purge);
+    }
 
     #[test]
     fn default_has_zero_threads_and_work_stealing_true() {

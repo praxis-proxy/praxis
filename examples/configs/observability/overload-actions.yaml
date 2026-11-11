@@ -17,6 +17,9 @@ admin:
 runtime:
   overload_gauges: true
   overload_actions: true
+  # Set false to bypass explicit allocator purging while retaining other actions.
+  # Startup-only; jemalloc's normal decay settings remain independent.
+  overload_purge: true
   overload_thresholds:
     connections: { scaling: 0.70, saturation: 0.95 }
   # Connection pressure needs a cap. In-flight HTTP requests and active TCP

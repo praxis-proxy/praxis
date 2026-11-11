@@ -633,8 +633,56 @@ fn spawn_watcher(
     config: Config,
     registry: FilterRegistry,
     state: ServerState,
-) -> Option<std::thread::JoinHandle<()>> {
-    watcher_params(config_file, config, registry, state).map(crate::watcher::spawn_config_watcher)
+) -> Option<ConfigWatcher> {
+    let params = watcher_params(config_file, config, registry, state)?;
+    let shutdown = params.shutdown.clone();
+    Some(ConfigWatcher {
+        shutdown,
+        pipelines: Arc::clone(&params.pipelines),
+        thread: Some(crate::watcher::spawn_config_watcher(params)),
+    })
+}
+
+/// Revoke live state and bound shutdown even if downstream reload code stalls.
+#[cfg(feature = "config-reload")]
+struct ConfigWatcher {
+    /// Stop accepting reload events before joining the watcher.
+    shutdown: CancellationToken,
+    /// Publication gate cleared before waiting for the thread.
+    pipelines: Arc<crate::reload::WatcherReloadTarget>,
+    /// Thread whose staged build may outlive cancellation if downstream code stalls.
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(feature = "config-reload")]
+impl Drop for ConfigWatcher {
+    fn drop(&mut self) {
+        self.shutdown.cancel();
+        self.pipelines.stop();
+        if let Some(thread) = self.thread.take() {
+            finish_config_watcher(thread);
+        }
+    }
+}
+
+/// Join a responsive watcher; stalled callbacks retain only their staged build.
+#[cfg(feature = "config-reload")]
+fn finish_config_watcher(thread: std::thread::JoinHandle<()>) {
+    let started = std::time::Instant::now();
+    while !thread.is_finished() {
+        if started.elapsed() >= Duration::from_secs(1) {
+            warn!("config watcher still building after shutdown; live publication revoked");
+            return;
+        }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "synchronous Drop cannot await; bound this join wait"
+        )]
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    if thread.join().is_err() {
+        warn!("config watcher panicked during shutdown");
+    }
 }
 
 /// Assemble the watcher's parameters, or `None` when there is no config file to watch.
@@ -674,7 +722,7 @@ fn watcher_params(
         cluster_meta: state.cluster_meta,
         session_stores: state.session_stores,
         slow_start_registry: state.slow_start_registry,
-        pipelines: state.pipelines,
+        pipelines: Arc::new(crate::reload::WatcherReloadTarget::new(state.pipelines)),
         referenced_files,
         registry: Arc::new(registry),
         shutdown: CancellationToken::new(),
@@ -985,6 +1033,7 @@ fn overload_gauge_loop(
 ) -> HousekeepingLoop {
     let bands = runtime.overload_thresholds;
     let heap_max_bytes = runtime.max_memory_bytes;
+    let purge_enabled = runtime.overload_purge;
     Box::pin(async move {
         let mut monitor = praxis_core::overload::Monitor::with_bands(bands);
         let mut tracker = praxis_core::overload::TransitionTracker::default();
@@ -1001,7 +1050,7 @@ fn overload_gauge_loop(
                 &mut tracker,
                 prev_actions,
                 heap_max_bytes,
-                (signal.as_ref(), actions_enabled.then_some(&mut purge)),
+                (signal.as_ref(), actions_enabled.then_some(&mut purge), purge_enabled),
             )
             .await;
         }
@@ -1017,9 +1066,10 @@ async fn sample_overload(
     control: (
         &praxis_core::overload::Signal,
         Option<&mut Option<tokio::task::JoinHandle<bool>>>,
+        bool,
     ),
 ) -> praxis_core::overload::EngagedActions {
-    let (signal, purge) = control;
+    let (signal, purge, purge_enabled) = control;
     let pressures = monitor.observe(overload_inputs(heap_max_bytes));
     let action_pressures = monitor.action_pressures(pressures);
     tracker.track_cpu_source(action_pressures.cpu.is_some());
@@ -1032,7 +1082,7 @@ async fn sample_overload(
     let Some(purge) = purge else {
         return prev_actions;
     };
-    apply_overload_actions(action_pressures, tracker, prev_actions, purge, signal).await
+    apply_overload_actions(action_pressures, tracker, prev_actions, (purge, purge_enabled), signal).await
 }
 
 /// Counts the sampler already has. Kernel files are read inside `observe`.
@@ -1050,11 +1100,12 @@ async fn apply_overload_actions(
     pressures: praxis_core::overload::Pressures,
     tracker: &praxis_core::overload::TransitionTracker,
     prev_actions: praxis_core::overload::EngagedActions,
-    purge: &mut Option<tokio::task::JoinHandle<bool>>,
+    purge: (&mut Option<tokio::task::JoinHandle<bool>>, bool),
     signal: &praxis_core::overload::Signal,
 ) -> praxis_core::overload::EngagedActions {
+    let (purge, purge_enabled) = purge;
     let mut actions = praxis_core::overload::EngagedActions::from_pressures(pressures, tracker, prev_actions);
-    actions.purge_heap = poll_heap_purge(actions.purge_heap, purge).await;
+    actions.purge_heap = poll_heap_purge(actions.purge_heap && purge_enabled, purge).await;
     publish_overload_actions(actions, signal, tracker.action_pressures(pressures).peak());
     log_action_changes(prev_actions, actions);
     actions
@@ -1713,7 +1764,14 @@ filter_chains:
         let mut actions = praxis_core::overload::EngagedActions::default();
         let mut purge = None;
         for _ in 0..3 {
-            actions = sample_overload(&mut monitor, &mut tracker, actions, None, (&signal, Some(&mut purge))).await;
+            actions = sample_overload(
+                &mut monitor,
+                &mut tracker,
+                actions,
+                None,
+                (&signal, Some(&mut purge), true),
+            )
+            .await;
         }
         assert!(
             !signal.is_saturated(),
@@ -1722,7 +1780,14 @@ filter_chains:
         assert!(!signal.should_disable_keepalive());
         monitor.set_cpu_sample_for_test(Some((1.0, true)));
         for _ in 0..3 {
-            actions = sample_overload(&mut monitor, &mut tracker, actions, None, (&signal, Some(&mut purge))).await;
+            actions = sample_overload(
+                &mut monitor,
+                &mut tracker,
+                actions,
+                None,
+                (&signal, Some(&mut purge), true),
+            )
+            .await;
         }
         assert!(signal.is_saturated(), "the same local CPU sample must drive actions");
     }
@@ -1742,7 +1807,7 @@ filter_chains:
                 &mut praxis_core::overload::TransitionTracker::default(),
                 praxis_core::overload::EngagedActions::default(),
                 None,
-                (signal, None),
+                (signal, None, true),
             )
             .await;
         }
@@ -1832,6 +1897,39 @@ filter_chains:
             );
         }
         reset_overload_actions(&sibling, true);
+    }
+
+    #[tokio::test]
+    async fn disabling_heap_purge_preserves_other_overload_actions() {
+        use praxis_core::overload::{EngagedActions, Pressures, TransitionTracker};
+        praxis_core::overload::set_heap_purge(|| true);
+        let pressures = Pressures {
+            cgroup_memory: Some(1.0),
+            heap: None,
+            cpu: None,
+            connections: None,
+            file_descriptors: None,
+        };
+        let mut tracker = TransitionTracker::default();
+        for _ in 0..3 {
+            drop(tracker.update(pressures, [Some(true), None, None, None, None]));
+        }
+        assert!(EngagedActions::from_pressures(pressures, &tracker, EngagedActions::default()).purge_heap);
+        let signal = praxis_core::overload::Signal::default();
+        let mut task = None;
+        let actions = apply_overload_actions(
+            pressures,
+            &tracker,
+            EngagedActions::default(),
+            (&mut task, false),
+            &signal,
+        )
+        .await;
+        assert!(task.is_none(), "the disabled action must not spawn allocator work");
+        assert!(!actions.purge_heap);
+        assert!(actions.disable_keepalive);
+        assert!(actions.fail_readiness);
+        assert!(signal.is_saturated());
     }
 
     #[tokio::test]
@@ -1940,6 +2038,80 @@ filter_chains:
         assert!(
             watcher_params(None, config, registry, state).is_none(),
             "the built-in default has no file to watch"
+        );
+    }
+
+    #[cfg(feature = "config-reload")]
+    #[test]
+    fn watcher_owner_releases_controller_between_embedded_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("praxis.yaml");
+        std::fs::write(&path, static_response_yaml(200)).unwrap();
+        for _ in 0..3 {
+            let file = ConfigFile::read(&path).unwrap();
+            let config = Config::from_config_file(&file).unwrap();
+            let (state, registry) = startup_state(&config);
+            let controller = Arc::downgrade(&state.pipelines.overload());
+            let watcher = spawn_watcher(Some(file), config, registry, state).unwrap();
+            assert!(controller.upgrade().is_some());
+            drop(watcher);
+            assert!(
+                controller.upgrade().is_none(),
+                "watcher must release its controller before returning"
+            );
+        }
+    }
+
+    #[cfg(feature = "config-reload")]
+    #[test]
+    fn watcher_shutdown_revokes_a_stalled_reload_without_waiting_for_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("praxis.yaml");
+        std::fs::write(&path, static_response_yaml(200)).unwrap();
+        let file = ConfigFile::read(&path).unwrap();
+        let config = Config::from_config_file(&file).unwrap();
+        let (mut state, registry) = startup_state(&config);
+        let controller = Arc::downgrade(&state.pipelines.overload());
+        // Keep the slot, not ListenerPipelines: it cannot pin the controller.
+        let slot = Arc::clone(state.pipelines.get("web").unwrap());
+        let original = slot.load_full();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release_rx = Mutex::new(release_rx);
+        let (_, composition) = ServerComposition::standard()
+            .add_pipeline_validator(move |_| {
+                started_tx.send(()).unwrap();
+                release_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(15))
+                    .unwrap();
+                Ok(())
+            })
+            .into_parts();
+        state.pipeline_composition = composition;
+        let params = watcher_params(Some(file), config, registry, state).unwrap();
+        let weak_registry = Arc::downgrade(&params.registry);
+        std::fs::write(&path, static_response_yaml(201)).unwrap();
+        let watcher = ConfigWatcher {
+            shutdown: params.shutdown.clone(),
+            pipelines: Arc::clone(&params.pipelines),
+            thread: Some(crate::watcher::spawn_config_watcher(params)),
+        };
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let started = std::time::Instant::now();
+        drop(watcher);
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(
+            controller.upgrade().is_none(),
+            "stalled build must not retain the live controller"
+        );
+        assert!(weak_registry.upgrade().is_some(), "validator must still be blocked");
+        release_tx.send(()).unwrap();
+        poll_until(|| weak_registry.upgrade().is_none());
+        assert!(
+            Arc::ptr_eq(&original, &slot.load_full()),
+            "late reload must never publish"
         );
     }
 

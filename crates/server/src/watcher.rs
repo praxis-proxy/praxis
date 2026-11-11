@@ -19,12 +19,14 @@ use std::{
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher as _};
 use praxis_core::config::Config;
 use praxis_filter::FilterRegistry;
-use praxis_protocol::ListenerPipelines;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-use crate::{composition::PipelineComposition, reload::reload_pipelines};
+use crate::{
+    composition::PipelineComposition,
+    reload::{ReloadTarget, WatcherReloadTarget, reload_pipelines},
+};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -71,8 +73,8 @@ pub(crate) struct WatcherParams {
     /// Slow-start ramp registry, preserved across reloads.
     pub(crate) slow_start_registry: Arc<praxis_filter::SlowStartRegistry>,
 
-    /// Live pipeline storage, swapped atomically on reload.
-    pub(crate) pipelines: Arc<ListenerPipelines>,
+    /// Revocable live pipeline access; stalled downstream builders do not own live state.
+    pub(crate) pipelines: Arc<WatcherReloadTarget>,
 
     /// Documents the configured filters read, beyond the main config.
     ///
@@ -315,7 +317,7 @@ fn handle_reload(
     current_config: &mut Config,
     content_hash: &mut u64,
     registry: &FilterRegistry,
-    pipelines: &ListenerPipelines,
+    pipelines: &impl ReloadTarget,
     listener_meta: &praxis_protocol::http::health::ListenerMetaStore,
     cluster_meta: &praxis_protocol::http::health::ClusterMetaStore,
     health_shutdown: &Arc<Mutex<CancellationToken>>,
@@ -1171,7 +1173,7 @@ mod tests {
             kv_stores: praxis_core::kv::KvStoreRegistry::new(),
             session_stores: Arc::new(praxis_filter::SessionStoreRegistry::new()),
             slow_start_registry: Arc::new(praxis_filter::SlowStartRegistry::new()),
-            pipelines,
+            pipelines: Arc::new(WatcherReloadTarget::new(pipelines)),
             referenced_files: Vec::new(),
             listener_meta: praxis_protocol::http::health::new_listener_meta_store(
                 praxis_protocol::http::health::listener_meta_from_config(&config),
@@ -1227,7 +1229,7 @@ mod tests {
             referenced_files: Vec::new(),
             session_stores: Arc::new(praxis_filter::SessionStoreRegistry::new()),
             slow_start_registry: Arc::new(praxis_filter::SlowStartRegistry::new()),
-            pipelines: Arc::clone(&pipelines),
+            pipelines: Arc::new(WatcherReloadTarget::new(Arc::clone(&pipelines))),
             listener_meta: praxis_protocol::http::health::new_listener_meta_store(
                 praxis_protocol::http::health::listener_meta_from_config(&config),
             ),
@@ -1290,7 +1292,7 @@ mod tests {
             referenced_files: Vec::new(),
             session_stores: Arc::new(praxis_filter::SessionStoreRegistry::new()),
             slow_start_registry: Arc::new(praxis_filter::SlowStartRegistry::new()),
-            pipelines: Arc::clone(&pipelines),
+            pipelines: Arc::new(WatcherReloadTarget::new(Arc::clone(&pipelines))),
             listener_meta: praxis_protocol::http::health::new_listener_meta_store(
                 praxis_protocol::http::health::listener_meta_from_config(&config),
             ),
@@ -1382,7 +1384,7 @@ mod tests {
             kv_stores,
             session_stores: Arc::new(praxis_filter::SessionStoreRegistry::new()),
             slow_start_registry: Arc::new(praxis_filter::SlowStartRegistry::new()),
-            pipelines,
+            pipelines: Arc::new(WatcherReloadTarget::new(pipelines)),
             referenced_files: Vec::new(),
             listener_meta: praxis_protocol::http::health::new_listener_meta_store(
                 praxis_protocol::http::health::listener_meta_from_config(&config),
@@ -1458,7 +1460,7 @@ mod tests {
             referenced_files: Vec::new(),
             session_stores: Arc::new(praxis_filter::SessionStoreRegistry::new()),
             slow_start_registry: Arc::new(praxis_filter::SlowStartRegistry::new()),
-            pipelines: Arc::clone(&pipelines),
+            pipelines: Arc::new(WatcherReloadTarget::new(Arc::clone(&pipelines))),
             listener_meta: praxis_protocol::http::health::new_listener_meta_store(
                 praxis_protocol::http::health::listener_meta_from_config(&config),
             ),
@@ -1535,7 +1537,7 @@ mod tests {
             referenced_files: Vec::new(),
             session_stores: Arc::new(praxis_filter::SessionStoreRegistry::new()),
             slow_start_registry: Arc::new(praxis_filter::SlowStartRegistry::new()),
-            pipelines: Arc::clone(&pipelines),
+            pipelines: Arc::new(WatcherReloadTarget::new(Arc::clone(&pipelines))),
             listener_meta: praxis_protocol::http::health::new_listener_meta_store(
                 praxis_protocol::http::health::listener_meta_from_config(&config),
             ),
@@ -1611,7 +1613,7 @@ mod tests {
             referenced_files: Vec::new(),
             session_stores: Arc::new(praxis_filter::SessionStoreRegistry::new()),
             slow_start_registry: Arc::new(praxis_filter::SlowStartRegistry::new()),
-            pipelines: Arc::clone(&pipelines),
+            pipelines: Arc::new(WatcherReloadTarget::new(Arc::clone(&pipelines))),
             listener_meta: praxis_protocol::http::health::new_listener_meta_store(
                 praxis_protocol::http::health::listener_meta_from_config(&config),
             ),
@@ -1779,7 +1781,7 @@ mod tests {
             kv_stores: praxis_core::kv::KvStoreRegistry::new(),
             session_stores: Arc::new(praxis_filter::SessionStoreRegistry::new()),
             slow_start_registry: Arc::new(praxis_filter::SlowStartRegistry::new()),
-            pipelines: Arc::clone(&pipelines),
+            pipelines: Arc::new(WatcherReloadTarget::new(Arc::clone(&pipelines))),
             referenced_files: Vec::new(),
             listener_meta: praxis_protocol::http::health::new_listener_meta_store(
                 praxis_protocol::http::health::listener_meta_from_config(&config),

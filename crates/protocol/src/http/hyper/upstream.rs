@@ -9,9 +9,7 @@
 //! `error_while_proxy` hooks: the retry policy for connect and exchange
 //! failures, and no retry once the replay copy of the body is truncated.
 
-#[cfg(test)]
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use http::{Response, Version};
 use praxis_core::{
@@ -156,7 +154,7 @@ async fn select_peer(listener: &ListenerShared, flight: &mut Flight) -> Result<P
     let mut peer = PeerSpec::from_upstream(target.upstream, target.allow_private)
         .await
         .map_err(|err| Failure::peer(&err))?;
-    crate::overload::scale_connection(&mut peer.connection, &listener.overload);
+    apply_overload_connection(&mut peer.connection, &listener.overload);
     peer.trust_anchors.clone_from(&listener.trust_anchors);
     open_attempt_at(&peer.address.ip().to_string(), peer.address.port(), &mut flight.ctx);
     Ok(peer)
@@ -301,6 +299,15 @@ fn connect_budget(options: &ConnectionOptions) -> Duration {
     })
 }
 
+/// Materialize Hyper's effective budget before scaling, including its default.
+fn apply_overload_connection(options: &mut Arc<ConnectionOptions>, signal: &praxis_core::overload::Signal) {
+    if signal.is_enabled() {
+        let budget = connect_budget(options);
+        Arc::make_mut(options).total_connection_timeout = Some(budget);
+    }
+    crate::overload::scale_connection(options, signal);
+}
+
 // -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
@@ -364,6 +371,37 @@ mod tests {
             Duration::from_secs(30),
             "a longer TCP connect timeout stretches the budget"
         );
+    }
+
+    #[test]
+    fn overload_scales_the_effective_default_connect_budget() {
+        let signal = praxis_core::overload::Signal::default();
+        let mut options = Arc::new(ConnectionOptions::default());
+        apply_overload_connection(&mut options, &signal);
+        assert!(options.total_connection_timeout.is_none());
+        for (pressure, millis) in [(0.0, 10_000), (0.5, 5500), (1.0, 1000)] {
+            signal.update(praxis_core::overload::EngagedActions::default(), pressure);
+            let mut options = Arc::new(ConnectionOptions::default());
+            apply_overload_connection(&mut options, &signal);
+            assert_eq!(connect_budget(&options), Duration::from_millis(millis));
+            assert!(options.read_timeout.is_none());
+            assert!(options.write_timeout.is_none());
+        }
+    }
+
+    #[test]
+    fn overload_preserves_explicit_connect_budget_precedence() {
+        let signal = praxis_core::overload::Signal::default();
+        signal.update(praxis_core::overload::EngagedActions::default(), 0.5);
+        for (connect, total, millis) in [(30, None, 16_500), (1, Some(3), 1650)] {
+            let mut options = Arc::new(ConnectionOptions {
+                connection_timeout: Some(Duration::from_secs(connect)),
+                total_connection_timeout: total.map(Duration::from_secs),
+                ..Default::default()
+            });
+            apply_overload_connection(&mut options, &signal);
+            assert_eq!(connect_budget(&options), Duration::from_millis(millis));
+        }
     }
 
     #[tokio::test]

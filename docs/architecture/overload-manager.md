@@ -74,6 +74,15 @@ sequenceDiagram
   Housekeeping drop cancels samplers and clears their controller. A running
   purge is joined after the network shutdown budget and may extend final exit.
 
+The config watcher revokes its access to live pipelines on shutdown and waits
+up to one second for its thread. Pipeline construction and downstream validation
+run without holding the live controller or publication lock. A stalled callback
+cannot delay that wait indefinitely, and any build that returns afterward is
+discarded before changing pipelines, logging state, health checks, or metadata.
+Rust cannot forcibly terminate a synchronous downstream callback: its staged
+resources remain owned until it returns, so embedders must bound their callbacks.
+This limit is independent of the network shutdown budget and allocator purge.
+
 For example, four admitted requests with a hard cap of five and saturation
 ratio 0.80 trigger pressure refusal while one hard-limit permit remains free.
 The fifth HTTP2 stream gets 503, the four admitted responses finish, and
@@ -89,3 +98,15 @@ with in-flight work are described in
 [Observability](../operating/observability.md). Independent body-buffer and
 filter-hook attribution is reviewed separately in
 [PR #1515](https://github.com/praxis-proxy/praxis/pull/1515).
+
+Set `runtime.overload_purge: false` to disable only explicit allocator purging;
+admission, readiness, keep-alive, and deadline actions remain enabled. This
+startup-only switch defaults to true and does not alter jemalloc's own decay
+policy. Operators may configure allocator decay separately through jemalloc's
+allocator-specific startup settings; the switch itself never calls an
+allocator control. Disabling it requires a restart, not a filter reload.
+
+The purge FFI contract is audited against the exact `tikv-jemalloc-sys` version
+in Cargo.lock. Every allocator upgrade requires a manual audit of the command,
+initialization and locking assumptions in `allocator.rs`; a version regression
+test flags upgrades but cannot prove the new implementation safe.
