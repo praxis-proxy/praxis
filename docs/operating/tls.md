@@ -174,8 +174,12 @@ Revocation policy:
 - When CRLs are configured, a certificate whose
   issuer has no CRL is rejected (unknown revocation
   status is denied).
-- A CRL past its `nextUpdate` is still accepted, so
-  operators must refresh CRL files themselves.
+- A CRL past its `nextUpdate` is rejected, and so is
+  every client certificate it covers. The check runs
+  on each handshake, so a loaded CRL that goes stale
+  fails closed without a reload. Refresh CRL files
+  before their `nextUpdate`; Praxis does not fetch
+  them.
 
 After a CA *replacement* (not a CRL update), the
 `CertificateRequest` still advertises the old CA

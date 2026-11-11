@@ -43,6 +43,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Security
 
+- **Breaking:** listener mTLS now rejects a CRL past its `nextUpdate`
+  instead of trusting it indefinitely. Once a configured CRL expires, every
+  client certificate it covers fails the handshake until the CRL file is
+  refreshed. The check runs on each handshake, so a loaded CRL that goes
+  stale takes effect without a reload. Follow-up to GHSA-g775-fpgp-4j3x.
 - LLM policies now apply HTTP authorization, delegation and request assertions
   to accepted unclassified requests without a model when
   `llm.require_model: false`. Adding a body to a discovery request no longer
