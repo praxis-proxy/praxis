@@ -278,6 +278,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(*control.0.lock().unwrap(), vec![3]);
     }
+    #[cfg(any(feature = "pingora", feature = "hyper"))]
     #[tokio::test]
     #[expect(
         clippy::too_many_lines,
