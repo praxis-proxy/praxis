@@ -39,7 +39,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   block `title`, `context`, `source.data` for `type: text` sources, and
   `source.content[].text` for `type: content` sources, including when a
   document is nested in a `tool_result`, and Anthropic `search_result` block
-  `title` and `source` strings. Binary and URL document sources are unchanged.
+  `title` and `source` strings. The projection skips binary, URL, and
+  file-reference document sources.
 
 - **Breaking:** statically buffered request pipelines now reject a finite
   `body_limits.max_request_bytes` above `body_limits.max_buffer_bytes` at

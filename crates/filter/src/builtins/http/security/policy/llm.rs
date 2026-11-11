@@ -405,7 +405,7 @@ fn push_object_text(parts: &mut Vec<ContentPart>, item: &serde_json::Value, dept
 /// Project accepted text from an Anthropic document `source`.
 ///
 /// Only `type: text` (`source.data`) and `type: content` (`source.content[].text`)
-/// sources contribute prompt text. Binary and URL sources are skipped.
+/// sources contribute prompt text. Binary, URL, and file-reference sources are skipped.
 fn push_document_source_text(parts: &mut Vec<ContentPart>, source: Option<&serde_json::Value>, depth: u8) {
     let Some(source) = source else {
         return;
