@@ -1,0 +1,31 @@
+# Policy request correlation
+#
+# Supplies request and trace identifiers, a timestamp, and the deployment environment to policy rules in both request and response phases.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/security/policy-request-context.yaml
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: trace_context
+      - filter: policy
+        # A sample policy document is in tests/integration/fixtures/request-context-policy.yaml.
+        config_path: /etc/praxis/request-context-policy.yaml
+        environment: production
+      - filter: router
+        routes:
+          - path_prefix: /
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints: ["127.0.0.1:3000"]
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends

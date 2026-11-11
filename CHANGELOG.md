@@ -17,6 +17,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Policy rules and hooks receive request and trace IDs and a stable request
+  timestamp when trace context is available. The optional policy `environment`
+  field supplies `request.environment`, including without tracing; blank labels
+  are rejected at startup. Unrepresentable clock values leave the timestamp unset.
+
 ### Changed
 
 - Update the Pingora fork dependencies to v0.11.4.

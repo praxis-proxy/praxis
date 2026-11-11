@@ -99,6 +99,21 @@ static EMPTY_BODY: Bytes = Bytes::new();
 /// own configured header and contributes to a typed `Extensions`
 /// context.
 ///
+/// Request correlation is captured at this filter's first request or body
+/// callback and reused in response hooks. When a matching `trace_context`
+/// filter has initialized correlation, `request.request_id` and
+/// `request.trace_id` come from that context, and `request.timestamp` is the
+/// capture time from the request clock, in RFC 3339 UTC with millisecond
+/// precision, or absent if the clock value cannot be represented. The pipeline
+/// initializes matching top-level trace filters before executing the chain.
+/// Missing trace context logs at debug and leaves the
+/// request slot absent, or environment-only when `environment` is configured.
+/// `request.span_id` is unset: the trace context stores no exported span ID.
+/// Establish the final request ID before this filter's first callback: in a
+/// normal header-first chain, place `request_id` and ID-rewriting filters before
+/// `policy`. Later ID changes are not reflected in the snapshot, and body
+/// pre-read callbacks can precede header filters even in that order.
+///
 /// On the body phase, the filter consumes protocol classifier filter metadata
 /// (from the `praxis-ai` package) to dispatch the matching CMF
 /// hook chain. APL routes
@@ -406,6 +421,13 @@ impl PolicyFilter {
     ) -> Result<Self, FilterError> {
         cfg.validate_context_headers()
             .map_err(|e| -> FilterError { format!("policy: {e}").into() })?;
+        if cfg
+            .environment
+            .as_ref()
+            .is_some_and(|environment| environment.trim().is_empty())
+        {
+            return Err("policy: environment must contain a non-whitespace character".into());
+        }
         refuse_fips_blockers(praxis_tls::provider::required())?;
 
         // Validate addressable, nonzero limits. The pipeline additionally clamps
@@ -980,16 +1002,17 @@ impl PolicyFilter {
         view: &RequestView,
         entity_type: &str,
         entity_name: &str,
-        scope: Option<&str>,
+        cfg: &PolicyFilterConfig,
     ) -> Extensions {
         Extensions {
             meta: Some(Arc::new(MetaExtension {
                 entity_type: Some(entity_type.to_owned()),
                 entity_name: Some(entity_name.to_owned()),
-                scope: scope.map(ToOwned::to_owned),
+                scope: cfg.context_meta.scope.clone(),
                 ..Default::default()
             })),
             http: Some(Arc::new(view.http_extension())),
+            request: view.get_request_context_with_environment(cfg.environment.as_deref()),
             ..Default::default()
         }
     }
@@ -1009,12 +1032,7 @@ impl PolicyFilter {
             return Ok(None);
         }
         state_mut(ctx).limits.pre_identity = true;
-        let ext = Self::identity_extensions(
-            view,
-            ENTITY_HTTP,
-            ENTITY_NAME_GLOBAL,
-            self.cfg.context_meta.scope.as_deref(),
-        );
+        let ext = Self::identity_extensions(view, ENTITY_HTTP, ENTITY_NAME_GLOBAL, &self.cfg);
         let result = self
             .invoke::<HttpHook>(ctx, HOOK_RATELIMIT_PRE_IDENTITY, HttpPayload, ext)
             .await?;
@@ -1092,8 +1110,7 @@ impl PolicyFilter {
         if let Some(rejection) = self.pre_identity_limit(ctx, view).await? {
             return Ok(Err(rejection));
         }
-        let route_ext =
-            Self::identity_extensions(view, entity_type, entity_name, self.cfg.context_meta.scope.as_deref());
+        let route_ext = Self::identity_extensions(view, entity_type, entity_name, &self.cfg);
         let payload = Self::identity_payload(view.headers().clone());
         let id_result = self
             .invoke::<IdentityHook>(ctx, HOOK_IDENTITY_RESOLVE, payload, route_ext)
@@ -1122,6 +1139,7 @@ impl PolicyFilter {
         let headers = view.headers();
         let mut ext = identity.apply_to_extensions(Extensions {
             http: Some(Arc::new(view.http_extension())),
+            request: view.get_request_context_with_environment(cfg.environment.as_deref()),
             ..Default::default()
         });
 
@@ -1354,12 +1372,7 @@ impl PolicyFilter {
         if let Some(rejection) = self.pre_identity_limit(ctx, &view).await? {
             return Ok(Err(rejection));
         }
-        let gate_ext = Self::identity_extensions(
-            &view,
-            ENTITY_HTTP,
-            ENTITY_NAME_GLOBAL,
-            self.cfg.context_meta.scope.as_deref(),
-        );
+        let gate_ext = Self::identity_extensions(&view, ENTITY_HTTP, ENTITY_NAME_GLOBAL, &self.cfg);
         let payload = Self::identity_payload(view.headers().clone());
         let result = self
             .invoke::<IdentityHook>(ctx, HOOK_IDENTITY_RESOLVE, payload, gate_ext)
@@ -1879,6 +1892,7 @@ impl PolicyFilter {
                  an entry sourced from it renders nothing",
             );
             let mut ext = Self::entity_less_extensions();
+            ext.request = view.get_request_context_with_environment(cfg.environment.as_deref());
             if let (Some(scope), Some(meta)) = (&cfg.context_meta.scope, ext.meta.as_ref()) {
                 let mut m = (**meta).clone();
                 m.scope = Some(scope.clone());
