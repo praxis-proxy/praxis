@@ -469,7 +469,11 @@ impl PingoraTcpProxy {
             let cluster_label = self.metrics_cluster_label();
             let connect_result = before_deadline(
                 max_deadline,
-                connect_upstream(&upstream_addr, self.allow_private_upstreams, self.overload.scale_timeout(UPSTREAM_CONNECT_TIMEOUT)),
+                connect_upstream(
+                    &upstream_addr,
+                    self.allow_private_upstreams,
+                    self.overload.scale_timeout(UPSTREAM_CONNECT_TIMEOUT),
+                ),
             )
             .await;
             let mut upstream = match connect_result {

@@ -177,7 +177,13 @@ pub fn load_http_handler_with_lifecycle(
     cert_watcher_shutdowns: &mut Vec<tokio::sync::watch::Sender<bool>>,
     lifecycle: LifecycleHandle,
 ) -> Result<(), praxis_core::ProxyError> {
-    load_http_handler_with_overload(server, listener, pipeline, cert_watcher_shutdowns, (lifecycle, Arc::default()))
+    load_http_handler_with_overload(
+        server,
+        listener,
+        pipeline,
+        cert_watcher_shutdowns,
+        (lifecycle, Arc::default()),
+    )
 }
 
 /// Register a listener with its process lifecycle and owning overload controller.

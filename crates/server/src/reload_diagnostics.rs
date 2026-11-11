@@ -311,7 +311,11 @@ fn detect_shutdown_timing_changes(old: &Config, new: &Config) {
 
 /// Detect restart-only changes to the overload controller.
 fn detect_overload_runtime_changes(old: &Config, new: &Config) {
-    detect_runtime_field_changes!(old, new, [overload_actions, overload_gauges, overload_thresholds]);
+    detect_runtime_field_changes!(
+        old,
+        new,
+        [overload_actions, overload_gauges, overload_purge, overload_thresholds]
+    );
 }
 
 /// Detect changes to the admin endpoint configuration.
@@ -620,6 +624,18 @@ mod tests {
         let warnings = capture_warnings(|| detect_startup_only_runtime_changes(&old, &new));
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("requires restart"));
+    }
+
+    #[test]
+    fn runtime_overload_purge_change_requires_restart() {
+        let enabled = config_with_runtime("");
+        let disabled = config_with_runtime("runtime:\n  overload_purge: false\n");
+        for (old, new) in [(&enabled, &disabled), (&disabled, &enabled)] {
+            let warnings = capture_warnings(|| log_restart_required_changes(old, new));
+            assert_eq!(warnings.len(), 1);
+            assert!(warnings[0].contains("requires restart"));
+        }
+        assert!(capture_warnings(|| log_restart_required_changes(&disabled, &disabled)).is_empty());
     }
 
     #[test]

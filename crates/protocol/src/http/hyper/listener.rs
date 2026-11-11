@@ -209,6 +209,7 @@ pub(super) fn register(
     );
     let accept = AcceptLoop {
         acceptor,
+        builder: Arc::new(connection_builder(&shared)),
         drain_bound: runtime
             .shutdown_timeout()
             .saturating_sub(runtime.shutdown_drain_delay())
@@ -249,6 +250,9 @@ struct AcceptLoop {
     /// TLS acceptor for a TLS listener.
     acceptor: Option<TlsAcceptor>,
 
+    /// Immutable listener settings; `HeaderTimer` reads the shared signal live.
+    builder: Arc<auto::Builder<TokioExecutor>>,
+
     /// How long connections may take to finish once shutdown starts: less
     /// than the runtime gives the service.
     drain_bound: Duration,
@@ -277,7 +281,7 @@ impl AcceptLoop {
                 }
                 let connection = Connection {
                     acceptor: self.acceptor.clone(),
-                    builder: Arc::new(connection_builder(&self.shared)),
+                    builder: Arc::clone(&self.builder),
                     peer,
                     shared: Arc::clone(&self.shared),
                     shutdown: shutdown.clone(),

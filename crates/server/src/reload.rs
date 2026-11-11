@@ -38,6 +38,64 @@ use crate::{
 // Reload
 // -----------------------------------------------------------------------------
 
+/// Result of accessing live reload state or publishing a staged generation.
+type ReloadResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+/// Access live state only outside downstream pipeline construction.
+pub(crate) trait ReloadTarget {
+    /// Run a bounded live-state operation, or reject it after watcher shutdown.
+    fn with_live<T, Operation>(&self, operation: Operation) -> ReloadResult<T>
+    where
+        Operation: FnOnce(&ListenerPipelines) -> ReloadResult<T>;
+}
+
+impl ReloadTarget for ListenerPipelines {
+    fn with_live<T, Operation>(&self, operation: Operation) -> ReloadResult<T>
+    where
+        Operation: FnOnce(&ListenerPipelines) -> ReloadResult<T>,
+    {
+        operation(self)
+    }
+}
+
+impl<L: ReloadTarget> ReloadTarget for Arc<L> {
+    fn with_live<T, Operation>(&self, operation: Operation) -> ReloadResult<T>
+    where
+        Operation: FnOnce(&ListenerPipelines) -> ReloadResult<T>,
+    {
+        self.as_ref().with_live(operation)
+    }
+}
+
+/// Revocable watcher access; a stalled build never holds this lock or its live Arc.
+pub(crate) struct WatcherReloadTarget(Mutex<Option<Arc<ListenerPipelines>>>);
+
+impl WatcherReloadTarget {
+    /// Keep live pipelines available until the serving owner stops the watcher.
+    pub(crate) fn new(live: Arc<ListenerPipelines>) -> Self {
+        Self(Mutex::new(Some(live)))
+    }
+
+    /// Revoke publication and release the controller, waiting only for a live-state operation.
+    pub(crate) fn stop(&self) {
+        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+    }
+}
+
+impl ReloadTarget for WatcherReloadTarget {
+    fn with_live<T, Operation>(&self, operation: Operation) -> ReloadResult<T>
+    where
+        Operation: FnOnce(&ListenerPipelines) -> ReloadResult<T>,
+    {
+        let guard = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        operation(
+            guard
+                .as_ref()
+                .ok_or("config watcher stopped; discarding staged reload")?,
+        )
+    }
+}
+
 /// Validate a new config, rebuild pipelines, and atomically swap them
 /// into the running server.
 ///
@@ -63,7 +121,7 @@ pub(crate) fn reload_pipelines(
     new_config: &Config,
     old_config: &Config,
     registry: &FilterRegistry,
-    live: &ListenerPipelines,
+    live: &impl ReloadTarget,
     listener_meta: &praxis_protocol::http::health::ListenerMetaStore,
     cluster_meta: &praxis_protocol::http::health::ClusterMetaStore,
     health_shutdown: &Arc<Mutex<CancellationToken>>,
@@ -77,25 +135,28 @@ pub(crate) fn reload_pipelines(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("building new pipelines from reloaded config");
 
-    if let Err(err) = reject_protocol_changes(new_config, live) {
-        error!(error = %err, "config reload failed: listener protocol changed; requires restart");
-        return Err(err);
-    }
+    live.with_live(|live| {
+        if let Err(err) = reject_protocol_changes(new_config, live) {
+            error!(error = %err, "config reload failed: listener protocol changed; requires restart");
+            return Err(err);
+        }
 
-    if let Err(err) = praxis_protocol::tcp::validate_tcp_groups(new_config) {
-        error!(error = %err, "config reload failed: inconsistent TCP listener group");
-        return Err(err.into());
-    }
+        if let Err(err) = praxis_protocol::tcp::validate_tcp_groups(new_config) {
+            error!(error = %err, "config reload failed: inconsistent TCP listener group");
+            return Err(err.into());
+        }
 
-    if let Err(err) = reject_tcp_group_changes(new_config, old_config) {
-        error!(error = %err, "config reload failed: TCP listener topology changed; requires restart");
-        return Err(err);
-    }
+        if let Err(err) = reject_tcp_group_changes(new_config, old_config) {
+            error!(error = %err, "config reload failed: TCP listener topology changed; requires restart");
+            return Err(err);
+        }
 
-    if let Err(err) = reject_forward_proxy_changes(new_config, old_config, live) {
-        error!(error = %err, "config reload failed: listener forward_proxy changed; requires restart");
-        return Err(err);
-    }
+        if let Err(err) = reject_forward_proxy_changes(new_config, old_config, live) {
+            error!(error = %err, "config reload failed: listener forward_proxy changed; requires restart");
+            return Err(err);
+        }
+        Ok(())
+    })?;
 
     let health_registry = build_health_registry(&new_config.clusters);
 
@@ -127,90 +188,92 @@ pub(crate) fn reload_pipelines(
         },
     };
 
-    // Emit this reload's change diagnostics under the OLD logging baseline:
-    // refresh_baseline below applies the new config's env-filter immediately,
-    // and a reload that both requires a restart and lowers verbosity must not
-    // swallow the very warnings telling the operator their change was not
-    // applied.
-    log_restart_required_changes(old_config, new_config);
-    warn_insecure_option_escalations(old_config, new_config);
-    warn_stateful_filter_reset(new_config);
-    log_config_change_audit(old_config, new_config);
-    // The advisory file-permission warnings belong with the diagnostics
-    // above for the same reason: a reload may introduce a new listener
-    // cert, a cluster mTLS client key, or a new log file path, and a
-    // reload that also lowers verbosity must not swallow the warning
-    // about the insecurely-permissioned file it just brought live.
+    // Filesystem metadata can block. Keep advisory permission checks outside
+    // the publication lock and before a new logging baseline can hide warnings.
     warn_insecure_key_permissions(new_config);
     warn_insecure_log_file_permissions(new_config);
     warn_insecure_sink_file_permissions(new_config);
 
-    // Apply the log-level baseline while a failure can still abort the reload
-    // cleanly. This is the last fallible step; it must run before the
-    // irreversible pipeline swap below so a bad logging baseline does not leave
-    // live traffic already moved onto the new pipelines while the caller sees
-    // Err (which would churn a retry loop that re-swaps every cycle). The
-    // refresh only touches the logging subsystem, and the diagnostics above
-    // are infallible, so ordering it here is safe.
-    if let Some(log_level) = log_level
-        && let Err(error) = log_level.refresh_baseline(new_config)
-    {
-        error!(%error, "config reload failed: log level baseline refresh");
-        return Err(error.into());
-    }
+    // Keep diagnostics under the old logging baseline, outside the publication
+    // mutex so a blocked synchronous log sink cannot hold up watcher shutdown.
+    log_restart_required_changes(old_config, new_config);
+    warn_insecure_option_escalations(old_config, new_config);
+    warn_stateful_filter_reset(new_config);
+    log_config_change_audit(old_config, new_config);
 
-    // Removed listeners keep serving through their old bound pipelines. Their
-    // stores must remain discoverable for a later reintroduction, even though
-    // the configured candidate has no filter for them in this generation.
-    for name in live.listener_names() {
-        if new_pipelines.get(name).is_none()
-            && let Some(old) = live.get(name)
+    let (swapped, skipped, carried) = live.with_live(|live| {
+        // Apply the log-level baseline while a failure can still abort the reload
+        // cleanly. This is the last fallible step; it must run before the
+        // irreversible pipeline swap below so a bad logging baseline does not leave
+        // live traffic already moved onto the new pipelines while the caller sees
+        // Err (which would churn a retry loop that re-swaps every cycle). The
+        // refresh only touches the logging subsystem, and the diagnostics above
+        // are infallible, so ordering it here is safe.
+        if let Some(log_level) = log_level
+            && let Err(error) = log_level.refresh_baseline(new_config)
         {
-            let old_pipeline = old.load();
-            if let Some(stores) = old_pipeline.session_stores() {
-                candidate_session_stores.retain_used_from(stores);
+            return Err(error.into());
+        }
+
+        // Removed listeners keep serving through their old bound pipelines. Their
+        // stores must remain discoverable for a later reintroduction, even though
+        // the configured candidate has no filter for them in this generation.
+        for name in live.listener_names() {
+            if new_pipelines.get(name).is_none()
+                && let Some(old) = live.get(name)
+            {
+                let old_pipeline = old.load();
+                if let Some(stores) = old_pipeline.session_stores() {
+                    candidate_session_stores.retain_used_from(stores);
+                }
             }
         }
-    }
-    session_stores.publish(&candidate_session_stores);
-    slow_start_generation.commit();
+        session_stores.publish(&candidate_session_stores);
+        slow_start_generation.commit();
 
-    // Copy known-down endpoint state into the new registry BEFORE the
-    // swap: afterwards `live` already serves the new pipelines and the
-    // old registry is no longer reachable through them.
-    carry_over_health_state(live, old_config, new_config, &health_registry);
+        // Copy known-down endpoint state into the new registry BEFORE the
+        // swap: afterwards `live` already serves the new pipelines and the
+        // old registry is no longer reachable through them.
+        let carried = carry_over_health_state(live, old_config, new_config, &health_registry);
 
-    let mut swapped: Vec<&str> = Vec::new();
-    let mut skipped: Vec<&str> = Vec::new();
+        let mut swapped: Vec<&str> = Vec::new();
+        let mut skipped: Vec<&str> = Vec::new();
 
-    for name in new_pipelines.listener_names() {
-        let Some(new_slot) = new_pipelines.get(name) else {
-            continue;
-        };
-        if live.get(name).is_none() {
-            skipped.push(name);
-            continue;
+        for name in new_pipelines.listener_names() {
+            let Some(new_slot) = new_pipelines.get(name) else {
+                continue;
+            };
+            if live.get(name).is_none() {
+                skipped.push(name);
+                continue;
+            }
+            live.swap(name, new_slot.load_full());
+            swapped.push(name);
         }
-        live.swap(name, new_slot.load_full());
-        swapped.push(name);
+
+        listener_meta.store(Arc::new(merged_listener_meta(new_config, live, listener_meta)));
+        cluster_meta.store(Arc::new(praxis_protocol::http::health::cluster_meta_from_config(
+            new_config,
+        )));
+
+        respawn_health_checks(
+            old_config,
+            new_config,
+            &health_registry,
+            health_shutdown,
+            health_lifecycle,
+            subrequest_client.upstream_ca(),
+        );
+
+        Ok((swapped, skipped, carried))
+    })?;
+    if carried > 0 {
+        info!(
+            endpoints = carried,
+            "carried unhealthy endpoint state across reload; probes must confirm recovery"
+        );
     }
-
-    listener_meta.store(Arc::new(merged_listener_meta(new_config, live, listener_meta)));
-    cluster_meta.store(Arc::new(praxis_protocol::http::health::cluster_meta_from_config(
-        new_config,
-    )));
-
-    respawn_health_checks(
-        old_config,
-        new_config,
-        &health_registry,
-        health_shutdown,
-        health_lifecycle,
-        subrequest_client.upstream_ca(),
-    );
-
     info!(swapped = ?swapped, skipped = ?skipped, "config reload complete");
-
     Ok(())
 }
 
@@ -418,15 +481,16 @@ fn live_health_registry(live: &ListenerPipelines, old_config: &Config) -> Option
 /// live traffic to known-down upstreams until the new probe generation
 /// re-detects them. For each cluster present in both configs with an
 /// unchanged `health_check` config, copy each endpoint's unhealthy flag
-/// by address so known-down endpoints stay out of rotation.
+/// by address so known-down endpoints stay out of rotation. Return the number
+/// carried so the caller can log it after releasing the publication lock.
 fn carry_over_health_state(
     live: &ListenerPipelines,
     old_config: &Config,
     new_config: &Config,
     new_registry: &HealthRegistry,
-) {
+) -> usize {
     let Some(old_registry) = live_health_registry(live, old_config) else {
-        return;
+        return 0;
     };
 
     let old_by_name: std::collections::HashMap<&str, &praxis_core::config::Cluster> = old_config
@@ -454,12 +518,7 @@ fn carry_over_health_state(
         carried = carried.saturating_add(carry_cluster_endpoints(cluster, old_entry, new_entry));
     }
 
-    if carried > 0 {
-        info!(
-            endpoints = carried,
-            "carried unhealthy endpoint state across reload; probes must confirm recovery"
-        );
-    }
+    carried
 }
 
 /// Copy unhealthy endpoint flags for one cluster; returns how many carried.
@@ -618,6 +677,119 @@ mod tests {
         fn prepare(&self, extensions: &mut RequestExtensions) {
             extensions.insert(self.clone());
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn permission_warning_can_revoke_reload_before_publication() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        let (pipelines, old_config, registry, shutdown, meta, cluster_meta) = setup_live_pipelines();
+        let pipelines = Arc::new(pipelines);
+        let original = pipelines.get("web").unwrap().load_full();
+        let original_token = shutdown.lock().unwrap().clone();
+        let target = Arc::new(WatcherReloadTarget::new(Arc::clone(&pipelines)));
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::set_permissions(file.path(), std::fs::Permissions::from_mode(0o644)).unwrap();
+        let mut new_config = old_config.clone();
+        new_config.runtime.logging.output = praxis_core::config::LogOutput::File;
+        new_config.runtime.logging.file_path = Some(file.path().display().to_string());
+        let observations = Arc::new(AtomicUsize::new(0));
+        let locked = Arc::new(AtomicUsize::new(0));
+        let subscriber = tracing_subscriber::registry().with(PublicationLockProbe {
+            diagnostic_target: "startup_checks",
+            target: Arc::clone(&target),
+            observations: Arc::clone(&observations),
+            locked: Arc::clone(&locked),
+        });
+
+        let result = tracing::subscriber::with_default(subscriber, || {
+            reload_pipelines(
+                &new_config,
+                &old_config,
+                &registry,
+                &target,
+                &meta,
+                &cluster_meta,
+                &shutdown,
+                None,
+                &empty_kv_stores(),
+                &empty_session_stores(),
+                &empty_slow_start_registry(),
+                &empty_subrequest_client(),
+                None,
+                &PipelineComposition::default(),
+            )
+        });
+
+        assert!(
+            observations.load(Ordering::Relaxed) > 0,
+            "the permission check must run"
+        );
+        assert_eq!(
+            locked.load(Ordering::Relaxed),
+            0,
+            "permission checks must not hold the publication lock"
+        );
+        assert!(result.unwrap_err().to_string().contains("discarding staged reload"));
+        assert!(Arc::ptr_eq(&original, &pipelines.get("web").unwrap().load_full()));
+        assert!(
+            !original_token.is_cancelled(),
+            "late reload must not restart health checks"
+        );
+    }
+
+    #[test]
+    fn change_diagnostics_can_revoke_reload_before_publication() {
+        let (pipelines, old_config, registry, shutdown, meta, cluster_meta) = setup_live_pipelines();
+        let mut new_config = old_config.clone();
+        new_config.runtime.overload_purge = !old_config.runtime.overload_purge;
+        let pipelines = Arc::new(pipelines);
+        let original = pipelines.get("web").unwrap().load_full();
+        let original_token = shutdown.lock().unwrap().clone();
+        let target = Arc::new(WatcherReloadTarget::new(Arc::clone(&pipelines)));
+        let observations = Arc::new(AtomicUsize::new(0));
+        let locked = Arc::new(AtomicUsize::new(0));
+        let subscriber = tracing_subscriber::registry().with(PublicationLockProbe {
+            diagnostic_target: "reload_diagnostics",
+            target: Arc::clone(&target),
+            observations: Arc::clone(&observations),
+            locked: Arc::clone(&locked),
+        });
+
+        let result = tracing::subscriber::with_default(subscriber, || {
+            reload_pipelines(
+                &new_config,
+                &old_config,
+                &registry,
+                &target,
+                &meta,
+                &cluster_meta,
+                &shutdown,
+                None,
+                &empty_kv_stores(),
+                &empty_session_stores(),
+                &empty_slow_start_registry(),
+                &empty_subrequest_client(),
+                None,
+                &PipelineComposition::default(),
+            )
+        });
+
+        assert!(observations.load(Ordering::Relaxed) > 0, "change diagnostic must run");
+        assert_eq!(
+            locked.load(Ordering::Relaxed),
+            0,
+            "diagnostics must not lock publication"
+        );
+        assert!(result.unwrap_err().to_string().contains("discarding staged reload"));
+        assert!(Arc::ptr_eq(&original, &pipelines.get("web").unwrap().load_full()));
+        assert!(
+            !original_token.is_cancelled(),
+            "late reload must not restart health checks"
+        );
     }
 
     #[test]
@@ -3309,6 +3481,31 @@ filter_chains:
 "#,
         )
         .unwrap()
+    }
+
+    /// Try revoking publication while a synchronous diagnostic sink is running.
+    struct PublicationLockProbe {
+        /// Diagnostic module to observe.
+        diagnostic_target: &'static str,
+        /// The publication target whose lock must remain available.
+        target: Arc<WatcherReloadTarget>,
+        /// Number of diagnostics observed.
+        observations: Arc<AtomicUsize>,
+        /// Number of diagnostics emitted while publication was locked.
+        locked: Arc<AtomicUsize>,
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for PublicationLockProbe {
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: tracing_subscriber::layer::Context<'_, S>) {
+            if event.metadata().target().ends_with(self.diagnostic_target) {
+                self.observations.fetch_add(1, Ordering::Relaxed);
+                if let Ok(mut live) = self.target.0.try_lock() {
+                    live.take();
+                } else {
+                    self.locked.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
     }
 
     /// A policy-filter config whose policy document is `policy_path`.
