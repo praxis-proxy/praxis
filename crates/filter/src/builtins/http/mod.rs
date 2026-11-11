@@ -38,8 +38,8 @@ pub use security::{
 pub use traffic_management::IterativeRequestRouterFilter;
 pub use traffic_management::{
     CircuitBreakerFilter, EndpointReselector, EndpointSelectorFilter, GrpcDetectionFilter, GrpcTimeoutFilter,
-    HeadClassifierFilter, LoadBalancerFilter, RateLimitFilter, RateLimitMode, RedirectFilter, RedirectStatus,
-    RouterFilter, StaticResponseFilter, StickySessionsFilter, TimeoutFilter,
+    HeadClassifierFilter, LoadBalancerFilter, RateLimitFilter, RateLimitMode, RateLimitScope, RedirectFilter,
+    RedirectStatus, RouterFilter, StaticResponseFilter, StickySessionsFilter, TimeoutFilter,
     sticky_sessions::{SessionStore, SessionStoreRegistry},
 };
 pub use transformation::{
