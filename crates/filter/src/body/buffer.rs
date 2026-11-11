@@ -203,17 +203,24 @@ mod tests {
         metrics::with_local_recorder(&recorder, || {
             let mut buffer = BodyBuffer::new(16);
             buffer.push(Bytes::from_static(b"hello")).unwrap();
-            assert!(handle.render().contains("praxis_body_buffer_bytes 5"));
+            assert_eq!(body_bytes(&handle), 5, "push must account for five bytes");
             let frozen = buffer.freeze();
+            assert_eq!(body_bytes(&handle), 5, "freeze must retain five bytes");
             let clone = frozen.clone();
+            assert_eq!(body_bytes(&handle), 5, "cloning must not double-count shared bytes");
             drop(frozen);
-            assert!(handle.render().contains("praxis_body_buffer_bytes 5"));
+            assert_eq!(body_bytes(&handle), 5, "the clone must retain five bytes");
             drop(clone);
-            assert!(handle.render().contains("praxis_body_buffer_bytes 0"));
+            assert_eq!(body_bytes(&handle), 0, "the final drop must release the bytes");
             let mut aborted = BodyBuffer::new(16);
             aborted.push(Bytes::from_static(b"discard")).unwrap();
+            assert_eq!(
+                body_bytes(&handle),
+                7,
+                "the unfinished buffer must account for its bytes"
+            );
             drop(aborted);
-            assert!(handle.render().contains("praxis_body_buffer_bytes 0"));
+            assert_eq!(body_bytes(&handle), 0, "the aborted buffer must release the bytes");
         });
     }
 
@@ -226,7 +233,7 @@ mod tests {
             assert_eq!(buf.total_bytes(), 0, "empty buffer should have zero bytes");
             let frozen = buf.freeze();
             assert!(frozen.is_empty(), "freezing empty buffer should yield empty Bytes");
-            assert!(handle.render().contains("praxis_body_buffer_bytes 0"));
+            assert_eq!(body_bytes(&handle), 0, "empty freeze must retain no bytes");
         });
     }
 
@@ -398,5 +405,20 @@ mod tests {
             "body exceeds maximum size: 150 bytes attempted, 100 byte limit",
             "overflow Display should include limit and attempted size"
         );
+    }
+
+    // -----------------------------------------------------------------------------
+    // Test Utilities
+    // -----------------------------------------------------------------------------
+
+    /// Parse the complete retained-body gauge sample as an integer byte count.
+    fn body_bytes(handle: &metrics_exporter_prometheus::PrometheusHandle) -> u64 {
+        handle
+            .render()
+            .lines()
+            .find_map(|line| line.strip_prefix("praxis_body_buffer_bytes "))
+            .expect("body buffering must register its retained-byte gauge")
+            .parse()
+            .expect("these byte-count samples must be complete nonnegative integers")
     }
 }

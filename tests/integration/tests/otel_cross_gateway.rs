@@ -129,8 +129,6 @@ fn exported_parentage_links_edge_provider_and_backend() {
 
     let backend = start_header_echo_backend();
     let subrequest_backend = start_header_echo_backend();
-    // Keep future listeners reserved while other fixtures and the OTLP exporter
-    // open sockets. A released ephemeral port can become a client's source port.
     let provider_port = free_port_guard();
     let edge_port = free_port_guard();
     let routing_edge_port = free_port_guard();
@@ -217,7 +215,6 @@ fn exported_parentage_links_edge_provider_and_backend() {
         Some("vendor=routed"),
     );
     let retry_trace_id = "77777777777777777777777777777777";
-    // This upstream must refuse connections, so release it only for the retry.
     retry_dead_port.release();
     let retry_response = send_retry_request(retry_edge.addr(), &format!("00-{retry_trace_id}-8888888888888888-01"));
     let mid_proxy_trace_id = "99999999999999999999999999999999";
