@@ -376,7 +376,8 @@ fn push_input_parts_text(parts: &mut Vec<ContentPart>, value: &serde_json::Value
 /// (e.g. an Anthropic `tool_result` block carrying its own parts).
 ///
 /// Anthropic `document` blocks also carry prompt-bearing text in `title`,
-/// `context`, and `source` fields that are not named `text` or `content`.
+/// `context`, and `source` fields that are not named `text` or `content`,
+/// and `search_result` blocks carry a `title` and a `source` string.
 fn push_object_text(parts: &mut Vec<ContentPart>, item: &serde_json::Value, depth: u8) {
     if let Some(text) = item.get("text") {
         push_text_at(parts, text, depth);
@@ -390,8 +391,14 @@ fn push_object_text(parts: &mut Vec<ContentPart>, item: &serde_json::Value, dept
     if let Some(context) = item.get("context") {
         push_text_at(parts, context, depth);
     }
-    if item.get("type").and_then(serde_json::Value::as_str) == Some("document") {
-        push_document_source_text(parts, item.get("source"), depth);
+    match item.get("type").and_then(serde_json::Value::as_str) {
+        Some("document") => push_document_source_text(parts, item.get("source"), depth),
+        Some("search_result") => {
+            if let Some(source) = item.get("source").filter(|source| source.is_string()) {
+                push_text_at(parts, source, depth);
+            }
+        },
+        Some(_) | None => {},
     }
 }
 
@@ -1302,6 +1309,20 @@ mod tests {
             texts(&parsed.content()),
             vec!["note", "hidden prompt"],
             "a document nested in tool_result must be projected the same way",
+        );
+    }
+
+    #[test]
+    fn anthropic_search_result_title_and_source_are_projected() {
+        let parsed = request(
+            r#"{"model":"claude","messages":[{"role":"user","content":[
+                {"type":"search_result","source":"https://example.com/doc","title":"result title",
+                 "content":[{"type":"text","text":"result body"}]}]}]}"#,
+        );
+        assert_eq!(
+            texts(&parsed.content()),
+            vec!["result body", "result title", "https://example.com/doc"],
+            "search_result content, title, and source must reach the scanner",
         );
     }
 
