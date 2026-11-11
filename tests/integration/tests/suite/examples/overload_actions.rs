@@ -458,13 +458,19 @@ filter_chains:
         key = certs.key_path.display()
     );
     let proxy = PraxisProcess::spawn(&yaml, &addr(metrics));
-    let mut admitted: Vec<_> = (0..4)
-        .map(|_| {
-            let socket = TcpStream::connect(addr(port)).unwrap();
-            socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
-            socket
-        })
+    // Admin readiness does not imply that every data listener is bound. Keep
+    // the first successful data connection as one of the four admitted sessions.
+    let mut first = None;
+    wait_for(&proxy, || {
+        first = TcpStream::connect(addr(port)).ok();
+        first.is_some()
+    });
+    let mut admitted: Vec<_> = std::iter::once(first.unwrap())
+        .chain((0..3).map(|_| TcpStream::connect(addr(port)).unwrap()))
         .collect();
+    for socket in &admitted {
+        socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    }
     wait_for(&proxy, || {
         for socket in &mut admitted {
             socket.write_all(b"live").unwrap();

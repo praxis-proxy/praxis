@@ -72,7 +72,23 @@ sequenceDiagram
 - Memory pressure requests one blocking allocator purge at a time per sampler.
   Missing callbacks start no worker, and the gauge reports completed success.
   Housekeeping drop cancels samplers and clears their controller. A running
-  purge is joined after the network shutdown budget and may extend final exit.
+  purge remains owned by the housekeeping runtime during background cleanup.
+  After network shutdown, the server allows two seconds in total to join its
+  watcher, housekeeping runtime, and health-check runtimes. A task exceeding
+  that deadline is detached with a warning; an in-flight allocator call is
+  never forcibly interrupted.
+
+The config watcher revokes its access to live pipelines on shutdown, serialized
+with any publication already in progress, then joins its thread within the
+shared background-cleanup deadline (one second when dropped independently).
+Pipeline construction, downstream validation, advisory file-permission checks,
+and change diagnostics run outside the publication lock. Stalled validation,
+filesystem checks, or sinks for these diagnostics cannot hold that lock, and
+any build that returns after revocation is
+discarded before changing pipelines, logging state, health checks, or metadata.
+Rust cannot forcibly terminate a synchronous downstream callback: its staged
+resources remain owned until it returns, so embedders must bound their callbacks.
+The background-cleanup deadline starts after the network shutdown budget.
 
 For example, four admitted requests with a hard cap of five and saturation
 ratio 0.80 trigger pressure refusal while one hard-limit permit remains free.
@@ -89,3 +105,15 @@ with in-flight work are described in
 [Observability](../operating/observability.md). Independent body-buffer and
 filter-hook attribution is reviewed separately in
 [PR #1515](https://github.com/praxis-proxy/praxis/pull/1515).
+
+Set `runtime.overload_purge: false` to disable only explicit allocator purging;
+admission, readiness, keep-alive, and deadline actions remain enabled. This
+startup-only switch defaults to true and does not alter jemalloc's own decay
+policy. Operators may configure allocator decay separately through jemalloc's
+allocator-specific startup settings; the switch itself never calls an
+allocator control. Disabling it requires a restart, not a filter reload.
+
+The purge FFI contract is audited against the exact `tikv-jemalloc-sys` version
+in Cargo.lock. Every allocator upgrade requires a manual audit of the command,
+initialization and locking assumptions in `allocator.rs`; a version regression
+test flags upgrades but cannot prove the new implementation safe.

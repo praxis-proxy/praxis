@@ -86,7 +86,7 @@ watch exists) is applied on the watcher's first pass.
   config-level TLS changes)
 - Startup-only `runtime` settings (`threads`, `work_stealing`,
   `global_queue_interval`, `max_connections`, `max_memory_bytes`,
-  `max_open_files`, `overload_gauges`, `overload_actions`,
+  `max_open_files`, `overload_gauges`, `overload_actions`, `overload_purge`,
   `overload_thresholds`, `shed_on_fd_pressure`,
   `subrequest_pool_size`, `subrequest_max_connections`,
   `subrequest_circuit_breaker`, `upstream_ca_file`,
@@ -512,6 +512,10 @@ runtime:
   not `admin.address`. Heap pressure needs `max_memory_bytes`, and connection
   pressure needs `max_connections`. How cgroup pressure is computed is in
   [Observability](observability.md#praxis_overload_pressure-gauge).
+- `overload_purge`: defaults to `true`. With overload actions enabled, set
+  `false` to disable only explicit jemalloc purge calls. Other overload actions
+  and allocator-managed background decay continue independently. Requires a
+  restart; filter reload does not change this setting.
 - `overload_actions`: **experimental.** Requires a binary built with
   `--features overload-actions` and `overload_gauges: true`.
   Purges unused jemalloc pages under memory pressure, disables HTTP/1

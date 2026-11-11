@@ -48,7 +48,6 @@ praxis-filter = { workspace = true }
 # that depends on the harness, so the full test surface is always built.
 praxis-protocol = { workspace = true, features = ["admin-api", "config-reload"] }
 praxis-tls = { workspace = true }
-cargo_metadata = { workspace = true }
 h2 = { workspace = true }
 http = { workspace = true }
 # Well-formed EC key shares for the raw TLS probes (tls_probe.rs).
