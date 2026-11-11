@@ -5542,6 +5542,7 @@ fn build_hook_read_write_filter(config_path: String) -> PolicyFilter {
     };
     PolicyFilter::new(
         PolicyFilterConfig {
+            environment: None,
             config_path,
             allow_private_idp: false,
             trusted_private_endpoints: vec![],

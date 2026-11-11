@@ -2254,10 +2254,6 @@ impl PolicyFilter {
     }
 
     /// Dispatch against the independent metadata-only policy engine.
-    #[expect(
-        clippy::large_stack_frames,
-        reason = "PPE response dispatch carries its typed hook inputs into the bounded future"
-    )]
     fn dispatch_metadata_response_cmf(
         &self,
         ctx: &mut HttpFilterContext<'_>,
@@ -2274,9 +2270,9 @@ impl PolicyFilter {
         }
         let response_manager = Arc::clone(manager);
         let invoke = async move {
-            let (result, _background) = response_manager
-                .invoke_named::<CmfHook>(HOOK_CMF_LLM_OUTPUT, payload, extensions, table)
-                .await;
+            let (result, _background) =
+                Box::pin(response_manager.invoke_named::<CmfHook>(HOOK_CMF_LLM_OUTPUT, payload, extensions, table))
+                    .await;
             result
         };
         let mut result = block_on_bounded(invoke, self.response_dispatch_timeout).map_err(|error| -> FilterError {
