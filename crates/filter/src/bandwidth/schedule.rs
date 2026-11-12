@@ -247,6 +247,7 @@ impl BandwidthGrant {
     /// Commit bytes accepted by the writer; dropping the rest refunds it.
     pub(crate) fn commit(mut self) {
         if self.cost_ns == 0 {
+            self.unclaim();
             return;
         }
         self.reserve();
@@ -316,6 +317,7 @@ impl BandwidthGrant {
     /// Release only debt belonging to this reservation's still-current generation.
     fn refund(&mut self) {
         if !self.reserved {
+            self.unclaim();
             return;
         }
         let mut inner = self.schedule.lock();

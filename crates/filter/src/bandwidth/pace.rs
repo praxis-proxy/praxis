@@ -578,6 +578,31 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn zero_byte_prefix_releases_its_claim_on_commit_or_drop() {
+        for commit in [false, true] {
+            let schedule = Schedule::new(100, 100);
+            let mut plan = PaceReservation {
+                grants: vec![schedule.prepare(1)],
+                output_bytes: None,
+            };
+            let (bytes, permit) = plan.acquire_prefix(0, None).await.unwrap();
+            assert_eq!(bytes, 0);
+            if commit {
+                permit.commit();
+            } else {
+                drop(permit);
+            }
+            assert_eq!(plan.remaining(), 1, "zero-byte admission preserves the plan");
+            let (bytes, permit) = plan
+                .acquire_prefix(1, Some(Instant::now() + Duration::from_millis(100)))
+                .await
+                .expect("a settled zero-byte prefix must not lock later writers");
+            assert_eq!(bytes, 1);
+            permit.commit_bytes(bytes);
+        }
+    }
+
+    #[tokio::test]
     #[expect(
         clippy::too_many_lines,
         reason = "one release trace checks first-byte latency and every intermediate interval"
