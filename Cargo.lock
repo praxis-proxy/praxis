@@ -3384,6 +3384,7 @@ dependencies = [
  "praxis-proxy-protocol",
  "praxis-proxy-tls",
  "serde",
+ "serde_json",
  "tempfile",
  "tikv-jemallocator",
  "tokio",

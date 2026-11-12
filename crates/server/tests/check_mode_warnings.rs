@@ -84,7 +84,7 @@ fn validate_reports_deprecated_filter_for_each_listener() {
 
     let listeners: Vec<String> = stderr
         .lines()
-        .filter_map(|line| serde_yaml::from_str::<serde_yaml::Value>(line).ok())
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("each stderr log line should be valid JSON"))
         .filter_map(|event| {
             let fields = event.get("fields")?;
             if fields.get("item")?.as_str()? != "basic_auth" {
