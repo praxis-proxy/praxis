@@ -174,6 +174,23 @@ async fn the_scheme_comes_from_downstream_tls() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn requiring_a_missing_timestamp_fails_closed() {
+    for predicate in [
+        "exists(request.timestamp)",
+        "request.timestamp > '2026-01-01T00:00:00.000Z'",
+    ] {
+        let rules =
+            format!("    pre_invocation:\n      - \"require(authenticated)\"\n      - \"require({predicate})\"");
+        let (_dir, filter) = api_key_filter(HEADER_CREDENTIAL, &rules);
+        let req = request("/widgets", &[("x-api-key", TEST_API_KEY)]);
+        let rejection = header_phase(&filter, &req, false)
+            .await
+            .expect("missing timestamp must not satisfy require");
+        assert_eq!(rejection.status, 403, "{predicate}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_trusted_proxy_chain_sets_the_client_address() {
     let rules = "    pre_invocation:\n      - \"require(authenticated)\"\n      - \"http.client_address != '203.0.113.7': deny('other client', 'test.other_client')\"";
     let (_dir, filter) = api_key_filter_trusting(HEADER_CREDENTIAL, rules, &["10.0.0.0/8"]);

@@ -115,6 +115,8 @@ mod policy_llm_request;
 mod policy_query_credential;
 #[cfg(feature = "policy-builtins")]
 mod policy_rate_limit;
+#[cfg(feature = "policy-builtins")]
+mod policy_request_context;
 mod priority_lb;
 mod process_logging;
 mod protocol_examples;

@@ -199,6 +199,7 @@ mod filter;
 mod host_plugins;
 mod json_rpc;
 mod llm;
+mod request_context;
 mod request_facts;
 mod request_headers;
 mod request_state;

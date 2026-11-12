@@ -47,6 +47,11 @@ pub(crate) struct PolicyFilterConfig {
     /// Filesystem path to the policy document.
     pub config_path: String,
 
+    /// Operator-supplied deployment label exposed as `request.environment`.
+    /// Available even when no `trace_context` filter matches the request.
+    #[serde(default)]
+    pub environment: Option<String>,
+
     /// Maximum time, in seconds, to wait for `PolicyEngine::initialize`
     /// at filter construction. Identity plugins fetch JWKS over HTTPS
     /// during init; a reachable-but-unresponsive identity provider

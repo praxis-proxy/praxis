@@ -19,6 +19,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Policy rules and hooks receive request and trace IDs and a stable request
+  timestamp when trace context is available. The optional policy `environment`
+  field supplies `request.environment`, including without tracing; blank labels
+  are rejected at startup. Unrepresentable clock values leave the timestamp unset.
 - `cargo xtask rollout` and `make test-rollout` exercise Kubernetes pod
   loss, rollouts, config reloads, TLS rotation, node drain, and upstream
   failure under continuous HTTP/1.1, HTTP/2, and HTTPS traffic.
