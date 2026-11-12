@@ -1,69 +1,52 @@
-# Quickstart
+# Quickstart: run a local reverse proxy
 
-## Quick Test Servers
+This source-build walkthrough starts a local backend, then forwards an HTTP
+request through Praxis to it. You need Git, Make, curl, and the build
+prerequisites in [contributor setup](developing/getting-started.md#requirements).
+Use a non-root account and leave ports 3000 and 8080 free.
 
-For rapid experimentation without building or configuring, use the xtask utilities:
-
-**Echo server** (static responses):
-
-```console
-cargo xtask echo
-curl http://127.0.0.1:8080/
-# {"status": "ok"}
-```
-
-Customize responses:
+Clone the repository and run all commands from its root. Open a second
+terminal in the same checkout when instructed:
 
 ```console
-cargo xtask echo --status 201 --body '{"created": true}' --header "X-Custom: value"
-```
-
-**Debug server** (run with dev settings):
-
-```console
-cargo xtask debug
-# Runs with debug logging, admin API on :9090, single-threaded
-```
-
-Pass a config file:
-
-```console
-cargo xtask debug examples/configs/traffic-management/basic-reverse-proxy.yaml
-```
-
-## Build and Run
-
-Build the release binary:
-
-```console
+git clone https://github.com/praxis-proxy/praxis.git
+cd praxis
 make release
 ```
 
-Start Praxis:
+Already working in a checkout? Run `make release` there instead of cloning.
+These instructions use the binary built from your checkout; they do not pin
+a released version.
+
+## Start the backend
+
+In the second terminal, start a backend with a recognizable response:
 
 ```console
-./target/release/praxis
+cargo xtask echo --address 127.0.0.1:3000 --body '{"source":"local-backend"}'
 ```
 
-The server starts on `127.0.0.1:8080` with a built-in
-default configuration. Verify it:
+Leave it running. Check its startup log: if the address is occupied, the echo
+utility selects another port. Free port 3000 and restart it before continuing.
+
+In the first terminal, verify the backend directly:
 
 ```console
-curl http://127.0.0.1:8080/
+curl --fail-with-body http://127.0.0.1:3000/
 ```
+
+Expected body:
 
 ```json
-{"status": "ok", "server": "praxis"}
+{"source":"local-backend"}
 ```
 
-## Proxy to a backend
+## Configure and start Praxis
 
-Create `praxis.yaml`:
+Create `praxis.yaml` in the repository root:
 
 ```yaml
-# The backend below is on loopback, which the SSRF endpoint check
-# rejects unless you opt in. Drop this block once your backends are
-# on real addresses.
+# Local development only: permit the literal loopback backend.
 insecure_options:
   allow_private_endpoints: true
 
@@ -86,29 +69,107 @@ filter_chains:
               - "127.0.0.1:3000"
 ```
 
-> **Note:** Praxis rejects upstream endpoints that resolve to
-> loopback, link-local, or cloud-metadata addresses by default, as an
-> SSRF guard. `insecure_options.allow_private_endpoints: true` opts a
-> config into using them — appropriate for local development, not for
-> production configs pointing at real backends.
+The literal loopback backend requires `allow_private_endpoints` for this local
+fixture. Remove that development exception before deploying and review
+[security hardening](operating/security-hardening.md), including runtime DNS
+checks and scoped trust for private upstream hostnames. The literal IP in
+this example does not need `allow_private_upstreams`. See the
+[configuration reference](operating/configuration.md) for other settings.
 
-Start Praxis with your config:
+In the first terminal, start Praxis and leave it running:
 
 ```console
 ./target/release/praxis -c praxis.yaml
 ```
 
-Requests to port 8080 are now forwarded to your backend
-on port 3000:
+In a third terminal, request the proxy:
 
 ```console
-curl http://127.0.0.1:8080/
+curl --fail-with-body http://127.0.0.1:8080/
 ```
+
+Expected body:
+
+```json
+{"source":"local-backend"}
+```
+
+| Request port | Process | What success shows |
+| --- | --- | --- |
+| `3000` | Echo backend | The backend is listening. |
+| `8080` | Configured Praxis | The proxy reaches the backend. |
+
+## Stop and clean up
+
+Press Ctrl+C in the Praxis and echo terminals. Remove the local sample
+`praxis.yaml` when you no longer need it. Keep its development exception out
+of production configurations.
+
+## If the request fails
+
+- **Connection refused on port 8080:** check Praxis startup logs and confirm
+  another process has not taken the listener address.
+- **Upstream connection failure:** curl port 3000 directly and check the echo
+  server's logged address. Both processes must stay running.
+- **Wrong response or route:** confirm you started Praxis with `-c praxis.yaml`
+  and that the router's `cluster: backend` matches the load balancer's cluster
+  name. See [configuration](operating/configuration.md).
+- **Private endpoint rejection:** the literal loopback fixture needs the
+  shown exception. For DNS names and real deployments, follow
+  [security hardening](operating/security-hardening.md) instead of adding
+  broad bypass flags.
+
+See [diagnostics](operating/diagnostics.md) for config checks and logs.
+
+## Optional: built-in responder
+
+After stopping the proxy on port 8080, remove the sample `praxis.yaml`
+created above and clear any `PRAXIS_CONFIG` environment variable. Praxis
+automatically loads either when present. Then start it without a config:
+
+```console
+unset PRAXIS_CONFIG
+./target/release/praxis
+```
+
+From another terminal:
+
+```console
+curl --fail-with-body http://127.0.0.1:8080/
+```
+
+```json
+{"status": "ok", "server": "praxis"}
+```
+
+This is the built-in default responder on port 8080. It does not forward to
+the echo backend. Stop it with Ctrl+C before reusing that port.
+
+## Quick Test Servers
+
+For local experiments, the echo utility serves static responses without a
+YAML config (it still builds and runs Rust code):
+
+```console
+cargo xtask echo --status 201 --body '{"created": true}' --header "X-Custom: value"
+```
+
+The debug utility runs Praxis with debug logs, an admin API on port 9090,
+and one worker thread:
+
+```console
+cargo xtask debug
+cargo xtask debug examples/configs/traffic-management/basic-reverse-proxy.yaml
+```
+
+Run one server at a time when they use the same listener port.
 
 ## Next steps
 
 - [Configuration](operating/configuration.md): filter
   chains, routing, load balancing, TLS, and all options.
+- [TLS](operating/tls.md): certificates and upstream verification.
+- [Contributor setup](developing/getting-started.md): build, test, and lint.
 - [Example configs](../examples/configs/): working YAML
   for every feature.
 - [Filters](filters/README.md): built-in filters and
