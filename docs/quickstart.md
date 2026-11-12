@@ -43,7 +43,13 @@ Expected body:
 
 ## Configure and start Praxis
 
-Create `praxis.yaml` in the repository root:
+Before creating the sample, check whether `praxis.yaml` already exists in
+the repository root. If it does, move it to a backup path that is not already
+in use and keep that backup until you finish the walkthrough, including the
+optional default-responder check. Do not overwrite an existing config or
+backup.
+
+Create the walkthrough's sample `praxis.yaml` in the repository root:
 
 ```yaml
 # Local development only: permit the literal loopback backend.
@@ -101,9 +107,11 @@ Expected body:
 
 ## Stop and clean up
 
-Press Ctrl+C in the Praxis and echo terminals. Remove the local sample
-`praxis.yaml` when you no longer need it. Keep its development exception out
-of production configurations.
+Press Ctrl+C in the Praxis and echo terminals. Remove only the sample
+`praxis.yaml` created for this walkthrough. If you preserved an existing
+config, restore it to its original path now, unless you are continuing to
+the optional default-responder check below; restore it after that check
+instead. Keep the sample's development exception out of production configs.
 
 ## If the request fails
 
@@ -123,9 +131,11 @@ See [diagnostics](operating/diagnostics.md) for config checks and logs.
 
 ## Optional: built-in responder
 
-After stopping the proxy on port 8080, remove the sample `praxis.yaml`
-created above and clear any `PRAXIS_CONFIG` environment variable. Praxis
-automatically loads either when present. Then start it without a config:
+After stopping the proxy on port 8080, remove only the sample `praxis.yaml`
+created above and leave any preserved config in its backup location. If you
+already restored it, move it aside again without overwriting your backup.
+Clear any `PRAXIS_CONFIG` environment variable. Praxis automatically loads
+either when present. Then start it without a config:
 
 ```console
 unset PRAXIS_CONFIG
@@ -143,7 +153,8 @@ curl --fail-with-body http://127.0.0.1:8080/
 ```
 
 This is the built-in default responder on port 8080. It does not forward to
-the echo backend. Stop it with Ctrl+C before reusing that port.
+the echo backend. Stop it with Ctrl+C before reusing that port, then restore
+any preserved config to its original path.
 
 ## Quick Test Servers
 
