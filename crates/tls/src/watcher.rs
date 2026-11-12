@@ -932,6 +932,94 @@ mod tests {
         );
     }
 
+    #[tokio::test(start_paused = true)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "builds the listener fixture and drives a real handshake after the retry"
+    )]
+    async fn a_repaired_crl_is_installed_by_the_retry_and_rejects_a_fresh_handshake() {
+        let certs = gen_test_certs();
+        let trust_dir = tempfile::tempdir().expect("temporary directory");
+        let trust = gen_ca_and_crl(trust_dir.path(), "Repair Client CA");
+        let ca_path = trust.ca_path.to_str().expect("CA path").to_owned();
+        let crl_path = trust.crl_path.to_str().expect("CRL path").to_owned();
+        let pair = CertKeyPair {
+            cert_path: certs.cert_path.to_str().expect("cert path").to_owned(),
+            default: false,
+            key_path: certs.key_path.to_str().expect("key path").to_owned(),
+            server_names: Vec::new(),
+        };
+        let tls = crate::ListenerTls {
+            certificates: vec![pair.clone()],
+            cipher_suites: None,
+            client_ca: Some(crate::CaConfig {
+                ca_path: ca_path.clone(),
+                crl_paths: vec![crl_path.clone()],
+            }),
+            client_cert_mode: ClientCertMode::Require,
+            trusted_spiffe_ids: Vec::new(),
+            hot_reload: None,
+            min_version: None,
+        };
+        let server = crate::setup::build_reloadable_server_config(&tls, false).expect("reloadable server");
+        let swap = server.verifier_handle.clone().expect("verifier handle");
+        let reload = ClientVerifierReload {
+            ca_path,
+            crl_paths: vec![crl_path.clone()],
+            mode: ClientCertMode::Require,
+            trusted_spiffe_ids: Vec::new(),
+            swap_handle: Arc::clone(&swap),
+        };
+
+        // The certificate and key paths stay valid while the watched CRL goes
+        // malformed, so the failed reload is the verifier's alone and the
+        // retry, not the next poll, owns the recovery.
+        std::fs::write(&crl_path, b"not a CRL").expect("write malformed CRL");
+        let mut file_hashes = server.startup_hashes.clone();
+        let mut backoff_ms = DEBOUNCE_MS;
+        let before = swap.load_full();
+
+        let polled = reload_tracked(
+            &server.cert_handle,
+            &pair,
+            Some(&reload),
+            &mut backoff_ms,
+            &mut file_hashes,
+        )
+        .await;
+        assert!(!polled, "a malformed CRL must fail the reload");
+        assert!(
+            Arc::ptr_eq(&before, &swap.load_full()),
+            "a failed verifier reload must leave the serving verifier in place"
+        );
+        assert!(
+            backoff_ms > DEBOUNCE_MS,
+            "the failed reload must schedule a retry on the failure backoff"
+        );
+
+        // Repair before the retry fires; the next poll is a full interval away.
+        std::fs::write(&crl_path, &trust.revoked_crl).expect("repair the CRL");
+
+        let retried = reload_tracked(
+            &server.cert_handle,
+            &pair,
+            Some(&reload),
+            &mut backoff_ms,
+            &mut file_hashes,
+        )
+        .await;
+        assert!(retried, "the retry must install the repaired CRL");
+
+        let client = revoked_client_config(&certs, &trust);
+        assert!(
+            matches!(
+                complete_handshake(&server.config, &client),
+                Err(rustls::Error::InvalidCertificate(rustls::CertificateError::Revoked))
+            ),
+            "a fresh handshake after the retry must reject the revoked client"
+        );
+    }
+
     #[test]
     fn watcher_reloads_on_file_change() {
         let certs = gen_test_certs();
@@ -1402,6 +1490,8 @@ mod tests {
         crl_path: PathBuf,
         /// Client leaf with serial one, signed by this CA.
         leaf: rustls::pki_types::CertificateDer<'static>,
+        /// PKCS#8 DER private key matching `leaf`, so a test can authenticate.
+        leaf_key: Vec<u8>,
         /// Replacement CRL revoking the fixture leaf.
         revoked_crl: String,
     }
@@ -1436,6 +1526,7 @@ mod tests {
             ca_path,
             crl_path,
             leaf: leaf.der().clone(),
+            leaf_key: leaf_key.serialize_der(),
             revoked_crl: client_crl(&issuer, true),
         }
     }
@@ -1464,5 +1555,55 @@ mod tests {
         .expect("CRL signing")
         .pem()
         .expect("CRL PEM encoding")
+    }
+
+    /// Builds a client that authenticates as the trust fixture leaf and
+    /// trusts the generated server CA.
+    fn revoked_client_config(
+        certs: &crate::test_utils::TestCerts,
+        trust: &ClientTrustFixture,
+    ) -> Arc<rustls::ClientConfig> {
+        use rustls::pki_types::pem::PemObject as _;
+        let mut roots = rustls::RootCertStore::empty();
+        let ca_pem = std::fs::read(&certs.ca_cert_path).expect("server CA PEM");
+        for cert in rustls::pki_types::CertificateDer::pem_slice_iter(&ca_pem) {
+            roots.add(cert.expect("server CA certificate")).expect("server root");
+        }
+        let key = rustls::pki_types::PrivatePkcs8KeyDer::from(trust.leaf_key.clone());
+        Arc::new(
+            rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_client_auth_cert(vec![trust.leaf.clone()], key.into())
+                .expect("client identity"),
+        )
+    }
+
+    /// Drives an in-memory TLS handshake, returning the server's rejection.
+    fn complete_handshake(
+        config: &Arc<rustls::ServerConfig>,
+        client_config: &Arc<rustls::ClientConfig>,
+    ) -> Result<(), rustls::Error> {
+        let mut server = rustls::ServerConnection::new(Arc::clone(config))?;
+        let mut client = rustls::ClientConnection::new(
+            Arc::clone(client_config),
+            rustls::pki_types::ServerName::try_from("localhost").expect("server name"),
+        )?;
+        let mut completed = false;
+        for _ in 0..16 {
+            let mut flight = Vec::new();
+            client.write_tls(&mut flight).expect("client flight");
+            server.read_tls(&mut flight.as_slice()).expect("server read");
+            server.process_new_packets()?;
+            let mut response = Vec::new();
+            server.write_tls(&mut response).expect("server flight");
+            client.read_tls(&mut response.as_slice()).expect("client read");
+            client.process_new_packets()?;
+            if !server.is_handshaking() && !client.is_handshaking() {
+                completed = true;
+                break;
+            }
+        }
+        assert!(completed, "handshake did not complete in 16 flights");
+        Ok(())
     }
 }
