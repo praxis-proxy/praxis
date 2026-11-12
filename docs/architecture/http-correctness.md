@@ -71,10 +71,12 @@ correctness concerns at the framework level:
   responses before reaching clients.
 - **Retry safety**: GET, HEAD, OPTIONS, and QUERY are eligible for automatic
   retries under the configured policy. Other methods require
-  `allow_non_idempotent`. Pingora's separate `ReusedOnly` path requires a
-  reused connection and an intact replay buffer, regardless of method.
-  A fresh-connection EOF on that path is not retried. A truncated replay
-  buffer is never retried.
+  `allow_non_idempotent`. Pingora can also retry transport errors it has
+  already approved, such as an upstream HTTP/2 `REFUSED_STREAM`, even with
+  policy retries disabled, if the replay guards pass and another attempt is
+  available. Its separate `ReusedOnly` path requires a reused connection and
+  an intact replay buffer, regardless of method. A fresh-connection EOF on
+  that path is not retried. A truncated replay buffer is never retried.
 
 [RFC 9110 Section 7.6.1]:https://datatracker.ietf.org/doc/html/rfc9110#section-7.6.1
 
@@ -100,7 +102,7 @@ defaults: QUERY requires a trusted origin unless explicitly included in
 `safe_methods`. See the functional
 [HTTP QUERY example](../../examples/configs/traffic-management/http-query.yaml).
 
-[RFC 10008]: https://www.rfc-editor.org/rfc/rfc10008.html
+[RFC 10008]: https://datatracker.ietf.org/doc/html/rfc10008
 
 ## Related
 

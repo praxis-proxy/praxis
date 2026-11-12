@@ -3,7 +3,7 @@
 
 //! [RFC 10008] QUERY resource discovery and redirect forwarding.
 //!
-//! [RFC 10008]: https://www.rfc-editor.org/rfc/rfc10008.html
+//! [RFC 10008]: https://datatracker.ietf.org/doc/html/rfc10008
 
 use praxis_core::config::Config;
 use praxis_test_utils::{Backend, free_port, http_send, parse_header, parse_status, simple_proxy_yaml, start_proxy};
@@ -15,7 +15,7 @@ use praxis_test_utils::{Backend, free_port, http_send, parse_header, parse_statu
 /// [RFC 10008 Section 3]: a resource advertises its query formats with
 /// `Accept-Query`. A proxy must preserve that discovery response.
 ///
-/// [RFC 10008 Section 3]: https://www.rfc-editor.org/rfc/rfc10008.html#section-3
+/// [RFC 10008 Section 3]: https://datatracker.ietf.org/doc/html/rfc10008#section-3
 #[test]
 fn query_resource_discovery_preserves_allow_and_accept_query() {
     let backend = Backend::fixed("")
@@ -45,7 +45,7 @@ fn query_resource_discovery_preserves_allow_and_accept_query() {
 /// [RFC 10008 Section 2.5]: the origin's QUERY redirect reaches the client
 /// with its status and Location intact, for the client to handle.
 ///
-/// [RFC 10008 Section 2.5]: https://www.rfc-editor.org/rfc/rfc10008.html#section-2.5
+/// [RFC 10008 Section 2.5]: https://datatracker.ietf.org/doc/html/rfc10008#section-2.5
 #[test]
 fn query_redirects_preserve_status_and_location() {
     for status in [301, 302, 303, 307, 308] {
