@@ -16,24 +16,10 @@ use tracing::warn;
 #[derive(Clone, Copy)]
 enum ConfigPathSegment {
     /// A mapping key that must be present.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "no active field deprecation uses a mapping path yet; tests cover this target"
-        )
-    )]
     // means look for the specific key in this mapping
     Key(&'static str),
 
     /// Match every item in a YAML sequence.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "no active field deprecation uses a sequence path yet; tests cover this target"
-        )
-    )]
     // means that it can match each item of the sequence, for example
     // listeners → AnySequenceItem → old_setting can match listeners[0].old_setting,
     // listeners[1].old_setting and so on
@@ -57,13 +43,6 @@ enum DeprecatedConfigTarget {
     ConfigField(&'static [ConfigPathSegment]),
 
     /// A field belonging to one filter type.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "no active filter-field deprecation is declared yet; tests cover field matching"
-        )
-    )]
     FilterField {
         /// Filter type that owns the field.
         filter: &'static str,
@@ -96,12 +75,27 @@ struct DeprecatedConfigOccurrence {
 }
 
 /// Central declarations for config deprecations.
-const DEPRECATION_RULES: &[DeprecationRule] = &[DeprecationRule {
-    item: "basic_auth",
-    target: DeprecatedConfigTarget::Filter("basic_auth"),
-    replacement: Some("policy"),
-    message: "the basic_auth filter is deprecated; prefer the policy engine for authentication",
-}];
+const DEPRECATION_RULES: &[DeprecationRule] = &[
+    DeprecationRule {
+        item: "basic_auth",
+        target: DeprecatedConfigTarget::Filter("basic_auth"),
+        replacement: Some("policy"),
+        message: "the basic_auth filter is deprecated; prefer the policy engine for authentication",
+    },
+    DeprecationRule {
+        item: "credential_injection.clusters[].strip_client_credential",
+        target: DeprecatedConfigTarget::FilterField {
+            filter: "credential_injection",
+            path: &[
+                ConfigPathSegment::Key("clusters"),
+                ConfigPathSegment::AnySequenceItem,
+                ConfigPathSegment::Key("strip_client_credential"),
+            ],
+        },
+        replacement: None,
+        message: "remove strip_client_credential; injection always replaces any client-provided value for the configured header",
+    },
+];
 
 /// Check valid YAML for deprecated config usages and warn for each match.
 pub(super) fn check_for_deprecated_config(yaml: &str) {
@@ -588,6 +582,54 @@ filter_chains:
 
         assert_eq!(usages.len(), 1);
         assert_eq!(usages[0].rule.item, "old_option");
+    }
+
+    /// Explicit and omitted credential fields, plus a same-named field owned by another filter.
+    const CREDENTIAL_FIELDS_YAML: &str = r#"
+listeners:
+  - name: web
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: credential_injection
+        clusters:
+          - name: explicit-true
+            strip_client_credential: true
+          - name: omitted
+          - name: explicit-false
+            strip_client_credential: false
+      - filter: another_filter
+        clusters:
+          - name: unrelated
+            strip_client_credential: true
+"#;
+
+    #[test]
+    fn credential_stripping_rule_reports_only_explicit_fields_in_its_filter() {
+        let config = serde_yaml::from_str(CREDENTIAL_FIELDS_YAML).unwrap();
+        let usages = find_usages(&config, DEPRECATION_RULES);
+
+        assert_eq!(usages.len(), 2, "only explicit fields under credential_injection match");
+        assert_eq!(
+            usages[0].path,
+            "filter_chains[main].filters[0].clusters[0].strip_client_credential"
+        );
+        assert_eq!(
+            usages[1].path,
+            "filter_chains[main].filters[0].clusters[2].strip_client_credential"
+        );
+        for usage in usages {
+            assert_eq!(
+                usage.rule.item,
+                "credential_injection.clusters[].strip_client_credential"
+            );
+            assert_eq!(usage.listener.as_deref(), Some("web"));
+            assert!(
+                usage.rule.replacement.is_none(),
+                "remove the obsolete key without a replacement"
+            );
+        }
     }
 
     #[test]

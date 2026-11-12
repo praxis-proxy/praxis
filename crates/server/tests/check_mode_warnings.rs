@@ -132,6 +132,65 @@ fn validate_prints_each_insecure_flag_warning_once() {
     }
 }
 
+/// Valid credential injection settings with two explicit deprecated fields and one omitted default.
+const DEPRECATED_CREDENTIAL_FIELD_CONFIG: &str = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: credential_injection
+        clusters:
+          - name: explicit-true
+            header: Authorization
+            value: example-secret
+            strip_client_credential: true
+          - name: omitted
+            header: Authorization
+            value: example-secret
+          - name: explicit-false
+            header: Authorization
+            value: example-secret
+            strip_client_credential: false
+      - filter: static_response
+        status: 200
+"#;
+
+#[test]
+fn validate_warns_for_explicit_deprecated_credential_fields() {
+    let (ok, _, stderr) = run_check_mode("--validate", DEPRECATED_CREDENTIAL_FIELD_CONFIG, Some("json"));
+    assert!(ok, "deprecated credential settings remain accepted: {stderr}");
+    let paths: Vec<String> = stderr
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("each stderr log line should be valid JSON"))
+        .filter_map(|event| {
+            let fields = event.get("fields")?;
+            if fields.get("item")?.as_str()? != "credential_injection.clusters[].strip_client_credential" {
+                return None;
+            }
+            fields.get("path")?.as_str().map(str::to_owned)
+        })
+        .collect();
+    assert_eq!(
+        paths,
+        [
+            "filter_chains[main].filters[0].clusters[0].strip_client_credential",
+            "filter_chains[main].filters[0].clusters[2].strip_client_credential",
+        ],
+        "omitting the deprecated field must not warn: {stderr}"
+    );
+    assert!(
+        stderr.contains("remove strip_client_credential"),
+        "warning should explain the remedy: {stderr}"
+    );
+    assert!(
+        !stderr.contains("example-secret"),
+        "warnings must not include credential values"
+    );
+}
+
 #[test]
 fn validate_honours_json_log_format() {
     let (ok, _, stderr) = run_check_mode("--validate", INSECURE_CONFIG, Some("json"));
