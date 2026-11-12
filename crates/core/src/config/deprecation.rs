@@ -363,7 +363,7 @@ fn warn_usage(usage: &DeprecatedConfigOccurrence) {
         path = %usage.path,
         listener = usage.listener.as_deref().unwrap_or("not_applicable"),
         replacement = usage.rule.replacement.unwrap_or("none"),
-        "deprecated configuration is in use: {}",
+        "candidate configuration contains deprecated settings: {}",
         usage.rule.message,
     );
 }

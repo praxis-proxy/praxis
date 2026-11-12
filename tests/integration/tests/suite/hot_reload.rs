@@ -131,7 +131,7 @@ fn reload_with_deprecated_filter_warns_and_applies() {
     wait_for_process_log(&proxy, "config file watcher started");
 
     proxy.write_config(&deprecated_basic_auth_yaml(proxy_port));
-    let logs = wait_for_process_log(&proxy, "deprecated configuration is in use");
+    let logs = wait_for_process_log(&proxy, "candidate configuration contains deprecated settings");
     assert!(
         logs.contains("basic_auth"),
         "warning should name the deprecated filter: {logs}"

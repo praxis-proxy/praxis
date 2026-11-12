@@ -107,12 +107,14 @@ fn dump_surfaces_deprecation_warning_without_mixing_stdout() {
     let (ok, stdout, stderr) = run_check_mode("--dump", DEPRECATED_FILTER_CONFIG, Some("json"));
     assert!(ok, "deprecated config should still dump: {stderr}");
     assert_eq!(
-        stderr.matches("deprecated configuration is in use").count(),
+        stderr
+            .matches("candidate configuration contains deprecated settings")
+            .count(),
         2,
         "each listener should be warned about: {stderr}"
     );
     assert!(
-        !stdout.contains("deprecated configuration is in use"),
+        !stdout.contains("candidate configuration contains deprecated settings"),
         "warnings must not leak into YAML output: {stdout}"
     );
     serde_yaml::from_str::<serde_yaml::Value>(&stdout).expect("dump stdout should remain valid YAML");
