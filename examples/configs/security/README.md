@@ -19,7 +19,7 @@ Security filters protect against threats, enforce access control, and validate r
 
 **Policy**: Integrates with external policy engines (PPE) for complex authorization decisions based on identity, resource attributes, and environmental context.
 
-**Forward proxy**: A listener's `forward_proxy` block accepts CONNECT tunnels, gated by a destination allowlist, by `ip_acl`/`policy` filters on the client, or both. An enabled block with neither is rejected at load, so the listener is never an open relay.
+**Forward proxy**: A listener's `forward_proxy` block accepts CONNECT tunnels, gated by a destination allowlist, by `ip_acl`/`policy` filters on the client, or both. An enabled block with neither is rejected at load, so the listener is never an open relay. A destination rule can also list one IP address and port, such as a service on the proxy's own host; see [forward-proxy-local-service.yaml](forward-proxy-local-service.yaml).
 
 ## Best Practices
 

@@ -673,10 +673,9 @@ filter_chains:
                 continue;
             }
             #[cfg(not(feature = "forward-proxy"))]
-            if entry
-                .file_name()
-                .is_some_and(|n| n == "forward-proxy.yaml" || n == "forward-proxy-ip-acl.yaml")
-            {
+            if entry.file_name().is_some_and(|n| {
+                n == "forward-proxy.yaml" || n == "forward-proxy-ip-acl.yaml" || n == "forward-proxy-local-service.yaml"
+            }) {
                 continue;
             }
             Config::from_file(&entry).unwrap_or_else(|err| panic!("{}: {err}", entry.display()));

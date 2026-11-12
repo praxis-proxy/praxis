@@ -53,10 +53,11 @@ fn every_example_resolves_its_pipelines() {
             continue;
         }
         #[cfg(not(feature = "forward-proxy"))]
-        if path
-            .file_name()
-            .is_some_and(|name| name == "forward-proxy.yaml" || name == "forward-proxy-ip-acl.yaml")
-        {
+        if path.file_name().is_some_and(|name| {
+            name == "forward-proxy.yaml"
+                || name == "forward-proxy-ip-acl.yaml"
+                || name == "forward-proxy-local-service.yaml"
+        }) {
             continue;
         }
         match resolve(&path) {

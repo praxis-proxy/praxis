@@ -19,6 +19,7 @@
 mod tunnel;
 
 use std::{
+    collections::BTreeSet,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -84,6 +85,9 @@ pub(super) struct ForwardProxyRuntime {
     /// Host-to-ports destination matcher.
     matcher: SniMatcher<Vec<u16>>,
 
+    /// IP-literal destinations the rules list, each with its port.
+    addresses: BTreeSet<std::net::SocketAddr>,
+
     /// How long the tunnel may stay idle before closing.
     idle_timeout: Duration,
 
@@ -111,6 +115,7 @@ impl ForwardProxyRuntime {
         Ok(Self {
             allow_all: config.allow_destinations.is_empty(),
             matcher: config.destination_matcher()?,
+            addresses: config.destination_addresses(),
             idle_timeout: Duration::from_millis(config.idle_timeout_ms),
             max_duration: config.max_duration_secs.map(Duration::from_secs),
             allow_private_upstreams,
@@ -120,22 +125,45 @@ impl ForwardProxyRuntime {
     /// Whether `host`:`port` passes the destination rules.
     fn destination_allowed(&self, host: &str, port: u16) -> bool {
         self.allow_all
+            || self.listed_address(host, port)
             || self
                 .matcher
                 .lookup(host)
                 .is_some_and(|ports| ports.is_empty() || ports.contains(&port))
     }
 
+    /// Whether `host`:`port` is an IP-literal destination the rules list.
+    ///
+    /// `host` is in canonical form (see [`destination`]), as the listed
+    /// addresses are, so the comparison is exact.
+    fn listed_address(&self, host: &str, port: u16) -> bool {
+        host.parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| self.addresses.contains(&std::net::SocketAddr::new(ip, port)))
+    }
+
+    /// Whether `host`:`port` may be dialed at a private or reserved
+    /// address.
+    ///
+    /// `insecure_options.allow_private_upstreams` allows every destination.
+    /// Otherwise only an address the rules list does: the operator chose
+    /// it, as with a cluster endpoint, and config load gated it with
+    /// `insecure_options.allow_private_endpoints`. Every destination a
+    /// client chooses, names included, still meets the guard.
+    fn private_allowed(&self, host: &str, port: u16) -> bool {
+        self.allow_private_upstreams || self.listed_address(host, port)
+    }
+
     /// Whether `host` is an IP literal in a private or reserved range that
-    /// the private-address guard refuses.
+    /// the private-address guard refuses on `port`.
     ///
     /// The HTTP upstream resolver checks only names it resolves and trusts
     /// literals, which in reverse-proxy mode come from validated config.
     /// Forward-proxy destinations come from the client, so a literal is
     /// checked here, with the same ranges (IPv4-mapped and NAT64 forms
-    /// included) the CONNECT dialer applies.
-    fn private_literal_refused(&self, host: &str) -> bool {
-        !self.allow_private_upstreams
+    /// included) the CONNECT dialer applies, and the same exemptions (see
+    /// [`private_allowed`](Self::private_allowed)).
+    fn private_literal_refused(&self, host: &str, port: u16) -> bool {
+        !self.private_allowed(host, port)
             && host
                 .parse::<std::net::IpAddr>()
                 .is_ok_and(|ip| is_private_upstream_ip(&ip))
@@ -647,9 +675,9 @@ async fn dial_destination(
     }
     // The TCP proxy's private/reserved-IP guard, so a CONNECT cannot reach
     // loopback or RFC 1918 space without
-    // `insecure_options.allow_private_upstreams`.
+    // `insecure_options.allow_private_upstreams` or a rule listing the address.
     let upstream = match resolve_destination(address, host, port).await {
-        Some(addrs) => connect_resolved(address, &addrs, forward_proxy.allow_private_upstreams).await,
+        Some(addrs) => connect_resolved(address, &addrs, forward_proxy.private_allowed(host, port)).await,
         None => None,
     };
     let Some(upstream) = upstream else {
@@ -877,7 +905,7 @@ fn refuse_destination(
         warn!(destination = %address, "forward request destination denied by allow_destinations");
         return Some((403, ERROR_TYPE_FILTER_REJECT));
     }
-    if forward_proxy.private_literal_refused(&destination.host) {
+    if forward_proxy.private_literal_refused(&destination.host, destination.port) {
         warn!(
             destination = %address,
             "forward request destination is a private/reserved IP address; \
@@ -1153,16 +1181,16 @@ allow_destinations:
             "64:ff9b::a00:1",
         ] {
             assert!(
-                forward_proxy.private_literal_refused(host),
+                forward_proxy.private_literal_refused(host, 80),
                 "{host} is private or reserved and must be refused"
             );
         }
         assert!(
-            !forward_proxy.private_literal_refused("93.184.215.14"),
+            !forward_proxy.private_literal_refused("93.184.215.14", 80),
             "a public literal is not refused"
         );
         assert!(
-            !forward_proxy.private_literal_refused("localhost"),
+            !forward_proxy.private_literal_refused("localhost", 80),
             "names are checked when they resolve, not here"
         );
     }
@@ -1171,7 +1199,85 @@ allow_destinations:
     fn private_literal_destinations_pass_with_allow_private_upstreams() {
         let config: ForwardProxyConfig = serde_yaml::from_str("enabled: true\n").unwrap();
         let forward_proxy = ForwardProxyRuntime::try_from_config(&config, true).unwrap();
-        assert!(!forward_proxy.private_literal_refused("127.0.0.1"));
+        assert!(!forward_proxy.private_literal_refused("127.0.0.1", 80));
+        assert!(forward_proxy.private_allowed("localhost", 80), "names too");
+    }
+
+    /// Destination rules listing loopback `127.0.0.1:11434` and `[::1]:11434`
+    /// beside a host pattern, without `allow_private_upstreams`.
+    fn runtime_with_listed_loopback() -> ForwardProxyRuntime {
+        runtime(
+            r#"
+enabled: true
+allow_destinations:
+  - host: api.example.com
+    port: 443
+  - host: 127.0.0.1
+    port: 11434
+  - host: "::1"
+    port: 11434
+"#,
+        )
+    }
+
+    #[test]
+    fn runtime_allows_listed_addresses_on_their_port_only() {
+        let forward_proxy = runtime_with_listed_loopback();
+        assert!(forward_proxy.destination_allowed("127.0.0.1", 11434));
+        assert!(forward_proxy.destination_allowed("::1", 11434));
+        assert!(forward_proxy.destination_allowed("api.example.com", 443));
+        assert!(
+            !forward_proxy.destination_allowed("127.0.0.1", 8080),
+            "another port of a listed address is denied"
+        );
+        assert!(
+            !forward_proxy.destination_allowed("10.0.0.1", 11434),
+            "an unlisted address is denied"
+        );
+        assert!(
+            !forward_proxy.destination_allowed("localhost", 11434),
+            "a name for a listed address is not the address"
+        );
+    }
+
+    #[test]
+    fn listed_private_address_passes_the_private_guard() {
+        let forward_proxy = runtime_with_listed_loopback();
+        assert!(
+            !forward_proxy.private_literal_refused("127.0.0.1", 11434),
+            "the operator listed this address"
+        );
+        assert!(!forward_proxy.private_literal_refused("::1", 11434));
+        assert!(
+            forward_proxy.private_allowed("127.0.0.1", 11434),
+            "the CONNECT dial too"
+        );
+        assert!(
+            forward_proxy.private_literal_refused("127.0.0.1", 8080),
+            "other ports of the address keep the guard"
+        );
+        assert!(
+            forward_proxy.private_literal_refused("169.254.169.254", 80),
+            "unlisted private addresses keep the guard"
+        );
+        assert!(
+            !forward_proxy.private_allowed("localhost", 11434),
+            "a name keeps the guard: its answers are not what the operator listed"
+        );
+    }
+
+    #[test]
+    fn listed_address_matches_every_connect_spelling() {
+        // CONNECT targets are canonicalized before the rules see them;
+        // absolute-form targets in another spelling are refused at parse.
+        let forward_proxy = runtime_with_listed_loopback();
+        for target in ["[0:0:0:0:0:0:0:1]:11434", "[::ffff:127.0.0.1]:11434"] {
+            let parsed = parse_destination(target).unwrap();
+            assert!(
+                forward_proxy.destination_allowed(&parsed.host, parsed.port),
+                "{target} names a listed address"
+            );
+        }
     }
 
     #[test]
@@ -1851,7 +1957,7 @@ allow_destinations:
         for target in ["http://[::1]/", "http://[fd00::1]:8080/", "https://[64:ff9b::a00:1]/"] {
             let parsed = forwarded(target);
             assert!(
-                forward_proxy.private_literal_refused(&parsed.destination.host),
+                forward_proxy.private_literal_refused(&parsed.destination.host, parsed.destination.port),
                 "{target} must be refused"
             );
         }

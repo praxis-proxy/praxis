@@ -15,18 +15,29 @@
 //!
 //! Destinations are matched with [`SniMatcher`] semantics: exact hostnames
 //! win over wildcards, `*.example.com` matches any number of leading labels
-//! (longest suffix first), and matching is case-insensitive. IP-literal
-//! destinations cannot be allowlisted (host patterns must be DNS names);
-//! they are denied whenever a destination rule list is configured. Private
-//! destination IPs are denied at connect time unless
-//! `insecure_options.allow_private_upstreams` is set.
+//! (longest suffix first), and matching is case-insensitive. Host patterns
+//! must be DNS names, so no pattern matches an IP literal. An IP-literal
+//! rule instead lists one exact address and port (`host: 127.0.0.1`,
+//! `port: 11434`); any other IP literal is denied whenever a destination
+//! rule list is configured.
+//!
+//! Private destination IPs are denied at connect time unless
+//! `insecure_options.allow_private_upstreams` is set, except an address a
+//! rule lists: the operator chose it, as with a cluster endpoint, so it is
+//! gated at config load instead. A listed loopback, link-local, or
+//! cloud-metadata address needs `insecure_options.allow_private_endpoints`,
+//! and the runtime guard keeps applying to every destination a client
+//! chooses, names included.
 
-use std::collections::BTreeMap;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    net::{IpAddr, SocketAddr},
+};
 
 use praxis_tls::{SniMatcher, WildcardMatch};
 use serde::{Deserialize, Deserializer, Serialize, de};
 
-use crate::errors::ProxyError;
+use crate::{connectivity::normalize_mapped_ipv4, errors::ProxyError};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -45,7 +56,8 @@ const MAX_DURATION_SECS: u64 = 86_400; // 24 hours
 // DestinationRule
 // -----------------------------------------------------------------------------
 
-/// One `allow_destinations` entry: a host pattern plus an optional port.
+/// One `allow_destinations` entry: a host pattern or IP address, plus an
+/// optional port.
 ///
 /// ```
 /// use praxis_core::config::DestinationRule;
@@ -57,16 +69,18 @@ const MAX_DURATION_SECS: u64 = 86_400; // 24 hours
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DestinationRule {
-    /// Destination host pattern.
+    /// Destination host pattern or IP address.
     ///
-    /// A DNS name or a `*.`-prefixed wildcard; IP literals are rejected
-    /// (they cannot be expressed as patterns and are always denied when
-    /// any destination rule list is configured).
+    /// A DNS name, a `*.`-prefixed wildcard, or an IP literal (IPv6
+    /// without brackets). An IP literal matches only that address, on the
+    /// rule's port; numeric patterns such as `*.0.1` are rejected, so no
+    /// wildcard can match an address.
     pub host: String,
 
     /// Destination port this rule covers.
     ///
-    /// `None` (the default) matches any port.
+    /// `None` (the default) matches any port. An IP-literal rule must set
+    /// one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
 }
@@ -183,7 +197,8 @@ impl ForwardProxyConfig {
     /// # Errors
     ///
     /// Returns [`ProxyError::Config`] when a bound is exceeded, a port is
-    /// zero, or a destination host pattern is malformed.
+    /// zero, an IP-literal destination has no port, or a destination host
+    /// pattern is malformed.
     pub fn validate(&self) -> Result<(), ProxyError> {
         if self.idle_timeout_ms == 0 || self.idle_timeout_ms > MAX_IDLE_TIMEOUT_MS {
             return Err(ProxyError::Config(format!(
@@ -207,6 +222,7 @@ impl ForwardProxyConfig {
     /// Entries sharing a host merge their ports; pattern validity and
     /// duplicates are delegated to [`SniMatcher::build`] under
     /// [`WildcardMatch::Suffix`] semantics (same policy as `sni_router`).
+    /// IP-literal rules are left out; [`destination_addresses`] holds them.
     ///
     /// Building allocates and sorts, so hot paths (the per-CONNECT
     /// destination check) must build the matcher once — at service or
@@ -216,28 +232,78 @@ impl ForwardProxyConfig {
     ///
     /// Returns [`ProxyError::Config`] when a destination host pattern is
     /// malformed for suffix-wildcard matching.
+    ///
+    /// [`destination_addresses`]: Self::destination_addresses
     pub fn destination_matcher(&self) -> Result<SniMatcher<Vec<u16>>, ProxyError> {
         SniMatcher::build(merge_destination_ports(&self.allow_destinations), WildcardMatch::Suffix)
             .map_err(|err| ProxyError::Config(format!("forward_proxy: {err}")))
     }
+
+    /// The IP-literal destinations the rules list, each with its port.
+    ///
+    /// An IPv4-mapped IPv6 rule is listed as plain IPv4, the canonical form
+    /// destinations are matched in, so either spelling of a rule matches
+    /// the same requests. As with [`destination_matcher`], build the set
+    /// once and reuse it.
+    ///
+    /// ```
+    /// use praxis_core::config::ForwardProxyConfig;
+    ///
+    /// let config: ForwardProxyConfig = serde_yaml::from_str(
+    ///     "enabled: true\nallow_destinations:\n  - host: 127.0.0.1\n    port: 11434\n",
+    /// )
+    /// .unwrap();
+    /// let addresses = config.destination_addresses();
+    /// assert!(addresses.contains(&"127.0.0.1:11434".parse().unwrap()));
+    /// assert_eq!(addresses.len(), 1, "one address, on one port");
+    /// ```
+    ///
+    /// [`destination_matcher`]: Self::destination_matcher
+    pub fn destination_addresses(&self) -> BTreeSet<SocketAddr> {
+        self.allow_destinations
+            .iter()
+            .filter_map(|rule| {
+                Some(SocketAddr::new(
+                    normalize_mapped_ipv4(ip_literal(&rule.host)?),
+                    rule.port?,
+                ))
+            })
+            .collect()
+    }
 }
 
-/// Reject a destination rule with port 0 or a host whose last label starts
-/// with a digit.
+/// The address `host` names, when it is an IP literal.
+fn ip_literal(host: &str) -> Option<IpAddr> {
+    host.parse().ok()
+}
+
+/// Reject a destination rule with port 0, an IP literal without a port, or
+/// a host whose last label starts with a digit.
 ///
-/// The [`SniMatcher`] pattern check only refuses a pattern that parses as an
-/// IP address, so `*.0.1` would pass and then suffix-match `10.0.0.1` (or
-/// `::ffff:10.0.0.1`). Every IPv4 literal, including the `inet_aton` short
-/// and hex forms a resolver may accept (`10.1`, `10.0x1`), ends in a label
-/// that starts with a digit, while top-level domains are alphabetic (RFC
-/// 3696 §2 forbids all-numeric ones; none starts with a digit). Refusing
-/// such hosts keeps IP literals out of reach of every pattern.
+/// An IP literal names one address, so it is allowlisted one port at a
+/// time, and only by its own rule. The [`SniMatcher`] pattern check only
+/// refuses a pattern that parses as an IP address, so `*.0.1` would pass
+/// and then suffix-match `10.0.0.1` (or `::ffff:10.0.0.1`). Every IPv4
+/// literal, including the `inet_aton` short and hex forms a resolver may
+/// accept (`10.1`, `10.0x1`), ends in a label that starts with a digit,
+/// while top-level domains are alphabetic (RFC 3696 §2 forbids all-numeric
+/// ones; none starts with a digit). Refusing such hosts keeps IP literals
+/// out of reach of every pattern.
 fn validate_destination_rule(rule: &DestinationRule) -> Result<(), ProxyError> {
     let host = &rule.host;
     if rule.port == Some(0) {
         return Err(ProxyError::Config(format!(
             "forward_proxy: destination '{host}' has port 0"
         )));
+    }
+    if ip_literal(host).is_some() {
+        if rule.port.is_none() {
+            return Err(ProxyError::Config(format!(
+                "forward_proxy: IP destination '{host}' needs a port; \
+                 an address is allowlisted one port at a time"
+            )));
+        }
+        return Ok(());
     }
     let last_label = host.rsplit('.').next().unwrap_or_default();
     if last_label.starts_with(|first: char| first.is_ascii_digit()) {
@@ -249,17 +315,17 @@ fn validate_destination_rule(rule: &DestinationRule) -> Result<(), ProxyError> {
     Ok(())
 }
 
-/// Merge destination rules into one host-to-ports map.
+/// Merge the host-pattern rules into one host-to-ports map.
 ///
-/// Hosts are lowercased so case variants merge; duplicate ports collapse.
-/// A portless rule grants every port, so a host with both portless and
-/// ported rules merges to any-port (an empty port set), regardless of
-/// rule order. A [`BTreeMap`] keeps the resulting entry order
-/// deterministic for matcher construction.
+/// IP-literal rules are not patterns and are left out. Hosts are lowercased
+/// so case variants merge; duplicate ports collapse. A portless rule grants
+/// every port, so a host with both portless and ported rules merges to
+/// any-port (an empty port set), regardless of rule order. A [`BTreeMap`]
+/// keeps the resulting entry order deterministic for matcher construction.
 fn merge_destination_ports(rules: &[DestinationRule]) -> BTreeMap<String, Vec<u16>> {
     // (any-port seen, explicit ports)
     let mut merged: BTreeMap<String, (bool, Vec<u16>)> = BTreeMap::new();
-    for rule in rules {
+    for rule in rules.iter().filter(|rule| ip_literal(&rule.host).is_none()) {
         let entry = merged.entry(rule.host.to_ascii_lowercase()).or_default();
         match rule.port {
             None => entry.0 = true,
@@ -298,17 +364,20 @@ mod tests {
     ///
     /// A host matches when a configured pattern matches it (exact wins
     /// over wildcard) and the pattern's port set is empty (any port) or
-    /// contains `port`. With no rules configured every destination
+    /// contains `port`. An IP-literal host matches only a rule listing that
+    /// address and port. With no rules configured every destination
     /// matches; egress control then rests on the listener's filters.
     fn destination_allowed(config: &ForwardProxyConfig, host: &str, port: u16) -> bool {
         if config.allow_destinations.is_empty() {
             return true;
         }
-        config
-            .destination_matcher()
-            .unwrap()
-            .lookup(host)
-            .is_some_and(|ports| ports.is_empty() || ports.contains(&port))
+        host.parse::<IpAddr>()
+            .is_ok_and(|ip| config.destination_addresses().contains(&SocketAddr::new(ip, port)))
+            || config
+                .destination_matcher()
+                .unwrap()
+                .lookup(host)
+                .is_some_and(|ports| ports.is_empty() || ports.contains(&port))
     }
 
     #[test]
@@ -400,14 +469,83 @@ allow_destinations:
     }
 
     #[test]
-    fn reject_ip_literal_destination_pattern() {
-        let err =
-            serde_yaml::from_str::<ForwardProxyConfig>("enabled: true\nallow_destinations:\n  - host: 10.0.0.1\n")
-                .unwrap_err();
+    fn reject_ip_literal_destination_without_port() {
+        for host in ["10.0.0.1", "::1"] {
+            let yaml = format!("enabled: true\nallow_destinations:\n  - host: \"{host}\"\n");
+            let err = serde_yaml::from_str::<ForwardProxyConfig>(&yaml).unwrap_err();
+            assert!(
+                err.to_string().contains("needs a port"),
+                "'{host}' without a port must be rejected: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn reject_bracketed_ipv6_destination() {
+        let err = serde_yaml::from_str::<ForwardProxyConfig>(
+            "enabled: true\nallow_destinations:\n  - host: \"[::1]\"\n    port: 11434\n",
+        )
+        .unwrap_err();
         assert!(
-            err.to_string().contains("10.0.0.1"),
-            "IP-literal pattern rejected: {err}"
+            err.to_string().contains("[::1]"),
+            "an IPv6 rule is written without brackets: {err}"
         );
+    }
+
+    #[test]
+    fn ip_literal_destination_matches_only_its_address_and_port() {
+        let config: ForwardProxyConfig = serde_yaml::from_str(
+            r#"
+enabled: true
+allow_destinations:
+  - host: 127.0.0.1
+    port: 11434
+  - host: "2001:db8::1"
+    port: 443
+"#,
+        )
+        .unwrap();
+        assert!(destination_allowed(&config, "127.0.0.1", 11434));
+        assert!(destination_allowed(&config, "2001:db8::1", 443));
+        assert!(
+            !destination_allowed(&config, "127.0.0.1", 11435),
+            "another port of a listed address is denied"
+        );
+        assert!(
+            !destination_allowed(&config, "127.0.0.2", 11434),
+            "an unlisted address is denied"
+        );
+        assert!(
+            !destination_allowed(&config, "localhost", 11434),
+            "a name for a listed address is not the address"
+        );
+    }
+
+    #[test]
+    fn ipv4_mapped_rule_is_listed_as_ipv4() {
+        let config: ForwardProxyConfig = serde_yaml::from_str(
+            "enabled: true\nallow_destinations:\n  - host: \"::ffff:127.0.0.1\"\n    port: 11434\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.destination_addresses().into_iter().collect::<Vec<_>>(),
+            vec!["127.0.0.1:11434".parse::<SocketAddr>().unwrap()],
+            "destinations are matched in canonical form, so the rule is too"
+        );
+    }
+
+    #[test]
+    fn ip_literal_rules_stay_out_of_the_host_matcher() {
+        // SniMatcher refuses IP patterns, so building it with an IP rule in
+        // the list must skip that rule rather than fail.
+        let config: ForwardProxyConfig = serde_yaml::from_str(
+            "enabled: true\nallow_destinations:\n  - host: api.example.com\n  - host: 127.0.0.1\n    port: 11434\n",
+        )
+        .unwrap();
+        let matcher = config.destination_matcher().unwrap();
+        assert!(matcher.lookup("api.example.com").is_some());
+        assert!(matcher.lookup("127.0.0.1").is_none(), "addresses are not patterns");
+        assert_eq!(config.destination_addresses().len(), 1);
     }
 
     #[test]
@@ -564,7 +702,7 @@ allow_destinations:
     #[test]
     fn serializes_and_round_trips() {
         let config: ForwardProxyConfig = serde_yaml::from_str(
-            "enabled: true\nidle_timeout_ms: 60000\nmax_duration_secs: 3600\nallow_destinations:\n  - host: a.com\n    port: 443\n",
+            "enabled: true\nidle_timeout_ms: 60000\nmax_duration_secs: 3600\nallow_destinations:\n  - host: a.com\n    port: 443\n  - host: \"::1\"\n    port: 11434\n",
         )
         .unwrap();
         let yaml = serde_yaml::to_string(&config).unwrap();

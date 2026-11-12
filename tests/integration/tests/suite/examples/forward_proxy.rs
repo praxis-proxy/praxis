@@ -11,6 +11,8 @@
 //! `localhost` on the backends' ports, and turn on
 //! `insecure_options.allow_private_upstreams` because `localhost` resolves
 //! to loopback, which the runtime's private-address guard refuses otherwise.
+//! The local-service example lists a loopback address itself, so its tests
+//! only move that address to a backend's port and leave the guard on.
 
 use std::{
     collections::HashMap,
@@ -204,6 +206,95 @@ fn ip_acl_example_refuses_private_literal_destinations_by_default() {
             "CONNECT to a private IP literal ({target}) must not be dialed"
         );
     }
+}
+
+// -----------------------------------------------------------------------------
+// Tests: security/forward-proxy-local-service.yaml (listed local address)
+// -----------------------------------------------------------------------------
+
+#[test]
+fn local_service_example_tunnels_connect_to_the_listed_address() {
+    let echo_port = start_tcp_echo_backend();
+    let proxy = start_example(&local_service_example_yaml(echo_port, ""));
+
+    let mut tunnel = connect_tunnel(proxy.addr(), &format!("127.0.0.1:{echo_port}"));
+    assert_eq!(
+        tunnel.status, 200,
+        "a listed loopback address opens a tunnel without allow_private_upstreams"
+    );
+    tunnel.stream.write_all(b"to the local service").unwrap();
+    assert_eq!(
+        read_exact_len(&mut tunnel.stream, 20),
+        b"to the local service",
+        "tunnel should relay bytes"
+    );
+}
+
+#[test]
+fn local_service_example_forwards_plain_requests_to_the_listed_address() {
+    let backend_port = praxis_test_utils::start_backend("local service says hi");
+    let proxy = start_example(&local_service_example_yaml(backend_port, ""));
+
+    let response = praxis_test_utils::http_send(
+        proxy.addr(),
+        &format!(
+            "GET http://127.0.0.1:{backend_port}/api/tags HTTP/1.1\r\n\
+             Host: 127.0.0.1:{backend_port}\r\nConnection: close\r\n\r\n"
+        ),
+    );
+    assert_eq!(
+        parse_status(&response),
+        200,
+        "an absolute-form request to the listed address is forwarded: {response}"
+    );
+    assert_eq!(praxis_test_utils::parse_body(&response), "local service says hi");
+}
+
+#[test]
+fn local_service_example_keeps_the_guard_for_other_destinations() {
+    let echo_port = start_tcp_echo_backend();
+    // A name rule beside the listed address: the name resolves to the same
+    // loopback address, but the client chose it, so the guard refuses it.
+    let proxy = start_example(&local_service_example_yaml(echo_port, "        - host: localhost\n"));
+
+    for (target, status, why) in [
+        (
+            format!("127.0.0.1:{}", free_port()),
+            403,
+            "another port of the listed address",
+        ),
+        (format!("127.0.0.2:{echo_port}"), 403, "an unlisted loopback address"),
+        (
+            format!("localhost:{echo_port}"),
+            502,
+            "a name resolving to the listed address",
+        ),
+    ] {
+        let tunnel = connect_tunnel(proxy.addr(), &target);
+        assert_eq!(tunnel.status, status, "CONNECT to {why} ({target})");
+    }
+    let unlisted = free_port();
+    let response = praxis_test_utils::http_send(
+        proxy.addr(),
+        &format!(
+            "GET http://127.0.0.1:{unlisted}/ HTTP/1.1\r\nHost: 127.0.0.1:{unlisted}\r\nConnection: close\r\n\r\n"
+        ),
+    );
+    assert_eq!(
+        parse_status(&response),
+        403,
+        "an absolute-form request to an unlisted port is denied: {response}"
+    );
+}
+
+#[test]
+fn local_service_example_needs_allow_private_endpoints() {
+    let yaml = local_service_example_yaml(free_port(), "");
+    let (without_flag, _insecure) = yaml
+        .split_once("insecure_options:")
+        .expect("the example sets insecure_options");
+    let err = Config::from_yaml(without_flag).expect_err("listing loopback must be opted in to");
+    assert!(err.to_string().contains("allow_private_endpoints"), "{err}");
 }
 
 // -----------------------------------------------------------------------------
@@ -456,6 +547,25 @@ fn start_ip_acl_example(allow_cidr: &str, allow_private_upstreams: bool) -> Prox
     } else {
         start_example(&yaml)
     }
+}
+
+/// `security/forward-proxy-local-service.yaml` with its listed address moved
+/// to `port`, and `extra_rules` (YAML list items, indented for
+/// `allow_destinations`) appended to its destination rules.
+fn local_service_example_yaml(port: u16, extra_rules: &str) -> String {
+    let example = read_example("security/forward-proxy-local-service.yaml", free_port());
+    let listed = "        - host: 127.0.0.1\n          port: 11434\n";
+    assert!(example.contains(listed), "the example lists 127.0.0.1:11434");
+    let yaml = example.replacen(
+        listed,
+        &format!("        - host: 127.0.0.1\n          port: {port}\n{extra_rules}"),
+        1,
+    );
+    assert!(
+        !yaml.contains("allow_private_upstreams: true"),
+        "the listed address must work with the runtime guard on"
+    );
+    yaml
 }
 
 /// Read an example config with its listener moved to `proxy_port`.

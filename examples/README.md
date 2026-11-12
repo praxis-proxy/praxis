@@ -164,6 +164,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | [csrf.yaml](configs/security/csrf.yaml) | Cross-site request forgery protection via origin validation |
 | [downstream-read-timeout.yaml](configs/security/downstream-read-timeout.yaml) | Protects against slow client attacks by limiting how long the proxy waits for data from downstream clients |
 | [forward-proxy-ip-acl.yaml](configs/security/forward-proxy-ip-acl.yaml) | Forward proxy with no destination allowlist: any destination is reachable, and egress control rests on the ip_acl filter gating which clients may open tunnels |
+| [forward-proxy-local-service.yaml](configs/security/forward-proxy-local-service.yaml) | Forward proxy that also reaches one service on the proxy's own host, such as an Ollama server on 127.0.0.1:11434, by listing its address and port as a destination |
 | [forward-proxy.yaml](configs/security/forward-proxy.yaml) | HTTP listener that doubles as an egress gateway for clients configured with HTTPS_PROXY: CONNECT tunnels reach only the destinations in allow_destinations |
 | [forwarded-headers.yaml](configs/security/forwarded-headers.yaml) | Injects X-Forwarded-For, X-Forwarded-Proto, and X-Forwarded-Host into upstream requests |
 | [guardrails-per-model.yaml](configs/security/guardrails-per-model.yaml) | Runs body-inspecting guardrails only for a model selected from the request body |

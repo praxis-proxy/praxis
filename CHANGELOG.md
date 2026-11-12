@@ -70,6 +70,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `security/forward-proxy.yaml`
   (destination allowlist) and `security/forward-proxy-ip-acl.yaml` (client
   ACL).
+- Forward-proxy `allow_destinations` entries can list an IP address with a
+  port (`host: 127.0.0.1`, `port: 11434`), matching only that address on
+  that port, so a forward proxy can reach one service on its own host, such
+  as a local Ollama server. A listed address skips the runtime
+  private-address guard; a loopback, link-local, or cloud-metadata entry
+  needs `insecure_options.allow_private_endpoints` instead, the config-time
+  flag cluster endpoints use, so `allow_private_upstreams` can stay off for
+  the destinations clients choose. An IP entry without a port is rejected.
+  Example config: `security/forward-proxy-local-service.yaml`.
 - `praxis_protocol::http::load_http_handler_with_options` and
   `HttpHandlerOptions`, for library callers that load HTTP listeners
   themselves and need settings from outside the listener, such as
