@@ -21,7 +21,7 @@
 //! [RFC 9110]: https://datatracker.ietf.org/doc/html/rfc9110
 //! [RFC 9112]: https://datatracker.ietf.org/doc/html/rfc9112
 //! [RFC 9113]: https://datatracker.ietf.org/doc/html/rfc9113
-//! [RFC 10008]: https://www.rfc-editor.org/rfc/rfc10008.html
+//! [RFC 10008]: https://datatracker.ietf.org/doc/html/rfc10008
 
 mod rfc10008;
 mod rfc6265;

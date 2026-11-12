@@ -98,7 +98,7 @@ defaults: QUERY requires a trusted origin unless explicitly included in
 `safe_methods`. See the functional
 [HTTP QUERY example](../../examples/configs/traffic-management/http-query.yaml).
 
-[RFC 10008]: https://www.rfc-editor.org/rfc/rfc10008.html
+[RFC 10008]: https://datatracker.ietf.org/doc/html/rfc10008
 
 ## Related
 
