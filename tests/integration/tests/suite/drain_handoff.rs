@@ -132,6 +132,46 @@ fn drain_does_not_close_after_an_informational_response() {
     );
 }
 
+/// A filter-generated reply during the drain also closes the connection.
+///
+/// The iterative request router answers some requests without an
+/// upstream, so the drain marker cannot depend on the response filter
+/// that runs after one. RFC 9112 §9.6 still wants `Connection: close`
+/// on that reply, and the status proves the static response filter
+/// answered rather than a fall-through to the routed backend.
+#[test]
+#[cfg_attr(
+    coverage,
+    ignore = "spawns the praxis binary; deadlocks on exit under llvm-cov instrumentation"
+)]
+fn drain_marks_a_filter_generated_reply() {
+    let upstream = start_upstream(false);
+    let port = free_port();
+    let admin_port = free_port();
+    let admin = format!("127.0.0.1:{admin_port}");
+    let mut proxy = PraxisProcess::spawn(&terminal_reply_config(port, admin_port, upstream.port()), &admin);
+
+    wait_for_ready(&admin, 200, "the proxy must serve before the drain starts");
+    proxy.signal("TERM");
+    wait_for_ready(&admin, 503, "the drain must fail readiness immediately");
+
+    let http1 = http1_get_keepalive_on(port, "/terminal");
+    assert!(
+        http1.starts_with("HTTP/1.1 204"),
+        "the static response filter must answer /terminal itself: {http1}"
+    );
+    assert!(
+        http1.to_ascii_lowercase().contains("connection: close"),
+        "RFC 9112 §9.6: a filter-generated HTTP/1.1 reply during drain must close the connection: {http1}"
+    );
+
+    let status = proxy.wait_for_exit(Duration::from_secs(90));
+    assert!(
+        status.is_some_and(|status| status.success()),
+        "the delayed handoff must exit cleanly"
+    );
+}
+
 #[test]
 #[cfg_attr(
     coverage,
@@ -331,6 +371,45 @@ listeners:
     )
 }
 
+/// Proxy whose `/terminal` prefix is answered by a `static_response`
+/// filter ahead of the router, so the reply is generated without an
+/// upstream.
+fn terminal_reply_config(port: u16, admin_port: u16, upstream: u16) -> String {
+    format!(
+        r#"
+shutdown_timeout_secs: 60
+shutdown_drain_delay_secs: 40
+runtime:
+  threads: 2
+insecure_options:
+  allow_private_endpoints: true
+admin:
+  metrics_address: "127.0.0.1:{admin_port}"
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        conditions:
+          - when:
+              path_prefix: /terminal
+        status: 204
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:{upstream}"
+listeners:
+  - name: web
+    address: "127.0.0.1:{port}"
+    filter_chains: [main]
+"#
+    )
+}
+
 /// Guarded backend that serves keep-alive requests and echoes upgrades.
 struct Upstream {
     port: u16,
@@ -449,13 +528,17 @@ fn wait_for_ready(admin: &str, expected: u16, context: &str) {
 
 /// Send a keep-alive HTTP/1.1 request and return the response head.
 fn http1_get_keepalive(port: u16) -> String {
+    http1_get_keepalive_on(port, "/")
+}
+
+/// Send a keep-alive HTTP/1.1 request for `path` and return the head.
+fn http1_get_keepalive_on(port: u16, path: &str) -> String {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect to the proxy");
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .expect("read timeout");
-    stream
-        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
-        .expect("write request");
+    let request = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    stream.write_all(request.as_bytes()).expect("write request");
     read_head(&mut stream)
 }
 
