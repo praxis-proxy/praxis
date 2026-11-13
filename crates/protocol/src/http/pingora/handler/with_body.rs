@@ -233,12 +233,19 @@ impl ProxyHttp for PingoraHttpHandler {
 
         if praxis_core::memory::is_exceeded() {
             metrics::record_overload_reject(metrics::OVERLOAD_REASON_MEMORY);
-            return reject_503(session, "5", "memory pressure exceeded").await;
+            return reject_503(session, "5", "memory pressure exceeded", ctx, &self.lifecycle).await;
         }
 
         let Some(fd_admission) = praxis_core::fd::try_admit() else {
             metrics::record_overload_reject(metrics::OVERLOAD_REASON_FILE_DESCRIPTORS);
-            return reject_503(session, "1", "file descriptor limit nearly exhausted").await;
+            return reject_503(
+                session,
+                "1",
+                "file descriptor limit nearly exhausted",
+                ctx,
+                &self.lifecycle,
+            )
+            .await;
         };
         ctx.fd_admission = Some(fd_admission);
 
@@ -246,7 +253,7 @@ impl ProxyHttp for PingoraHttpHandler {
         ctx._global_connection_permit = permit;
         if exceeded {
             metrics::record_overload_reject(metrics::OVERLOAD_REASON_GLOBAL_CONNECTIONS);
-            return reject_503(session, "1", "global max connections exceeded").await;
+            return reject_503(session, "1", "global max connections exceeded", ctx, &self.lifecycle).await;
         }
 
         if let Some(sem) = &self.connection_semaphore {
@@ -254,7 +261,7 @@ impl ProxyHttp for PingoraHttpHandler {
                 ctx._connection_permit = Some(permit);
             } else {
                 metrics::record_overload_reject(metrics::OVERLOAD_REASON_LISTENER_CONNECTIONS);
-                return reject_503(session, "1", "max connections exceeded").await;
+                return reject_503(session, "1", "max connections exceeded", ctx, &self.lifecycle).await;
             }
         }
 
@@ -653,10 +660,21 @@ fn inject_upstream_trace_context(
 // -----------------------------------------------------------------------------
 
 /// Write a 503 response with `Retry-After` and return the corresponding error.
-async fn reject_503(session: &mut Session, retry_after: &'static str, reason: &'static str) -> Result<()> {
+///
+/// An overload rejection runs the drain `Connection: close` marker too, so a
+/// HTTP/1 client refused while draining is still told to move off the
+/// replica; the marker is a no-op outside a drain.
+async fn reject_503(
+    session: &mut Session,
+    retry_after: &'static str,
+    reason: &'static str,
+    ctx: &PingoraRequestCtx,
+    lifecycle: &LifecycleHandle,
+) -> Result<()> {
     tracing::warn!(reason, "rejecting request");
     let mut header = pingora_http::ResponseHeader::build(503, None)?;
     header.append_header("Retry-After", retry_after)?;
+    add_drain_connection_close(session, &mut header, ctx, lifecycle)?;
     session.write_response_header(Box::new(header), true).await?;
     Err(pingora_core::Error::explain(
         pingora_core::ErrorType::HTTPStatus(503),
