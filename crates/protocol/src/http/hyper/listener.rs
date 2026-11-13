@@ -21,16 +21,16 @@ use arc_swap::ArcSwap;
 use hyper::{Request, Response, body::Incoming, service::Service};
 use hyper_util::{
     rt::{TokioExecutor, TokioIo, TokioTimer},
-    server::{
-        conn::auto,
-        graceful::{GracefulShutdown, Watcher},
-    },
+    server::conn::auto,
 };
 use praxis_core::{
     ProxyError,
     config::Listener,
     egress::hyper::HyperConnector,
-    server::{HyperRuntime, hyper::ShutdownWatch},
+    server::{
+        HyperRuntime, LifecycleHandle, LifecyclePhase,
+        hyper::{Readiness, ShutdownWatch},
+    },
 };
 use praxis_filter::FilterPipeline;
 use praxis_tls::CachedCaCerts;
@@ -38,6 +38,7 @@ use tokio::{
     io::{AsyncRead, AsyncWrite},
     net::{TcpSocket, TcpStream},
     sync::{Semaphore, watch},
+    task::JoinSet,
 };
 use tokio_rustls::{TlsAcceptor, server::TlsStream};
 use tracing::{debug, error, info, warn};
@@ -92,6 +93,8 @@ const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60); // 60 s
 
 /// What every request on one listener shares.
 pub(super) struct ListenerShared {
+    /// Process lifecycle, used to stop reusing HTTP/1 connections while draining.
+    pub(super) lifecycle: LifecycleHandle,
     /// Listener name, as the active-request gauge labels it.
     pub(super) name: ::metrics::SharedString,
 
@@ -122,6 +125,7 @@ impl ListenerShared {
         pipeline: Arc<ArcSwap<FilterPipeline>>,
         connector: HyperConnector,
         trust_anchors: Option<Arc<CachedCaCerts>>,
+        lifecycle: LifecycleHandle,
     ) -> Self {
         // Pingora applies the keep-alive timeout in whole seconds, rounded up;
         // the read timeout bounds body reads only, as there.
@@ -129,6 +133,7 @@ impl ListenerShared {
             .downstream_keepalive_timeout_ms
             .map(|millis| Duration::from_secs(millis.div_ceil(1_000)));
         Self {
+            lifecycle,
             name: ::metrics::SharedString::from_shared(Arc::from(listener.name.as_str())),
             connection_limit: listener
                 .max_connections
@@ -175,6 +180,10 @@ pub(super) struct ConnectionFacts {
 ///
 /// Returns [`ProxyError::Config`] naming the address when it cannot be
 /// parsed or bound, or when its TLS settings cannot be built.
+#[expect(
+    clippy::too_many_lines,
+    reason = "registration binds, wraps TLS, and starts the accept loop in one flow"
+)]
 pub(super) fn register(
     runtime: &mut HyperRuntime,
     listener: &Listener,
@@ -205,12 +214,14 @@ pub(super) fn register(
     let accept = AcceptLoop {
         acceptor,
         builder: Arc::new(connection_builder(&shared)),
-        drain_bound: runtime.shutdown_timeout().saturating_sub(DRAIN_HEADROOM),
+        drain_bound: runtime
+            .shutdown_timeout()
+            .saturating_sub(runtime.shutdown_drain_delay())
+            .saturating_sub(DRAIN_HEADROOM),
         shared: Arc::new(shared),
     };
-    runtime.add_required_service(&format!("http-proxy:{name}", name = listener.name), move |shutdown| {
-        accept.run(socket, shutdown)
-    });
+    let name = format!("http-proxy:{name}", name = listener.name);
+    runtime.add_required_service(&name, move |shutdown, ready| accept.run(socket, shutdown, ready));
     Ok(())
 }
 
@@ -260,7 +271,7 @@ impl AcceptLoop {
     async fn accepted(
         &self,
         accepted: io::Result<(TcpStream, SocketAddr)>,
-        watcher: Watcher,
+        connections: &mut JoinSet<()>,
         shutdown: &ShutdownWatch,
     ) {
         match accepted {
@@ -275,7 +286,7 @@ impl AcceptLoop {
                     shared: Arc::clone(&self.shared),
                     shutdown: shutdown.clone(),
                 };
-                drop(tokio::spawn(connection.serve(stream, watcher)));
+                connections.spawn(connection.serve(stream));
             },
             Err(err) => {
                 warn!(name = %self.shared.name, error = %err, "failed to accept an HTTP connection");
@@ -284,15 +295,19 @@ impl AcceptLoop {
         }
     }
 
-    /// Ask every open connection to finish and wait for them, up to the
-    /// shutdown bound.
-    async fn drain(&self, graceful: GracefulShutdown) {
-        let open = graceful.count();
-        if tokio::time::timeout(self.drain_bound, graceful.shutdown())
-            .await
-            .is_err()
+    /// Wait for every open connection to finish, aborting any that outlive
+    /// the shutdown bound.
+    async fn drain(&self, connections: &mut JoinSet<()>) {
+        let open = connections.len();
+        if tokio::time::timeout(self.drain_bound, async {
+            while connections.join_next().await.is_some() {}
+        })
+        .await
+        .is_err()
         {
             warn!(name = %self.shared.name, open, "HTTP connections outlived the shutdown bound");
+            connections.abort_all();
+            while connections.join_next().await.is_some() {}
         } else {
             debug!(name = %self.shared.name, open, "HTTP connections drained");
         }
@@ -300,7 +315,7 @@ impl AcceptLoop {
 
     /// Listen on `socket` and serve connections until `shutdown` flips,
     /// then let open connections finish within the shutdown bound.
-    async fn run(self, socket: TcpSocket, mut shutdown: ShutdownWatch) {
+    async fn run(self, socket: TcpSocket, mut shutdown: ShutdownWatch, ready: Readiness) {
         let listener = match socket.listen(LISTEN_BACKLOG) {
             Ok(listener) => listener,
             Err(err) => {
@@ -308,16 +323,24 @@ impl AcceptLoop {
                 return;
             },
         };
-        let graceful = GracefulShutdown::new();
-        let connections = shutdown.clone();
+        ready.ready();
+        let mut connections = JoinSet::new();
+        let connection_shutdown = shutdown.clone();
         while !*shutdown.borrow_and_update() {
+            while let Some(joined) = connections.try_join_next() {
+                if let Err(err) = joined {
+                    debug!(name = %self.shared.name, error = %err, "HTTP connection task failed");
+                }
+            }
             tokio::select! {
                 changed = shutdown.changed() => if changed.is_err() { break },
-                accepted = listener.accept() => self.accepted(accepted, graceful.watcher(), &connections).await,
+                accepted = listener.accept() => {
+                    self.accepted(accepted, &mut connections, &connection_shutdown).await;
+                },
             }
         }
         drop(listener);
-        self.drain(graceful).await;
+        self.drain(&mut connections).await;
     }
 }
 
@@ -374,10 +397,10 @@ impl Connection {
 
     /// Terminate TLS when the listener asks for it, then serve HTTP once the
     /// client sends something.
-    async fn serve(mut self, stream: TcpStream, watcher: Watcher) {
+    async fn serve(mut self, stream: TcpStream) {
         let Some(acceptor) = self.acceptor.clone() else {
             if self.first_bytes(&stream).await {
-                self.serve_http(stream, false, watcher).await;
+                self.serve_http(stream, false).await;
             }
             return;
         };
@@ -388,7 +411,7 @@ impl Connection {
                     note_unmapped_peer_identity();
                 }
                 if tls_holds_data(&mut tls) || self.first_bytes(tls.get_ref().0).await {
-                    self.serve_http(tls, true, watcher).await;
+                    self.serve_http(tls, true).await;
                 }
             },
             Ok(Err(err)) if handshake_abandoned(&err) => {
@@ -399,8 +422,9 @@ impl Connection {
         }
     }
 
-    /// Serve HTTP on `io` until the client closes it or shutdown drains it.
-    fn serve_http<I>(self, io: I, tls: bool, watcher: Watcher) -> Pin<Box<dyn Future<Output = ()> + Send>>
+    /// Serve HTTP on `io` until the client closes it, the lifecycle starts
+    /// draining, or the listener shuts down.
+    fn serve_http<I>(self, io: I, tls: bool) -> Pin<Box<dyn Future<Output = ()> + Send>>
     where
         I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
@@ -408,16 +432,62 @@ impl Connection {
             connection: Arc::new(ConnectionFacts { peer: self.peer, tls }),
             shared: Arc::clone(&self.shared),
         };
-        let connection = self
-            .builder
-            .serve_connection_with_upgrades(TokioIo::new(io), service)
-            .into_owned();
+        let connection = Box::pin(
+            self.builder
+                .serve_connection_with_upgrades(TokioIo::new(io), service)
+                .into_owned(),
+        );
+        let phases = self.shared.lifecycle.subscribe();
+        let shutdown = self.shutdown;
         let peer = self.peer;
         Box::pin(async move {
-            if let Err(err) = watcher.watch(connection).await {
-                debug!(%peer, error = %err, "HTTP connection ended with an error");
-            }
+            drain_connection(connection, phases, shutdown, peer, |connection| {
+                connection.graceful_shutdown();
+            })
+            .await;
         })
+    }
+}
+
+/// Poll `connection` until it ends, starting graceful shutdown when the
+/// lifecycle begins draining or the listener stops.
+async fn drain_connection<C, F>(
+    mut connection: Pin<Box<C>>,
+    mut phases: watch::Receiver<LifecyclePhase>,
+    mut shutdown: ShutdownWatch,
+    peer: SocketAddr,
+    mut graceful_shutdown: F,
+) where
+    C: Future<Output = Result<(), Box<dyn std::error::Error + Send + Sync>>> + Send,
+    F: FnMut(Pin<&mut C>),
+{
+    let mut draining = false;
+    loop {
+        tokio::select! {
+            result = connection.as_mut() => {
+                if let Err(err) = result {
+                    debug!(%peer, error = %err, "HTTP connection ended with an error");
+                }
+                return;
+            },
+            changed = phases.changed(), if !draining => {
+                if changed.is_err()
+                    || matches!(
+                        *phases.borrow_and_update(),
+                        LifecyclePhase::Draining | LifecyclePhase::Stopped
+                    )
+                {
+                    graceful_shutdown(connection.as_mut());
+                    draining = true;
+                }
+            },
+            changed = shutdown.changed(), if !draining => {
+                if changed.is_err() || *shutdown.borrow_and_update() {
+                    graceful_shutdown(connection.as_mut());
+                    draining = true;
+                }
+            },
+        }
     }
 }
 
@@ -844,7 +914,6 @@ mod tests {
         let builder = Arc::new(connection_builder(&shared));
         drop(tokio::spawn(async move {
             let (stream, peer) = listener.accept().await.unwrap();
-            let graceful = GracefulShutdown::new();
             let connection = Connection {
                 acceptor,
                 builder,
@@ -852,8 +921,7 @@ mod tests {
                 shared: Arc::new(shared),
                 shutdown,
             };
-            connection.serve(stream, graceful.watcher()).await;
-            drop(graceful);
+            connection.serve(stream).await;
         }));
         (addr, stop)
     }
@@ -897,6 +965,7 @@ mod tests {
             Arc::new(ArcSwap::from_pointee(empty_pipeline())),
             HyperConnector::new(4),
             None,
+            LifecycleHandle::new(),
         );
         let mut watchers = Vec::new();
         register(&mut runtime, &listener, shared, &mut watchers)?;
@@ -939,6 +1008,7 @@ mod tests {
             Arc::new(ArcSwap::from_pointee(pipeline)),
             HyperConnector::new(4),
             None,
+            LifecycleHandle::new(),
         )
     }
 

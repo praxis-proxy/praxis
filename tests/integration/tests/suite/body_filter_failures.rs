@@ -406,6 +406,62 @@ fn response_over_stream_buffer_ceiling_is_not_delivered() {
 }
 
 #[test]
+fn head_rejection_sends_no_body() {
+    let backend_port = Backend::fixed("should-not-be-reached").start();
+    let proxy_port = free_port();
+    let config = Config::from_yaml(&proxy_yaml(proxy_port, backend_port, "test_reject_response_phase")).unwrap();
+    let reg = registry();
+    let _proxy = start_full_proxy_with_registry(&config, &reg);
+
+    use std::io::{BufReader, Read as _, Write as _};
+    let address = format!("127.0.0.1:{proxy_port}");
+    praxis_test_utils::wait_for_tcp(&address);
+    let mut stream = std::net::TcpStream::connect(&address).unwrap();
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .unwrap();
+    stream
+        .write_all(b"HEAD / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    let mut reader = BufReader::new(stream);
+    let mut body = Vec::new();
+    let response = praxis_test_utils::read_h1_response(&mut reader, true, 4096, |part| {
+        body.extend_from_slice(part);
+        Ok(())
+    });
+    assert_eq!(
+        response.status,
+        Some(429),
+        "a HEAD rejection must keep its status: {response:?}"
+    );
+    assert_eq!(
+        response.completion,
+        Some(praxis_test_utils::H1Completion::Headers),
+        "a HEAD response completes at its header terminator, whatever Content-Length it \
+         advertises: {response:?}"
+    );
+    assert!(body.is_empty(), "a HEAD rejection must not send a body, got {body:?}");
+    assert!(
+        response
+            .headers
+            .iter()
+            .any(|(name, value)| name == "retry-after" && value == "7"),
+        "a HEAD rejection must keep its response headers: {response:?}"
+    );
+    // HEAD reading stops at the header terminator, so drain the rest of the
+    // connection: the rejection must send no trailing bytes and must close
+    // (the stream's read timeout bounds the wait).
+    let mut trailing = Vec::new();
+    reader
+        .read_to_end(&mut trailing)
+        .expect("the connection must close after the HEAD response");
+    assert!(
+        trailing.is_empty(),
+        "a HEAD rejection must not send trailing bytes after the headers, got {trailing:?}"
+    );
+}
+
+#[test]
 fn request_body_filter_error_rejects_request() {
     let backend_port = Backend::fixed("should-not-be-reached").start();
     let proxy_port = free_port();
