@@ -78,6 +78,9 @@ pub(super) type Action = Arc<dyn Fn() -> Result<FilterAction, FilterError> + Sen
 /// last; called on every invocation.
 pub(super) type BodyHook = Arc<dyn Fn(&mut Option<Bytes>, bool) -> Result<FilterAction, FilterError> + Send + Sync>;
 
+/// What a [`Scripted`] filter does when upstream response trailers arrive.
+pub(super) type TrailerHook = Arc<dyn Fn(&mut HeaderMap) -> Result<Option<Bytes>, FilterError> + Send + Sync>;
+
 /// What a [`Scripted`] filter does at each hook; an unset hook continues
 /// and an unset body hook means no access to that body.
 #[derive(Clone, Default)]
@@ -96,6 +99,9 @@ pub(super) struct Script {
 
     /// The response body mode and hook.
     pub(super) response_body: Option<(BodyMode, BodyHook)>,
+
+    /// The response trailer hook.
+    pub(super) response_trailers: Option<TrailerHook>,
 }
 
 /// A pipeline with no filters.
@@ -190,6 +196,21 @@ impl HttpFilter for Scripted {
     ) -> Result<FilterAction, FilterError> {
         hook(self.script.response_body.as_ref(), body, end_of_stream)
     }
+
+    fn response_trailer_access(&self) -> bool {
+        self.script.response_trailers.is_some()
+    }
+
+    fn on_response_trailers(
+        &self,
+        _ctx: &mut HttpFilterContext<'_>,
+        trailers: &mut HeaderMap,
+    ) -> Result<Option<Bytes>, FilterError> {
+        self.script
+            .response_trailers
+            .as_ref()
+            .map_or(Ok(None), |hook| hook(trailers))
+    }
 }
 
 /// Run `action`, continuing when there is none.
@@ -199,7 +220,9 @@ fn act(action: Option<&Action>) -> Result<FilterAction, FilterError> {
 
 /// The body access a body hook needs.
 fn access(body: Option<&(BodyMode, BodyHook)>) -> BodyAccess {
-    body.map_or(BodyAccess::None, |_body| BodyAccess::ReadWrite)
+    body.map_or(BodyAccess::None, |_body| {
+        BodyAccess::ReadWrite(praxis_filter::BodyRequirement::Optional)
+    })
 }
 
 /// The body mode a body hook asks for.

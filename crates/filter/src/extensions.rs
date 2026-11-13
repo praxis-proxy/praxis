@@ -40,6 +40,14 @@ pub struct ClientResponseHeadersCommitted;
 /// An access record was emitted or managed completion handled its eligibility.
 pub(crate) struct AccessRecordEmitted;
 
+/// Marks a synthetic response-body EOF that is followed by upstream trailers.
+///
+/// Streaming filters use this marker to flush only bytes that are safe to
+/// emit before trailer filters append their final frame. The protocol layer
+/// removes it before the trailer phase begins.
+#[derive(Clone, Copy, Debug)]
+pub struct ResponseTrailersPending;
+
 // -----------------------------------------------------------------------------
 // AuthenticatedIdentity
 // -----------------------------------------------------------------------------

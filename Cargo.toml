@@ -105,6 +105,7 @@ praxis-filter = { version = "0.8.0", path = "crates/filter", package = "praxis-p
 # forwards the backend it wants (`pingora` in its own default set).
 praxis-protocol = { version = "0.8.0", path = "crates/protocol", package = "praxis-proxy-protocol", default-features = false }
 praxis-tls = { version = "0.8.0", path = "crates/tls", package = "praxis-proxy-tls" }
+praxis-tests-rollout = { path = "tests/rollout" }
 praxis-test-utils = { path = "tests/utils", default-features = false }
 praxis-proxy-benchmarks = "0.2.2"
 # Backend-neutral: no member may select a jsonwebtoken crypto backend, which
@@ -156,7 +157,7 @@ tonic-prost = "0.14.6"
 # Pingora 0.11 creates zero-capacity BufStreams, which Tokio 1.54 rejects.
 # Keep the 1.53 patch line until Pingora supports the new constructor contract.
 # https://github.com/tokio-rs/tokio/pull/8494
-tokio = { version = "~1.53.3", features = ["macros", "rt"] }
+tokio = { version = "~1.54.1", features = ["macros", "rt"] }
 tokio-stream = "0.1.19"
 tokio-util = "0.7.20"
 tracing = "0.1.44"

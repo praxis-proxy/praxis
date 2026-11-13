@@ -459,15 +459,20 @@ Filters see headers only by default. Opt in:
 
 ```rust
 fn request_body_access(&self) -> BodyAccess {
-    BodyAccess::ReadOnly // or ReadWrite
+    BodyAccess::ReadOnly(BodyRequirement::Optional) // or ReadWrite(...)
 }
 ```
 
 | Access           | Hooks? | Modify? |
 | ---------------- | ------ | ------- |
 | `None` (default) | No     | No      |
-| `ReadOnly`       | Yes    | No      |
-| `ReadWrite`      | Yes    | Yes     |
+| `ReadOnly(requirement)`  | Yes | No  |
+| `ReadWrite(requirement)` | Yes | Yes |
+
+`requirement` is `BodyRequirement::Optional` or
+`BodyRequirement::Required`. `Required` also prevents an
+admitted opaque WebSocket tunnel from bypassing that selected
+HTTP body processing. See the [filter extension guide](extensions.md#declare-body-access-accurately).
 
 ### Body Mode
 
@@ -575,7 +580,10 @@ not match.
   conditions:
     - when:
         grpc: true
-  requests_per_second: 100
+  mode: global
+  scope: local
+  rate: 100
+  burst: 200
 ```
 
 ```yaml

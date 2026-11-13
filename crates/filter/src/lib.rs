@@ -116,19 +116,22 @@ pub use any_filter::AnyFilter;
 pub use binding::ChainBindingContext;
 #[cfg(feature = "chain-binding")]
 pub use binding::ChainBindingHttpFactory;
-pub use body::{BodyAccess, BodyBuffer, BodyBufferOverflow, BodyCapabilities, BodyMode};
+pub use body::{BodyAccess, BodyBuffer, BodyBufferOverflow, BodyCapabilities, BodyMode, BodyRequirement};
 #[cfg(feature = "basic-auth-filter")]
 pub use builtins::BasicAuthFilter;
 pub use builtins::{
     CircuitBreakerFilter, ContainsValue, CredentialInjectionFilter, DisallowedOriginMode, EndpointReselector,
     EndpointSelectorFilter, GuardrailsAction, GuardrailsFilter, LoadBalancerFilter, PiiKind, RateLimitMode,
-    RedirectStatus, RouterFilter, RuleTargetKind, SessionStore, SessionStoreRegistry, StickySessionsFilter,
-    access_record_already_emitted, bodyless_response, emit_access_record, encode_trailer_frame, has_dot_dot_traversal,
-    http::payload_processing::compression_config::CompressionConfig, mark_access_record_emitted,
+    RateLimitScope, RedirectStatus, RouterFilter, RuleTargetKind, SessionStore, SessionStoreRegistry,
+    StickySessionsFilter, access_record_already_emitted, bodyless_response, emit_access_record, encode_trailer_frame,
+    has_dot_dot_traversal, http::payload_processing::compression_config::CompressionConfig, mark_access_record_emitted,
     normalize_rewritten_path, shutdown_access_log_sinks,
 };
 #[cfg(feature = "policy-engine")]
-pub use builtins::{PolicyFilter, PolicyPluginFactoryFn, fips_crypto_blocker, register_policy_plugin_factory};
+pub use builtins::{
+    PolicyFilter, PolicyPluginFactoryFn, PolicyResponseContext, PolicyResponseOutput, fips_crypto_blocker,
+    register_policy_plugin_factory,
+};
 /// Why a `policy` filter registered by another factory cannot run under
 /// `PRAXIS_REQUIRE_FIPS`: this build has no Policy capability evidence for it.
 #[cfg(not(feature = "policy-engine"))]
@@ -149,7 +152,9 @@ pub use credentials::{DeferredCredential, PendingCredentials};
 pub use error_response::{
     ErrorResponseContext, ErrorResponseFormatter, ErrorResponseFormatterHandle, FormattedErrorResponse,
 };
-pub use extensions::{AuthenticatedIdentity, ClientResponseHeadersCommitted, RequestExtensions};
+pub use extensions::{
+    AuthenticatedIdentity, ClientResponseHeadersCommitted, RequestExtensions, ResponseTrailersPending,
+};
 pub use factory::{
     EmptyFilterConfig, FilterFactory, HttpFilterFactory, TcpFilterFactory, http_builtin, parse_filter_config,
     tcp_builtin,

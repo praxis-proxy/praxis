@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Praxis Contributors
 
 //! `PolicyFilter` — embeds the policy engine in-process to resolve and
-//! validate identity, evaluate APL routes, optionally mint delegated
+//! validate identity, evaluate policy routes, optionally mint delegated
 //! credentials, run the host plugins a policy names, emit audit records,
 //! and optionally rewrite request/response bodies.
 
@@ -46,6 +46,7 @@ use super::{
         engine_error, parse_trusted_proxies, refuse_fips_blockers, refuse_query_credentials_with_delegation,
         require_dpop_external_base_url,
     },
+    context::{PolicyResponseContext, PolicyResponseOutput},
     dispatch::{block_on_bounded, ensure_dispatch_runtime, response_dispatch_timeout},
     error::{
         VIOLATION_HEADER, auth_rejection, deny_with_body, json_rpc_error_envelope_bytes, json_rpc_error_rejection,
@@ -58,8 +59,8 @@ use super::{
     llm::{ParsedLlmRequest, ParsedLlmResponse, request_message, response_message},
     request_facts::{RequestFacts, RequestView},
     request_headers,
-    request_state::{state, state_mut},
-    response_rules::ensure_supported_entity_results,
+    request_state::{MetadataResponseDispatch, state, state_mut},
+    response_rules::{ensure_supported_entity_results, metadata_only_policy},
     transport::PolicyHttpTransport,
 };
 use crate::{
@@ -76,32 +77,91 @@ use crate::{
 /// Empty request body used for parsing bodyless requests.
 static EMPTY_BODY: Bytes = Bytes::new();
 
+/// How a response policy handled the custom extension namespace.
+pub(super) enum ResponseCustomState {
+    /// The policy did not return modified extensions.
+    Unmodified,
+    /// The policy returned a replacement custom namespace.
+    Replaced(Arc<std::collections::HashMap<String, serde_json::Value>>),
+    /// The policy explicitly removed the custom namespace.
+    Removed,
+}
+
 // -----------------------------------------------------------------------------
 // PolicyFilter
 // -----------------------------------------------------------------------------
 
-/// Embeds the Praxis Policy Engine in-process to enforce multi-source
-/// identity, APL route policy, RFC 8693 token exchange, field redaction,
-/// session taint, audit emission, and (under `body_access: read_write`)
-/// request / response body rewriting. Content scanning is a host plugin
-/// the engine dispatches, not a bundled one.
+/// The `policy` filter embeds the [Praxis Policy Engine (PPE)](https://github.com/praxis-proxy/policy)
+/// for JWT and API-key authentication, authorization, identity delegation,
+/// rate limiting and data protection across HTTP APIs, MCP tools, prompts
+/// and resources, and AI inference requests.
+///
+/// Policies combine shared defaults and route-specific controls, with ordered
+/// evaluation that stops on denial.
+///
+/// See the [PPE documentation](https://github.com/praxis-proxy/policy/blob/main/docs/content/index.md)
+/// for policy configuration, plugin references and worked examples.
+///
+/// It provides:
+///
+/// - **Identity and authorization:** independently validated user, agent and workload identities through JWTs or API
+///   keys; attribute-based rules and embedded Cedar, CEL and OPA/Rego decisions.
+///
+/// - **Identity delegation:** act on behalf of a user or as an application or workload, select the delegation subject
+///   and actor, and obtain upstream credentials scoped to the target audience and permissions through OAuth token
+///   exchange, or retrieve upstream credentials from Vault KV v2.
+///
+/// - **Header controls:** project verified identity and claims into upstream headers, control response headers, and
+///   strip configured names or prefixes.
+///
+/// - **Data protection:** input validation, MCP argument and tool-result redaction and masking, inference request
+///   inspection, and session taint labels for data-flow controls across calls.
+///
+/// - **Rate limiting:** enforce request limits before authentication by client address, or after authentication by
+///   resolved identity and claims, with configurable limits per policy route. Counters are local to each limiter
+///   instance.
+///
+/// - **Approval and accountability:** out-of-band human approval through OIDC CIBA, and configurable decision and
+///   effect auditing.
+///
+/// - **Extensibility:** host-provided plugins for content scanning, custom validation and audit destinations.
+///
+/// The engine runs in process as linked Rust crates. Available plugins depend
+/// on build features. MCP body rewriting and response policy require
+/// `body_access: read_write`; inference response content inspection covers
+/// non-streaming JSON responses. Trusted host metadata can also be evaluated
+/// at end of stream without buffering the response.
 ///
 /// Registered under the YAML filter name `policy`. The default build
 /// selects `policy-builtins`, which registers every Policy builtin plugin
-/// kind, including the experimental `ratelimit/limitador`. A narrower build
-/// names `policy-engine` or individual `policy-*` builtins plus one crypto
-/// backend; a policy naming a plugin kind the build did not compile in
+/// kind, including `ratelimit/limitador`. A narrower build names `policy-engine` or individual `policy-*` builtins plus
+/// one crypto backend; a policy naming a plugin kind the build did not compile in
 /// fails to load. `--no-default-features` leaves the filter out.
 ///
-/// A single request can carry multiple identity sources — user JWT in
-/// `Authorization`, agent JWT in `X-Agent-Token`, workload JWT in
-/// `X-Workload-Token`, etc. Each registered identity plugin reads its
-/// own configured header and contributes to a typed `Extensions`
-/// context.
+/// Authentication uses `identity/jwt` for verified JWTs, including OIDC tokens
+/// and SPIFFE JWT-SVIDs, or `identity/api-key` for opaque keys resolved through
+/// a file or HTTP directory. JWT credentials can come from headers, cookies
+/// or query parameters; header credentials can require `DPoP` proofs. Multiple
+/// resolvers independently populate user, client and workload identity slots.
+/// See [Identity configuration].
+///
+/// The JWT plugin maps verified OIDC claims into identity attributes through
+/// `claim_mapper` presets (`standard`, `keycloak`, `auth0`, `cognito`,
+/// `ibmverify`) or an inline `claim_map`. Custom maps select claim paths,
+/// merge role and permission collections, and can deny when required claims
+/// are missing. See [OIDC claim mapping].
+///
+/// Header assertions project verified identity and mapped claims onto the wire.
+/// `assertions.request` sets upstream headers; `assertions.response` controls
+/// headers sent to the client. Incoming values for asserted names are removed
+/// before injection, even when the source is absent. `strip:` removes additional header names or
+/// prefix patterns. Response contracts must be declared at `global`,
+/// `global.defaults.http` or an `http:` route; other placements fail to load.
+/// See [Header assertions].
 ///
 /// On the body phase, the filter consumes protocol classifier filter metadata
 /// (from the `praxis-ai` package) to dispatch the matching CMF
-/// hook chain. APL routes
+/// hook chain. Policy routes
 /// (declared in the policy document) gate the tool/prompt/resource call by
 /// role, attribute, or Cedar PDP decision. `delegate(...)` steps mint
 /// audience-scoped tokens (RFC 8693) that the allow path attaches as
@@ -131,27 +191,31 @@ static EMPTY_BODY: Bytes = Bytes::new();
 /// and malformed values leave these facts absent; rules that require them
 /// should deny their absence. See the [normalized LLM input example].
 ///
-/// PPE 0.4.1 changes OPA and CEL `args` on `tool:` routes to native JSON.
-/// Before upgrading, review rules that read `args`: for example, a numeric
-/// ID in `args.ids` must be compared with `13`, not `"13"`. A schema-backed
-/// `cedar-direct` PDP must set `structured_context: true` or the policy
-/// fails to load. Its schema must also declare the optional `args` and `llm`
-/// context fields its actions can receive, or those requests are denied.
-/// See the [PPE 0.4.1 changelog] and
-/// [args migration guidance].
+/// OPA and CEL receive `args` on `tool:` routes as native JSON, so a
+/// numeric ID in `args.ids` is compared with `13`, not `"13"`. A schema-backed
+/// `cedar-direct` PDP must set `structured_context: true` or the policy fails
+/// to load. Its schema must declare the optional `args` and `llm` context
+/// fields its actions can receive, or those requests are denied.
 ///
-/// PPE 0.5.0 tightens OAuth `delegate(...)` by default. A token-exchange
+/// `delegator/vault` retrieves upstream personal access tokens (PATs) or API keys
+/// from Vault KV v2 instead of exchanging an OAuth token. Vault JWT authentication supports
+/// caller-scoped access for users, clients and workloads; `AppRole` supports
+/// credentials owned by this deployment (`subject: this_workload`). The
+/// delegator is included in `policy-builtins` or selected individually with
+/// `policy-delegator-vault`. Vault policies must enforce credential isolation.
+/// See [Vault delegation recipes].
+///
+/// OAuth `delegate(...)` validates token-exchange responses by default. A
 /// response must name an access-token or JWT `issued_token_type`. When the
 /// step requests scopes, a granted scope that was neither requested nor
 /// listed in `allowed_extra_scopes` is refused; a step that requests none
 /// accepts the identity provider's defaults. When the minted token is a JWT,
 /// its `aud` must contain the step's `audience`, and on a token exchange its
 /// `sub` must match the caller. `strict_response_validation: false` turns
-/// these checks off. A JWT with an unsupported `crit` header is rejected, and an `env` secret provider with
-/// settings it does not use fails to load. CEL `size()` now counts code
-/// points rather than bytes, and `exists()` returns true when one element
-/// matches even if another errors, so some requests that were denied may now
-/// be allowed. See the [PPE 0.5.0 changelog].
+/// these checks off. A JWT with an unsupported `crit` header is rejected, and
+/// an `env` secret provider with settings it does not use fails to load.
+/// CEL `size()` counts code points, and `exists()` returns true when one
+/// element matches even if another errors.
 ///
 /// Every hook sees the downstream request as this filter first received
 /// it: method, path, raw query, the validated host lowercased without a port,
@@ -198,6 +262,7 @@ static EMPTY_BODY: Bytes = Bytes::new();
 /// forms a valid upstream header receives HTTP 500
 /// (`policy.delegation_failed`) rather than forwarding the inbound one.
 ///
+/// Vault delegation is separate from the policy's `secrets:` registry.
 /// The filter registers only the `env` secret provider. A `secrets:` block
 /// naming any other provider kind, including `file`, fails to load. Secret
 /// values are read when the filter is built, so a changed value takes effect
@@ -237,7 +302,7 @@ static EMPTY_BODY: Bytes = Bytes::new();
 /// will not see `Tools`. If an upstream accepts such aliases, cover them
 /// explicitly in policy or require canonical field spelling at its boundary.
 ///
-/// The CMF prompt text that APL steps and scanners read is projected from
+/// The CMF prompt text that policy steps and scanners read is projected from
 /// `system`, Responses `instructions`, `messages[].content`, legacy
 /// `prompt`, and `input`. For Responses and embeddings `input`, only text
 /// counts: a string, string items, and `input_text`, `text`,
@@ -249,10 +314,18 @@ static EMPTY_BODY: Bytes = Bytes::new();
 /// are also projected. Token-ID arrays, images, and files are skipped.
 ///
 /// `body_access: read_write` enables the JSON-RPC re-serialization
-/// round-trip so APL field mutators (`redact()`, `assign()`) rewrite
+/// round-trip so policy field mutators (`redact()`, `assign()`) rewrite
 /// the upstream request body and the downstream response. It also enables
-/// `cmf.llm_output` for non-streaming inference responses. APL field
+/// `cmf.llm_output` for non-streaming inference responses. Policy field
 /// mutators do not rewrite inference bodies.
+///
+/// Host filters can provide trusted response metadata through
+/// `PolicyResponseContext`. The `cmf.llm_output` hook evaluates `custom.*`
+/// values at end of stream, including under `read_only`, and returns
+/// plugin-written values through `PolicyResponseOutput`. This path neither
+/// buffers nor exposes response content. A host filter that supplies the
+/// context must run after `policy` in the filter chain, since response-body
+/// filters execute in reverse order.
 ///
 /// `body_access: read_write` also enables response-phase `tool:`, `prompt:`,
 /// and `resource:` rules, including attribute-only `post_invocation` rules. Under `read_only`, these
@@ -264,13 +337,10 @@ static EMPTY_BODY: Bytes = Bytes::new();
 /// inspection. The pipeline's `failure_mode` controls that error; valid
 /// JSON-RPC error responses continue unchanged.
 ///
-/// `result.<field>` projection for `prompt:` and `resource:` routes remains
-/// blocked on [policy #75]; host-side content projection is tracked in [Praxis #1330].
+/// `result.<field>` projection is supported only for `tool:` routes;
+/// prompt and resource results are not projected into field pipelines.
 /// A `result:` field pipeline on either entity, including an inherited one,
 /// is rejected at load so its controls cannot be silently skipped.
-///
-/// [policy #75]: https://github.com/praxis-proxy/policy/issues/75
-/// [Praxis #1330]: https://github.com/praxis-proxy/praxis/issues/1330
 ///
 /// Policies with MCP entity routes cannot declare `authorization:` on an
 /// `http:` route. Use `global` for shared authorization; route-scoped
@@ -296,10 +366,11 @@ static EMPTY_BODY: Bytes = Bytes::new();
 /// `https`: an IP carries no SNI, and Pingora peers skip certificate
 /// verification entirely when SNI is empty. Use a hostname for `https`.
 ///
+/// [Identity configuration]: https://github.com/praxis-proxy/policy/blob/main/docs/content/apl/identity.md
+/// [OIDC claim mapping]: https://github.com/praxis-proxy/policy/blob/main/docs/content/identity-delegation.md#reading-claims-the-way-your-idp-writes-them
+/// [Header assertions]: https://github.com/praxis-proxy/policy/blob/main/docs/content/assertions.md
+/// [Vault delegation recipes]: https://github.com/praxis-proxy/policy/blob/main/docs/content/identity-delegation.md#recipe-8-a-users-vault-stored-credential
 /// [Structured request input]: https://github.com/praxis-proxy/policy/blob/main/docs/content/apl/pdp.md#structured-request-input
-/// [PPE 0.4.1 changelog]: https://github.com/praxis-proxy/policy/blob/v0.4.1/CHANGELOG.md#041---2026-10-05
-/// [PPE 0.5.0 changelog]: https://github.com/praxis-proxy/policy/blob/v0.5.0/CHANGELOG.md#050---2026-10-13
-/// [args migration guidance]: https://github.com/praxis-proxy/policy/blob/v0.4.1/docs/content/apl/pdp.md#migrating-args-policies
 /// [normalized LLM input example]: https://github.com/praxis-proxy/praxis/blob/main/examples/configs/security/policy-llm-input.yaml
 ///
 /// # YAML configuration
@@ -334,6 +405,8 @@ pub struct PolicyFilter {
     /// dispatches hook chains. Wrapped in `Arc` so offloaded hook
     /// dispatches can hold their own handle without borrowing `&self`.
     mgr: Arc<PolicyEngine>,
+    /// Policy engine view containing only post rules that can run without a response body.
+    response_context_mgr: Option<Arc<PolicyEngine>>,
     /// Derived from the loaded policy: it declares per-entity routes
     /// (tool/prompt/resource/llm). When true, authorization runs at the
     /// body phase, once the request is attributed to an entity.
@@ -381,7 +454,7 @@ pub struct PolicyFilter {
 impl PolicyFilter {
     /// Construct a filter from a parsed config. Loads the policy document
     /// referenced by `cfg.config_path`, registers bundled plugin
-    /// factories, wires the APL visitor, and initializes the manager.
+    /// factories, wires the policy visitor, and initializes the manager.
     /// Errors abort filter chain construction at server startup —
     /// failing fast is what we want for misconfigured policy.
     ///
@@ -442,8 +515,9 @@ impl PolicyFilter {
             format!("policy: failed to read config_path {}: {e}", cfg.config_path).into()
         })?;
 
+        let session_store: Arc<dyn ppe::SessionStore> = Arc::new(ppe::MemorySessionStore::new());
         let mgr = Arc::new(PolicyEngine::default());
-        Self::install_plugins(&mgr);
+        Self::install_plugins(&mgr, Arc::clone(&session_store));
 
         // The lazy connection pool must not bind to the temporary init runtime.
         let transport = Self::http_transport(
@@ -592,6 +666,21 @@ impl PolicyFilter {
         })?;
         let dispatch_timeout = response_dispatch_timeout(policy_config.engine_settings.plugin_timeout);
         ensure_supported_entity_results(&yaml, &policy_config)?;
+        let response_context_mgr = if llm_post {
+            metadata_only_policy(&yaml)?
+                .map(|filtered| {
+                    Self::load_policy_engine(
+                        &filtered,
+                        &cfg.config_path,
+                        Arc::clone(&transport),
+                        cfg.init_timeout_secs,
+                        Arc::clone(&session_store),
+                    )
+                })
+                .transpose()?
+        } else {
+            None
+        };
         if entity_routes {
             ensure_dispatch_runtime()
                 .map_err(|e| -> FilterError { format!("policy: response hooks cannot run: {e}").into() })?;
@@ -640,6 +729,7 @@ impl PolicyFilter {
         Ok(Self {
             cfg,
             mgr,
+            response_context_mgr,
             entity_routes,
             mcp_routes,
             mcp_post_tool,
@@ -659,6 +749,84 @@ impl PolicyFilter {
             #[cfg(all(test, feature = "policy-builtins"))]
             transport,
         })
+    }
+
+    /// Load and initialize one PPE view of the policy document.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "linear engine registration, load, and bounded initialization"
+    )]
+    fn load_policy_engine(
+        yaml: &str,
+        source: &str,
+        transport: Arc<PolicyHttpTransport>,
+        init_timeout_secs: u64,
+        session_store: Arc<dyn ppe::SessionStore>,
+    ) -> Result<Arc<PolicyEngine>, FilterError> {
+        let manager = Arc::new(PolicyEngine::default());
+        Self::install_plugins(&manager, session_store);
+        let mut secret_providers = ppe::SecretProviderRegistry::new();
+        secret_providers.register(Box::new(EnvSecretProviderFactory));
+        if !manager.set_secret_providers(secret_providers) {
+            tracing::warn!(
+                target: "policy.filter",
+                "policy: secret providers were already registered on a fresh engine"
+            );
+        }
+        if !manager.set_http_transport(transport) {
+            tracing::warn!(
+                target: "policy.filter",
+                "policy: an HTTP transport was already installed on a fresh engine"
+            );
+        }
+
+        let host_factories = super::host_plugins::host_plugin_factories();
+        if !host_factories.is_empty() {
+            tracing::info!(
+                count = super::host_plugins::host_plugin_count(),
+                "policy: registering host-supplied plugin factories"
+            );
+        }
+        for (kind, factory) in host_factories {
+            tracing::debug!(target: "policy.filter", kind = %kind, "registering host plugin factory");
+            manager.register_factory(kind, factory);
+        }
+        manager
+            .load_config_yaml(yaml)
+            .map_err(|error: Box<PluginError>| -> FilterError {
+                format!("policy: load_config_yaml failed for {source}: {error}").into()
+            })?;
+
+        let manager_for_init = Arc::clone(&manager);
+        let init_timeout = std::time::Duration::from_secs(init_timeout_secs);
+        let init = std::thread::spawn(move || -> Result<(), String> {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| format!("policy: failed to build init runtime: {error}"))?;
+            runtime.block_on(async move {
+                match tokio::time::timeout(init_timeout, manager_for_init.initialize()).await {
+                    Ok(Ok(())) => Ok(()),
+                    Ok(Err(error)) => Err(format!("policy: PolicyEngine::initialize failed: {error}")),
+                    Err(_) => Err(format!(
+                        "policy: PolicyEngine::initialize timed out after {}s \
+                         (init_timeout_secs); likely a JWKS / OAuth endpoint is unreachable",
+                        init_timeout.as_secs(),
+                    )),
+                }
+            })
+        })
+        .join()
+        .map_err(|panic| {
+            let message = panic
+                .downcast_ref::<&str>()
+                .map(|value| (*value).to_owned())
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "<no panic message>".to_owned());
+            format!("policy: PolicyEngine::initialize panicked in init thread: {message}")
+        })?;
+        init.map_err(|message: String| -> FilterError { message.into() })?;
+        Ok(manager)
     }
 
     /// Test accessor for the transport installed on the engine.
@@ -724,8 +892,10 @@ impl PolicyFilter {
             tracing::warn!(
                 target: "policy.filter",
                 "policy declares response-phase `llm:` rules (`post_invocation`) but \
-                 `body_access` is `read_only`, which does not buffer the response: those rules \
-                 will never run. Set `body_access: read_write` to enable them.",
+                 `body_access` is `read_only`, which does not buffer the response: rules that \
+                 need response content will not run. A host may still trigger metadata-only \
+                 response policy by supplying `PolicyResponseContext`; otherwise set \
+                 `body_access: read_write`.",
             );
         }
         tracing::debug!(
@@ -760,8 +930,7 @@ impl PolicyFilter {
                 target: "policy.filter",
                 "policy declares response-phase `prompt:` or `resource:` rules: \
                  `post_invocation` predicates over identity and attributes are dispatched, but \
-                 `result.<field>` projection remains blocked on praxis-proxy/policy#75; \
-                 host-side content projection is tracked in praxis-proxy/praxis#1330.",
+                 `result.<field>` projection is unsupported for these routes.",
             );
         }
     }
@@ -1214,19 +1383,23 @@ impl PolicyFilter {
 
     /// Publish the raw-credential-free subject projection for downstream filters.
     ///
-    /// The Praxis Policy Engine (PPE) may authenticate a client or workload without resolving a user
-    /// subject. In that case no `AuthenticatedIdentity` is published; a
-    /// consumer that requires a user principal must fail closed when the
+    /// The [Praxis Policy Engine (PPE)](https://github.com/praxis-proxy/policy)
+    /// may authenticate a client or workload without resolving a user subject. In that case no `AuthenticatedIdentity`
+    /// is published; a consumer that requires a user principal must fail closed when the
     /// extension is absent.
     fn publish_authenticated_identity(ctx: &mut HttpFilterContext<'_>, identity: &IdentityPayload) {
         Self::publish_identity_projection(ctx, Self::authenticated_identity(identity));
     }
 
-    /// Register the compiled builtin factories and the APL visitor on `mgr`.
+    /// Register the compiled builtin factories and the policy visitor on `mgr`.
     ///
-    /// An engine-only build supports APL but refuses policies naming builtin
+    /// An engine-only build evaluates rules but refuses policies naming builtin
     /// plugin kinds.
-    fn install_plugins(mgr: &Arc<PolicyEngine>) {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the feature-gated factory list mirrors Cargo's independently selectable Policy builtins"
+    )]
+    fn install_plugins(mgr: &Arc<PolicyEngine>, session_store: Arc<dyn ppe::SessionStore>) {
         #[cfg(any(
             feature = "policy-builtins",
             feature = "policy-api-key",
@@ -1241,7 +1414,20 @@ impl PolicyFilter {
             feature = "policy-valkey",
             feature = "policy-experimental-ratelimit",
         ))]
-        ppe::install_builtins(mgr);
+        {
+            ppe::register_builtin_plugins(mgr);
+            ppe::register_apl(
+                mgr,
+                ppe::AplOptions {
+                    dispatch_cache: Arc::new(ppe::DispatchCache::new()),
+                    session_store,
+                    pdps: Vec::new(),
+                    pdp_factories: ppe::builtin_pdp_factories(),
+                    session_store_factories: ppe::builtin_session_store_factories(),
+                    base_capabilities: None,
+                },
+            );
+        }
         #[cfg(not(any(
             feature = "policy-builtins",
             feature = "policy-api-key",
@@ -1256,7 +1442,11 @@ impl PolicyFilter {
             feature = "policy-valkey",
             feature = "policy-experimental-ratelimit",
         )))]
-        let _visitor = ppe::register_apl(mgr, ppe::AplOptions::in_process());
+        {
+            let mut options = ppe::AplOptions::in_process();
+            options.session_store = session_store;
+            let _visitor = ppe::register_apl(mgr, options);
+        }
     }
 
     /// Build the proxy-backed transport with the configured destination policy.
@@ -1569,7 +1759,7 @@ impl PolicyFilter {
         .is_some()
     }
 
-    /// Add inference attributes used by APL rules and the parsed body for PDPs.
+    /// Add inference attributes used by policy rules and the parsed body for PDPs.
     fn attach_llm_attributes(&self, ext: &mut Extensions, parsed: ParsedLlmRequest, model: &str) {
         ext.llm = Some(Arc::new(LLMExtension {
             model_id: Some(model.to_owned()),
@@ -1632,6 +1822,9 @@ impl PolicyFilter {
 
         let parsed = ParsedLlmResponse::parse(&body_bytes);
         if !parsed.is_object() {
+            if ctx.extensions.get::<PolicyResponseContext>().is_some() {
+                return self.dispatch_llm_response_context(ctx);
+            }
             tracing::debug!(
                 target: "policy.filter",
                 model = %model,
@@ -1666,11 +1859,47 @@ impl PolicyFilter {
             capabilities: Vec::new(),
         }));
         extensions.completion = Some(Arc::new(parsed.completion()));
+        let response_context = ctx
+            .extensions
+            .get::<PolicyResponseContext>()
+            .map(PolicyResponseContext::custom);
+        if let Some(custom) = response_context.as_ref() {
+            extensions.custom = Some(Arc::clone(custom));
+        }
 
         let payload = MessagePayload {
             message: response_message(&parsed),
         };
-        let cmf_result = self.dispatch_response_cmf(ctx, hook_name, payload, extensions)?;
+        let cmf_result = match self.dispatch_response_cmf(ctx, hook_name, payload, extensions) {
+            Ok(result) => result,
+            Err(error) if response_context.is_some() => {
+                let violation = PluginViolation::new("llm.response_context_unavailable", error.to_string());
+                if let Some(host_custom) = response_context.clone() {
+                    Self::publish_response_output(
+                        ctx,
+                        host_custom.as_ref(),
+                        ResponseCustomState::Unmodified,
+                        Some(violation),
+                    );
+                }
+                tracing::warn!(target: "policy.filter", %error, "response policy dispatch failed; applying failure_mode");
+                return Err(error);
+            },
+            Err(error) => return Err(error),
+        };
+        if let Some(host_custom) = response_context {
+            let custom_state =
+                cmf_result
+                    .modified_extensions
+                    .as_ref()
+                    .map_or(ResponseCustomState::Unmodified, |modified| {
+                        modified
+                            .custom
+                            .clone()
+                            .map_or(ResponseCustomState::Removed, ResponseCustomState::Replaced)
+                    });
+            Self::publish_response_output(ctx, host_custom.as_ref(), custom_state, cmf_result.violation.clone());
+        }
 
         if !cmf_result.continue_processing {
             tracing::warn!(
@@ -1698,6 +1927,139 @@ impl PolicyFilter {
             );
         }
         Ok(FilterAction::Continue)
+    }
+
+    /// Evaluate response policy over host-provided context without response content.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "linear trusted-context construction, dispatch, and output publication"
+    )]
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "response-phase dispatch shares the fallible hook signature with content evaluation"
+    )]
+    fn dispatch_llm_response_context(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        let Some(host_custom) = ctx
+            .extensions
+            .get::<PolicyResponseContext>()
+            .map(PolicyResponseContext::custom)
+        else {
+            return Ok(FilterAction::Continue);
+        };
+        if state(ctx)
+            .is_some_and(|state| matches!(state.metadata_response_dispatch, MetadataResponseDispatch::Complete))
+        {
+            return Ok(FilterAction::Continue);
+        }
+        state_mut(ctx).metadata_response_dispatch = MetadataResponseDispatch::Complete;
+        if self.response_context_mgr.is_none() {
+            Self::publish_response_output(ctx, host_custom.as_ref(), ResponseCustomState::Unmodified, None);
+            return Ok(FilterAction::Continue);
+        }
+        let Some(model) = state(ctx).and_then(|state| state.inference_model.clone()) else {
+            Self::publish_response_output(ctx, host_custom.as_ref(), ResponseCustomState::Unmodified, None);
+            return Ok(FilterAction::Continue);
+        };
+        let Some(identity) = state(ctx).and_then(|state| state.identity.clone()) else {
+            let violation = PluginViolation::new(
+                "llm.response_context_unavailable",
+                "request identity unavailable for metadata-only response policy",
+            );
+            Self::publish_response_output(
+                ctx,
+                host_custom.as_ref(),
+                ResponseCustomState::Unmodified,
+                Some(violation),
+            );
+            return Ok(FilterAction::Continue);
+        };
+        let view = Self::request_view(ctx, &self.cfg.context_headers, &self.trusted_proxies);
+        let mut extensions = Self::extensions_from_identity(&view, &identity, ENTITY_LLM, &model, &self.cfg);
+        if let Some(http) = extensions.http.as_ref() {
+            let mut http = (**http).clone();
+            if let Some(state) = state(ctx) {
+                http.response_headers.clone_from(&state.response_headers);
+                http.status = state.response_status;
+            }
+            extensions.http = Some(Arc::new(http));
+        }
+        extensions.llm = Some(Arc::new(LLMExtension {
+            model_id: Some(model),
+            provider: self.cfg.llm.provider.clone(),
+            capabilities: Vec::new(),
+        }));
+        extensions.custom = Some(Arc::clone(&host_custom));
+        let payload = MessagePayload {
+            message: Message::with_content(Role::Assistant, Vec::new()),
+        };
+        let result = match self.dispatch_metadata_response_cmf(ctx, payload, extensions) {
+            Ok(result) => result,
+            Err(error) => {
+                let violation = PluginViolation::new("llm.response_context_unavailable", error.to_string());
+                Self::publish_response_output(
+                    ctx,
+                    host_custom.as_ref(),
+                    ResponseCustomState::Unmodified,
+                    Some(violation),
+                );
+                tracing::warn!(target: "policy.filter", %error, "metadata-only response policy dispatch failed; continuing");
+                return Ok(FilterAction::Continue);
+            },
+        };
+        let custom_state = result
+            .modified_extensions
+            .as_ref()
+            .map_or(ResponseCustomState::Unmodified, |modified| {
+                modified
+                    .custom
+                    .clone()
+                    .map_or(ResponseCustomState::Removed, ResponseCustomState::Replaced)
+            });
+        let violation = ctx
+            .extensions
+            .get::<PolicyResponseOutput>()
+            .and_then(|output| output.violation().cloned())
+            .or_else(|| result.violation.clone());
+        Self::publish_response_output(ctx, host_custom.as_ref(), custom_state, violation.clone());
+        if !result.continue_processing {
+            tracing::warn!(
+                target: "policy.filter",
+                violation = ?violation,
+                "metadata-only inference response policy denied after response content was released; host receives the denial in PolicyResponseOutput",
+            );
+            return Ok(FilterAction::Continue);
+        }
+        Ok(FilterAction::Continue)
+    }
+
+    /// Publish host-visible response output without erasing an earlier denial.
+    pub(super) fn publish_response_output(
+        ctx: &mut HttpFilterContext<'_>,
+        host_custom: &std::collections::HashMap<String, serde_json::Value>,
+        custom_state: ResponseCustomState,
+        violation: Option<PluginViolation>,
+    ) {
+        let earlier_output = ctx.extensions.get::<PolicyResponseOutput>();
+        let mut custom =
+            earlier_output.map_or_else(std::collections::HashMap::new, |output| (*output.custom()).clone());
+        let custom_modified = !matches!(custom_state, ResponseCustomState::Unmodified);
+        let current = match custom_state {
+            ResponseCustomState::Unmodified if earlier_output.is_none() => host_custom.clone(),
+            ResponseCustomState::Replaced(values) => (*values).clone(),
+            ResponseCustomState::Unmodified | ResponseCustomState::Removed => std::collections::HashMap::new(),
+        };
+        // A modified namespace is authoritative for host keys: an omitted host
+        // key was intentionally removed. Preserve keys produced by earlier
+        // policy instances, then let the later instance win on conflicts.
+        if custom_modified {
+            for key in host_custom.keys().filter(|key| !current.contains_key(*key)) {
+                custom.remove(key);
+            }
+        }
+        custom.extend(current);
+        let earlier = earlier_output.and_then(|output| output.violation().cloned());
+        ctx.extensions
+            .insert(PolicyResponseOutput::new(Arc::new(custom), earlier.or(violation)));
     }
 
     /// Return the request model for a non-streaming inference response.
@@ -1936,6 +2298,143 @@ impl PolicyFilter {
         Ok(result)
     }
 
+    /// Dispatch against the independent metadata-only policy engine.
+    #[expect(
+        clippy::large_stack_frames,
+        reason = "PPE response dispatch carries its typed hook inputs into the bounded future"
+    )]
+    fn dispatch_metadata_response_cmf(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+        payload: MessagePayload,
+        extensions: Extensions,
+    ) -> Result<PipelineResult, FilterError> {
+        let manager = self
+            .response_context_mgr
+            .as_ref()
+            .ok_or_else(|| -> FilterError { "policy: metadata-only response engine unavailable".into() })?;
+        let mut table = state_mut(ctx).take_table()?;
+        if let Some(table) = table.as_mut() {
+            Self::remap_plugin_local_states(&self.mgr, manager, table);
+        }
+        let response_manager = Arc::clone(manager);
+        let invoke = async move {
+            let (result, _background) = response_manager
+                .invoke_named::<CmfHook>(HOOK_CMF_LLM_OUTPUT, payload, extensions, table)
+                .await;
+            result
+        };
+        let mut result = block_on_bounded(invoke, self.response_dispatch_timeout).map_err(|error| -> FilterError {
+            format!("policy: metadata-only response dispatch failed: {error}").into()
+        })?;
+        Self::remap_plugin_local_states(manager, &self.mgr, &mut result.context_table);
+        state_mut(ctx).restore_table(std::mem::take(&mut result.context_table));
+        Ok(result)
+    }
+
+    /// Re-key private state for same-named plugin instances in two engines.
+    fn remap_plugin_local_states(
+        source: &PolicyEngine,
+        destination: &PolicyEngine,
+        table: &mut ppe::praxis_policy_core::context::PluginContextTable,
+    ) {
+        for name in destination.plugin_names() {
+            let Some((source_id, destination_id)) = source
+                .get_plugin(&name)
+                .zip(destination.get_plugin(&name))
+                .map(|(source, destination)| (source.id(), destination.id()))
+            else {
+                continue;
+            };
+            if source_id != destination_id
+                && let Some(local_state) = table.local_states.remove(&source_id)
+            {
+                table.local_states.insert(destination_id, local_state);
+            }
+        }
+    }
+
+    /// Capture the final response facts visible at this filter's header phase.
+    fn snapshot_response_context(ctx: &mut HttpFilterContext<'_>) {
+        let Some(response) = ctx.response_header.as_ref() else {
+            return;
+        };
+        let headers = snapshot_response_headers(&response.headers);
+        let status = response.status.as_u16();
+        let state = state_mut(ctx);
+        state.response_headers = headers;
+        state.response_status = Some(status);
+    }
+
+    /// Whether the final response is complete when its headers are delivered.
+    fn response_ends_at_headers(ctx: &HttpFilterContext<'_>) -> bool {
+        let Some(response) = ctx.response_header.as_ref() else {
+            return false;
+        };
+        if response.status.is_informational() {
+            return false;
+        }
+        if crate::bodyless_response(response.status, &ctx.request.method) {
+            return true;
+        }
+        if response.headers.contains_key(http::header::TRANSFER_ENCODING) {
+            return false;
+        }
+        let mut values = response.headers.get_all(http::header::CONTENT_LENGTH).iter();
+        let Some(first) = values.next() else {
+            return false;
+        };
+        std::iter::once(first).chain(values).all(|value| {
+            value
+                .to_str()
+                .ok()
+                .is_some_and(|value| value.split(',').all(|part| part.trim() == "0"))
+        })
+    }
+
+    /// Run the configured generic HTTP response hook, when present.
+    async fn dispatch_http_response_hook(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+    ) -> Result<Option<FilterAction>, FilterError> {
+        let Some(hook) = self.response_hook else {
+            return Ok(None);
+        };
+        let Some(response) = ctx.response_header.as_ref() else {
+            return Ok(None);
+        };
+        let extensions = Self::response_extensions(
+            ctx,
+            snapshot_response_headers(&response.headers),
+            response.status.as_u16(),
+            &self.cfg,
+            &self.trusted_proxies,
+        );
+        let result = self.invoke::<HttpHook>(ctx, hook, HttpPayload, extensions).await?;
+        if !result.continue_processing {
+            tracing::warn!(
+                target: "policy.filter",
+                violation = ?result.violation,
+                "http response deny; replacing the upstream response",
+            );
+            return Ok(Some(FilterAction::Reject(super::error::http_authz_rejection(
+                result.violation.as_ref(),
+            ))));
+        }
+        self.write_response_assertions(ctx, result.modified_extensions.as_ref());
+        Ok(None)
+    }
+
+    /// Remember an SSE classification until the clean body EOF callback.
+    fn record_streamed_inference_response(&self, ctx: &mut HttpFilterContext<'_>) {
+        if self.llm_post
+            && state(ctx).is_some_and(|state| state.inference_model.is_some())
+            && Self::response_is_event_stream(ctx)
+        {
+            state_mut(ctx).streamed_inference_response = true;
+        }
+    }
+
     /// Put the rendered response contract on the response the client receives.
     fn write_response_assertions(&self, ctx: &mut HttpFilterContext<'_>, extensions: Option<&Extensions>) {
         let Some(response) = ctx.response_header.as_mut() else {
@@ -2107,8 +2606,8 @@ impl HttpFilter for PolicyFilter {
         // traffic out of this filter so the buffering cost is bounded
         // either way.
         match self.cfg.body_access {
-            BodyAccessMode::ReadOnly => BodyAccess::ReadOnly,
-            BodyAccessMode::ReadWrite => BodyAccess::ReadWrite,
+            BodyAccessMode::ReadOnly => BodyAccess::ReadOnly(crate::BodyRequirement::Required),
+            BodyAccessMode::ReadWrite => BodyAccess::ReadWrite(crate::BodyRequirement::Required),
         }
     }
 
@@ -2139,8 +2638,8 @@ impl HttpFilter for PolicyFilter {
 
     fn response_body_access(&self) -> BodyAccess {
         match self.cfg.body_access {
-            BodyAccessMode::ReadOnly => BodyAccess::ReadOnly,
-            BodyAccessMode::ReadWrite => BodyAccess::ReadWrite,
+            BodyAccessMode::ReadOnly => BodyAccess::ReadOnly(crate::BodyRequirement::Required),
+            BodyAccessMode::ReadWrite => BodyAccess::ReadWrite(crate::BodyRequirement::Required),
         }
     }
 
@@ -2466,33 +2965,17 @@ impl HttpFilter for PolicyFilter {
     }
 
     async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        let Some(hook) = self.response_hook else {
+        self.record_streamed_inference_response(ctx);
+        if ctx.response_header.is_none() {
             return Ok(FilterAction::Continue);
-        };
-        let Some(response) = ctx.response_header.as_ref() else {
-            return Ok(FilterAction::Continue);
-        };
-        let extensions = Self::response_extensions(
-            ctx,
-            snapshot_response_headers(&response.headers),
-            response.status.as_u16(),
-            &self.cfg,
-            &self.trusted_proxies,
-        );
-
-        let result = self.invoke::<HttpHook>(ctx, hook, HttpPayload, extensions).await?;
-        if !result.continue_processing {
-            tracing::warn!(
-                target: "policy.filter",
-                violation = ?result.violation,
-                "http response deny; replacing the upstream response",
-            );
-            return Ok(FilterAction::Reject(super::error::http_authz_rejection(
-                result.violation.as_ref(),
-            )));
         }
-
-        self.write_response_assertions(ctx, result.modified_extensions.as_ref());
+        if let Some(action) = self.dispatch_http_response_hook(ctx).await? {
+            return Ok(action);
+        }
+        Self::snapshot_response_context(ctx);
+        if Self::response_ends_at_headers(ctx) && self.entity_routes && self.llm_post {
+            return self.dispatch_llm_response_context(ctx);
+        }
         Ok(FilterAction::Continue)
     }
 
@@ -2506,8 +2989,13 @@ impl HttpFilter for PolicyFilter {
         body: &mut Option<Bytes>,
         end_of_stream: bool,
     ) -> Result<FilterAction, FilterError> {
-        // Release SSE immediately because it has no single completion to evaluate.
-        if matches!(self.cfg.body_access, BodyAccessMode::ReadWrite) && self.inference_response_is_streamed(ctx) {
+        // Release SSE chunks immediately because there is no single completion to buffer.
+        // Keep the clean-EOF callback available for metadata-only response policy.
+        if !end_of_stream
+            && matches!(self.cfg.body_access, BodyAccessMode::ReadWrite)
+            && (self.inference_response_is_streamed(ctx)
+                || state(ctx).is_some_and(|state| state.streamed_inference_response))
+        {
             return Ok(FilterAction::Release);
         }
         if !end_of_stream {
@@ -2517,6 +3005,14 @@ impl HttpFilter for PolicyFilter {
         // a pure L7 (or identity-only) policy has no per-entity post hook.
         if !self.entity_routes {
             return Ok(FilterAction::Continue);
+        }
+        if self.llm_post
+            && ctx.extensions.get::<PolicyResponseContext>().is_some()
+            && (matches!(self.cfg.body_access, BodyAccessMode::ReadOnly)
+                || self.inference_response_is_streamed(ctx)
+                || state(ctx).is_some_and(|state| state.streamed_inference_response))
+        {
+            return self.dispatch_llm_response_context(ctx);
         }
         // Response hooks require the buffering enabled by `read_write`.
         if !matches!(self.cfg.body_access, BodyAccessMode::ReadWrite) {
@@ -2943,7 +3439,7 @@ pub(super) fn identity_only_fallback_warnings(
 }
 
 /// Warn when the loaded policy declares `rate_limits:`, which runs the
-/// experimental limiter. Runs on every construction, so on every reload too.
+/// request limiter. Runs on every construction, so on every reload too.
 fn warn_on_rate_limits(policy_config: &ppe::praxis_policy_core::config::PolicyConfig, config_path: &str) {
     if declares_rate_limits(policy_config) {
         tracing::warn!(

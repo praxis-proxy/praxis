@@ -316,11 +316,14 @@ impl ProxyHttp for PingoraHttpHandler {
     {
         let pipeline = ctx.pipeline(&self.pipeline);
         if !pipeline.needs_response_trailers() {
-            return Ok(None);
+            let produced = response_trailer_filter::dispatch_synthetic_eof(&pipeline, ctx)
+                .map_err(|error| pingora_core::Error::explain(pingora_core::ErrorType::InternalError, error))?;
+            return Ok(produced);
         }
         let span = ctx.request_span.clone();
         let _entered = span.enter();
-        let produced = response_trailer_filter::execute(&pipeline, upstream_trailers, ctx);
+        let produced = response_trailer_filter::execute(&pipeline, upstream_trailers, ctx)
+            .map_err(|error| pingora_core::Error::explain(pingora_core::ErrorType::InternalError, error))?;
         hop_by_hop::strip_reserved_internal_header_map(upstream_trailers);
         Ok(produced)
     }
@@ -657,7 +660,7 @@ mod replay_tests {
         }
 
         fn request_body_access(&self) -> BodyAccess {
-            BodyAccess::ReadWrite
+            BodyAccess::ReadWrite(praxis_filter::BodyRequirement::Optional)
         }
     }
 

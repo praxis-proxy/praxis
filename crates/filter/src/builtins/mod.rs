@@ -19,12 +19,15 @@ pub use http::{
     CsrfFilter, DisallowedOriginMode, EndpointReselector, EndpointSelectorFilter, ForwardedHeadersFilter,
     GrpcDetectionFilter, GrpcStatusFilter, GrpcTimeoutFilter, GrpcWebFilter, GuardrailsAction, GuardrailsFilter,
     HeadClassifierFilter, HeaderFilter, IpAclFilter, JsonBodyFieldFilter, JsonBodyFilter, JsonBodyOps, JsonRpcFilter,
-    LoadBalancerFilter, PathRewriteFilter, PiiKind, RateLimitFilter, RateLimitMode, RedirectFilter, RedirectStatus,
-    RequestIdFilter, RouterFilter, RuleTargetKind, SessionStore, SessionStoreRegistry, StaticResponseFilter,
-    StickySessionsFilter, TimeoutFilter, TraceContextFilter, UrlRewriteFilter, access_record_already_emitted,
-    bodyless_response, emit_access_record, encode_trailer_frame, has_dot_dot_traversal, mark_access_record_emitted,
-    normalize_rewritten_path, shutdown_access_log_sinks,
+    LoadBalancerFilter, PathRewriteFilter, PiiKind, RateLimitFilter, RateLimitMode, RateLimitScope, RedirectFilter,
+    RedirectStatus, RequestIdFilter, RouterFilter, RuleTargetKind, SessionStore, SessionStoreRegistry,
+    StaticResponseFilter, StickySessionsFilter, TimeoutFilter, TraceContextFilter, UrlRewriteFilter,
+    access_record_already_emitted, bodyless_response, emit_access_record, encode_trailer_frame, has_dot_dot_traversal,
+    mark_access_record_emitted, normalize_rewritten_path, shutdown_access_log_sinks,
 };
 #[cfg(feature = "policy-engine")]
-pub use http::{PolicyFilter, PolicyPluginFactoryFn, fips_crypto_blocker, register_policy_plugin_factory};
+pub use http::{
+    PolicyFilter, PolicyPluginFactoryFn, PolicyResponseContext, PolicyResponseOutput, fips_crypto_blocker,
+    register_policy_plugin_factory,
+};
 pub use tcp::{SniRouterFilter, TcpAccessLogFilter, TcpLoadBalancerFilter};
