@@ -296,8 +296,7 @@ pub(in crate::http) async fn run_pipeline(
         retry_policy,
         route_retry_policy,
         hedge_policy,
-        cluster_retry_state,
-        cluster_retry_state_released,
+        cluster_admission,
         endpoint_reselector,
         extensions,
         filter_metadata,
@@ -411,8 +410,7 @@ pub(in crate::http) async fn run_pipeline(
             filter_ctx.retry_policy,
             filter_ctx.route_retry_policy,
             filter_ctx.hedge_policy,
-            filter_ctx.cluster_retry_state,
-            filter_ctx.cluster_retry_state_released,
+            filter_ctx.cluster_admission,
             filter_ctx.endpoint_reselector,
             filter_ctx.extensions,
             filter_ctx.filter_metadata,
@@ -470,8 +468,7 @@ pub(in crate::http) async fn run_pipeline(
     ctx.cluster = cluster;
     ctx.upstream = upstream;
     ctx.selected_endpoint_index = selected_endpoint_index;
-    ctx.cluster_retry_state = cluster_retry_state;
-    ctx.cluster_retry_state_released = cluster_retry_state_released;
+    ctx.cluster_admission = cluster_admission;
     ctx.endpoint_reselector = endpoint_reselector;
 
     match action {
@@ -532,17 +529,21 @@ pub(in crate::http) async fn run_pipeline(
     reason = "tests"
 )]
 mod tests {
-    use std::{collections::VecDeque, net::IpAddr};
+    use std::{collections::VecDeque, net::IpAddr, sync::atomic::Ordering as AtomicOrdering, time::Duration};
 
     use http::{HeaderMap, Method, Uri};
-    use praxis_core::config::FailureMode;
     #[cfg(not(feature = "pingora"))]
     use praxis_core::connectivity::normalize_mapped_ipv4;
+    use praxis_core::{
+        config::FailureMode,
+        retry::{AdmissionLease, ClusterRetryState},
+    };
     #[cfg(not(feature = "pingora"))]
     use praxis_filter::{BodyMode, Rejection};
     use praxis_filter::{FilterRegistry, TrustedHeaderMutation};
 
     use super::*;
+    use crate::http::pingora::handler::{response_filter::run_response_filters, retry_util::release_retry_state};
 
     #[tokio::test]
     async fn empty_pipeline_continues() {
@@ -1307,10 +1308,7 @@ mod tests {
             status: http::StatusCode::OK,
             headers: HeaderMap::new(),
         };
-        let (action, _) =
-            super::super::super::response_filter::run_response_filters(&pipeline, &mut ctx, &mut response)
-                .await
-                .unwrap();
+        let (action, _) = run_response_filters(&pipeline, &mut ctx, &mut response).await.unwrap();
         assert!(matches!(action.unwrap(), FilterAction::Continue));
         assert_eq!(ctx.response_body_mode, BodyMode::StreamBuffer { max_bytes: Some(7) });
     }
@@ -1377,5 +1375,372 @@ mod tests {
             ctx.adapted_request_body.is_none(),
             "phase is gated on a selected upstream"
         );
+    }
+    // -------------------------------------------------------------------------
+    // Cancelled Phases and the Admission Lease
+    // -------------------------------------------------------------------------
+
+    /// A filter whose request hook never finishes, standing in for one
+    /// awaiting a slow dependency when the client goes away.
+    struct StallingRequestFilter;
+
+    #[async_trait::async_trait]
+    impl praxis_filter::HttpFilter for StallingRequestFilter {
+        fn name(&self) -> &'static str {
+            "stalling_request"
+        }
+
+        async fn on_request(
+            &self,
+            _ctx: &mut praxis_filter::HttpFilterContext<'_>,
+        ) -> Result<FilterAction, FilterError> {
+            std::future::pending::<()>().await;
+            Ok(FilterAction::Continue)
+        }
+    }
+
+    /// A filter whose response hook never finishes.
+    struct StallingResponseFilter;
+
+    #[async_trait::async_trait]
+    impl praxis_filter::HttpFilter for StallingResponseFilter {
+        fn name(&self) -> &'static str {
+            "stalling_response"
+        }
+
+        async fn on_request(
+            &self,
+            _ctx: &mut praxis_filter::HttpFilterContext<'_>,
+        ) -> Result<FilterAction, FilterError> {
+            Ok(FilterAction::Continue)
+        }
+
+        async fn on_response(
+            &self,
+            _ctx: &mut praxis_filter::HttpFilterContext<'_>,
+        ) -> Result<FilterAction, FilterError> {
+            std::future::pending::<()>().await;
+            Ok(FilterAction::Continue)
+        }
+    }
+
+    /// A `load_balancer` capped at one connection, paired with a stalling
+    /// filter.
+    ///
+    /// `stall_first` puts the stall ahead of the load balancer, which is what
+    /// makes it run *after* the load balancer on the way out, since the
+    /// response phase unwinds in reverse.
+    fn capped_lb_with_stall(
+        stall: &'static str,
+        make: fn() -> Box<dyn praxis_filter::HttpFilter>,
+        stall_first: bool,
+    ) -> FilterPipeline {
+        let mut registry = FilterRegistry::with_builtins();
+        registry
+            .register(stall, praxis_filter::FilterFactory::Http(Arc::new(move |_| Ok(make()))))
+            .unwrap();
+        let entry = |filter_type: String, config: serde_yaml::Value| praxis_filter::FilterEntry {
+            branch_chains: None,
+            filter_type,
+            config,
+            conditions: vec![],
+            name: None,
+            response_conditions: vec![],
+            failure_mode: FailureMode::default(),
+        };
+        let lb = entry(
+            "load_balancer".into(),
+            serde_yaml::from_str(
+                "clusters:\n  - name: web\n    endpoints: [\"127.0.0.1:8080\"]\n    max_connections: 1\n",
+            )
+            .unwrap(),
+        );
+        let stalling = entry(stall.into(), serde_yaml::from_str("{}").unwrap());
+        let mut entries = if stall_first {
+            vec![stalling, lb]
+        } else {
+            vec![lb, stalling]
+        };
+        FilterPipeline::build(&mut entries, &registry).unwrap()
+    }
+
+    /// A context routed to the capped cluster.
+    fn ctx_for_web() -> PingoraRequestCtx {
+        let mut ctx = make_ctx();
+        ctx.cluster = Some(Arc::from("web"));
+        ctx
+    }
+
+    /// Exercise the streaming request-body context writeback without changing the body.
+    struct AdmissionBodyObserver;
+
+    #[async_trait::async_trait]
+    impl praxis_filter::HttpFilter for AdmissionBodyObserver {
+        fn name(&self) -> &'static str {
+            "admission_body_observer"
+        }
+
+        async fn on_request(
+            &self,
+            _ctx: &mut praxis_filter::HttpFilterContext<'_>,
+        ) -> Result<FilterAction, FilterError> {
+            Ok(FilterAction::Continue)
+        }
+
+        fn request_body_access(&self) -> praxis_filter::BodyAccess {
+            praxis_filter::BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional)
+        }
+    }
+
+    /// Prefer the first endpoint on equal load so counter leaks and double releases affect selection.
+    fn admission_cleanup_pipeline() -> FilterPipeline {
+        let mut entries = serde_yaml::from_str::<Vec<praxis_filter::FilterEntry>>(
+            r#"
+- filter: load_balancer
+  response_conditions:
+    - when:
+        status: [201]
+  clusters:
+    - name: web
+      max_connections: 3
+      load_balancer_strategy: least_connections
+      endpoints:
+        - { address: "127.0.0.1:8080", weight: 2 }
+        - { address: "127.0.0.1:8081", weight: 1 }
+      retry_policy:
+        max_retries: 1
+        retriable_conditions: [status_5xx]
+        backoff: { base_interval_ms: 1, max_interval_ms: 1 }
+- filter: admission_body_observer
+"#,
+        )
+        .unwrap();
+        let mut registry = FilterRegistry::with_builtins();
+        registry
+            .register(
+                "admission_body_observer",
+                praxis_filter::FilterFactory::Http(Arc::new(|_| Ok(Box::new(AdmissionBodyObserver)))),
+            )
+            .unwrap();
+        FilterPipeline::build(&mut entries, &registry).unwrap()
+    }
+
+    /// An active attempt whose request-body hook restored a copy of the selected upstream.
+    async fn body_filtered_attempt(pipeline: &FilterPipeline) -> PingoraRequestCtx {
+        let mut ctx = ctx_for_web();
+        drop(run_pipeline(pipeline, make_request(), &mut ctx).await.unwrap());
+        ctx.request_is_idempotent = true;
+        let _target = super::super::super::upstream_peer::prepare_attempt(&mut ctx)
+            .await
+            .unwrap();
+        let mut body = Some(Bytes::from_static(b"body"));
+        assert!(
+            super::super::super::request_body_filter::run_request_body(pipeline, &mut body, true, &mut ctx)
+                .await
+                .is_ok()
+        );
+        assert_eq!(ctx.upstream.as_ref().unwrap().address.as_ref(), "127.0.0.1:8080");
+        assert_eq!(
+            ctx.upstream_for_retry.as_ref().unwrap().address,
+            ctx.upstream.as_ref().unwrap().address
+        );
+        ctx
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "keeps the fallback and repeated-cleanup scenario together"
+    )]
+    async fn fallback_cleanup_returns_the_selected_endpoint_once() {
+        for contacted in [false, true] {
+            let pipeline = admission_cleanup_pipeline();
+            let mut first = ctx_for_web();
+            drop(run_pipeline(&pipeline, make_request(), &mut first).await.unwrap());
+            assert_eq!(first.upstream.as_ref().unwrap().address.as_ref(), "127.0.0.1:8080");
+            if contacted {
+                first.upstream_for_retry = first.upstream.take();
+            }
+            let lease = Arc::clone(first.cluster_admission.as_ref().unwrap());
+            release_retry_state(&mut first);
+            assert!(lease.is_released());
+
+            let mut second = ctx_for_web();
+            drop(run_pipeline(&pipeline, make_request(), &mut second).await.unwrap());
+            assert_eq!(
+                second.upstream.as_ref().unwrap().address.as_ref(),
+                "127.0.0.1:8080",
+                "fallback must return the first endpoint's counter before response hooks run"
+            );
+            super::super::super::logging_util::logging_cleanup(&pipeline, &mut first).await;
+            release_retry_state(&mut first);
+
+            let mut third = ctx_for_web();
+            drop(run_pipeline(&pipeline, make_request(), &mut third).await.unwrap());
+            assert_eq!(
+                third.upstream.as_ref().unwrap().address.as_ref(),
+                "127.0.0.1:8081",
+                "repeated cleanup must leave the second request's endpoint counter alone"
+            );
+            assert_eq!(lease.state().active_requests.load(AtomicOrdering::Relaxed), 2);
+            release_retry_state(&mut second);
+            release_retry_state(&mut third);
+        }
+    }
+
+    #[cfg(feature = "pingora")]
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "follows admission and both endpoint counters across a retry"
+    )]
+    async fn final_header_cleanup_waits_for_the_retry_decision() {
+        let pipeline = admission_cleanup_pipeline();
+        let mut ctx = body_filtered_attempt(&pipeline).await;
+        let lease = Arc::clone(ctx.cluster_admission.as_ref().unwrap());
+        let mut retryable = pingora_http::ResponseHeader::build(503, None).unwrap();
+        let error = super::super::super::response_filter::execute(&pipeline, &mut retryable, &mut ctx)
+            .await
+            .expect_err("the 503 should be retried before final-header cleanup");
+        assert!(error.retry());
+        assert!(!lease.is_released(), "admission must span all retry attempts");
+        assert_eq!(lease.state().active_requests.load(AtomicOrdering::Relaxed), 1);
+
+        let _target = super::super::super::upstream_peer::prepare_attempt(&mut ctx)
+            .await
+            .unwrap();
+        let mut final_response = pingora_http::ResponseHeader::build(200, None).unwrap();
+        super::super::super::response_filter::execute(&pipeline, &mut final_response, &mut ctx)
+            .await
+            .unwrap();
+        assert!(lease.is_released(), "the accepted final response must return admission");
+        assert_eq!(lease.state().active_requests.load(AtomicOrdering::Relaxed), 0);
+        let mut next = ctx_for_web();
+        drop(run_pipeline(&pipeline, make_request(), &mut next).await.unwrap());
+        assert_eq!(next.upstream.as_ref().unwrap().address.as_ref(), "127.0.0.1:8080");
+        let mut other = ctx_for_web();
+        drop(run_pipeline(&pipeline, make_request(), &mut other).await.unwrap());
+        assert_eq!(
+            other.upstream.as_ref().unwrap().address.as_ref(),
+            "127.0.0.1:8081",
+            "final cleanup must return the reselected endpoint, not the original attempt"
+        );
+        release_retry_state(&mut next);
+        release_retry_state(&mut other);
+    }
+
+    #[tokio::test]
+    async fn fallback_cleanup_during_retry_backoff_keeps_another_requests_endpoint() {
+        let pipeline = admission_cleanup_pipeline();
+        let mut abandoned = body_filtered_attempt(&pipeline).await;
+        let lease = Arc::clone(abandoned.cluster_admission.as_ref().unwrap());
+        assert!(super::super::super::retry_util::response_status_retry(
+            &mut abandoned,
+            503
+        ));
+        assert!(
+            abandoned.upstream_for_retry.is_none(),
+            "the failed attempt is already released"
+        );
+
+        let mut active = ctx_for_web();
+        drop(run_pipeline(&pipeline, make_request(), &mut active).await.unwrap());
+        assert_eq!(active.upstream.as_ref().unwrap().address.as_ref(), "127.0.0.1:8080");
+        release_retry_state(&mut abandoned);
+        super::super::super::logging_util::logging_cleanup(&pipeline, &mut abandoned).await;
+        assert!(lease.is_released());
+        assert_eq!(lease.state().active_requests.load(AtomicOrdering::Relaxed), 1);
+
+        let mut next = ctx_for_web();
+        drop(run_pipeline(&pipeline, make_request(), &mut next).await.unwrap());
+        assert_eq!(
+            next.upstream.as_ref().unwrap().address.as_ref(),
+            "127.0.0.1:8081",
+            "cancellation before reselection must not release the old endpoint a second time"
+        );
+        release_retry_state(&mut active);
+        release_retry_state(&mut next);
+    }
+
+    /// A context as the response phase finds it: request answered by the
+    /// upstream the load balancer picked, holding `lease`.
+    fn answered_ctx(lease: Arc<AdmissionLease>) -> PingoraRequestCtx {
+        let mut ctx = ctx_for_web();
+        ctx.request_snapshot = Some(make_request());
+        ctx.upstream = Some(make_test_upstream());
+        ctx.cluster_admission = Some(lease);
+        let _old = ctx.filter_metadata.insert("lb.selected".to_owned(), "true".to_owned());
+        ctx
+    }
+
+    /// Covers the cluster admission slot only. The per-endpoint in-flight
+    /// count `strategy.select` takes in the same `on_request` is not owned by
+    /// the lease, and a cancelled phase still strands it; that is a separate
+    /// pre-existing leak, reachable with `least_connections` and no
+    /// `max_connections` set at all.
+    #[tokio::test]
+    async fn a_cancelled_request_phase_returns_the_admission_slot() {
+        let pipeline = capped_lb_with_stall("stalling_request", || Box::new(StallingRequestFilter), false);
+
+        // The client goes away while the filter after the load balancer is
+        // still awaiting, so the phase never reaches its writeback.
+        let mut abandoned = ctx_for_web();
+        let ran = tokio::time::timeout(
+            Duration::from_millis(50),
+            run_pipeline(&pipeline, make_request(), &mut abandoned),
+        )
+        .await;
+        assert!(ran.is_err(), "the stalling filter keeps the request phase pending");
+        release_retry_state(&mut abandoned);
+
+        // The cap is one, so the next request proves whether the slot came back.
+        let mut next = ctx_for_web();
+        let ran = tokio::time::timeout(
+            Duration::from_millis(50),
+            run_pipeline(&pipeline, make_request(), &mut next),
+        )
+        .await;
+        assert!(
+            ran.is_err(),
+            "the abandoned request's slot must come back, letting the next request through to the stall"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_response_phase_keeps_another_requests_slot() {
+        let pipeline = capped_lb_with_stall("stalling_response", || Box::new(StallingResponseFilter), true);
+        let state = Arc::new(ClusterRetryState::new(None).with_max_concurrent(Some(2)));
+        let lease = AdmissionLease::claim(&state).expect("the first request is admitted");
+        let other = AdmissionLease::claim(&state).expect("a second request is admitted");
+
+        // The first request's response phase releases its slot and is then
+        // cancelled before its state is written back.
+        let mut ctx = answered_ctx(lease);
+        let mut response = praxis_filter::Response {
+            status: http::StatusCode::OK,
+            headers: HeaderMap::new(),
+        };
+        let ran = tokio::time::timeout(
+            Duration::from_millis(50),
+            run_response_filters(&pipeline, &mut ctx, &mut response),
+        )
+        .await;
+        assert!(ran.is_err(), "the stalling filter keeps the response phase pending");
+        assert_eq!(
+            state.active_requests.load(AtomicOrdering::Relaxed),
+            1,
+            "the load balancer released the first request's slot"
+        );
+
+        // Completion runs anyway, and must not take the slot the other
+        // request is still holding.
+        release_retry_state(&mut ctx);
+
+        assert_eq!(
+            state.active_requests.load(AtomicOrdering::Relaxed),
+            1,
+            "the second request must keep its slot"
+        );
+        assert!(!other.is_released(), "and its lease is untouched");
     }
 }

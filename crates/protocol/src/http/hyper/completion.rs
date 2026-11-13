@@ -86,7 +86,7 @@ mod tests {
 
     use praxis_core::{
         health::{ClusterHealthEntry, EndpointHealth, HealthRegistry},
-        retry::ClusterRetryState,
+        retry::{AdmissionLease, ClusterRetryState},
     };
     use praxis_filter::FilterPipeline;
     use tracing::info_span;
@@ -181,9 +181,9 @@ mod tests {
     #[tokio::test]
     async fn completion_releases_the_cluster_retry_lease() {
         let state = Arc::new(ClusterRetryState::new(None));
-        state.enter();
+        let lease = AdmissionLease::claim(&state).expect("an uncapped cluster admits");
         let mut flight = Flight::for_tests(empty_pipeline());
-        flight.ctx.cluster_retry_state = Some(Arc::clone(&state));
+        flight.ctx.cluster_admission = Some(Arc::clone(&lease));
 
         run(&mut flight).await;
 
@@ -192,10 +192,7 @@ mod tests {
             0,
             "the request no longer counts as active on its cluster"
         );
-        assert!(
-            flight.ctx.cluster_retry_state_released,
-            "the lease is marked released so nothing releases it twice"
-        );
+        assert!(lease.is_released(), "the lease is spent, so nothing releases it twice");
     }
 
     #[tokio::test]

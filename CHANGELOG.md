@@ -119,6 +119,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   handshakes remain healthy when that deadline expires without a response.
   Rust consumers matching `HealthCheckType` exhaustively must handle the new
   `Tls` variant even when the feature is disabled.
+- `praxis_cluster_overload_rejects_total{cluster}` counts requests shed by a
+  cluster's `max_connections` ceiling. Kept separate from
+  `praxis_overload_rejects_total`, which covers only the pre-filter
+  protections and carries no cluster label.
+- `praxis_core::retry::ClusterRetryState` gains `try_enter`,
+  `with_max_concurrent` and a `max_concurrent` field, exposing the per-cluster
+  admission counter the ceiling is built on.
+- `praxis_core::retry::AdmissionLease` owns one request's claim on that
+  counter: `claim` takes a slot or reports the cluster full, `release` returns
+  it idempotently, and dropping the lease returns it too. It replaces the
+  `cluster_retry_state` and `cluster_retry_state_released` fields on
+  `HttpFilterContext` and `PingoraRequestCtx` with a single
+  `cluster_admission` field holding the lease. Rust consumers that read or
+  wrote either field must move to the lease.
+- `tcp_load_balancer` rejects a cluster that sets `max_connections` at startup
+  rather than ignoring it: a TCP connection has no status code to shed with.
+  Cap TCP concurrency on the listener instead.
 - Granular Policy Engine Cargo features. `policy-builtins` (on by default)
   is the complete bundle; a `--no-default-features` build names
   `policy-engine` or individual builtins (`policy-api-key`, `policy-jwt`,
@@ -226,6 +243,60 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Cluster admission and selected endpoint counters now return at final response
+  headers even when `response_conditions` skip the load balancer's response
+  hook. Long-lived SSE responses no longer keep a cluster at its
+  `max_connections` ceiling after final headers. Repeated response and fallback
+  cleanup releases each counter only once. Retry reselection clears upstream
+  copies restored by body filters, so final-header cleanup returns the current
+  endpoint and cancellation during backoff cannot release the old endpoint twice.
+- Cluster `max_connections` is now enforced. It was parsed, validated and
+  documented as shedding excess requests with 503, but nothing read it, so a
+  cluster accepted unlimited concurrent requests. The load balancer now claims
+  an in-flight slot before selecting an endpoint and sheds a request that would
+  exceed the ceiling with `503` and `Retry-After: 1`, matching the listener
+  cap. Operators who set `max_connections` expecting it to be inert will start
+  seeing 503s once a cluster saturates; raise or remove the value to restore
+  the previous behaviour. A request pinned by session affinity bypasses
+  endpoint selection and so is neither shed nor counted.
+- A sub-request running a nested pipeline (an `iterative_request_router` step
+  or a callout chain) now returns its cluster admission slot on every exit
+  path. Previously a filter ordered after the step's `load_balancer` that
+  rejected, errored or timed out ended the sub-request before its response
+  phase, leaking the slot permanently; after `max_connections` such
+  sub-requests the cluster answered 503 to everything until the config was
+  reloaded (CWE-772). The nested context now releases the slot, and the
+  endpoint's in-flight count with it, when it is dropped.
+- A terminal response produced after the load balancer ran no longer releases
+  the cluster's in-flight slot twice. The response pipeline runs against a
+  cloned context whose release flag was not carried back, so the `logging`
+  hook released a second time and took another request's slot, letting the
+  ceiling drift loose.
+- An upstream `103 Early Hints`, or any other non-final `1xx`, no longer
+  releases the cluster's in-flight slot. The response pipeline runs once per
+  response head the upstream sends, so an interim head handed the slot back
+  while the request was still being served and the final head released it a
+  second time, taking another request's slot. One `103`-emitting backend was
+  enough to let `max_connections` be exceeded.
+- A request whose client goes away mid-pipeline no longer leaks its cluster
+  in-flight slot. Each phase ran against a cloned context whose state reached
+  the request only at the end of the phase, so a phase cancelled before that
+  point stranded the slot with nothing left holding it, and a cancelled
+  response phase lost the release flag and released a second time, taking
+  another request's slot. After `max_connections` cancellations a cluster
+  answered 503 to everything until the config was reloaded (CWE-772). The
+  slot is now an `AdmissionLease` shared by every phase, which returns it
+  exactly once whether the request finishes or is dropped.
+- A request whose endpoint a preceding filter preset now counts against its
+  cluster's `max_connections` ceiling. The load balancer skips selection when
+  an upstream is already set, and the admission claim sat inside the selection
+  path, so an `endpoint_selector` -> `router` -> `load_balancer` pipeline sent
+  preset requests to a saturated cluster uncounted and unshed. A preset
+  request now takes a slot whenever a router placed it in one of the load
+  balancer's clusters, is shed with `503` and `Retry-After: 1` when that
+  cluster is full, and hands the slot back at the final response without
+  touching the endpoint counter it never took. Session affinity keeps its
+  documented exception.
 - Pingora sub-request connections now respect the cluster
   `idle_timeout_ms` when returned to the pool, avoiding reuse of idle
   connections silently dropped by NAT or firewall state.

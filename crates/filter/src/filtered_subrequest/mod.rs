@@ -912,6 +912,9 @@ impl FilteredSubrequestExecutor {
                 .as_ref()
                 .and_then(|value| value.to_str().ok())
                 .map(Arc::from);
+            // Cloned out with the two above so the borrow of `filter_ctx` ends
+            // before the credential phase below needs it mutably.
+            let upstream_base_path: Option<Arc<str>> = upstream.base_path.clone();
             // Fall back to the transport only when no override is set.
             #[cfg(feature = "chain-binding")]
             let logical_authority: Arc<str> = authority_override
@@ -982,7 +985,7 @@ impl FilteredSubrequestExecutor {
                 uri: subrequest_uri(
                     filter_ctx.rewritten_path.as_ref(),
                     &current_request.uri,
-                    upstream.base_path.as_deref(),
+                    upstream_base_path.as_deref(),
                 )?,
                 headers: sub_headers,
                 body: request_body.unwrap_or_default(),

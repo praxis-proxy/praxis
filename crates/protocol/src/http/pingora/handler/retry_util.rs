@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use praxis_core::config::RetryPolicy;
+use praxis_core::{config::RetryPolicy, retry::AdmissionLease};
 use tracing::{debug, warn};
 
 use super::{metrics, retry};
@@ -55,7 +55,7 @@ pub(in crate::http) fn connect_failure_retry(ctx: &mut PingoraRequestCtx, outcom
     metrics::record_upstream_connect_failure(cluster.clone());
 
     let policy = ctx.retry_policy.clone().unwrap_or_else(legacy_default_policy);
-    let decision = retry::should_retry(ctx, &policy, outcome, ctx.cluster_retry_state.as_deref());
+    let decision = retry::should_retry(ctx, &policy, outcome, budget_state(ctx));
 
     match decision {
         retry::RetryDecision::Retry { backoff } => {
@@ -133,7 +133,7 @@ pub(super) fn maybe_retry_response(ctx: &mut PingoraRequestCtx, status: u16) -> 
 pub(in crate::http) fn response_status_retry(ctx: &mut PingoraRequestCtx, status: u16) -> bool {
     let policy = ctx.retry_policy.clone().unwrap_or_else(legacy_default_policy);
     let outcome = retry::RetryOutcome::StatusCode(status);
-    let decision = retry::should_retry(ctx, &policy, outcome, ctx.cluster_retry_state.as_deref());
+    let decision = retry::should_retry(ctx, &policy, outcome, budget_state(ctx));
     match decision {
         retry::RetryDecision::Retry { backoff } => {
             ctx.retries += 1;
@@ -168,13 +168,26 @@ pub(in crate::http) fn response_status_retry(ctx: &mut PingoraRequestCtx, status
     }
 }
 
-/// Release the active-request counter if it has not already been released.
+/// The cluster counter the retry budget reads, when this request holds a
+/// lease on one.
+fn budget_state(ctx: &PingoraRequestCtx) -> Option<&praxis_core::retry::ClusterRetryState> {
+    ctx.cluster_admission.as_deref().map(AdmissionLease::state)
+}
+
+/// Give the cluster admission slot and selected endpoint back, if still held.
+///
+/// Releasing a lease twice is a no-op, so this runs safely after a phase
+/// that already released, and after one that was cancelled before it could.
 pub(in crate::http) fn release_retry_state(ctx: &mut PingoraRequestCtx) {
-    if !ctx.cluster_retry_state_released
-        && let Some(state) = ctx.cluster_retry_state.take()
+    if let Some(lease) = ctx.cluster_admission.take()
+        && lease.release()
+        && ctx.filter_metadata.contains_key("lb.selected")
+        && let (Some(reselector), Some(upstream)) = (
+            ctx.endpoint_reselector.as_ref(),
+            ctx.upstream_for_retry.as_ref().or(ctx.upstream.as_ref()),
+        )
     {
-        state.leave();
-        ctx.cluster_retry_state_released = true;
+        reselector.release(&upstream.address);
     }
 }
 
@@ -183,6 +196,8 @@ pub(in crate::http) fn release_retry_state(ctx: &mut PingoraRequestCtx) {
 /// presented for the reselected upstream to reuse.
 fn clear_for_reselection(ctx: &mut PingoraRequestCtx) {
     let failed = ctx.upstream_for_retry.take();
+    // Body hooks restore a copy here; it must not outlive the attempt's endpoint counter.
+    ctx.upstream = None;
     if let Some(upstream) = failed.as_ref()
         && let Some(reselector) = ctx.endpoint_reselector.as_ref()
     {

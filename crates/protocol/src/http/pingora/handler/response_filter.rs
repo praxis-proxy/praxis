@@ -63,7 +63,8 @@ pub(super) async fn execute(
     // map on every response for listeners with no filters.
     let name_fingerprint_before = (!pipeline.is_empty()).then(|| header_name_fingerprint(&resp.headers));
     ctx.connection_upgraded = is_upgrade_response;
-    if super::fail_to_proxy::is_final_response(upstream_response) {
+    let is_final = super::fail_to_proxy::is_final_response(upstream_response);
+    if is_final {
         ctx.upstream_response_status = Some(upstream_response.status.as_u16());
         praxis_core::subrequest::record_http_client_status(
             &ctx.upstream_client_span,
@@ -85,7 +86,9 @@ pub(super) async fn execute(
         return Err(err);
     }
 
-    ctx.response_phase_done = true;
+    if is_final {
+        ctx.response_phase_done = true;
+    }
 
     let (result, filter_flagged_modification) = run_response_pipeline(pipeline, ctx, &mut resp).await?;
     let rewritten_is_bodyless = ctx
@@ -226,7 +229,6 @@ pub(in crate::http) async fn run_response_filters(
         headers_modified,
         response_body_mode,
         cluster,
-        cluster_retry_state_released,
         extensions,
         filter_metadata,
         filter_state,
@@ -242,7 +244,6 @@ pub(in crate::http) async fn run_response_filters(
             fctx.response_headers_modified,
             fctx.response_body_mode,
             fctx.cluster,
-            fctx.cluster_retry_state_released,
             fctx.extensions,
             fctx.filter_metadata,
             fctx.filter_state,
@@ -254,7 +255,6 @@ pub(in crate::http) async fn run_response_filters(
     };
     let headers_modified = strip_no_content_framing(resp) || headers_modified;
     ctx.cluster = cluster;
-    ctx.cluster_retry_state_released = cluster_retry_state_released;
     ctx.response_body_mode =
         clamp_body_mode_to_ceiling(response_body_mode, baseline_response_body_mode, pipeline.buffer_cap());
     ctx.extensions = extensions;

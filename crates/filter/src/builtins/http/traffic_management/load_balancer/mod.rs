@@ -30,6 +30,7 @@ use metrics::SharedString;
 use praxis_core::{
     config::Cluster,
     health::{ClusterHealthState, HealthRegistry},
+    retry::AdmissionLease,
 };
 use tracing::{debug, warn};
 
@@ -39,7 +40,7 @@ pub use self::reselector::EndpointReselector;
 use crate::pipeline::catalog::{ClusterApplicationMetadata, ClusterMetadataDeclaration};
 use crate::{
     FilterError,
-    actions::FilterAction,
+    actions::{FilterAction, Rejection},
     filter::{HttpFilter, HttpFilterContext},
 };
 
@@ -280,6 +281,40 @@ impl LoadBalancerFilter {
         Ok((key, entry))
     }
 
+    /// Serve a request whose upstream a preceding filter already chose.
+    ///
+    /// Selection is skipped — the preset address stands — but the request
+    /// still goes to the routed cluster, so it is reached under that
+    /// cluster's base path, carries its application metadata, and is
+    /// admitted against its `max_connections` ceiling like any other
+    /// request to it. When no routed cluster of this filter's answers for
+    /// the request there is no ceiling to charge and no metadata to
+    /// publish, and it passes through untouched.
+    fn preset_upstream(&self, ctx: &mut HttpFilterContext<'_>) -> FilterAction {
+        debug!("upstream already set, skipping LB selection");
+        let Some((cluster, entry)) = ctx
+            .cluster
+            .as_deref()
+            .and_then(|name| self.clusters.get_key_value(name))
+        else {
+            return FilterAction::Continue;
+        };
+        if let Some(rejection) = admit_preset(cluster, entry, ctx) {
+            return FilterAction::Reject(rejection);
+        }
+        // The preset address answers for the routed cluster, so it is
+        // reached under that cluster's base path.
+        if let Some(base_path) = entry.base_path.clone()
+            && let Some(upstream) = ctx.upstream.as_mut()
+        {
+            upstream.base_path = Some(base_path);
+        }
+        // A preset upstream still serves the routed cluster, so
+        // `selected_upstream` conditions must see its metadata.
+        ctx.publish_selected_application(entry.application_protocol.clone(), entry.application_provider.clone());
+        FilterAction::Continue
+    }
+
     /// Look up health state for `cluster_name` from the context's
     /// [`HealthRegistry`].
     fn cluster_health<'a>(registry: Option<&'a HealthRegistry>, cluster_name: &str) -> Option<&'a ClusterHealthState> {
@@ -302,6 +337,46 @@ impl LoadBalancerFilter {
             None
         }
     }
+}
+
+/// The 503 a cluster at its `max_connections` ceiling answers with.
+///
+/// Mirrors the listener-level connection cap: `503` with `Retry-After: 1`,
+/// so a client backs off the same way whichever ceiling shed it.
+fn cluster_overloaded() -> Rejection {
+    Rejection::status(503)
+        .with_header("Retry-After", "1")
+        .with_body("cluster at max_connections")
+}
+
+/// Count a preset upstream against its cluster's `max_connections`
+/// ceiling, answering with the 503 to shed it with when the cluster is
+/// full.
+///
+/// An admitted request is marked `lb.admitted` so the response phase hands
+/// the slot back. It cannot ride the `lb.selected` marker: that one also
+/// releases an endpoint counter, and a preset upstream never went through
+/// `strategy.select`, so it holds no such counter to release.
+///
+/// A request already holding a lease — a sub-request, or a second load
+/// balancer in the chain — keeps the one it has, since the ceiling counts
+/// requests to the cluster rather than the filters that handled them.
+fn admit_preset(cluster: &Arc<str>, entry: &ClusterEntry, ctx: &mut HttpFilterContext<'_>) -> Option<Rejection> {
+    if ctx.cluster_admission.is_some() {
+        return None;
+    }
+    let Some(lease) = AdmissionLease::claim(&entry.retry_state) else {
+        debug!(
+            cluster = %cluster,
+            max_connections = entry.retry_state.max_concurrent.unwrap_or_default(),
+            "cluster at max_connections, shedding preset-upstream request"
+        );
+        crate::metrics::record_cluster_overload_reject(SharedString::from(Arc::clone(cluster)));
+        return Some(cluster_overloaded());
+    };
+    ctx.cluster_admission = Some(lease);
+    ctx.set_metadata("lb.admitted", "true");
+    None
 }
 
 /// Bindings for clusters that configure a strategy which consumes the ramp.
@@ -367,23 +442,7 @@ impl HttpFilter for LoadBalancerFilter {
 
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         if ctx.upstream.is_some() {
-            debug!("upstream already set, skipping LB selection");
-            // A preset upstream (endpoint_selector) still serves the routed
-            // cluster, so `selected_upstream` conditions must see its metadata.
-            let entry = ctx.cluster.as_deref().and_then(|name| self.clusters.get(name));
-            let application =
-                entry.map(|entry| (entry.application_protocol.clone(), entry.application_provider.clone()));
-            // The preset address answers for the routed cluster, so it is
-            // reached under that cluster's base path.
-            if let Some(base_path) = entry.and_then(|entry| entry.base_path.clone())
-                && let Some(upstream) = ctx.upstream.as_mut()
-            {
-                upstream.base_path = Some(base_path);
-            }
-            if let Some((protocol, provider)) = application {
-                ctx.publish_selected_application(protocol, provider);
-            }
-            return Ok(FilterAction::Continue);
+            return Ok(self.preset_upstream(ctx));
         }
 
         let (cluster, entry) = self.resolve_cluster(ctx)?;
@@ -404,12 +463,14 @@ impl HttpFilter for LoadBalancerFilter {
                 debug!(cluster = %cluster_name, upstream = %pinned_addr, "using pinned endpoint from session affinity");
                 ctx.selected_endpoint_index = pinned_index;
                 // Known limitation: a pinned request is served directly without
-                // a retry policy, retry budget, or endpoint reselector, so it is
-                // not retried or failed over on a transient connect failure, and
-                // its load is not tracked by counter-based strategies (strategy
-                // .select is bypassed to honor affinity). Health-check-detected
-                // outages are handled upstream by the session-affinity filter,
-                // which does not pin to a down endpoint.
+                // a retry policy, retry budget, endpoint reselector, or
+                // `max_connections` admission, so it is not retried or failed
+                // over on a transient connect failure, its load is not tracked
+                // by counter-based strategies (strategy.select is bypassed to
+                // honor affinity), and it neither consumes nor is shed by the
+                // cluster's concurrency ceiling. Health-check-detected outages
+                // are handled upstream by the session-affinity filter, which
+                // does not pin to a down endpoint.
                 ctx.upstream = Some(entry.build_upstream(pinned_addr, ctx));
                 ctx.publish_selected_application(
                     entry.application_protocol.clone(),
@@ -424,6 +485,20 @@ impl HttpFilter for LoadBalancerFilter {
             );
         }
 
+        // Admission against the cluster's `max_connections` ceiling. Claimed
+        // before selection so a shed request takes no strategy counter. The
+        // lease owns the slot from here: every early return below drops it,
+        // which hands the slot straight back.
+        let Some(lease) = AdmissionLease::claim(&entry.retry_state) else {
+            debug!(
+                cluster = %cluster_name,
+                max_connections = entry.retry_state.max_concurrent.unwrap_or_default(),
+                "cluster at max_connections, shedding request"
+            );
+            crate::metrics::record_cluster_overload_reject(SharedString::from(Arc::clone(cluster)));
+            return Ok(FilterAction::Reject(cluster_overloaded()));
+        };
+
         if let Some(h) = health {
             if h.endpoints().iter().all(|ep| !ep.is_healthy()) {
                 if !entry.panic_mode_logged.swap(true, Ordering::Relaxed) {
@@ -437,22 +512,27 @@ impl HttpFilter for LoadBalancerFilter {
 
         let weights = self.slow_start_weights(cluster_name, health);
         let scaling = crate::load_balancing::slow_start::scaling_weights(weights.as_ref()).is_some();
-        let addr = if scaling {
+        let selected = if scaling {
             entry.strategy.select_weighted(ctx, health, &[], weights.as_ref())
         } else {
             entry.strategy.select(ctx, health, &[])
-        }
-        .ok_or_else(|| -> FilterError {
-            format!("load_balancer filter: cluster '{cluster_name}' has no available endpoints").into()
-        })?;
+        };
+        let Some(addr) = selected else {
+            // Dropping the lease hands the slot back: a cluster with no
+            // selectable endpoint must not spend its own ceiling on requests
+            // it never sends, which would wedge it closed once
+            // `max_connections` failures accumulated.
+            drop(lease);
+            return Err(format!("load_balancer filter: cluster '{cluster_name}' has no available endpoints").into());
+        };
         debug!(cluster = %cluster_name, upstream = %addr, "upstream selected");
 
         ctx.selected_endpoint_index = health.and_then(|h| h.endpoint_index(&addr)).or(Some(usize::MAX));
         ctx.set_metadata("lb.selected", "true");
 
-        // Track active request for retry budget.
-        entry.retry_state.enter();
-        ctx.cluster_retry_state = Some(Arc::clone(&entry.retry_state));
+        // Hand the lease to the request: from here the release paths, and the
+        // lease's own drop, are what give the slot back.
+        ctx.cluster_admission = Some(lease);
 
         let policy = match &ctx.route_retry_policy {
             Some(route_override) => entry.merged_retry_policy(route_override),
@@ -483,21 +563,7 @@ impl HttpFilter for LoadBalancerFilter {
     }
 
     async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        if ctx.get_metadata("lb.selected").is_none() {
-            return Ok(FilterAction::Continue);
-        }
-
-        tracing::trace!("releasing in-flight counter");
-        if let (Some(cluster_name), Some(upstream)) = (&ctx.cluster, &ctx.upstream)
-            && let Some(entry) = self.clusters.get(cluster_name)
-        {
-            entry.strategy.release(&upstream.address);
-        }
-        if let Some(state) = &ctx.cluster_retry_state {
-            state.leave();
-            ctx.cluster_retry_state_released = true;
-        }
-
+        ctx.finish_upstream_response();
         Ok(FilterAction::Continue)
     }
 }
