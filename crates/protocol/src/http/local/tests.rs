@@ -504,6 +504,31 @@ async fn generated_512_mib_stream_is_bounded_and_ignores_global_buffer_ceilings(
 }
 
 #[tokio::test]
+async fn request_limit_rejects_unread_tail_above_transport_chunk_boundary() {
+    for (input, status, outcome, eof) in [
+        (65_536, 200, LocalOutcome::Completed, true),
+        (65_537, 413, LocalOutcome::LimitExceeded, false),
+    ] {
+        let state = State::default();
+        let mut owner = Fixture::owner(state.clone());
+        owner.handler = HandlerKind::ObserveRequestChunks;
+        owner.routes.first_mut().unwrap().request_limit = 65_536;
+        let pipeline = pipeline(vec![owner]);
+        let result = run(&pipeline, &state, Input::bytes(input), "/files", http::Method::POST).await;
+        assert_eq!(result.status, status, "request size: {input}");
+        assert_eq!(result.outcome, outcome);
+        assert_eq!(result.request_bytes, 65_536);
+        assert_eq!(result.request_eof, eof);
+        assert_eq!(
+            state.events().iter().filter(|event| *event == "request-chunk").count(),
+            1,
+            "the oversized tail must not reach the handler"
+        );
+        assert_complete(&state, 1);
+    }
+}
+
+#[tokio::test]
 async fn exact_limit_and_plus_one_are_enforced_before_handoff_and_after_filtering() {
     for input in [8, 9] {
         let state = State::default();

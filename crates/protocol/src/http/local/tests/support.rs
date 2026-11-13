@@ -504,7 +504,7 @@ impl LocalTransport for Transport {
         let bytes = self.input.remaining.min(self.input.chunk_size);
         let mut remaining = bytes;
         let chunk = generated(&mut remaining);
-        self.input.remaining = self.input.remaining.saturating_sub(bytes);
+        self.input.remaining = self.input.remaining.saturating_sub(bytes.saturating_sub(remaining));
         Ok(chunk)
     }
 
