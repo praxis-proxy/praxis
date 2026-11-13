@@ -413,16 +413,39 @@ fn head_rejection_sends_no_body() {
     let reg = registry();
     let _proxy = start_full_proxy_with_registry(&config, &reg);
 
-    let raw = http_send(
-        &format!("127.0.0.1:{proxy_port}"),
-        "HEAD / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    use std::io::{BufReader, Write as _};
+    let address = format!("127.0.0.1:{proxy_port}");
+    praxis_test_utils::wait_for_tcp(&address);
+    let mut stream = std::net::TcpStream::connect(&address).unwrap();
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .unwrap();
+    stream
+        .write_all(b"HEAD / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    let mut body = Vec::new();
+    let response = praxis_test_utils::read_h1_response(&mut BufReader::new(stream), true, 4096, |part| {
+        body.extend_from_slice(part);
+        Ok(())
+    });
+    assert_eq!(
+        response.status,
+        Some(429),
+        "a HEAD rejection must keep its status: {response:?}"
     );
-    assert_eq!(parse_status(&raw), 429, "a HEAD rejection must keep its status");
-    let body = raw.split_once("\r\n\r\n").map(|(_, body)| body).unwrap_or_default();
+    assert_eq!(
+        response.completion,
+        Some(praxis_test_utils::H1Completion::Headers),
+        "a HEAD response completes at its header terminator, whatever Content-Length it \
+         advertises: {response:?}"
+    );
     assert!(body.is_empty(), "a HEAD rejection must not send a body, got {body:?}");
     assert!(
-        raw.to_ascii_lowercase().contains("retry-after: 7"),
-        "a HEAD rejection must keep its response headers: {raw:?}"
+        response
+            .headers
+            .iter()
+            .any(|(name, value)| name == "retry-after" && value == "7"),
+        "a HEAD rejection must keep its response headers: {response:?}"
     );
 }
 
