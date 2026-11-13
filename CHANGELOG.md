@@ -243,6 +243,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Cluster admission and selected endpoint counters now return at final response
+  headers even when `response_conditions` skip the load balancer's response
+  hook. Long-lived SSE responses no longer keep a cluster at its
+  `max_connections` ceiling after final headers. Repeated response and fallback
+  cleanup releases each counter only once. Retry reselection clears upstream
+  copies restored by body filters, so final-header cleanup returns the current
+  endpoint and cancellation during backoff cannot release the old endpoint twice.
 - Cluster `max_connections` is now enforced. It was parsed, validated and
   documented as shedding excess requests with 503, but nothing read it, so a
   cluster accepted unlimited concurrent requests. The load balancer now claims

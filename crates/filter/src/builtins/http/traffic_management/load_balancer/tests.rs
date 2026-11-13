@@ -1784,7 +1784,14 @@ async fn max_connections_keeps_the_slot_until_the_final_response() {
 
 #[tokio::test]
 async fn max_connections_releases_the_slot_once_per_request() {
-    let lb = LoadBalancerFilter::new(&[capped_cluster("web", &["127.0.0.1:8080"], 1)]);
+    let lb = LoadBalancerFilter::new(&[Cluster {
+        max_connections: Some(1),
+        ..cluster_with_strategy(
+            "web",
+            &["127.0.0.1:8080"],
+            LoadBalancerStrategy::Simple(SimpleStrategy::LeastConnections),
+        )
+    }]);
     let req = crate::test_utils::make_request(http::Method::GET, "/");
     let state = Arc::clone(&lb.clusters.get("web").unwrap().retry_state);
 
@@ -1799,6 +1806,11 @@ async fn max_connections_releases_the_slot_once_per_request() {
     drop(lb.on_response(&mut first).await.unwrap());
 
     assert_eq!(
+        least_connections_load(&lb, "web", "127.0.0.1:8080"),
+        Some(1),
+        "the repeated release must leave the second request's endpoint counter alone"
+    );
+    assert_eq!(
         state.active_requests.load(std::sync::atomic::Ordering::Relaxed),
         1,
         "the repeated release must leave the second request's slot alone"
@@ -1810,6 +1822,65 @@ async fn max_connections_releases_the_slot_once_per_request() {
         panic!("the cap must still be full, got {action:?}");
     };
     assert_eq!(rejection.status, 503, "the shed request should answer 503");
+}
+
+#[tokio::test]
+async fn response_conditions_do_not_gate_admission_or_endpoint_cleanup() {
+    let lb = LoadBalancerFilter::new(&[Cluster {
+        max_connections: Some(1),
+        ..cluster_with_strategy(
+            "web",
+            &["127.0.0.1:8080"],
+            LoadBalancerStrategy::Simple(SimpleStrategy::LeastConnections),
+        )
+    }]);
+    let strategy = Arc::clone(&lb.clusters.get("web").unwrap().strategy);
+    let SharedStrategy::LeastConnections(counter) = strategy.inner() else {
+        panic!("the test must track endpoint load");
+    };
+    let conditions = serde_yaml::from_str("- when:\n    status: [201]\n").unwrap();
+    let pipeline = crate::FilterPipeline::from_filters(vec![crate::pipeline::filter::PipelineFilter::new(
+        0,
+        crate::any_filter::AnyFilter::Http(Box::new(lb)),
+        vec![],
+        conditions,
+    )]);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut first = crate::test_utils::make_filter_context(&req);
+    first.cluster = Some(Arc::from("web"));
+    drop(pipeline.execute_http_request(&mut first).await.unwrap());
+    let lease = Arc::clone(first.cluster_admission.as_ref().unwrap());
+
+    let mut hints = response_with_status(103);
+    first.response_header = Some(&mut hints);
+    drop(pipeline.execute_http_response(&mut first).await.unwrap());
+    assert!(!lease.is_released(), "informational headers must retain admission");
+    assert_eq!(counter.load_for("127.0.0.1:8080"), 1);
+
+    let mut response = response_with_status(200);
+    first.response_header = Some(&mut response);
+    drop(pipeline.execute_http_response(&mut first).await.unwrap());
+    assert!(
+        lease.is_released(),
+        "final headers must release despite the skipped hook"
+    );
+    assert_eq!(counter.load_for("127.0.0.1:8080"), 0);
+
+    let mut second = crate::test_utils::make_filter_context(&req);
+    second.cluster = Some(Arc::from("web"));
+    assert!(matches!(
+        pipeline.execute_http_request(&mut second).await.unwrap(),
+        FilterAction::Continue
+    ));
+    let mut matching = response_with_status(201);
+    first.response_header = Some(&mut matching);
+    drop(pipeline.execute_http_response(&mut first).await.unwrap());
+    assert_eq!(
+        counter.load_for("127.0.0.1:8080"),
+        1,
+        "even a matching hook must not release twice"
+    );
+    assert!(!second.cluster_admission.as_ref().unwrap().is_released());
 }
 
 #[tokio::test]

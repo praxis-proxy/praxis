@@ -296,6 +296,37 @@ fn cluster_max_connections_holds_the_slot_until_the_final_response() {
 }
 
 #[test]
+fn cluster_max_connections_releases_before_a_conditionally_skipped_sse_response() {
+    let backend = start_holding_backend(Some(
+        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: hello\n\n",
+    ));
+    let yaml = single_cluster_yaml(free_port(), backend.port, 1).replace(
+        "      - filter: load_balancer\n",
+        "      - filter: load_balancer\n        response_conditions:\n          - when:\n              status: [201]\n",
+    );
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+    let mut held = hold_in_flight(proxy.addr(), "/hold", 1, &backend);
+    let stream = held.first_mut().unwrap();
+    let mut received = Vec::new();
+    let mut buffer = [0_u8; 1024];
+    while !received.windows(13).any(|window| window == b"data: hello\n\n") {
+        let read = stream.read(&mut buffer).expect("receive the SSE head and first event");
+        assert_ne!(read, 0, "the SSE response must remain open");
+        received.extend_from_slice(&buffer[..read]);
+    }
+    assert_eq!(parse_status(&String::from_utf8_lossy(&received)), 200);
+
+    let (status, body) = http_get(proxy.addr(), "/", None);
+    assert_eq!(
+        status, 200,
+        "final headers must return admission while the SSE body remains open"
+    );
+    assert_eq!(body, "ok");
+    drop(held);
+}
+
+#[test]
 fn cluster_max_connections_allows_after_release() {
     let backend_guard = start_backend_with_shutdown("ok");
     let proxy_port = free_port();

@@ -587,6 +587,37 @@ impl StreamDeadlineCap {
 }
 
 impl HttpFilterContext<'_> {
+    /// Return admission and the selected endpoint once the final response is accepted.
+    ///
+    /// Call only after deciding against a retry, before conditional response hooks.
+    /// A missing response header denotes cleanup after a request that never answered.
+    pub(crate) fn finish_upstream_response(&self) {
+        // `lb.selected` marks a request the load balancer picked an endpoint for,
+        // which owes back both an endpoint counter and a cluster slot.
+        // `lb.admitted` marks one it only admitted — a preset upstream —
+        // which owes back the cluster slot alone.
+        let selected = self.get_metadata("lb.selected").is_some();
+        if !selected && self.get_metadata("lb.admitted").is_none() {
+            return;
+        }
+        // The response phase runs once per response head the upstream sends,
+        // and a `103 Early Hints` is a head that does not end the request.
+        // Releasing on it would hand back slots the request is still using,
+        // letting the next request past `max_connections`, and leave the
+        // real response releasing slots that now belong to someone else.
+        let ends_the_request = self.response_header.as_ref().is_none_or(|response| {
+            !response.status.is_informational() || response.status == StatusCode::SWITCHING_PROTOCOLS
+        });
+        if !ends_the_request || !self.cluster_admission.as_ref().is_some_and(|lease| lease.release()) {
+            return;
+        }
+
+        tracing::trace!("releasing in-flight counter");
+        if selected && let (Some(reselector), Some(upstream)) = (&self.endpoint_reselector, &self.upstream) {
+            reselector.release(&upstream.address);
+        }
+    }
+
     /// Selected cluster name, if any.
     pub fn cluster_name(&self) -> Option<&str> {
         self.cluster.as_deref()

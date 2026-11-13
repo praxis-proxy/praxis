@@ -379,11 +379,6 @@ fn admit_preset(cluster: &Arc<str>, entry: &ClusterEntry, ctx: &mut HttpFilterCo
     None
 }
 
-/// Whether `status` is the answer that ends the request.
-fn is_final_response(status: http::StatusCode) -> bool {
-    !status.is_informational() || status == http::StatusCode::SWITCHING_PROTOCOLS
-}
-
 /// Bindings for clusters that configure a strategy which consumes the ramp.
 #[cfg(feature = "slow-start")]
 fn slow_start_bindings(clusters: &[Cluster]) -> Vec<crate::load_balancing::slow_start::SlowStartBinding> {
@@ -568,35 +563,7 @@ impl HttpFilter for LoadBalancerFilter {
     }
 
     async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        // `lb.selected` marks a request this filter picked an endpoint for,
-        // which owes back both an endpoint counter and a cluster slot.
-        // `lb.admitted` marks one it only admitted — a preset upstream —
-        // which owes back the cluster slot alone.
-        let selected = ctx.get_metadata("lb.selected").is_some();
-        if !selected && ctx.get_metadata("lb.admitted").is_none() {
-            return Ok(FilterAction::Continue);
-        }
-        // The response phase runs once per response head the upstream sends,
-        // and a `103 Early Hints` is a head that does not end the request.
-        // Releasing on it would hand back slots the request is still using,
-        // letting the next request past `max_connections`, and leave the
-        // real response releasing slots that now belong to someone else.
-        let ends_the_request = ctx.response_header.as_ref().is_none_or(|r| is_final_response(r.status));
-        if !ends_the_request {
-            return Ok(FilterAction::Continue);
-        }
-
-        tracing::trace!("releasing in-flight counter");
-        if selected
-            && let (Some(cluster_name), Some(upstream)) = (&ctx.cluster, &ctx.upstream)
-            && let Some(entry) = self.clusters.get(cluster_name)
-        {
-            entry.strategy.release(&upstream.address);
-        }
-        if let Some(lease) = &ctx.cluster_admission {
-            lease.release();
-        }
-
+        ctx.finish_upstream_response();
         Ok(FilterAction::Continue)
     }
 }
