@@ -413,7 +413,7 @@ fn head_rejection_sends_no_body() {
     let reg = registry();
     let _proxy = start_full_proxy_with_registry(&config, &reg);
 
-    use std::io::{BufReader, Write as _};
+    use std::io::{BufReader, Read as _, Write as _};
     let address = format!("127.0.0.1:{proxy_port}");
     praxis_test_utils::wait_for_tcp(&address);
     let mut stream = std::net::TcpStream::connect(&address).unwrap();
@@ -423,8 +423,9 @@ fn head_rejection_sends_no_body() {
     stream
         .write_all(b"HEAD / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
         .unwrap();
+    let mut reader = BufReader::new(stream);
     let mut body = Vec::new();
-    let response = praxis_test_utils::read_h1_response(&mut BufReader::new(stream), true, 4096, |part| {
+    let response = praxis_test_utils::read_h1_response(&mut reader, true, 4096, |part| {
         body.extend_from_slice(part);
         Ok(())
     });
@@ -446,6 +447,17 @@ fn head_rejection_sends_no_body() {
             .iter()
             .any(|(name, value)| name == "retry-after" && value == "7"),
         "a HEAD rejection must keep its response headers: {response:?}"
+    );
+    // HEAD reading stops at the header terminator, so drain the rest of the
+    // connection: the rejection must send no trailing bytes and must close
+    // (the stream's read timeout bounds the wait).
+    let mut trailing = Vec::new();
+    reader
+        .read_to_end(&mut trailing)
+        .expect("the connection must close after the HEAD response");
+    assert!(
+        trailing.is_empty(),
+        "a HEAD rejection must not send trailing bytes after the headers, got {trailing:?}"
     );
 }
 
