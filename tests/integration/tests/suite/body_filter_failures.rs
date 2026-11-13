@@ -10,8 +10,8 @@ use std::sync::Arc;
 use bytes::Bytes;
 use praxis_core::config::Config;
 use praxis_filter::{
-    BodyAccess, BodyMode, FilterAction, FilterError, FilterFactory, FilterRegistry, HttpFilter, HttpFilterContext,
-    Rejection,
+    BodyAccess, BodyMode, BodyRequirement, FilterAction, FilterError, FilterFactory, FilterRegistry, HttpFilter,
+    HttpFilterContext, Rejection,
 };
 use praxis_test_utils::{
     Backend, GrpcBackend, free_port, http_get, http_send, parse_body, parse_header, parse_status,
@@ -32,7 +32,7 @@ impl HttpFilter for RejectResponseBodyFilter {
     }
 
     fn response_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional)
+        BodyAccess::ReadOnly(BodyRequirement::Optional)
     }
 
     async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
@@ -85,7 +85,7 @@ impl HttpFilter for ErrorResponseBodyFilter {
     }
 
     fn response_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional)
+        BodyAccess::ReadOnly(BodyRequirement::Optional)
     }
 
     async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
@@ -112,7 +112,7 @@ impl HttpFilter for ErrorAtResponseEofFilter {
     }
 
     fn response_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional)
+        BodyAccess::ReadOnly(BodyRequirement::Optional)
     }
 
     fn response_trailer_access(&self) -> bool {
@@ -147,7 +147,7 @@ impl HttpFilter for TinyBufferResponseFilter {
     }
 
     fn response_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional)
+        BodyAccess::ReadOnly(BodyRequirement::Optional)
     }
 
     fn response_body_mode(&self) -> BodyMode {
@@ -169,7 +169,7 @@ impl HttpFilter for ErrorRequestBodyFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional)
+        BodyAccess::ReadOnly(BodyRequirement::Optional)
     }
 
     async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {

@@ -41,6 +41,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   Lower the request limit or raise the buffer cap to correct the configuration.
   Streaming requests can still use transfer limits above the buffering cap.
 
+- Poll TLS certificate, key, CA, and CRL files alongside filesystem
+  notifications, including when a projected Kubernetes Secret update
+  produces no usable notification. Polling applies to single-certificate
+  listeners with TLS hot-reload enabled in builds that include the
+  `config-reload` feature. A changed or unreadable file triggers a reload
+  of the server certificate and configured client verifier. A stable,
+  successful notification reload updates the polling baseline.
+
 ### Security
 
 - LLM policies now apply HTTP authorization, delegation and request assertions
