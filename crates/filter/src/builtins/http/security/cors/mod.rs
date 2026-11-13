@@ -59,6 +59,7 @@ const UPSTREAM_CORS_HEADERS: [&str; 7] = [
 ];
 
 /// Generated fields from an approved CORS preflight.
+#[cfg(feature = "local-http")]
 type PreflightHeaders = Vec<(String, String)>;
 
 /// A local CORS preflight passed this filter's request checks and is awaiting
@@ -328,14 +329,10 @@ impl CorsFilter {
     }
 
     /// Handle a preflight OPTIONS request.
-    fn handle_preflight(
-        &self,
-        origin: &str,
-        request: &crate::context::Request,
-    ) -> (FilterAction, Option<PreflightHeaders>) {
+    fn handle_preflight(&self, origin: &str, request: &crate::context::Request) -> (FilterAction, bool) {
         if self.resolve_origin(origin).is_none() {
             debug!(origin = %origin, "preflight origin disallowed");
-            return (self.disallowed_preflight(), None);
+            return (self.disallowed_preflight(), false);
         }
 
         let request_method = request
@@ -346,7 +343,7 @@ impl CorsFilter {
 
         if !self.is_method_allowed(request_method) {
             debug!(method = %request_method, "preflight method not allowed");
-            return (self.disallowed_preflight(), None);
+            return (self.disallowed_preflight(), false);
         }
 
         if let Some(rh) = request.headers.get("access-control-request-headers")
@@ -355,12 +352,11 @@ impl CorsFilter {
             && !self.are_headers_allowed(rh)
         {
             debug!(headers = %rh, "preflight headers not allowed");
-            return (self.disallowed_preflight(), None);
+            return (self.disallowed_preflight(), false);
         }
 
         let rejection = build_preflight_rejection(self, origin, request);
-        let approved_headers = rejection.headers.clone();
-        (FilterAction::Reject(rejection), Some(approved_headers))
+        (FilterAction::Reject(rejection), true)
     }
 
     /// Retain generated cache variation only for this filter's approved response.
@@ -416,15 +412,17 @@ impl HttpFilter for CorsFilter {
             && ctx.request.headers.contains_key("access-control-request-method")
         {
             debug!(origin = %origin, "handling CORS preflight");
-            let (action, approved_headers) = self.handle_preflight(origin, ctx.request);
+            let (action, approved) = self.handle_preflight(origin, ctx.request);
             #[cfg(feature = "local-http")]
-            if let Some(headers) = approved_headers
+            if approved
                 && is_local_preflight_request(ctx)
+                && let FilterAction::Reject(rejection) = &action
             {
+                let headers = rejection.headers.clone();
                 ctx.extensions.insert(LocalCorsPreflightPending { headers });
             }
             #[cfg(not(feature = "local-http"))]
-            drop(approved_headers);
+            let _ = approved;
             return Ok(action);
         }
 
