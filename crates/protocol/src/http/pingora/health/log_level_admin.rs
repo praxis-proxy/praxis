@@ -408,8 +408,7 @@ mod tests {
         assert_eq!(module, Some("foo".to_owned()));
         assert!(all);
 
-        let (reversed_module, reversed_all) =
-            parse_delete_query(Some("all=true&module=bar")).expect("parse");
+        let (reversed_module, reversed_all) = parse_delete_query(Some("all=true&module=bar")).expect("parse");
         assert_eq!(reversed_module, Some("bar".to_owned()));
         assert!(reversed_all);
     }
@@ -445,8 +444,7 @@ mod tests {
         assert!(all);
 
         // Leading/trailing ampersands
-        let (trimmed_module, trimmed_all) =
-            parse_delete_query(Some("&module=test&")).expect("parse");
+        let (trimmed_module, trimmed_all) = parse_delete_query(Some("&module=test&")).expect("parse");
         assert_eq!(trimmed_module, Some("test".to_owned()));
         assert!(!trimmed_all);
     }
