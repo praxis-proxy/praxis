@@ -79,7 +79,7 @@ pub trait LocalTransport: Send {
 }
 
 /// Single owner of claim, cancellation, finalization, logging, and completion.
-/// Consuming `run` prevents response-policy re-entry and duplicate completion.
+/// The request's first `run` owns delivery and completion across repeated claims.
 pub struct LocalExchange {
     /// Frozen ownership of the original admitted route.
     claim: LocalClaim,
@@ -112,22 +112,14 @@ impl LocalExchange {
 
     /// Complete all managed lifecycle work exactly once; never dispatch upstream.
     /// `ctx.response_header` must borrow a response slot for header policies.
+    /// A repeated exchange returns an uncommitted failure without transport I/O.
     pub async fn run(mut self, ctx: &mut HttpFilterContext<'_>, transport: &mut dyn LocalTransport) -> LocalCompletion {
         let mut completion = LocalCompletion::pending();
-        let response_slot = ctx.response_header.take();
-        let mut response = self.prepare(ctx, transport, &mut completion).await;
-        ctx.response_header = response_slot;
-        let invalid_status = response.replace_invalid_status(&mut ctx.extensions).await;
-        if invalid_status {
+        if !self.claim.try_start_exchange() {
             completion.outcome = LocalOutcome::Failed;
+            return completion;
         }
-        let response_replaced = self
-            .claim
-            .filter_response(ctx, &mut response, &self.cancellation)
-            .await;
-        if response_replaced && !invalid_status {
-            completion.outcome = LocalOutcome::PolicyDenied;
-        }
+        let mut response = self.prepare_response(ctx, transport, &mut completion).await;
         delivery::Delivery {
             claim: &self.claim,
             cancellation: &self.cancellation,
@@ -142,6 +134,27 @@ impl LocalExchange {
         self.claim.pipeline().complete_local_http(ctx, completion.status);
         transport.complete(completion, ctx);
         completion
+    }
+
+    /// Prepare a valid pending response and apply paired policies once.
+    async fn prepare_response(
+        &mut self,
+        ctx: &mut HttpFilterContext<'_>,
+        transport: &mut dyn LocalTransport,
+        completion: &mut LocalCompletion,
+    ) -> LocalResponse {
+        let response_slot = ctx.response_header.take();
+        let mut response = self.prepare(ctx, transport, completion).await;
+        ctx.response_header = response_slot;
+        let invalid_status = response.replace_invalid_status(&mut ctx.extensions).await;
+        if invalid_status {
+            completion.outcome = LocalOutcome::Failed;
+        }
+        let response_replaced = self.claim.filter_response(ctx, &mut response, &self.cancellation).await;
+        if response_replaced && !invalid_status {
+            completion.outcome = LocalOutcome::PolicyDenied;
+        }
+        response
     }
 
     /// Approve headers before constructing or invoking the service.

@@ -60,6 +60,7 @@ impl FilterPipeline {
             owner: *owner,
             route: route.clone(),
             conflict: Arc::new(AtomicBool::new(conflict)),
+            exchange_started: Arc::new(AtomicBool::new(false)),
         };
         ctx.extensions.insert(LocalHttpActive { claim: claim.clone() });
         Some(claim)

@@ -147,7 +147,9 @@ again, including when a header hook is cancelled. The local claim, applied
 header edits, and completion marker stay in the coordinator's context.
 Source state is recovered for completion after delivery or replacement.
 
-One consuming `LocalExchange::run` call owns managed completion. The
+The first `LocalExchange::run` call for a request owns delivery and managed
+completion. Repeated claims share this ownership: subsequent runs return an
+uncommitted failure without transport I/O or another completion callback. The
 context borrows an adapter-owned response slot through `response_header`;
 request approval temporarily hides this slot. The coordinator defers
 access-log emission to completion, preserving request conditions,

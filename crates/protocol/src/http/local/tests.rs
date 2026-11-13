@@ -1071,6 +1071,114 @@ async fn swallowed_request_fault_still_fails_closed_and_dropped_chunks_are_not_e
 }
 
 #[tokio::test]
+async fn repeated_claims_deliver_and_complete_only_one_exchange() {
+    for second_first in [false, true] {
+        let state = State::default();
+        let pipeline = pipeline(vec![Fixture::owner(state.clone())]);
+        let request = praxis_filter::Request {
+            method: http::Method::POST,
+            uri: "/files".parse().unwrap(),
+            headers: http::HeaderMap::new(),
+        };
+        let mut head = Response {
+            status: http::StatusCode::OK,
+            headers: http::HeaderMap::new(),
+        };
+        let mut ctx = context::context(&request, &pipeline);
+        ctx.response_header = Some(&mut head);
+        let first = LocalExchange::claim(&pipeline, &mut ctx).unwrap();
+        let second = LocalExchange::claim(&pipeline, &mut ctx).unwrap();
+        let (winner, duplicate) = if second_first { (second, first) } else { (first, second) };
+        let delivered = State::default();
+        let ignored = State::default();
+        let result = winner
+            .run(
+                &mut ctx,
+                &mut Transport {
+                    state: delivered.clone(),
+                    input: Input::bytes(1),
+                },
+            )
+            .await;
+        let duplicate = duplicate
+            .run(
+                &mut ctx,
+                &mut Transport {
+                    state: ignored.clone(),
+                    input: Input::bytes(1),
+                },
+            )
+            .await;
+        assert_eq!(result.status, 500);
+        assert!(result.committed);
+        assert_eq!(delivered.events(), ["headers", "finish", "complete"]);
+        assert_eq!(delivered.inner.lock().unwrap().completions, 1);
+        assert!(!duplicate.committed, "the duplicate must not attempt another response");
+        assert_eq!(duplicate.outcome, LocalOutcome::Failed);
+        assert_eq!(duplicate.request_bytes, 0);
+        assert_eq!(duplicate.response_bytes, 0);
+        assert!(
+            ignored.events().is_empty(),
+            "the duplicate must not touch its transport"
+        );
+        assert!(
+            state.events().is_empty(),
+            "conflicted claims must not run hooks or handlers"
+        );
+    }
+}
+
+#[tokio::test]
+async fn claims_after_completion_cannot_deliver_or_complete_again() {
+    let state = State::default();
+    let pipeline = pipeline(vec![Fixture::owner(state.clone())]);
+    let request = praxis_filter::Request {
+        method: http::Method::POST,
+        uri: "/files".parse().unwrap(),
+        headers: http::HeaderMap::new(),
+    };
+    let mut head = Response {
+        status: http::StatusCode::OK,
+        headers: http::HeaderMap::new(),
+    };
+    let mut ctx = context::context(&request, &pipeline);
+    ctx.response_header = Some(&mut head);
+    let result = LocalExchange::claim(&pipeline, &mut ctx)
+        .unwrap()
+        .run(
+            &mut ctx,
+            &mut Transport {
+                state: state.clone(),
+                input: Input::bytes(1),
+            },
+        )
+        .await;
+    assert_eq!(result.status, 200);
+    assert_complete(&state, 1);
+    let completed_events = state.events();
+    let ignored = State::default();
+    let duplicate = LocalExchange::claim(&pipeline, &mut ctx)
+        .unwrap()
+        .run(
+            &mut ctx,
+            &mut Transport {
+                state: ignored.clone(),
+                input: Input::bytes(1),
+            },
+        )
+        .await;
+    assert_eq!(duplicate.outcome, LocalOutcome::Failed);
+    assert!(!duplicate.committed);
+    assert!(ignored.events().is_empty());
+    assert_eq!(
+        state.events(),
+        completed_events,
+        "completed hooks and handlers must not run again"
+    );
+    assert_complete(&state, 1);
+}
+
+#[tokio::test]
 async fn claims_pin_generation_and_repeated_claims_poison_both_owners() {
     let old = State::default();
     let new = State::default();

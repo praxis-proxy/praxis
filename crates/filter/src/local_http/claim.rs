@@ -22,10 +22,17 @@ pub struct LocalClaim {
     pub(crate) route: LocalRoute,
     /// Invalid programmatic or repeated claims remain local failures.
     pub(crate) conflict: Arc<AtomicBool>,
+    /// All claims share a single delivery and completion owner.
+    pub(crate) exchange_started: Arc<AtomicBool>,
 }
 
-
 impl LocalClaim {
+    /// Acquire this request's sole exchange execution before any I/O or hooks.
+    /// Returns false after another exchange has started, even if it was dropped.
+    pub fn try_start_exchange(&self) -> bool {
+        !self.exchange_started.swap(true, Ordering::AcqRel)
+    }
+
     /// Whether an invalid or repeated claim poisoned this request's ownership.
     pub fn is_conflicted(&self) -> bool {
         self.conflict.load(Ordering::Acquire)

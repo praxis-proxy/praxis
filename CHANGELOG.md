@@ -19,6 +19,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Repeated local HTTP exchanges share one delivery and completion owner,
+  preventing duplicate responses and adapter completion callbacks.
 - Local HTTP pipeline construction rejects routes in embedded pipelines,
   including iterative router steps, before unsupported nested execution.
 - Local HTTP policy failures log the failing filter, phase, and cause before
