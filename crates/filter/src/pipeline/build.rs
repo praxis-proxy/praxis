@@ -155,6 +155,7 @@ impl FilterPipeline {
         let id_generator = Arc::new(IdGenerator::new());
         let time_source: Arc<dyn praxis_core::time::TimeSource> = Arc::new(SystemTimeSource);
         let mut pipeline = Self {
+            upgrade_policy: None,
             body_capabilities,
             compression,
             filters,
