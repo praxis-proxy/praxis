@@ -67,6 +67,9 @@ otel = [
 cloud-events-filter = [
     "dep:url",
 ]
+# Library support for the off-by-default `bandwidth_limit` filter.
+# Listener adapters opt in separately; the server integration is in part 2.
+bandwidth = []
 
 # Logical upstream binding: the router publishes the matched cluster as a
 # request-wide binding that `bound_upstream` conditions and

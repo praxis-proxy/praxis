@@ -36,6 +36,8 @@ pub use security::{
 };
 #[cfg(feature = "iterative-request-router")]
 pub use traffic_management::IterativeRequestRouterFilter;
+#[cfg(feature = "bandwidth")]
+pub use traffic_management::{BandwidthLimitFilter, BandwidthMode};
 pub use traffic_management::{
     CircuitBreakerFilter, EndpointReselector, EndpointSelectorFilter, GrpcDetectionFilter, GrpcTimeoutFilter,
     HeadClassifierFilter, LoadBalancerFilter, RateLimitFilter, RateLimitMode, RateLimitScope, RedirectFilter,

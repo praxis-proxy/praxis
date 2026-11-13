@@ -84,9 +84,19 @@ impl PendingStreamChunks {
         }
     }
 
+    /// Total queued output used for admission before any bandwidth wait.
+    pub(crate) fn len_bytes(&self) -> usize {
+        self.retained_bytes
+    }
+
     /// Consume the accounting wrapper and return its FIFO queue.
     pub(crate) fn into_chunks(self) -> VecDeque<bytes::Bytes> {
         self.chunks
+    }
+
+    /// Move pending output into a wait while preserving the empty queue's limit.
+    pub(crate) fn take_pending(&mut self) -> Self {
+        std::mem::replace(self, Self::new(self.max_retained_bytes))
     }
 
     /// Drain queued chunks and reset their retained-byte accounting.

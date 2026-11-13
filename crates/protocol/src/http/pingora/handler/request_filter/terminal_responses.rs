@@ -56,12 +56,12 @@ pub(super) async fn run_terminal_response(
     if is_bodyless {
         ctx.response_delivery_complete = true;
     } else if let Err(rejection) = run_parent_terminal_body_filters(pipeline, ctx, &resp, &mut body, true) {
-        send_rejection_for(session, rejection, ctx).await;
+        Box::pin(send_rejection_for(session, rejection, ctx)).await;
         return;
     }
     strip_hop_by_hop_header_map(&mut resp.headers, RESPONSE_HOP_BY_HOP);
     strip_reserved_internal_header_map(&mut resp.headers);
-    send_terminal_to_session(session, &resp, body, ctx).await;
+    Box::pin(send_terminal_to_session(session, &resp, body, ctx)).await;
 }
 
 /// Run response-header filters and persist their request-scoped state.

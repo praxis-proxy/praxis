@@ -25,6 +25,8 @@ pub use http::{
     access_record_already_emitted, bodyless_response, emit_access_record, encode_trailer_frame, has_dot_dot_traversal,
     mark_access_record_emitted, normalize_rewritten_path, shutdown_access_log_sinks,
 };
+#[cfg(feature = "bandwidth")]
+pub use http::{BandwidthLimitFilter, BandwidthMode};
 #[cfg(feature = "policy-engine")]
 pub use http::{
     PolicyFilter, PolicyPluginFactoryFn, PolicyResponseContext, PolicyResponseOutput, fips_crypto_blocker,

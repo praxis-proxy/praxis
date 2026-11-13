@@ -29,6 +29,7 @@ mod client;
 pub(crate) mod internals;
 /// Data types for sub-request exchanges.
 mod types;
+mod upload;
 
 /// Backend-neutral buffered completion contract regression tests.
 #[cfg(test)]
@@ -48,3 +49,4 @@ pub use types::{
     DEPTH_HEADER, FrameworkHeaders, StreamLimits, StreamingSubResponse, SubRequest, SubRequestError, SubResponse,
     SubResponseBody, UrlSubRequestError,
 };
+pub use upload::UploadControl;

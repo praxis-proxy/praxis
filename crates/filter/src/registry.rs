@@ -64,6 +64,15 @@ enum RegisteredFilterFactory {
     /// A public factory whose configuration is self-contained.
     Standard(FilterFactory),
 
+    /// Built-in with HTTP and TCP implementations; HTTP is the default.
+    #[cfg(feature = "bandwidth")]
+    Dual {
+        /// HTTP constructor.
+        http: HttpFilterFactoryFn,
+        /// TCP constructor.
+        tcp: TcpFilterFactoryFn,
+    },
+
     /// A built-in HTTP factory that resolves nested filters.
     #[cfg(feature = "iterative-request-router")]
     HttpWithRegistry(RegistryHttpFilterFactory),
@@ -117,6 +126,8 @@ impl RegisteredFilterFactory {
     ) -> Result<AnyFilter, FilterError> {
         match self {
             Self::Standard(factory) => factory.create(config),
+            #[cfg(feature = "bandwidth")]
+            Self::Dual { http, .. } => http(config).map(AnyFilter::Http),
             // No containing build here, so there is no named-chain table, no
             // shared budgets, and no operator posture: build with a standalone
             // context (empty chains, strict default posture). The real server
@@ -163,6 +174,8 @@ impl RegisteredFilterFactory {
     ) -> Result<AnyFilter, FilterError> {
         match self {
             Self::Standard(factory) => factory.create(config),
+            #[cfg(feature = "bandwidth")]
+            Self::Dual { http, .. } => http(config).map(AnyFilter::Http),
             #[cfg(feature = "iterative-request-router")]
             Self::HttpWithRegistry(factory) => Ok(AnyFilter::Http(factory(config, ctx)?)),
             #[cfg(feature = "chain-binding")]
@@ -202,6 +215,30 @@ pub struct FilterRegistry {
 }
 
 impl FilterRegistry {
+    /// Select dual built-ins for a listener, preserving custom registrations.
+    #[must_use]
+    pub fn for_protocol(&self, protocol: praxis_core::config::ProtocolKind) -> Self {
+        #[cfg(feature = "bandwidth")]
+        {
+            let mut registry = self.clone();
+            for entry in registry.filters.values_mut() {
+                if let RegisteredFilterFactory::Dual { http, tcp } = &entry.factory {
+                    let factory = match protocol {
+                        praxis_core::config::ProtocolKind::Http => http_builtin(*http),
+                        praxis_core::config::ProtocolKind::Tcp => tcp_builtin(*tcp),
+                    };
+                    entry.factory = RegisteredFilterFactory::Standard(factory);
+                }
+            }
+            registry
+        }
+        #[cfg(not(feature = "bandwidth"))]
+        {
+            let _ = protocol;
+            self.clone()
+        }
+    }
+
     /// Creates a registry with only the built-in filters.
     #[must_use]
     pub fn with_builtins() -> Self {
@@ -566,6 +603,13 @@ fn register_http_builtins(filters: &mut HashMap<String, FilterRegistration>) {
         RedirectFilter, RequestIdFilter, StaticResponseFilter, TimeoutFilter, TraceContextFilter, UrlRewriteFilter,
     };
 
+    #[cfg(feature = "bandwidth")]
+    register_dual_security(
+        filters,
+        "bandwidth_limit",
+        crate::BandwidthLimitFilter::from_config,
+        crate::BandwidthLimitFilter::from_config_tcp,
+    );
     register_http(filters, "access_log", AccessLogFilter::from_config);
     #[cfg(feature = "basic-auth-filter")]
     register_http_security(filters, "basic_auth", crate::BasicAuthFilter::from_config);
@@ -686,6 +730,24 @@ fn register_tcp_builtins(filters: &mut HashMap<String, FilterRegistration>) {
     );
 }
 
+/// Registers one filter that has both an HTTP and a TCP factory.
+#[cfg(feature = "bandwidth")]
+fn register_dual_security(
+    filters: &mut HashMap<String, FilterRegistration>,
+    name: &str,
+    http: HttpFilterFactoryFn,
+    tcp: TcpFilterFactoryFn,
+) {
+    let previous = filters.insert(
+        name.to_owned(),
+        FilterRegistration {
+            factory: RegisteredFilterFactory::Dual { http, tcp },
+            security_class: SecurityClass::Security,
+        },
+    );
+    debug_assert!(previous.is_none(), "duplicate built-in filter name: '{name}'");
+}
+
 /// Registers a single TCP filter factory with [`SecurityClass::Standard`].
 fn register_tcp(filters: &mut HashMap<String, FilterRegistration>, name: &str, factory_fn: TcpFilterFactoryFn) {
     insert_registration(filters, name, tcp_builtin(factory_fn), SecurityClass::Standard);
@@ -725,6 +787,33 @@ fn insert_registration(
     reason = "tests"
 )]
 mod tests {
+    #[cfg(feature = "bandwidth")]
+    #[test]
+    fn bandwidth_registry_selects_tcp_without_changing_http_or_custom_factories() {
+        let mut registry = FilterRegistry::with_builtins();
+        let config = serde_yaml::from_str("mode: per_connection\nupload_bytes_per_sec: 1000").unwrap();
+        let tcp = registry.for_protocol(praxis_core::config::ProtocolKind::Tcp);
+        assert!(
+            matches!(tcp.create("bandwidth_limit", &config), Ok(AnyFilter::Tcp(_))),
+            "TCP listeners need the TCP factory"
+        );
+        assert!(
+            matches!(registry.create("bandwidth_limit", &config), Ok(AnyFilter::Http(_))),
+            "the shared registry must keep its HTTP default"
+        );
+        registry
+            .register(
+                "custom",
+                http_builtin(crate::builtins::http::RequestIdFilter::from_config),
+            )
+            .unwrap();
+        let tcp = registry.for_protocol(praxis_core::config::ProtocolKind::Tcp);
+        assert!(
+            matches!(tcp.create("custom", &serde_yaml::Value::Null), Ok(AnyFilter::Http(_))),
+            "protocol selection must preserve custom registrations"
+        );
+    }
+
     use super::*;
 
     #[test]
@@ -734,6 +823,11 @@ mod tests {
         names.sort();
 
         assert!(names.contains(&"access_log"), "access_log should be registered");
+        #[cfg(feature = "bandwidth")]
+        assert!(
+            names.contains(&"bandwidth_limit"),
+            "bandwidth_limit should be registered"
+        );
         #[cfg(feature = "basic-auth-filter")]
         assert!(names.contains(&"basic_auth"), "basic_auth should be registered");
         assert!(
@@ -871,7 +965,7 @@ mod tests {
     #[test]
     fn builtin_security_filters_classified() {
         let registry = FilterRegistry::with_builtins();
-        #[allow(unused_mut, reason = "mutated only with basic-auth-filter or spiffe")]
+        #[allow(unused_mut, reason = "mutated only with basic-auth-filter, bandwidth, or spiffe")]
         let mut expected_security = vec![
             "cors",
             "credential_injection",
@@ -881,6 +975,8 @@ mod tests {
             "ip_acl",
             "rate_limit",
         ];
+        #[cfg(feature = "bandwidth")]
+        expected_security.push("bandwidth_limit");
         #[cfg(feature = "basic-auth-filter")]
         expected_security.push("basic_auth");
         #[cfg(feature = "spiffe")]
@@ -933,6 +1029,11 @@ mod tests {
 
         #[cfg(feature = "basic-auth-filter")]
         assert!(sec.contains(&"basic_auth"), "basic_auth should be in security_filters");
+        #[cfg(feature = "bandwidth")]
+        assert!(
+            sec.contains(&"bandwidth_limit"),
+            "bandwidth_limit should be in security_filters"
+        );
         assert!(sec.contains(&"cors"), "cors should be in security_filters");
         assert!(
             sec.contains(&"credential_injection"),

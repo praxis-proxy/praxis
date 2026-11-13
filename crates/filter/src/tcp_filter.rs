@@ -8,6 +8,8 @@ use std::{borrow::Cow, sync::Arc, time::Instant};
 use async_trait::async_trait;
 use praxis_core::{health::HealthRegistry, kv::KvStoreRegistry};
 
+#[cfg(feature = "bandwidth")]
+use crate::bandwidth::TcpBandwidthPacer;
 use crate::{actions::FilterAction, filter::FilterError};
 
 // -----------------------------------------------------------------------------
@@ -74,10 +76,47 @@ pub trait TcpFilter: Send + Sync {
         Ok(FilterAction::Continue)
     }
 
+    /// Opt-in connection state for filters that install a byte pacer.
+    ///
+    /// Existing implementations inherit `on_connect` unchanged. The separate
+    /// state preserves the public `TcpFilterContext` literal contract.
+    #[cfg(feature = "bandwidth")]
+    async fn on_connect_with_state(
+        &self,
+        ctx: &mut TcpFilterContext<'_>,
+        _state: &mut TcpConnectState,
+    ) -> Result<FilterAction, FilterError> {
+        self.on_connect(ctx).await
+    }
+
     /// Called when a TCP connection is closed.
     async fn on_disconnect(&self, ctx: &mut TcpFilterContext<'_>) -> Result<(), FilterError> {
         let _ = ctx;
         Ok(())
+    }
+}
+
+/// Optional state owned by the TCP connection rather than its public context.
+#[cfg(feature = "bandwidth")]
+#[derive(Default)]
+pub struct TcpConnectState {
+    /// Byte schedules installed by the executed connect filters.
+    pub(crate) bandwidth: Option<Arc<TcpBandwidthPacer>>,
+    /// Trusted connection-close metadata.
+    pub(crate) extensions: crate::RequestExtensions,
+}
+
+#[cfg(feature = "bandwidth")]
+impl TcpConnectState {
+    /// Take the byte pacer after the connection pipeline succeeds.
+    pub fn take_bandwidth(&mut self) -> Option<Arc<TcpBandwidthPacer>> {
+        self.bandwidth.take()
+    }
+
+    /// Why this connection was rejected without a protocol response.
+    #[must_use]
+    pub fn close_reason(&self) -> Option<&'static str> {
+        crate::connection_close_reason(&self.extensions)
     }
 }
 

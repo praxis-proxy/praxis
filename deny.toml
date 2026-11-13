@@ -59,4 +59,6 @@ skip-tree = [
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+# Temporary exact-revision pin for the upload writer API in praxis-proxy/pingora#11.
+# Remove once the fork publishes the API and Cargo.toml returns to registry versions.
+allow-git = ["https://github.com/rkaplan-hub/pingora.git"]
