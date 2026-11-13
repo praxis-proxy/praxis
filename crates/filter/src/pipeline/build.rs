@@ -176,6 +176,8 @@ impl FilterPipeline {
             #[cfg(feature = "local-http")]
             local_http_valid: false,
             #[cfg(feature = "local-http")]
+            nested_local_routes: false,
+            #[cfg(feature = "local-http")]
             local_routes: filters
                 .iter()
                 .enumerate()
@@ -218,6 +220,9 @@ impl FilterPipeline {
         };
         #[cfg(feature = "local-http")]
         {
+            let mut nested_local_routes = false;
+            pipeline.visit_nested_pipelines(&mut |nested| nested_local_routes |= nested.has_local_http_routes());
+            pipeline.nested_local_routes = nested_local_routes;
             pipeline.local_http_valid = pipeline.validate_local_http().is_ok();
         }
         pipeline.set_id_generator(id_generator);

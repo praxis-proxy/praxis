@@ -121,6 +121,10 @@ pub struct FilterPipeline {
     #[cfg(feature = "local-http")]
     pub(crate) local_http_valid: bool,
 
+    /// Local ownership inside unsupported filter-owned pipelines.
+    #[cfg(feature = "local-http")]
+    nested_local_routes: bool,
+
     /// Route declarations frozen at pipeline construction.
     #[cfg(feature = "local-http")]
     pub(crate) local_routes: Vec<(usize, crate::local_http::LocalRoute)>,

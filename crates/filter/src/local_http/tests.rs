@@ -115,6 +115,79 @@ fn nonlocal_builders_accept_empty_branch_declarations() {
     assert_eq!(pipeline.len(), 1, "ordinary pipelines still accept empty branches");
 }
 
+#[cfg(feature = "iterative-request-router")]
+#[test]
+fn local_route_builders_reject_iterative_step_owners() {
+    let mut registry = crate::FilterRegistry::with_builtins();
+    registry
+        .register(
+            "owner",
+            crate::FilterFactory::Http(Arc::new(|_| Ok(Box::new(InvalidOwner(vec![test_route()]))))),
+        )
+        .unwrap();
+    for owner in ["{filter: owner},", ""] {
+        let config = format!(
+            "- filter: iterative_request_router\n  initial_step: serve\n  steps:\n    - name: serve\n      filters: [{owner} {{filter: static_response, status: 200}}]\n      on_result: [{{default: true, done: true}}]"
+        );
+        for with_chains in [false, true] {
+            let mut entries = serde_yaml::from_str::<Vec<crate::FilterEntry>>(&config).unwrap();
+            let result = if with_chains {
+                FilterPipeline::build_with_chains(
+                    &mut entries,
+                    &registry,
+                    &std::collections::HashMap::new(),
+                    &praxis_core::config::InsecureOptions::default(),
+                    &[],
+                )
+            } else {
+                FilterPipeline::build(&mut entries, &registry)
+            };
+            if owner.is_empty() {
+                let pipeline = result.unwrap();
+                assert!(
+                    !pipeline.has_local_http_routes(),
+                    "ordinary nested steps stay supported"
+                );
+            } else {
+                let error = result.err().unwrap();
+                assert!(
+                    error.to_string().contains("nested local HTTP routes are unsupported"),
+                    "both builders must reject local ownership in iterative steps: {error}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn nested_route_ownership_remains_visible_to_adapter_guards() {
+    for routes in [vec![], vec![test_route()]] {
+        let owns_routes = !routes.is_empty();
+        let mut pipeline = FilterPipeline::from_filters(vec![PipelineFilter::new(
+            0,
+            AnyFilter::Http(Box::new(InvalidOwner(routes))),
+            vec![],
+            vec![],
+        )]);
+        for _depth in 0..2 {
+            pipeline = FilterPipeline::from_filters(vec![PipelineFilter::new(
+                0,
+                AnyFilter::Http(Box::new(NestedPipeline(pipeline))),
+                vec![],
+                vec![],
+            )]);
+            assert_eq!(pipeline.has_local_http_routes(), owns_routes);
+            match pipeline.validate_local_http() {
+                Err(error) => {
+                    assert!(owns_routes, "non-local nested pipelines remain valid: {error}");
+                    assert!(error.to_string().contains("nested local HTTP routes are unsupported"));
+                },
+                Ok(()) => assert!(!owns_routes, "nested local routes must fail validation"),
+            }
+        }
+    }
+}
+
 #[test]
 fn response_replacement_retains_policy_edits_without_leaking_source_headers() {
     let mut original = http::HeaderMap::new();
@@ -284,6 +357,24 @@ fn mandatory_validation_rejects_bound_upstream_consumers() {
         error.contains("bound-upstream body consumers are incompatible"),
         "{error}"
     );
+}
+
+/// An ordinary framework filter that exposes its owned pipeline for configuration.
+struct NestedPipeline(FilterPipeline);
+
+#[async_trait]
+impl HttpFilter for NestedPipeline {
+    fn name(&self) -> &'static str {
+        "nested_pipeline"
+    }
+
+    fn visit_nested_pipelines(&mut self, visitor: &mut dyn FnMut(&mut FilterPipeline)) {
+        visitor(&mut self.0);
+    }
+
+    async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Continue)
+    }
 }
 
 /// Minimal valid declaration shared by runtime and construction guards.

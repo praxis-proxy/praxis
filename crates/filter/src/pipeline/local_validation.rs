@@ -24,9 +24,9 @@ fn owns_routes(filters: &[PipelineFilter]) -> bool {
     reason = "pipeline concerns are split across modules"
 )]
 impl FilterPipeline {
-    /// Whether this pipeline owns local routes.
+    /// Whether this pipeline or an embedded pipeline owns local routes.
     pub fn has_local_http_routes(&self) -> bool {
-        !self.local_routes.is_empty()
+        self.nested_local_routes || owns_routes(&self.filters)
     }
 
     /// Enforce local safety even when ordering/security checks are skipped.
@@ -34,6 +34,9 @@ impl FilterPipeline {
     /// # Errors
     /// Rejects overlapping, fail-open, nonexclusive, or incompatible pipelines.
     pub fn validate_local_http(&self) -> Result<(), FilterError> {
+        if self.nested_local_routes {
+            return Err("nested local HTTP routes are unsupported".into());
+        }
         if !owns_routes(&self.filters) {
             return Ok(());
         }
