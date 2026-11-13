@@ -63,6 +63,35 @@ fn prefix_overlap_is_symmetric_and_retains_repeated_slash_semantics() {
     assert!(!LocalMethods::Explicit(vec![http::Method::GET]).matches(&http::Method::HEAD));
 }
 
+#[tokio::test]
+async fn handler_identity_uses_filter_id_instead_of_owner_index() {
+    let pipeline = Arc::new(FilterPipeline::from_filters(vec![PipelineFilter::new(
+        41,
+        AnyFilter::Http(Box::new(InvalidOwner(vec![test_route()]))),
+        vec![],
+        vec![],
+    )]));
+    let request = crate::test_utils::make_request(http::Method::POST, "/files");
+    let mut ctx = crate::test_utils::make_filter_context(&request);
+    let claim = pipeline.claim_local_http(&mut ctx).unwrap();
+    ctx.current_filter_id = Some(0);
+    ctx.insert_filter_state(418_u16);
+    ctx.current_filter_id = Some(41);
+    ctx.insert_filter_state(204_u16);
+    ctx.current_filter_id = Some(99);
+    let response = claim
+        .execute_handler(
+            &mut StateHandler,
+            &mut ctx,
+            &mut EmptyBody,
+            &LocalCancellation::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.head().status, http::StatusCode::NO_CONTENT);
+    assert_eq!(ctx.current_filter_id, Some(99));
+}
+
 #[test]
 fn local_route_builders_reject_empty_branch_declarations() {
     let mut registry = crate::FilterRegistry::with_builtins();
@@ -386,5 +415,33 @@ fn test_route() -> LocalRoute {
         body: LocalBodyOwnership::Exclusive,
         request_limit: 1,
         response_limit: 1,
+    }
+}
+
+/// Handler whose response proves which filter's request state it read.
+struct StateHandler;
+
+#[async_trait]
+impl LocalHttpHandler for StateHandler {
+    async fn execute(
+        &mut self,
+        ctx: &mut HttpFilterContext<'_>,
+        _body: &mut dyn LocalRequestBody,
+        _cancellation: &LocalCancellation,
+    ) -> Result<LocalResponse, FilterError> {
+        let status = ctx.get_filter_state::<u16>().copied().ok_or("missing owner state")?;
+        Ok(LocalResponse::Buffered(crate::TerminalResponse::new(status)))
+    }
+
+    async fn finalize(&mut self, _outcome: LocalOutcome) {}
+}
+
+/// Request-body test fixture for handlers that only read request state.
+struct EmptyBody;
+
+#[async_trait]
+impl LocalRequestBody for EmptyBody {
+    async fn next_chunk(&mut self) -> Result<Option<Bytes>, FilterError> {
+        Ok(None)
     }
 }

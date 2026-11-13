@@ -204,7 +204,7 @@ impl LocalExchange {
             tokio::select! {
                 biased;
                 () = self.cancellation.cancelled() => Err(FilterError::from("local request cancelled")),
-                response = handler.execute(ctx, &mut body, &self.cancellation) => response,
+                response = self.claim.execute_handler(handler.as_mut(), ctx, &mut body, &self.cancellation) => response,
             }
         } else {
             Err("missing local handler".into())

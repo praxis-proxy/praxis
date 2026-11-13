@@ -8,7 +8,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-use super::{LocalHttpHandler, LocalResponse, LocalRoute};
+use super::{LocalCancellation, LocalHttpHandler, LocalRequestBody, LocalResponse, LocalRoute};
 use crate::{AnyFilter, FilterError, FilterPipeline, HttpFilterContext};
 
 /// Immutable ownership. Neither policy rejection nor errors permit dispatch.
@@ -62,7 +62,7 @@ impl LocalClaim {
         &self,
         ctx: &mut HttpFilterContext<'_>,
         response: &mut LocalResponse,
-        cancellation: &super::LocalCancellation,
+        cancellation: &LocalCancellation,
     ) -> bool {
         let replaced = tokio::select! {
             biased;
@@ -86,5 +86,36 @@ impl LocalClaim {
             AnyFilter::Http(http) => http.create_local_http_handler(&self.route.id),
             AnyFilter::Tcp(_) => Err("local owner is not HTTP".into()),
         }
+    }
+
+    /// Execute under the declaring filter's identity, restoring it on every exit.
+    ///
+    /// # Errors
+    /// Returns missing-owner or handler execution errors.
+    pub async fn execute_handler(
+        &self,
+        handler: &mut dyn LocalHttpHandler,
+        ctx: &mut HttpFilterContext<'_>,
+        body: &mut dyn LocalRequestBody,
+        cancellation: &LocalCancellation,
+    ) -> Result<LocalResponse, FilterError> {
+        let filter = self.pipeline.filters.get(self.owner).ok_or("missing local owner")?;
+        let previous = ctx.current_filter_id.replace(filter.filter_id);
+        let identity = HandlerIdentity { ctx, previous };
+        handler.execute(identity.ctx, body, cancellation).await
+    }
+}
+
+/// A handler retains its owner's state scope until execution returns or drops.
+struct HandlerIdentity<'context, 'request> {
+    /// Context whose per-filter state belongs to the admitted owner.
+    ctx: &'context mut HttpFilterContext<'request>,
+    /// Invocation identity to restore after the handler is released.
+    previous: Option<usize>,
+}
+
+impl Drop for HandlerIdentity<'_, '_> {
+    fn drop(&mut self) {
+        self.ctx.current_filter_id = self.previous;
     }
 }

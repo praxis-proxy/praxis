@@ -112,6 +112,7 @@ pub(super) struct Fixture {
     pub(super) selected_access: BodyAccess,
     pub(super) response_mode: BodyMode,
     pub(super) source_extensions: bool,
+    pub(super) stateful: bool,
 }
 impl Fixture {
     pub(super) fn policy(name: &'static str, state: State) -> Self {
@@ -130,6 +131,7 @@ impl Fixture {
             selected_access: BodyAccess::None,
             response_mode: BodyMode::Stream,
             source_extensions: false,
+            stateful: false,
         }
     }
 
@@ -198,6 +200,7 @@ impl HttpFilter for Fixture {
             response_status: self.response_status,
             response_headers: self.response_headers.clone(),
             source_extensions: self.source_extensions,
+            filter_state: self.stateful.then_some(self.name),
         }))
     }
 
@@ -218,6 +221,9 @@ impl HttpFilter for Fixture {
 
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         self.state.event(format!("request:{}", self.name));
+        if self.stateful {
+            ctx.insert_filter_state(self.name);
+        }
         if self.compatibility == LocalCompatibility::UpstreamRoutingOnly {
             let mut inner = self.state.inner.lock().unwrap();
             inner.upstream_connections += 1;
@@ -328,6 +334,7 @@ struct Handler {
     response_status: u16,
     response_headers: http::HeaderMap,
     source_extensions: bool,
+    filter_state: Option<&'static str>,
 }
 #[async_trait]
 impl LocalHttpHandler for Handler {
@@ -338,6 +345,16 @@ impl LocalHttpHandler for Handler {
         _cancel: &LocalCancellation,
     ) -> Result<LocalResponse, FilterError> {
         self.state.event("handler");
+        if let Some(expected) = self.filter_state {
+            let actual = ctx
+                .get_filter_state::<&'static str>()
+                .copied()
+                .ok_or("missing local owner state")?;
+            if actual != expected {
+                return Err("incorrect local owner state".into());
+            }
+            self.state.event(format!("state:{actual}"));
+        }
         if self.kind == HandlerKind::Reclaim {
             self.state.reclaim(ctx);
         }

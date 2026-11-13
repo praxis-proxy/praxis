@@ -19,6 +19,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Local HTTP handlers read request state under their declaring filter's identity,
+  restoring the prior identity after completion, errors, or cancellation.
 - Repeated local HTTP exchanges share one delivery and completion owner,
   preventing duplicate responses and adapter completion callbacks.
 - Local HTTP pipeline construction rejects routes in embedded pipelines,

@@ -1001,6 +1001,93 @@ async fn disconnect_and_external_cancellation_finalize_once() {
 }
 
 #[tokio::test]
+async fn handler_reads_owners_isolated_request_filter_state() {
+    let state = State::default();
+    let mut fixtures = vec![
+        Fixture::policy("before", state.clone()),
+        Fixture::owner(state.clone()),
+        Fixture::policy("after", state.clone()),
+    ];
+    for fixture in &mut fixtures {
+        fixture.stateful = true;
+    }
+    let pipeline = pipeline(fixtures);
+    let result = run(&pipeline, &state, Input::bytes(1), "/files", http::Method::POST).await;
+    assert_eq!(result.status, 200, "handler must find its owner's request-hook state");
+    assert_eq!(state.events().iter().filter(|event| *event == "state:owner").count(), 1);
+    assert_complete(&state, 1);
+}
+
+#[tokio::test]
+async fn handler_identity_restores_after_success_error_cancellation_and_drop() {
+    for kind in [HandlerKind::Consume, HandlerKind::Error, HandlerKind::Wait] {
+        let state = State::default();
+        let mut owner = Fixture::owner(state.clone());
+        owner.handler = kind;
+        owner.stateful = true;
+        let pipeline = pipeline(vec![Fixture::policy("before", state.clone()), owner]);
+        let request = praxis_filter::Request {
+            method: http::Method::POST,
+            uri: "/files".parse().unwrap(),
+            headers: http::HeaderMap::new(),
+        };
+        let mut ctx = context::context(&request, &pipeline);
+        let mut exchange = LocalExchange::claim(&pipeline, &mut ctx).unwrap();
+        assert!(exchange.claim.approve(&mut ctx).await.is_none());
+        exchange.handler = Some(exchange.claim.create_handler().unwrap());
+        ctx.current_filter_id = Some(99);
+        let mut transport = Transport {
+            state: state.clone(),
+            input: Input::bytes(1),
+        };
+        let mut completion = LocalCompletion::pending();
+        let signal = exchange.cancellation();
+        let cancel = async {
+            tokio::task::yield_now().await;
+            if kind == HandlerKind::Wait {
+                signal.cancel();
+            }
+        };
+        let (response, ()) = tokio::join!(
+            exchange.execute_handler(&mut ctx, &mut transport, &mut completion),
+            cancel
+        );
+        assert_eq!(
+            ctx.current_filter_id,
+            Some(99),
+            "managed exit must restore identity: {kind:?}"
+        );
+        assert_eq!(
+            response.head().status.as_u16(),
+            if kind == HandlerKind::Consume { 200 } else { 500 }
+        );
+        assert!(state.events().contains(&"state:owner".into()));
+
+        if kind == HandlerKind::Wait {
+            let mut fresh = context::context(&request, &pipeline);
+            assert!(exchange.claim.approve(&mut fresh).await.is_none());
+            fresh.current_filter_id = Some(98);
+            let drop_signal = LocalCancellation::default();
+            let mut body = request::RequestStream::new(&mut transport, exchange.route().request_limit, &drop_signal);
+            let mut handler = exchange.claim.create_handler().unwrap();
+            let mut execution = Box::pin(exchange.claim.execute_handler(
+                handler.as_mut(),
+                &mut fresh,
+                &mut body,
+                &drop_signal,
+            ));
+            assert!(matches!(futures::poll!(execution.as_mut()), std::task::Poll::Pending));
+            drop(execution);
+            assert_eq!(
+                fresh.current_filter_id,
+                Some(98),
+                "dropping pending execution must restore identity"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn cancellation_interrupts_blocked_handler_and_drop_only_signals() {
     let state = State::default();
     let mut owner = Fixture::owner(state.clone());
