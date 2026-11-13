@@ -117,7 +117,15 @@ impl LocalExchange {
         let response_slot = ctx.response_header.take();
         let mut response = self.prepare(ctx, transport, &mut completion).await;
         ctx.response_header = response_slot;
-        if self.claim.filter_response(ctx, &mut response, &self.cancellation).await {
+        let invalid_status = response.replace_invalid_status(&mut ctx.extensions).await;
+        if invalid_status {
+            completion.outcome = LocalOutcome::Failed;
+        }
+        let response_replaced = self
+            .claim
+            .filter_response(ctx, &mut response, &self.cancellation)
+            .await;
+        if response_replaced && !invalid_status {
             completion.outcome = LocalOutcome::PolicyDenied;
         }
         delivery::Delivery {

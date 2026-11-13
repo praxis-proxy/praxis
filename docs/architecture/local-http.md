@@ -59,6 +59,10 @@ request-limit denials take this same response path. The configured
 `cors` and `headers` filters can therefore apply CORS and security
 headers to local outcomes.
 
+Before response policies run, the coordinator checks the handler's response
+status. A status outside `200..=599` cancels a streamed source and replaces
+the response with an empty 500; finalization reports `Failed`.
+
 External `Policy` filters use
 `praxis_filter::local_http::record_response_header_effects` from
 `on_response` after editing the response to record whole-field sets and
