@@ -78,8 +78,11 @@ impl Delivery<'_> {
             },
             Err(error) => return Err(error),
         };
-        // The adapter owns framing; generated lengths cannot survive streaming transforms.
-        head.headers.remove(http::header::CONTENT_LENGTH);
+        // The adapter owns body framing; only bodyless HEAD and 304 responses can
+        // retain a supplied length for their corresponding representation.
+        if !preserve_representation_length(head.status, &ctx.request.method) {
+            head.headers.remove(http::header::CONTENT_LENGTH);
+        }
         head.headers.remove(http::header::TRANSFER_ENCODING);
         if self.cancellation.is_cancelled() {
             return Err("local delivery cancelled".into());
@@ -250,6 +253,15 @@ impl Delivery<'_> {
 /// Local 205 content is forbidden even though its framing permits a body phase.
 fn suppress_body(status: http::StatusCode, method: &http::Method) -> bool {
     status == http::StatusCode::RESET_CONTENT || bodyless_response(status, method)
+}
+
+/// Keep representation metadata only where HTTP defines its meaning without a body.
+fn preserve_representation_length(status: http::StatusCode, method: &http::Method) -> bool {
+    (method == http::Method::HEAD
+        && status != http::StatusCode::NO_CONTENT
+        && status != http::StatusCode::RESET_CONTENT)
+        || (status == http::StatusCode::NOT_MODIFIED
+            && (method == http::Method::GET || method == http::Method::HEAD))
 }
 
 /// Remove shared hop-by-hop and reserved internal headers from a local response.
