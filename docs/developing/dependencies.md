@@ -24,8 +24,17 @@ direct workspace dependency.
 
 ## Enforcement Tooling
 
-`make audit` runs both supply-chain checks; CI runs
-them on every pull request.
+`make audit` runs both supply-chain checks. CI runs
+them on every push to `main` and on a daily schedule
+against the default branch, not on pull requests:
+advisory-database changes and new duplicate
+dependencies appear without any commit in the PR, so
+the result says nothing about the change under
+review. When a run on `main` fails, the workflow
+opens a tracking issue titled "Supply chain audit
+failing on main", comments on it instead of opening a
+duplicate for every later failure, and closes it once
+a run passes.
 
 - **cargo-audit**: scans `Cargo.lock` against the
   [RustSec advisory database] for vulnerable or
