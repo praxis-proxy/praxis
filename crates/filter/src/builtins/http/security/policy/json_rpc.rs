@@ -233,14 +233,13 @@ pub(super) fn reserialize_json_rpc_body(envelope: serde_json::Value, method: &st
 // -----------------------------------------------------------------------------
 
 /// Build the typed CMF `ContentPart` list from a JSON-RPC *response*
-/// body — the post-phase mirror of [`build_content_for_method`]. Today
-/// only `tools/call` produces a structured `ToolResult`; `prompts/get`
-/// and `resources/read` return TBD shapes the filter can extend later.
+/// body — the post-phase mirror of [`build_content_for_method`]. Only
+/// `tools/call` produces a structured `ToolResult`; other methods,
+/// including `prompts/get` and `resources/read`, produce no content parts.
 ///
 /// The actual tool data lives in `result.content[].text` (a
-/// JSON-stringified payload) and/or `result.structuredContent`
-/// (newer 2025-06-18 shape). We try
-/// `structuredContent` first; on miss, fold **every** text block (not
+/// JSON-stringified payload) and/or `result.structuredContent`. We prefer
+/// `structuredContent` when present; otherwise, fold **every** text block (not
 /// just the first) so policy evaluates against all of the response's text
 /// content. A lone text block that parses as JSON is exposed as that
 /// object (so `result.<field>` predicates resolve); otherwise the raw

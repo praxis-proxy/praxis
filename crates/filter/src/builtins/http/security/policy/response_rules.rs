@@ -47,7 +47,7 @@ pub(super) fn ensure_supported_entity_results(yaml: &str, config: &PolicyConfig)
 
     Err(format!(
         "policy: {} declares `result:` field rules for prompt/resource routes, but their result \
-         projection is unavailable (praxis-proxy/policy#75, praxis-proxy/praxis#1330). Remove those \
+         projection is unavailable. Remove those \
          field rules; attribute-only `post_invocation` rules remain supported.",
         unsupported.join(", ")
     )

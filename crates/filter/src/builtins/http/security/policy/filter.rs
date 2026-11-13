@@ -930,8 +930,7 @@ impl PolicyFilter {
                 target: "policy.filter",
                 "policy declares response-phase `prompt:` or `resource:` rules: \
                  `post_invocation` predicates over identity and attributes are dispatched, but \
-                 `result.<field>` projection remains blocked on praxis-proxy/policy#75; \
-                 host-side content projection is tracked in praxis-proxy/praxis#1330.",
+                 `result.<field>` projection is unsupported for these routes.",
             );
         }
     }
