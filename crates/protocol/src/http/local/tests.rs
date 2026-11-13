@@ -1922,20 +1922,59 @@ async fn access_logging_is_once_and_honors_scope_and_emit_conditions() {
             serde_yaml::from_str(&format!("- when:\n    path_prefix: {scope}")).unwrap();
         let pipeline = Arc::new(FilterPipeline::build(&mut entries, &registry).unwrap());
         run(&pipeline, &state, Input::bytes(1), "/files", http::Method::POST).await;
-        // The configured file sink flushes in its writer task.
-        let mut lines = 0;
-        for _attempt in 0..20 {
-            lines = std::fs::read_to_string(&path).unwrap_or_default().lines().count();
-            if lines == expected {
-                break;
+        let marker_state = State::default();
+        let mut marker_owner = Fixture::owner(marker_state.clone());
+        marker_owner.response_status = 201;
+        let marker_registry = support::registry(vec![marker_owner]);
+        let mut marker_entries: Vec<praxis_filter::FilterEntry> = serde_yaml::from_str(&format!(
+            "- filter: access_log\n  fields: [status]\n  sink:\n    type: file\n    path: '{}'\n- filter: owner",
+            path.display()
+        ))
+        .unwrap();
+        let marker_pipeline = Arc::new(FilterPipeline::build(&mut marker_entries, &marker_registry).unwrap());
+        run(
+            &marker_pipeline,
+            &marker_state,
+            Input::bytes(1),
+            "/files",
+            http::Method::POST,
+        )
+        .await;
+        let records = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                let records: Vec<serde_json::Value> = std::fs::read_to_string(&path)
+                    .unwrap_or_default()
+                    .lines()
+                    .map(|line| serde_json::from_str(line).unwrap())
+                    .collect();
+                if records
+                    .iter()
+                    .any(|record| record.get("status") == Some(&serde_json::json!("201")))
+                {
+                    break records;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
+        })
+        .await
+        .unwrap();
         assert_eq!(
-            lines, expected,
-            "local completion must retain configured logging eligibility"
+            records.len(),
+            expected + 1,
+            "the marker drains preceding sink writes before checking local logging eligibility: {scope}/{emit}"
         );
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| record.get("status") == Some(&serde_json::json!("200")))
+                .count(),
+            expected,
+            "local completion must emit exactly the configured number of target records"
+        );
+        assert_eq!(records.last().unwrap().get("status").unwrap(), "201");
         assert_complete(&state, 1);
+        assert_complete(&marker_state, 1);
+        drop(pipeline);
     }
 }
 
