@@ -1428,6 +1428,59 @@ async fn access_logging_preserves_request_eligibility_after_header_removal() {
 }
 
 #[tokio::test]
+async fn access_logging_honors_final_response_conditions() {
+    for (condition, status) in [("when", 201), ("unless", 200)] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("access.jsonl");
+        let mut pipelines = Vec::new();
+        for response_status in [200, 201] {
+            let state = State::default();
+            let mut owner = Fixture::owner(state.clone());
+            owner.response_status = response_status;
+            let registry = registry(vec![owner]);
+            let mut entries: Vec<praxis_filter::FilterEntry> = serde_yaml::from_str(&format!(
+                "- filter: access_log\n  fields: [status]\n  sink:\n    type: file\n    path: '{}'\n- filter: owner",
+                path.display()
+            ))
+            .unwrap();
+            entries.first_mut().unwrap().response_conditions =
+                serde_yaml::from_str(&format!("- {condition}:\n    status: [{status}]")).unwrap();
+            let pipeline = Arc::new(FilterPipeline::build(&mut entries, &registry).unwrap());
+            let result = run(&pipeline, &state, Input::bytes(1), "/files", http::Method::POST).await;
+            assert_eq!(result.status, response_status);
+            assert_complete(&state, 1);
+            pipelines.push(pipeline);
+        }
+        let records = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                let records: Vec<serde_json::Value> = std::fs::read_to_string(&path)
+                    .unwrap_or_default()
+                    .lines()
+                    .map(|line| serde_json::from_str(line).unwrap())
+                    .collect();
+                if records
+                    .iter()
+                    .any(|record| record.get("status") == Some(&serde_json::json!("201")))
+                {
+                    break records;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.get("status").unwrap().as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["201"],
+            "the matching record drains preceding sink writes before checking the excluded status: {condition}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn access_logging_is_once_and_honors_scope_and_emit_conditions() {
     for (scope, emit, expected) in [("/files", "[2xx]", 1), ("/files", "[4xx]", 0), ("/other", "[2xx]", 0)] {
         let directory = tempfile::tempdir().unwrap();

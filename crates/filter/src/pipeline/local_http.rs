@@ -173,6 +173,7 @@ impl FilterPipeline {
             if ctx.executed_filter_indices.get(index) == Some(&true)
                 && let AnyFilter::Http(http) = &filter.filter
                 && http.local_http_compatibility() == LocalCompatibility::Policy
+                && !skip_by_response_conditions(http.as_ref(), &filter.response_conditions, ctx)
             {
                 ctx.current_filter_id = Some(filter.filter_id);
                 http.complete_local_http(ctx, status);
