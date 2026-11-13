@@ -341,7 +341,7 @@ impl HttpFilter for BoundConsumer {
     }
 
     fn bound_upstream_request_body_access(&self) -> crate::BodyAccess {
-        crate::BodyAccess::ReadOnly
+        crate::BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
