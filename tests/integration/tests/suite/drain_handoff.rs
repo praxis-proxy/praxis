@@ -29,6 +29,11 @@ const DRAIN_DELAY_SECS: u64 = 40; // 40 s
 #[cfg(feature = "hyper")]
 const GOAWAY_DRAIN_DELAY_SECS: u64 = 10; // 10 s
 
+/// Drain window for the Pingora HTTP/2 check: long enough to finish both
+/// streams inside the window, short enough to keep the test quick.
+#[cfg(not(feature = "hyper"))]
+const PINGORA_DRAIN_DELAY_SECS: u64 = 5; // 5 s
+
 // -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
@@ -293,12 +298,13 @@ fn draining_http2_connection_receives_goaway_and_finishes_its_stream() {
             loop {
                 match std::future::poll_fn(|cx| sender.poll_ready(cx)).await {
                     Ok(()) => tokio::time::sleep(Duration::from_millis(10)).await,
-                    Err(error) => break error,
+                    Err(error) => break (error, started.elapsed()),
                 }
             }
         })
         .await
         .expect("the draining proxy must send GOAWAY before the drain delay ends");
+        let (goaway, goaway_after) = goaway;
         assert!(
             goaway.is_go_away(),
             "the client must observe a GOAWAY error, got {goaway:?}"
@@ -307,6 +313,13 @@ fn draining_http2_connection_receives_goaway_and_finishes_its_stream() {
             goaway.reason(),
             Some(h2::Reason::NO_ERROR),
             "a drain GOAWAY must not carry an error: {goaway:?}"
+        );
+        // Asserted from the value recorded when GOAWAY arrived, before the
+        // response and connection waits below, so their delays cannot
+        // inflate the timing check.
+        assert!(
+            goaway_after < Duration::from_secs(GOAWAY_DRAIN_DELAY_SECS),
+            "GOAWAY must arrive before the drain delay ends, took {goaway_after:?}"
         );
 
         upstream.release();
@@ -319,10 +332,6 @@ fn draining_http2_connection_receives_goaway_and_finishes_its_stream() {
         drop(tokio::time::timeout(Duration::from_secs(5), connection).await);
     });
 
-    assert!(
-        started.elapsed() < Duration::from_secs(GOAWAY_DRAIN_DELAY_SECS),
-        "GOAWAY must arrive before the drain delay ends"
-    );
     let status = proxy.wait_for_exit(Duration::from_secs(90));
     assert!(
         status.is_some_and(|status| status.success()),
@@ -333,6 +342,121 @@ fn draining_http2_connection_receives_goaway_and_finishes_its_stream() {
 // -----------------------------------------------------------------------------
 // Fixtures
 // -----------------------------------------------------------------------------
+
+/// Pingora finishes HTTP/2 streams during the drain window and sends GOAWAY
+/// only when the listener stops, after the delay.
+///
+/// Pingora's HTTP/2 connection loop is internal to its runtime and only
+/// begins the graceful shutdown that emits GOAWAY when the listener itself
+/// stops, so it cannot send GOAWAY at the drain transition the way the Hyper
+/// listener does without a pingora fork change. This test pins the behavior
+/// that limitation produces: the in-flight stream completes inside the drain
+/// window, the connection keeps serving new streams, and the GOAWAY lands
+/// after the delay, when the listener stops.
+#[test]
+#[cfg(not(feature = "hyper"))]
+#[cfg_attr(
+    coverage,
+    ignore = "spawns the praxis binary; deadlocks on exit under llvm-cov instrumentation"
+)]
+fn pingora_http2_drain_finishes_streams_and_defers_goaway() {
+    let upstream = start_upstream(true);
+    let port = free_port();
+    let admin_port = free_port();
+    let admin = format!("127.0.0.1:{admin_port}");
+    let mut proxy = PraxisProcess::spawn(
+        &proxy_config_with_drain(port, admin_port, upstream.port(), PINGORA_DRAIN_DELAY_SECS),
+        &admin,
+    );
+
+    wait_for_ready(&admin, 200, "the proxy must serve before the drain starts");
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("build the HTTP/2 test runtime");
+    let (mut sender, first, connection) = runtime.block_on(async {
+        let tcp = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("connect to the proxy");
+        let (mut sender, connection) = h2::client::handshake(tcp).await.expect("HTTP/2 handshake");
+        let connection = tokio::spawn(async move {
+            drop(connection.await);
+        });
+        let request = http::Request::get("http://localhost/").body(()).expect("build request");
+        let (response, _send) = sender.send_request(request, true).expect("send request");
+        (sender, response, connection)
+    });
+    thread::sleep(Duration::from_millis(200));
+
+    let started = Instant::now();
+    proxy.signal("TERM");
+    wait_for_ready(&admin, 503, "the drain must begin while the request is in flight");
+
+    runtime.block_on(async {
+        upstream.release();
+        let first = tokio::time::timeout(Duration::from_secs(2), first)
+            .await
+            .expect("the in-flight stream must finish inside the drain window")
+            .expect("the in-flight HTTP/2 stream must complete");
+        assert_eq!(first.status(), 200, "the in-flight stream must succeed during drain");
+        assert!(
+            started.elapsed() < Duration::from_secs(PINGORA_DRAIN_DELAY_SECS),
+            "the in-flight stream must finish inside the drain window, took {:?}",
+            started.elapsed()
+        );
+
+        let request = http::Request::get("http://localhost/again")
+            .body(())
+            .expect("build request");
+        let (second, _send) = sender
+            .send_request(request, true)
+            .expect("the connection must accept a new stream during drain");
+        let second = tokio::time::timeout(Duration::from_secs(2), second)
+            .await
+            .expect("the follow-up stream must finish inside the drain window")
+            .expect("the follow-up HTTP/2 stream must complete");
+        assert_eq!(second.status(), 200, "a new stream must succeed during drain");
+        assert!(
+            started.elapsed() < Duration::from_secs(PINGORA_DRAIN_DELAY_SECS),
+            "the follow-up stream must finish inside the drain window, took {:?}",
+            started.elapsed()
+        );
+
+        let goaway = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                match std::future::poll_fn(|cx| sender.poll_ready(cx)).await {
+                    Ok(()) => tokio::time::sleep(Duration::from_millis(10)).await,
+                    Err(error) => break error,
+                }
+            }
+        })
+        .await
+        .expect("the listener must stop and send GOAWAY after the drain delay");
+        assert!(
+            goaway.is_go_away(),
+            "the client must observe a GOAWAY error when the listener stops, got {goaway:?}"
+        );
+        assert_eq!(
+            goaway.reason(),
+            Some(h2::Reason::NO_ERROR),
+            "a shutdown GOAWAY must not carry an error: {goaway:?}"
+        );
+        assert!(
+            started.elapsed() >= Duration::from_secs(PINGORA_DRAIN_DELAY_SECS),
+            "Pingora defers GOAWAY to the listener stop after the drain delay; an earlier \
+             GOAWAY means the fork now supports it and this test, its doc comment, and #1292 \
+             should be updated"
+        );
+        drop(tokio::time::timeout(Duration::from_secs(5), connection).await);
+    });
+
+    let status = proxy.wait_for_exit(Duration::from_secs(90));
+    assert!(
+        status.is_some_and(|status| status.success()),
+        "the delayed handoff must exit cleanly"
+    );
+}
 
 /// Proxy with a delayed handoff and a local backend, plus a readiness listener.
 fn proxy_config(port: u16, admin_port: u16, upstream: u16) -> String {
