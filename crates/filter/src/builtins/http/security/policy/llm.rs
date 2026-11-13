@@ -374,12 +374,54 @@ fn push_input_parts_text(parts: &mut Vec<ContentPart>, value: &serde_json::Value
 
 /// Append the `text` and nested `content` of one content-part object
 /// (e.g. an Anthropic `tool_result` block carrying its own parts).
+///
+/// Anthropic `document` blocks also carry prompt-bearing text in `title`,
+/// `context`, and `source` fields that are not named `text` or `content`,
+/// and `search_result` blocks carry a `title` and a `source` string.
 fn push_object_text(parts: &mut Vec<ContentPart>, item: &serde_json::Value, depth: u8) {
     if let Some(text) = item.get("text") {
         push_text_at(parts, text, depth);
     }
     if let Some(content) = item.get("content") {
         push_text_at(parts, content, depth);
+    }
+    if let Some(title) = item.get("title") {
+        push_text_at(parts, title, depth);
+    }
+    if let Some(context) = item.get("context") {
+        push_text_at(parts, context, depth);
+    }
+    match item.get("type").and_then(serde_json::Value::as_str) {
+        Some("document") => push_document_source_text(parts, item.get("source"), depth),
+        Some("search_result") => {
+            if let Some(source) = item.get("source").filter(|source| source.is_string()) {
+                push_text_at(parts, source, depth);
+            }
+        },
+        Some(_) | None => {},
+    }
+}
+
+/// Project accepted text from an Anthropic document `source`.
+///
+/// Only `type: text` (`source.data`) and `type: content` (`source.content[].text`)
+/// sources contribute prompt text. Binary, URL, and file-reference sources are skipped.
+fn push_document_source_text(parts: &mut Vec<ContentPart>, source: Option<&serde_json::Value>, depth: u8) {
+    let Some(source) = source else {
+        return;
+    };
+    match source.get("type").and_then(serde_json::Value::as_str) {
+        Some("text") => {
+            if let Some(data) = source.get("data") {
+                push_text_at(parts, data, depth);
+            }
+        },
+        Some("content") => {
+            if let Some(content) = source.get("content") {
+                push_text_at(parts, content, depth);
+            }
+        },
+        Some(_) | None => {},
     }
 }
 
@@ -1224,6 +1266,75 @@ mod tests {
             texts(&parsed.content()),
             vec!["tool says hi"],
             "nested tool_result text must reach the scanner",
+        );
+    }
+
+    #[test]
+    fn anthropic_document_text_source_is_projected() {
+        let parsed = request(
+            r#"{"model":"claude","messages":[{"role":"user","content":[
+                {"type":"document","title":"spec","context":"internal",
+                 "source":{"type":"text","media_type":"text/plain","data":"inject me"}}]}]}"#,
+        );
+        assert_eq!(
+            texts(&parsed.content()),
+            vec!["spec", "internal", "inject me"],
+            "document title, context, and text source data must reach the scanner",
+        );
+    }
+
+    #[test]
+    fn anthropic_document_content_source_is_projected() {
+        let parsed = request(
+            r#"{"model":"claude","messages":[{"role":"user","content":[
+                {"type":"document","source":{"type":"content","content":[
+                    {"type":"text","text":"page one"}]}}]}]}"#,
+        );
+        assert_eq!(
+            texts(&parsed.content()),
+            vec!["page one"],
+            "document source.content[].text must reach the scanner",
+        );
+    }
+
+    #[test]
+    fn anthropic_document_inside_tool_result_is_projected() {
+        let parsed = request(
+            r#"{"model":"claude","messages":[{"role":"user","content":[
+                {"type":"tool_result","content":[
+                    {"type":"document","title":"note",
+                     "source":{"type":"text","data":"hidden prompt"}}]}]}]}"#,
+        );
+        assert_eq!(
+            texts(&parsed.content()),
+            vec!["note", "hidden prompt"],
+            "a document nested in tool_result must be projected the same way",
+        );
+    }
+
+    #[test]
+    fn anthropic_search_result_title_and_source_are_projected() {
+        let parsed = request(
+            r#"{"model":"claude","messages":[{"role":"user","content":[
+                {"type":"search_result","source":"https://example.com/doc","title":"result title",
+                 "content":[{"type":"text","text":"result body"}]}]}]}"#,
+        );
+        assert_eq!(
+            texts(&parsed.content()),
+            vec!["result body", "result title", "https://example.com/doc"],
+            "search_result content, title, and source must reach the scanner",
+        );
+    }
+
+    #[test]
+    fn anthropic_document_base64_source_is_not_projected_as_text() {
+        let parsed = request(
+            r#"{"model":"claude","messages":[{"role":"user","content":[
+                {"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"AAA="}}]}]}"#,
+        );
+        assert!(
+            parsed.content().is_empty(),
+            "binary document sources are not prompt text",
         );
     }
 
