@@ -8,8 +8,6 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-use praxis_core::config::FailureMode;
-
 use super::{FilterPipeline, check_failure_mode, filter::PipelineFilter, http_utils::skip_by_response_conditions};
 use crate::{
     AnyFilter, FilterAction, FilterError, HttpFilterContext,
@@ -245,7 +243,7 @@ async fn run_hook(
         return Err("conflicting local HTTP claim".into());
     }
     match result {
-        Err(error) if filter.failure_mode == FailureMode::Open => {
+        Err(error) => {
             check_failure_mode(http.name(), error, label, filter.failure_mode)?;
             Ok(FilterAction::Continue)
         },
@@ -267,5 +265,88 @@ async fn local_action(action: Result<FilterAction, FilterError>) -> Option<Local
         Ok(FilterAction::TerminalResponse(_) | FilterAction::Release | FilterAction::BodyDone) | Err(_) => {
             Some(LocalResponse::internal_error())
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+    use praxis_core::config::FailureMode;
+    use tracing::instrument::WithSubscriber as _;
+
+    use super::{
+        AnyFilter, FilterAction, FilterError, HttpFilterContext, LocalResponse, Phase, PipelineFilter, local_action,
+        run_hook,
+    };
+    use crate::HttpFilter;
+
+    #[tokio::test]
+    async fn local_policy_errors_log_filter_cause_and_phase_for_both_failure_modes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for (phase, label) in [
+            (Phase::Head, "request_head"),
+            (Phase::Request, "request"),
+            (Phase::Response, "response"),
+        ] {
+            for (mode, level) in [(FailureMode::Closed, "ERROR"), (FailureMode::Open, "WARN")] {
+                let (response, output) = run_failing_policy(phase, mode).await?;
+                match mode {
+                    FailureMode::Closed => {
+                        assert!(matches!(response, Some(LocalResponse::Buffered(response)) if response.status == 500));
+                    },
+                    FailureMode::Open => assert!(response.is_none()),
+                }
+                assert_eq!(output.lines().count(), 1, "each failure must be logged once: {output}");
+                for expected in [level, "error_policy", "policy exploded", label] {
+                    assert!(output.contains(expected), "missing {expected} in {output}");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Policy failure used to verify all local header phases.
+    struct ErrorPolicy;
+
+    #[async_trait]
+    impl HttpFilter for ErrorPolicy {
+        fn name(&self) -> &'static str {
+            "error_policy"
+        }
+
+        async fn on_request_head(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+            self.on_request(ctx).await
+        }
+
+        async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+            Err("policy exploded".into())
+        }
+
+        async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+            self.on_request(ctx).await
+        }
+    }
+
+    /// Run a policy failure with a synchronous file-backed tracing subscriber.
+    async fn run_failing_policy(
+        phase: Phase,
+        mode: FailureMode,
+    ) -> Result<(Option<LocalResponse>, String), Box<dyn std::error::Error>> {
+        let logs = tempfile::NamedTempFile::new()?;
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(Mutex::new(logs.reopen()?))
+            .finish();
+        let mut filter = PipelineFilter::new(0, AnyFilter::Http(Box::new(ErrorPolicy)), vec![], vec![]);
+        filter.failure_mode = mode;
+        let request = crate::test_utils::make_request(http::Method::POST, "/files");
+        let mut ctx = crate::test_utils::make_filter_context(&request);
+        let action = run_hook(&filter, &mut ctx, phase, false)
+            .with_subscriber(subscriber)
+            .await;
+        Ok((local_action(action).await, std::fs::read_to_string(logs.path())?))
     }
 }

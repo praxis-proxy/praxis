@@ -19,6 +19,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Local HTTP policy failures log the failing filter, phase, and cause before
+  returning a closed-mode error response.
 - Local HTTP requests cancelled before approval honor configured access logging,
   including request conditions, sampling, and emit conditions.
 - Local HTTP access-log completion honors pipeline response conditions against
