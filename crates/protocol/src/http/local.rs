@@ -157,6 +157,10 @@ impl LocalExchange {
         if invalid_status {
             completion.outcome = LocalOutcome::Failed;
         }
+        delivery::strip_response_hop_by_hop(match &mut response {
+            LocalResponse::Buffered(response) => &mut response.headers,
+            LocalResponse::Streamed(response) => &mut response.headers,
+        });
         let response_replaced = self.claim.filter_response(ctx, &mut response, &self.cancellation).await;
         if response_replaced && !invalid_status {
             completion.outcome = LocalOutcome::PolicyDenied;

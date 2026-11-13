@@ -241,6 +241,19 @@ impl Delivery<'_> {
     }
 }
 
+/// Remove connection-scoped fields before policies or downstream commitment.
+pub(super) fn strip_response_hop_by_hop(headers: &mut http::HeaderMap) {
+    strip_hop_by_hop(
+        headers,
+        StripHopByHopOptions {
+            static_headers: RESPONSE_HOP_BY_HOP_HEADERS,
+            upgrade: UpgradePreserve::None,
+            restore_chunked_framing: false,
+            suppress_chunked_restore_on_websocket: false,
+        },
+    );
+}
+
 /// Local 205 content is forbidden even though its framing permits a body phase.
 fn suppress_body(status: http::StatusCode, method: &http::Method) -> bool {
     status == http::StatusCode::RESET_CONTENT || bodyless_response(status, method)
@@ -264,15 +277,7 @@ fn prepare_response_framing(head: &mut Response, method: &http::Method) {
 
 /// Remove shared hop-by-hop and reserved internal headers from a local response.
 fn strip_response_head_headers(head: &mut Response) {
-    strip_hop_by_hop(
-        &mut head.headers,
-        StripHopByHopOptions {
-            static_headers: RESPONSE_HOP_BY_HOP_HEADERS,
-            upgrade: UpgradePreserve::None,
-            restore_chunked_framing: false,
-            suppress_chunked_restore_on_websocket: false,
-        },
-    );
+    strip_response_hop_by_hop(&mut head.headers);
     strip_reserved(&mut head.headers);
 }
 

@@ -872,10 +872,10 @@ fn mandatory_build_validation_rejects_all_unsafe_compositions() {
     fail.compatibility = LocalCompatibility::Unsupported;
     variants.push(fail);
     let mut fail = owner.clone();
-    fail.request_access = praxis_filter::BodyAccess::ReadOnly;
+    fail.request_access = praxis_filter::BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional);
     variants.push(fail);
     let mut fail = owner.clone();
-    fail.selected_access = praxis_filter::BodyAccess::ReadWrite;
+    fail.selected_access = praxis_filter::BodyAccess::ReadWrite(praxis_filter::BodyRequirement::Optional);
     variants.push(fail);
     let mut fail = owner.clone();
     fail.response_mode = praxis_filter::BodyMode::StreamBuffer { max_bytes: Some(1024) };
@@ -897,7 +897,7 @@ fn mandatory_build_validation_rejects_all_unsafe_compositions() {
         );
     }
     let mut conditional = Fixture::policy("conditional", state);
-    conditional.request_access = praxis_filter::BodyAccess::ReadOnly;
+    conditional.request_access = praxis_filter::BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional);
     let mut entries: Vec<praxis_filter::FilterEntry> = serde_yaml::from_str(
         "- filter: owner\n- filter: conditional\n  conditions:\n  - when:\n      path: /unrelated",
     )
@@ -2026,6 +2026,96 @@ fn branch_chains_are_rejected_even_with_every_validation_override() {
     };
     assert!(FilterPipeline::build(&mut entries.clone(), &registry).is_err());
     assert!(FilterPipeline::build_with_chains(&mut entries, &registry, &chains, &insecure, &[]).is_err());
+}
+
+#[tokio::test]
+async fn handler_connection_nominations_cannot_remove_response_policy_headers() {
+    for kind in [HandlerKind::Buffered, HandlerKind::Consume] {
+        let state = State::default();
+        let mut owner = Fixture::owner(state.clone());
+        owner.handler = kind;
+        for (name, value) in [
+            ("connection", "x-frame-options, x-handler-only"),
+            ("keep-alive", "timeout=5"),
+            ("x-frame-options", "SAMEORIGIN"),
+            ("x-handler-only", "private"),
+            ("x-end-to-end", "retained"),
+        ] {
+            owner.response_headers.insert(
+                http::header::HeaderName::from_static(name),
+                http::HeaderValue::from_static(value),
+            );
+        }
+        let registry = registry(vec![owner]);
+        let mut entries: Vec<praxis_filter::FilterEntry> = serde_yaml::from_str(
+            "
+- filter: owner
+- filter: headers
+  response_set:
+    - name: X-Frame-Options
+      value: DENY
+- filter: headers
+  response_conditions:
+    - unless:
+        headers_present: [Connection]
+    - unless:
+        headers_present: [Keep-Alive]
+    - unless:
+        headers_present: [X-Handler-Only]
+  response_set:
+    - name: X-Sanitized-Before-Policy
+      value: 'yes'
+",
+        )
+        .unwrap();
+        let pipeline = Arc::new(FilterPipeline::build(&mut entries, &registry).unwrap());
+        let result = run(&pipeline, &state, Input::bytes(1), "/files", http::Method::POST).await;
+        assert_eq!(result.outcome, LocalOutcome::Completed, "{kind:?}");
+        let inner = state.inner.lock().unwrap();
+        let (status, headers) = inner.head.as_ref().unwrap();
+        assert_eq!(*status, 200);
+        assert_eq!(headers.get("x-frame-options").unwrap(), "DENY", "{kind:?}");
+        assert_eq!(
+            headers.get("x-sanitized-before-policy").unwrap(),
+            "yes",
+            "response conditions must see sanitized handler headers"
+        );
+        assert_eq!(headers.get("x-end-to-end").unwrap(), "retained");
+        for name in ["connection", "keep-alive", "x-handler-only"] {
+            assert!(!headers.contains_key(name), "hop-by-hop header leaked: {name}");
+        }
+        drop(inner);
+        assert_complete(&state, 1);
+    }
+}
+
+#[tokio::test]
+async fn response_policy_hop_by_hop_fields_are_stripped_at_commitment() {
+    let state = State::default();
+    let mut policy = Fixture::policy("policy", state.clone());
+    policy.behavior = Behavior::RecordResponseHeaders;
+    for (name, value) in [
+        ("connection", "x-policy-hop"),
+        ("x-policy-hop", "private"),
+        ("x-praxis-private", "reserved"),
+        ("x-frame-options", "DENY"),
+    ] {
+        policy.response_headers.insert(
+            http::header::HeaderName::from_static(name),
+            http::HeaderValue::from_static(value),
+        );
+    }
+    let pipeline = pipeline(vec![Fixture::owner(state.clone()), policy]);
+    let result = run(&pipeline, &state, Input::bytes(1), "/files", http::Method::POST).await;
+    assert_eq!(result.outcome, LocalOutcome::Completed);
+    let inner = state.inner.lock().unwrap();
+    let (_, headers) = inner.head.as_ref().unwrap();
+    assert_eq!(headers.get("x-frame-options").unwrap(), "DENY");
+    for name in ["connection", "x-policy-hop", "x-praxis-private"] {
+        assert!(!headers.contains_key(name), "policy header leaked: {name}");
+    }
+    drop(inner);
+    assert_complete(&state, 1);
 }
 
 #[tokio::test]

@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use bytes::Bytes;
 use praxis_filter::{
-    BodyAccess, BodyMode, FilterAction, FilterEntry, FilterError, FilterFactory, FilterPipeline, FilterRegistry,
-    HttpFilter, HttpFilterContext, Request, RequestExtensions, Response, StreamingResponseBody,
+    BodyAccess, BodyMode, BodyRequirement, FilterAction, FilterEntry, FilterError, FilterFactory, FilterPipeline,
+    FilterRegistry, HttpFilter, HttpFilterContext, Request, RequestExtensions, Response, StreamingResponseBody,
     StreamingTerminalResponse, local_http::*,
 };
 
@@ -180,7 +180,7 @@ impl HttpFilter for Fixture {
     }
 
     fn response_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadWrite
+        BodyAccess::ReadWrite(BodyRequirement::Optional)
     }
 
     fn response_body_mode(&self) -> BodyMode {
