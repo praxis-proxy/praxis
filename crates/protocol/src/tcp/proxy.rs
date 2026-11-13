@@ -967,7 +967,11 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for CountingStream<'_, S> {
 /// config time but a private IP at connection time. The check is
 /// skipped when `allow_private` is `true`
 /// (`insecure_options.allow_private_upstreams`).
-async fn connect_upstream(upstream_addr: &str, allow_private: bool) -> Option<TcpStream> {
+///
+/// The HTTP CONNECT forward-proxy path resolves its client-chosen names
+/// under the bounded per-call resolver instead, and dials the answers with
+/// [`connect_resolved`].
+pub(crate) async fn connect_upstream(upstream_addr: &str, allow_private: bool) -> Option<TcpStream> {
     if let Ok(result) = tokio::time::timeout(
         UPSTREAM_CONNECT_TIMEOUT,
         resolve_and_connect(upstream_addr, allow_private),
@@ -999,8 +1003,40 @@ async fn resolve_and_connect(upstream_addr: &str, allow_private: bool) -> Option
             return None;
         },
     };
+    check_and_connect(upstream_addr, &addrs, allow_private).await
+}
 
-    if !allow_private && let Some(bad_ip) = find_private_addr(&addrs) {
+/// Connect to already-resolved addresses for `upstream_addr`, under the
+/// private/reserved-IP guard and the connect timeout.
+///
+/// For callers that resolve under their own bounds, such as the HTTP
+/// CONNECT path for client-chosen names.
+#[cfg(feature = "forward-proxy")]
+pub(crate) async fn connect_resolved(
+    upstream_addr: &str,
+    addrs: &[SocketAddr],
+    allow_private: bool,
+) -> Option<TcpStream> {
+    if let Ok(result) = tokio::time::timeout(
+        UPSTREAM_CONNECT_TIMEOUT,
+        check_and_connect(upstream_addr, addrs, allow_private),
+    )
+    .await
+    {
+        return result;
+    }
+    warn!(
+        upstream = %upstream_addr,
+        timeout_secs = UPSTREAM_CONNECT_TIMEOUT.as_secs(),
+        phase = "connect_timeout",
+        "connection_error"
+    );
+    None
+}
+
+/// Refuse private/reserved answers unless allowed, then connect.
+async fn check_and_connect(upstream_addr: &str, addrs: &[SocketAddr], allow_private: bool) -> Option<TcpStream> {
+    if !allow_private && let Some(bad_ip) = find_private_addr(addrs) {
         warn!(
             upstream = %upstream_addr,
             resolved_ip = %bad_ip,
@@ -1010,7 +1046,7 @@ async fn resolve_and_connect(upstream_addr: &str, allow_private: bool) -> Option
         return None;
     }
 
-    match TcpStream::connect(addrs.as_slice()).await {
+    match TcpStream::connect(addrs).await {
         Ok(s) => {
             // A proxy forwards bytes as they arrive; Nagle plus delayed ACK
             // can stall each exchange of a request/response protocol (Redis,
