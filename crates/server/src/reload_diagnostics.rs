@@ -274,6 +274,7 @@ macro_rules! detect_runtime_field_changes {
 /// `subrequest_max_connections` and `subrequest_circuit_breaker` have
 /// dedicated detectors with tailored messages and are excluded here.
 fn detect_startup_only_runtime_changes(old: &Config, new: &Config) {
+    detect_overload_runtime_changes(old, new);
     detect_runtime_field_changes!(
         old,
         new,
@@ -282,7 +283,6 @@ fn detect_startup_only_runtime_changes(old: &Config, new: &Config) {
             max_connections,
             max_memory_bytes,
             max_open_files,
-            overload_gauges,
             shed_on_fd_pressure,
             subrequest_pool_size,
             threads,
@@ -290,6 +290,15 @@ fn detect_startup_only_runtime_changes(old: &Config, new: &Config) {
             upstream_keepalive_pool_size,
             work_stealing,
         ]
+    );
+}
+
+/// Detect restart-only changes to the overload controller.
+fn detect_overload_runtime_changes(old: &Config, new: &Config) {
+    detect_runtime_field_changes!(
+        old,
+        new,
+        [overload_actions, overload_gauges, overload_purge, overload_thresholds]
     );
 }
 
@@ -589,6 +598,27 @@ mod tests {
         let config = config_with_tls_cert("certs/same.pem");
         let warnings = capture_warnings(|| detect_tls_toggles(&config, &config));
         assert!(warnings.is_empty(), "identical TLS blocks should produce no warnings");
+    }
+
+    #[test]
+    fn runtime_overload_threshold_change_requires_restart() {
+        let old = config_with_runtime("");
+        let new = config_with_runtime("runtime:\n  overload_thresholds:\n    cpu: { scaling: 0.2, saturation: 0.6 }\n");
+        let warnings = capture_warnings(|| detect_startup_only_runtime_changes(&old, &new));
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("requires restart"));
+    }
+
+    #[test]
+    fn runtime_overload_purge_change_requires_restart() {
+        let enabled = config_with_runtime("");
+        let disabled = config_with_runtime("runtime:\n  overload_purge: false\n");
+        for (old, new) in [(&enabled, &disabled), (&disabled, &enabled)] {
+            let warnings = capture_warnings(|| log_restart_required_changes(old, new));
+            assert_eq!(warnings.len(), 1);
+            assert!(warnings[0].contains("requires restart"));
+        }
+        assert!(capture_warnings(|| log_restart_required_changes(&disabled, &disabled)).is_empty());
     }
 
     #[test]

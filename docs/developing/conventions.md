@@ -203,8 +203,16 @@ Security is enforced at the lint level. See lints in
 - `#![forbid(unsafe_code)]` in every crate root except
   `praxis-proxy-filter`, which keeps the workspace
   `deny` so its SIMD JSON scanner (`json_ops::simd_scan`)
-  can opt in with `#[expect(unsafe_code)]`. Other unsafe
-  code belongs upstream.
+  can opt in with `#[expect(unsafe_code)]`.
+  A temporary exception, requested in the
+  [allocator review](https://github.com/praxis-proxy/praxis/pull/1487#discussion_r4491333627),
+  also applies to the server crate on Unix with `overload-actions`: it keeps
+  `deny` solely for the fixed all-arena purge callback's local
+  `#[expect(unsafe_code)]`. Its documented contract must be manually audited
+  on every allocator upgrade; the lockfile guard flags version changes.
+  Default and non-Unix server builds retain `forbid`. Remove this exception
+  when [#1514](https://github.com/praxis-proxy/praxis/issues/1514) provides a safe
+  upstream purge API. All other unsafe code belongs upstream.
 - Clippy runs with `-D warnings` (zero tolerance)
 - Errors via `thiserror`
 - Logging via `tracing`

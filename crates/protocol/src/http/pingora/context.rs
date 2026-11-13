@@ -36,6 +36,8 @@ use tracing::Span;
     )
 )]
 pub struct PingoraRequestCtx {
+    /// Owning server controller; standalone default contexts leave actions disabled.
+    pub overload: Option<Arc<praxis_core::overload::Signal>>,
     /// Connection permit from the per-listener semaphore.
     ///
     /// Held for the request's lifetime; released on drop,
@@ -620,10 +622,11 @@ impl PingoraRequestCtx {
 impl Default for PingoraRequestCtx {
     #[expect(
         clippy::too_many_lines,
-        reason = "context default enumerates all lifecycle fields explicitly"
+        reason = "context construction enumerates all lifecycle fields explicitly"
     )]
     fn default() -> Self {
         Self {
+            overload: None,
             _connection_permit: None,
             _global_connection_permit: None,
             cached_body_done_indices: Vec::new(),

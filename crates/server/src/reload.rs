@@ -37,6 +37,64 @@ use crate::{
 // Reload
 // -----------------------------------------------------------------------------
 
+/// Result of accessing live reload state or publishing a staged generation.
+type ReloadResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+/// Access live state only outside downstream pipeline construction.
+pub(crate) trait ReloadTarget {
+    /// Run a bounded live-state operation, or reject it after watcher shutdown.
+    fn with_live<T, Operation>(&self, operation: Operation) -> ReloadResult<T>
+    where
+        Operation: FnOnce(&ListenerPipelines) -> ReloadResult<T>;
+}
+
+impl ReloadTarget for ListenerPipelines {
+    fn with_live<T, Operation>(&self, operation: Operation) -> ReloadResult<T>
+    where
+        Operation: FnOnce(&ListenerPipelines) -> ReloadResult<T>,
+    {
+        operation(self)
+    }
+}
+
+impl<L: ReloadTarget> ReloadTarget for Arc<L> {
+    fn with_live<T, Operation>(&self, operation: Operation) -> ReloadResult<T>
+    where
+        Operation: FnOnce(&ListenerPipelines) -> ReloadResult<T>,
+    {
+        self.as_ref().with_live(operation)
+    }
+}
+
+/// Revocable watcher access; a stalled build never holds this lock or its live Arc.
+pub(crate) struct WatcherReloadTarget(Mutex<Option<Arc<ListenerPipelines>>>);
+
+impl WatcherReloadTarget {
+    /// Keep live pipelines available until the serving owner stops the watcher.
+    pub(crate) fn new(live: Arc<ListenerPipelines>) -> Self {
+        Self(Mutex::new(Some(live)))
+    }
+
+    /// Revoke publication and release the controller, waiting only for a live-state operation.
+    pub(crate) fn stop(&self) {
+        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+    }
+}
+
+impl ReloadTarget for WatcherReloadTarget {
+    fn with_live<T, Operation>(&self, operation: Operation) -> ReloadResult<T>
+    where
+        Operation: FnOnce(&ListenerPipelines) -> ReloadResult<T>,
+    {
+        let guard = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        operation(
+            guard
+                .as_ref()
+                .ok_or("config watcher stopped; discarding staged reload")?,
+        )
+    }
+}
+
 /// Validate a new config, rebuild pipelines, and atomically swap them
 /// into the running server.
 ///
@@ -62,7 +120,7 @@ pub(crate) fn reload_pipelines(
     new_config: &Config,
     old_config: &Config,
     registry: &FilterRegistry,
-    live: &ListenerPipelines,
+    live: &impl ReloadTarget,
     listener_meta: &praxis_protocol::http::health::ListenerMetaStore,
     cluster_meta: &praxis_protocol::http::health::ClusterMetaStore,
     health_shutdown: &Arc<Mutex<CancellationToken>>,
@@ -75,25 +133,28 @@ pub(crate) fn reload_pipelines(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("building new pipelines from reloaded config");
 
-    if let Err(err) = reject_protocol_changes(new_config, live) {
-        error!(error = %err, "config reload failed: listener protocol changed; requires restart");
-        return Err(err);
-    }
+    live.with_live(|live| {
+        if let Err(err) = reject_protocol_changes(new_config, live) {
+            error!(error = %err, "config reload failed: listener protocol changed; requires restart");
+            return Err(err);
+        }
 
-    if let Err(err) = praxis_protocol::tcp::validate_tcp_groups(new_config) {
-        error!(error = %err, "config reload failed: inconsistent TCP listener group");
-        return Err(err.into());
-    }
+        if let Err(err) = praxis_protocol::tcp::validate_tcp_groups(new_config) {
+            error!(error = %err, "config reload failed: inconsistent TCP listener group");
+            return Err(err.into());
+        }
 
-    if let Err(err) = reject_tcp_group_changes(new_config, old_config) {
-        error!(error = %err, "config reload failed: TCP listener topology changed; requires restart");
-        return Err(err);
-    }
+        if let Err(err) = reject_tcp_group_changes(new_config, old_config) {
+            error!(error = %err, "config reload failed: TCP listener topology changed; requires restart");
+            return Err(err);
+        }
 
-    if let Err(err) = reject_forward_proxy_changes(new_config, old_config, live) {
-        error!(error = %err, "config reload failed: listener forward_proxy changed; requires restart");
-        return Err(err);
-    }
+        if let Err(err) = reject_forward_proxy_changes(new_config, old_config, live) {
+            error!(error = %err, "config reload failed: listener forward_proxy changed; requires restart");
+            return Err(err);
+        }
+        Ok(())
+    })?;
 
     let health_registry = build_health_registry(&new_config.clusters);
 
@@ -127,78 +188,82 @@ pub(crate) fn reload_pipelines(
         },
     };
 
-    // Emit this reload's change diagnostics under the OLD logging baseline:
-    // refresh_baseline below applies the new config's env-filter immediately,
-    // and a reload that both requires a restart and lowers verbosity must not
-    // swallow the very warnings telling the operator their change was not
-    // applied.
-    log_restart_required_changes(old_config, new_config);
-    warn_insecure_option_escalations(old_config, new_config);
-    warn_stateful_filter_reset(new_config);
-    log_config_change_audit(old_config, new_config);
-    // The advisory file-permission warnings belong with the diagnostics
-    // above for the same reason: a reload may introduce a new listener
-    // cert, a cluster mTLS client key, or a new log file path, and a
-    // reload that also lowers verbosity must not swallow the warning
-    // about the insecurely-permissioned file it just brought live.
-    warn_insecure_key_permissions(new_config);
-    warn_insecure_log_file_permissions(new_config);
-    warn_insecure_sink_file_permissions(new_config);
+    // No live reference is held while downstream code builds or validates. Shutdown
+    // revokes this target; a late build then drops its uncommitted generation here.
+    live.with_live(|live| {
+        // Emit this reload's change diagnostics under the OLD logging baseline:
+        // refresh_baseline below applies the new config's env-filter immediately,
+        // and a reload that both requires a restart and lowers verbosity must not
+        // swallow the very warnings telling the operator their change was not
+        // applied.
+        log_restart_required_changes(old_config, new_config);
+        warn_insecure_option_escalations(old_config, new_config);
+        warn_stateful_filter_reset(new_config);
+        log_config_change_audit(old_config, new_config);
+        // The advisory file-permission warnings belong with the diagnostics
+        // above for the same reason: a reload may introduce a new listener
+        // cert, a cluster mTLS client key, or a new log file path, and a
+        // reload that also lowers verbosity must not swallow the warning
+        // about the insecurely-permissioned file it just brought live.
+        warn_insecure_key_permissions(new_config);
+        warn_insecure_log_file_permissions(new_config);
+        warn_insecure_sink_file_permissions(new_config);
 
-    // Apply the log-level baseline while a failure can still abort the reload
-    // cleanly. This is the last fallible step; it must run before the
-    // irreversible pipeline swap below so a bad logging baseline does not leave
-    // live traffic already moved onto the new pipelines while the caller sees
-    // Err (which would churn a retry loop that re-swaps every cycle). The
-    // refresh only touches the logging subsystem, and the diagnostics above
-    // are infallible, so ordering it here is safe.
-    if let Some(log_level) = log_level
-        && let Err(error) = log_level.refresh_baseline(new_config)
-    {
-        error!(%error, "config reload failed: log level baseline refresh");
-        return Err(error.into());
-    }
-
-    slow_start_generation.commit();
-
-    // Copy known-down endpoint state into the new registry BEFORE the
-    // swap: afterwards `live` already serves the new pipelines and the
-    // old registry is no longer reachable through them.
-    carry_over_health_state(live, old_config, new_config, &health_registry);
-
-    let mut swapped: Vec<&str> = Vec::new();
-    let mut skipped: Vec<&str> = Vec::new();
-
-    for name in new_pipelines.listener_names() {
-        let Some(new_slot) = new_pipelines.get(name) else {
-            continue;
-        };
-        if live.get(name).is_none() {
-            skipped.push(name);
-            continue;
+        // Apply the log-level baseline while a failure can still abort the reload
+        // cleanly. This is the last fallible step; it must run before the
+        // irreversible pipeline swap below so a bad logging baseline does not leave
+        // live traffic already moved onto the new pipelines while the caller sees
+        // Err (which would churn a retry loop that re-swaps every cycle). The
+        // refresh only touches the logging subsystem, and the diagnostics above
+        // are infallible, so ordering it here is safe.
+        if let Some(log_level) = log_level
+            && let Err(error) = log_level.refresh_baseline(new_config)
+        {
+            error!(%error, "config reload failed: log level baseline refresh");
+            return Err(error.into());
         }
-        live.swap(name, new_slot.load_full());
-        swapped.push(name);
-    }
 
-    listener_meta.store(Arc::new(praxis_protocol::http::health::listener_meta_from_config(
-        new_config,
-    )));
-    cluster_meta.store(Arc::new(praxis_protocol::http::health::cluster_meta_from_config(
-        new_config,
-    )));
+        slow_start_generation.commit();
 
-    respawn_health_checks(
-        old_config,
-        new_config,
-        &health_registry,
-        health_shutdown,
-        subrequest_client.upstream_ca(),
-    );
+        // Copy known-down endpoint state into the new registry BEFORE the
+        // swap: afterwards `live` already serves the new pipelines and the
+        // old registry is no longer reachable through them.
+        carry_over_health_state(live, old_config, new_config, &health_registry);
 
-    info!(swapped = ?swapped, skipped = ?skipped, "config reload complete");
+        let mut swapped: Vec<&str> = Vec::new();
+        let mut skipped: Vec<&str> = Vec::new();
 
-    Ok(())
+        for name in new_pipelines.listener_names() {
+            let Some(new_slot) = new_pipelines.get(name) else {
+                continue;
+            };
+            if live.get(name).is_none() {
+                skipped.push(name);
+                continue;
+            }
+            live.swap(name, new_slot.load_full());
+            swapped.push(name);
+        }
+
+        listener_meta.store(Arc::new(praxis_protocol::http::health::listener_meta_from_config(
+            new_config,
+        )));
+        cluster_meta.store(Arc::new(praxis_protocol::http::health::cluster_meta_from_config(
+            new_config,
+        )));
+
+        respawn_health_checks(
+            old_config,
+            new_config,
+            &health_registry,
+            health_shutdown,
+            subrequest_client.upstream_ca(),
+        );
+
+        info!(swapped = ?swapped, skipped = ?skipped, "config reload complete");
+
+        Ok(())
+    })
 }
 
 /// Refuse a config that changes the protocol of a listener whose handler

@@ -37,8 +37,8 @@ use crate::http::pingora::{
     reason = "the context names its permits for their only use, being dropped"
 )]
 pub(super) fn admit(listener: &ListenerShared, ctx: &mut PingoraRequestCtx) -> Option<LocalReply> {
-    if praxis_core::memory::is_exceeded() {
-        return Some(refuse(metrics::OVERLOAD_REASON_MEMORY, "5", "memory pressure exceeded"));
+    if let Some(refusal) = pressure_refusal(&listener.overload) {
+        return Some(refusal);
     }
 
     let Some(fd_admission) = praxis_core::fd::try_admit() else {
@@ -69,6 +69,14 @@ pub(super) fn admit(listener: &ListenerShared, ctx: &mut PingoraRequestCtx) -> O
     }
     ctx._active_request = Some(metrics::ActiveRequestGuard::acquire(listener.name.clone()));
     None
+}
+
+/// Refuse sustained overload or the independent hard memory backstop.
+fn pressure_refusal(signal: &praxis_core::overload::Signal) -> Option<LocalReply> {
+    if signal.is_saturated() {
+        return Some(refuse("pressure", "1", "sustained resource pressure"));
+    }
+    praxis_core::memory::is_exceeded().then(|| refuse(metrics::OVERLOAD_REASON_MEMORY, "5", "memory pressure exceeded"))
 }
 
 /// Take a permit from the listener's `max_connections` limit when it has

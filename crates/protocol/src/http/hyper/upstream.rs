@@ -9,7 +9,7 @@
 //! `error_while_proxy` hooks: the retry policy for connect and exchange
 //! failures, and no retry once the replay copy of the body is truncated.
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use http::{Response, Version};
 use praxis_core::{
@@ -154,6 +154,7 @@ async fn select_peer(listener: &ListenerShared, flight: &mut Flight) -> Result<P
     let mut peer = PeerSpec::from_upstream(target.upstream, target.allow_private)
         .await
         .map_err(|err| Failure::peer(&err))?;
+    apply_overload_connection(&mut peer.connection, &listener.overload);
     peer.trust_anchors.clone_from(&listener.trust_anchors);
     open_attempt_at(&peer.address.ip().to_string(), peer.address.port(), &mut flight.ctx);
     Ok(peer)
@@ -298,6 +299,15 @@ fn connect_budget(options: &ConnectionOptions) -> Duration {
     })
 }
 
+/// Materialize Hyper's effective budget before scaling, including its default.
+fn apply_overload_connection(options: &mut Arc<ConnectionOptions>, signal: &praxis_core::overload::Signal) {
+    if signal.is_enabled() {
+        let budget = connect_budget(options);
+        Arc::make_mut(options).total_connection_timeout = Some(budget);
+    }
+    crate::overload::scale_connection(options, signal);
+}
+
 // -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
@@ -312,7 +322,6 @@ fn connect_budget(options: &ConnectionOptions) -> Duration {
     reason = "tests"
 )]
 mod tests {
-    use std::sync::Arc;
 
     use http::StatusCode;
     use praxis_core::{
@@ -362,6 +371,37 @@ mod tests {
             Duration::from_secs(30),
             "a longer TCP connect timeout stretches the budget"
         );
+    }
+
+    #[test]
+    fn overload_scales_the_effective_default_connect_budget() {
+        let signal = praxis_core::overload::Signal::default();
+        let mut options = Arc::new(ConnectionOptions::default());
+        apply_overload_connection(&mut options, &signal);
+        assert!(options.total_connection_timeout.is_none());
+        for (pressure, millis) in [(0.0, 10_000), (0.5, 5500), (1.0, 1000)] {
+            signal.update(praxis_core::overload::EngagedActions::default(), pressure);
+            let mut options = Arc::new(ConnectionOptions::default());
+            apply_overload_connection(&mut options, &signal);
+            assert_eq!(connect_budget(&options), Duration::from_millis(millis));
+            assert!(options.read_timeout.is_none());
+            assert!(options.write_timeout.is_none());
+        }
+    }
+
+    #[test]
+    fn overload_preserves_explicit_connect_budget_precedence() {
+        let signal = praxis_core::overload::Signal::default();
+        signal.update(praxis_core::overload::EngagedActions::default(), 0.5);
+        for (connect, total, millis) in [(30, None, 16_500), (1, Some(3), 1650)] {
+            let mut options = Arc::new(ConnectionOptions {
+                connection_timeout: Some(Duration::from_secs(connect)),
+                total_connection_timeout: total.map(Duration::from_secs),
+                ..Default::default()
+            });
+            apply_overload_connection(&mut options, &signal);
+            assert_eq!(connect_budget(&options), Duration::from_millis(millis));
+        }
     }
 
     #[tokio::test]
@@ -650,8 +690,10 @@ mod tests {
     /// to a cluster of two endpoints nothing listens on, whose policy retries
     /// connect failures on another endpoint; its upload, and the client side.
     async fn routed_to_two_endpoints() -> (Flight, Upload, Client) {
-        let first = refusing_peer().await.address;
-        let second = refusing_peer().await.address;
+        let first_socket = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let second_socket = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let first = first_socket.local_addr().unwrap();
+        let second = second_socket.local_addr().unwrap();
         let yaml = format!(
             "- filter: router\n  routes:\n    - path_prefix: \"/\"\n      cluster: backend\n- filter: load_balancer\n  clusters:\n    - name: backend\n      endpoints: [\"{first}\", \"{second}\"]\n      retry_policy:\n        max_retries: 2\n        retriable_conditions: [connect_failure]\n"
         );
@@ -670,6 +712,7 @@ mod tests {
 
         assert!(matches!(phase, RequestPhase::Proxy), "the request is routed upstream");
         let upload = Upload::new(body, &flight.ctx);
+        drop((first_socket, second_socket));
         (flight, upload, client)
     }
 
