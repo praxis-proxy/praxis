@@ -17,27 +17,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
-### Fixed
-
-- Discarded local HTTP response cleanup cannot indefinitely block handler
-  finalization, access logging, or adapter completion after a request fault.
-- Local HTTP handlers read request state under their declaring filter's identity,
-  restoring the prior identity after completion, errors, or cancellation.
-- Repeated local HTTP exchanges share one delivery and completion owner,
-  preventing duplicate responses and adapter completion callbacks.
-- Local HTTP pipeline construction rejects routes in embedded pipelines,
-  including iterative router steps, before unsupported nested execution.
-- Local HTTP policy failures log the failing filter, phase, and cause before
-  returning a closed-mode error response.
-- Local HTTP requests cancelled before approval honor configured access logging,
-  including request conditions, sampling, and emit conditions.
-- Local HTTP access-log completion honors pipeline response conditions against
-  the final response.
-- Local HTTP pipeline construction consistently rejects branch-chain
-  declarations, including empty lists, before branch resolution.
-- Local CORS preflight responses retain their generated `Vary` fields alongside
-  replacement response values when a response policy replaces the preflight.
-
 ### Changed
 
 - Update the Pingora fork dependencies to v0.11.4.
