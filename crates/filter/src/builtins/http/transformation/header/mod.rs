@@ -223,6 +223,11 @@ impl HeaderFilter {
 
 #[async_trait]
 impl HttpFilter for HeaderFilter {
+    #[cfg(feature = "local-http")]
+    fn local_http_compatibility(&self) -> crate::local_http::LocalCompatibility {
+        crate::local_http::LocalCompatibility::Policy
+    }
+
     fn name(&self) -> &'static str {
         "headers"
     }
@@ -254,6 +259,15 @@ impl HttpFilter for HeaderFilter {
         remove_headers(&mut resp.headers, &self.response_remove);
         append_headers(&mut resp.headers, &self.response_add);
         set_headers(&mut resp.headers, &self.response_set);
+
+        #[cfg(feature = "local-http")]
+        crate::local_http::record_response_header_effects(
+            &mut ctx.extensions,
+            self.response_remove
+                .iter()
+                .cloned()
+                .chain(self.response_set.iter().map(|(name, _)| name.clone())),
+        );
 
         Ok(FilterAction::Continue)
     }

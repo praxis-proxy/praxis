@@ -35,6 +35,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Local HTTP response policies retain their headers when a handler nominates
+  the same fields in `Connection`; handler hop-by-hop fields are removed
+  before policies run.
 - **Breaking:** statically buffered request pipelines now reject a finite
   `body_limits.max_request_bytes` above `body_limits.max_buffer_bytes` at
   startup, config validation, and reload, naming both fields and byte values.
@@ -52,6 +55,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Policy credential stripping, delegation and asserted headers now survive
   preceding ordered body-filter mutations, including stripped headers
   introduced during earlier pre-read passes.
+
+### Added
+
+- Experimental, off-by-default `local-http` handler contracts with route and
+  pipeline validation. Pingora and Hyper adapters do not serve local handlers
+  yet, so startup and reload reject pipelines that declare local routes.
+  Custom policies can preserve explicit response-header writes and removals
+  across local response replacements through
+  `local_http::record_response_header_effects`. See
+  `docs/architecture/local-http.md`.
 
 ## [0.8.0] - 2026-11-06
 

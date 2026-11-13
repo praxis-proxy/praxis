@@ -203,6 +203,8 @@ different generations during a swap.
 
 ## Related
 
+- [Local HTTP Lifecycle](local-http.md)
+
 - [Pipeline Concepts](pipeline-concepts.md)
 - [Life of a Request](life-of-a-request.md)
 - [Connection Lifecycle](connection-lifecycle.md)

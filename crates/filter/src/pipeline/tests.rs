@@ -3393,6 +3393,12 @@ async fn skip_to_excludes_skipped_filters_from_response() {
     );
 
     let pipeline = with_body_indices(FilterPipeline {
+        #[cfg(feature = "local-http")]
+        local_routes: Vec::new(),
+        #[cfg(feature = "local-http")]
+        local_http_valid: true,
+        #[cfg(feature = "local-http")]
+        nested_local_routes: false,
         body_capabilities: BodyCapabilities::default(),
         compression: None,
         filters: vec![filter_a, filter_b, filter_c],
@@ -3476,6 +3482,12 @@ async fn skip_to_excludes_skipped_filters_from_body_hooks() {
     );
 
     let pipeline = with_body_indices(FilterPipeline {
+        #[cfg(feature = "local-http")]
+        local_routes: Vec::new(),
+        #[cfg(feature = "local-http")]
+        local_http_valid: true,
+        #[cfg(feature = "local-http")]
+        nested_local_routes: false,
         body_capabilities: BodyCapabilities::default(),
         compression: None,
         filters: vec![filter_a, filter_b, filter_c],
@@ -3537,6 +3549,12 @@ async fn body_hooks_run_for_every_filter_before_the_request_phase() {
     let log: Arc<std::sync::Mutex<Vec<&'static str>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
 
     let pipeline = with_body_indices(FilterPipeline {
+        #[cfg(feature = "local-http")]
+        local_routes: Vec::new(),
+        #[cfg(feature = "local-http")]
+        local_http_valid: true,
+        #[cfg(feature = "local-http")]
+        nested_local_routes: false,
         body_capabilities: BodyCapabilities::default(),
         compression: None,
         filters: vec![
@@ -3611,6 +3629,12 @@ async fn all_executed_filters_run_on_response() {
     let log: Arc<std::sync::Mutex<Vec<&'static str>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
 
     let pipeline = with_body_indices(FilterPipeline {
+        #[cfg(feature = "local-http")]
+        local_routes: Vec::new(),
+        #[cfg(feature = "local-http")]
+        local_http_valid: true,
+        #[cfg(feature = "local-http")]
+        nested_local_routes: false,
         body_capabilities: BodyCapabilities::default(),
         compression: None,
         filters: vec![
@@ -3841,6 +3865,12 @@ async fn skipped_filter_skips_its_branches() {
     parent.branches = vec![branch];
 
     let pipeline = with_body_indices(FilterPipeline {
+        #[cfg(feature = "local-http")]
+        local_routes: Vec::new(),
+        #[cfg(feature = "local-http")]
+        local_http_valid: true,
+        #[cfg(feature = "local-http")]
+        nested_local_routes: false,
         body_capabilities: BodyCapabilities::default(),
         compression: None,
         filters: vec![parent],
@@ -5455,6 +5485,12 @@ fn with_body_indices(mut pipeline: FilterPipeline) -> FilterPipeline {
 /// explicit body capabilities (defaults everywhere else).
 fn test_pipeline(body_capabilities: BodyCapabilities, filters: Vec<PipelineFilter>) -> FilterPipeline {
     with_body_indices(FilterPipeline {
+        #[cfg(feature = "local-http")]
+        local_routes: Vec::new(),
+        #[cfg(feature = "local-http")]
+        local_http_valid: true,
+        #[cfg(feature = "local-http")]
+        nested_local_routes: false,
         body_capabilities,
         compression: None,
         filters,
@@ -5898,6 +5934,12 @@ fn make_pipeline(filters: Vec<Box<dyn HttpFilter>>) -> FilterPipeline {
     let body_capabilities = compute_body_capabilities(&filters);
 
     with_body_indices(FilterPipeline {
+        #[cfg(feature = "local-http")]
+        local_routes: Vec::new(),
+        #[cfg(feature = "local-http")]
+        local_http_valid: true,
+        #[cfg(feature = "local-http")]
+        nested_local_routes: false,
         body_capabilities,
         compression: None,
         filters,
@@ -5939,6 +5981,12 @@ fn make_pipeline_with_conditions(
     let body_capabilities = compute_body_capabilities(&filters);
 
     with_body_indices(FilterPipeline {
+        #[cfg(feature = "local-http")]
+        local_routes: Vec::new(),
+        #[cfg(feature = "local-http")]
+        local_http_valid: true,
+        #[cfg(feature = "local-http")]
+        nested_local_routes: false,
         body_capabilities,
         compression: None,
         filters,
@@ -5980,6 +6028,12 @@ fn make_pipeline_with_response_conditions(
     let body_capabilities = compute_body_capabilities(&filters);
 
     with_body_indices(FilterPipeline {
+        #[cfg(feature = "local-http")]
+        local_routes: Vec::new(),
+        #[cfg(feature = "local-http")]
+        local_http_valid: true,
+        #[cfg(feature = "local-http")]
+        nested_local_routes: false,
         body_capabilities,
         compression: None,
         filters,
@@ -6651,6 +6705,12 @@ fn streaming_capability_not_detected_for_normal_filter() {
 fn streaming_capability_detected_when_filter_declares_it() {
     let streaming_pf = super::test_filters::streaming_capable_filter();
     let pipeline = with_body_indices(FilterPipeline {
+        #[cfg(feature = "local-http")]
+        local_routes: Vec::new(),
+        #[cfg(feature = "local-http")]
+        local_http_valid: true,
+        #[cfg(feature = "local-http")]
+        nested_local_routes: false,
         body_capabilities: BodyCapabilities::default(),
         compression: None,
         filters: vec![streaming_pf],

@@ -416,6 +416,7 @@ const EXPERIMENTAL_FEATURES: &[(&str, bool)] = &[
     ("hedged-requests", cfg!(feature = "hedged-requests")),
     ("hyper", cfg!(feature = "hyper")),
     ("iterative-request-router", cfg!(feature = "iterative-request-router")),
+    ("local-http", cfg!(feature = "local-http")),
     (
         "policy-experimental-ratelimit",
         cfg!(feature = "policy-experimental-ratelimit"),

@@ -222,6 +222,8 @@ pub(crate) fn resolve_pipelines_with_composition(
             &config.insecure_options,
             &config.clusters,
         )?;
+        #[cfg(feature = "local-http")]
+        praxis_protocol::http::local::require_supported_adapter(&pipeline)?;
         configure_pipeline(
             &mut pipeline,
             config,
@@ -404,6 +406,33 @@ fn validate_pipeline(
     reason = "tests"
 )]
 mod tests {
+    #[cfg(feature = "local-http")]
+    #[test]
+    fn local_http_startup_rejects_adapter_and_unsafe_owners_despite_overrides() {
+        let mut registry = FilterRegistry::with_builtins();
+        crate::local_http_tests::register(&mut registry);
+        for open in [false, true] {
+            let config = crate::local_http_tests::config(open);
+            let result = resolve_pipelines(
+                &config,
+                &registry,
+                &empty_health_registry(),
+                &empty_kv_stores(),
+                &empty_session_stores(),
+                &empty_subrequest_client(),
+            );
+            let error = result.err().expect("local pipelines cannot be served yet").to_string();
+            assert!(
+                error.contains(if open {
+                    "failure_mode: closed"
+                } else {
+                    "unsupported by this adapter"
+                }),
+                "{error}"
+            );
+        }
+    }
+
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use praxis_core::health::HealthRegistry;

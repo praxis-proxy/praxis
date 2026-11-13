@@ -319,6 +319,11 @@ fn slow_start_bindings(clusters: &[Cluster]) -> Vec<crate::load_balancing::slow_
     reason = "on_request orchestrates sequential setup and the pinned-endpoint branch"
 )]
 impl HttpFilter for LoadBalancerFilter {
+    #[cfg(feature = "local-http")]
+    fn local_http_compatibility(&self) -> crate::local_http::LocalCompatibility {
+        crate::local_http::LocalCompatibility::UpstreamRoutingOnly
+    }
+
     fn name(&self) -> &'static str {
         "load_balancer"
     }

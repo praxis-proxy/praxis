@@ -173,6 +173,7 @@ on that edge too. Adding a backend is described in
 | `access-log-syslog` | off (experimental) | The `access_log` filter's syslog sink (RFC 3164 over a Unix socket, UDP, or TCP). | On to ship access logs to a syslog collector. Adds the optional `syslog` crate; kept out of the default and FIPS builds. |
 | `tls-health-check` | off (experimental) | TLS handshakes and HTTPS active health probes. Selects Pingora. | Enables `health_check.type: tls`; HTTP probes on TLS clusters use HTTPS. See [health checking](health-checking.md#tls-and-https-probes). |
 | `hedged-requests` | off (experimental) | Races one idempotent request across healthy endpoints and returns the first successful response. | On when a route sets `hedge_policy` with `max_attempts` greater than 1. Off, the policy is still parsed and every request stays on one upstream. |
+| `local-http` | off (experimental) | Adapter-neutral local HTTP lifecycle for filters that claim and serve routes locally. | On to compile local-handler support. No adapter serves local handlers yet; Pingora and Hyper reject pipelines containing them. |
 | `dev` | off | Developer convenience bundle (currently enables `basic-auth-filter`). | Local development builds. |
 | `experimental` | off | Marker feature set transitively by experimental features; drives a startup warning. | Not selected directly; it lights up when an experimental feature is enabled. |
 
