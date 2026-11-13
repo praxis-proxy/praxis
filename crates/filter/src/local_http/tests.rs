@@ -159,18 +159,7 @@ fn local_route_builders_reject_iterative_step_owners() {
             "- filter: iterative_request_router\n  initial_step: serve\n  steps:\n    - name: serve\n      filters: [{owner} {{filter: static_response, status: 200}}]\n      on_result: [{{default: true, done: true}}]"
         );
         for with_chains in [false, true] {
-            let mut entries = serde_yaml::from_str::<Vec<crate::FilterEntry>>(&config).unwrap();
-            let result = if with_chains {
-                FilterPipeline::build_with_chains(
-                    &mut entries,
-                    &registry,
-                    &std::collections::HashMap::new(),
-                    &praxis_core::config::InsecureOptions::default(),
-                    &[],
-                )
-            } else {
-                FilterPipeline::build(&mut entries, &registry)
-            };
+            let result = build_iterative_pipeline(&config, &registry, with_chains);
             if owner.is_empty() {
                 let pipeline = result.unwrap();
                 assert!(
@@ -415,6 +404,27 @@ fn test_route() -> LocalRoute {
         body: LocalBodyOwnership::Exclusive,
         request_limit: 1,
         response_limit: 1,
+    }
+}
+
+/// Build the same iterative-route configuration through either public builder.
+#[cfg(feature = "iterative-request-router")]
+fn build_iterative_pipeline(
+    config: &str,
+    registry: &crate::FilterRegistry,
+    with_chains: bool,
+) -> Result<FilterPipeline, FilterError> {
+    let mut entries = serde_yaml::from_str::<Vec<crate::FilterEntry>>(config).unwrap();
+    if with_chains {
+        FilterPipeline::build_with_chains(
+            &mut entries,
+            registry,
+            &std::collections::HashMap::new(),
+            &praxis_core::config::InsecureOptions::default(),
+            &[],
+        )
+    } else {
+        FilterPipeline::build(&mut entries, registry)
     }
 }
 

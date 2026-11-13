@@ -78,12 +78,7 @@ impl Delivery<'_> {
             },
             Err(error) => return Err(error),
         };
-        // The adapter owns body framing; only bodyless HEAD and 304 responses can
-        // retain a supplied length for their corresponding representation.
-        if !preserve_representation_length(head.status, &ctx.request.method) {
-            head.headers.remove(http::header::CONTENT_LENGTH);
-        }
-        head.headers.remove(http::header::TRANSFER_ENCODING);
+        prepare_response_framing(head, &ctx.request.method);
         if self.cancellation.is_cancelled() {
             return Err("local delivery cancelled".into());
         }
@@ -257,6 +252,14 @@ fn preserve_representation_length(status: http::StatusCode, method: &http::Metho
         && status != http::StatusCode::NO_CONTENT
         && status != http::StatusCode::RESET_CONTENT)
         || (status == http::StatusCode::NOT_MODIFIED && (method == http::Method::GET || method == http::Method::HEAD))
+}
+
+/// Leave body framing to the adapter while retaining bodyless representation metadata.
+fn prepare_response_framing(head: &mut Response, method: &http::Method) {
+    if !preserve_representation_length(head.status, method) {
+        head.headers.remove(http::header::CONTENT_LENGTH);
+    }
+    head.headers.remove(http::header::TRANSFER_ENCODING);
 }
 
 /// Remove shared hop-by-hop and reserved internal headers from a local response.

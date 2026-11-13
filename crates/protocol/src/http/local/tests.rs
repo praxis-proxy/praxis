@@ -1772,7 +1772,7 @@ async fn access_logging_honors_final_response_conditions() {
     for (condition, status) in [("when", 201), ("unless", 200)] {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("access.jsonl");
-        let mut pipelines = Vec::new();
+        let mut sink_owner = None;
         for response_status in [200, 201] {
             let state = State::default();
             let mut owner = Fixture::owner(state.clone());
@@ -1789,7 +1789,7 @@ async fn access_logging_honors_final_response_conditions() {
             let result = run(&pipeline, &state, Input::bytes(1), "/files", http::Method::POST).await;
             assert_eq!(result.status, response_status);
             assert_complete(&state, 1);
-            pipelines.push(pipeline);
+            sink_owner = Some(pipeline);
         }
         let records = tokio::time::timeout(std::time::Duration::from_secs(1), async {
             loop {
@@ -1817,6 +1817,7 @@ async fn access_logging_honors_final_response_conditions() {
             ["201"],
             "the matching record drains preceding sink writes before checking the excluded status: {condition}"
         );
+        drop(sink_owner);
     }
 }
 

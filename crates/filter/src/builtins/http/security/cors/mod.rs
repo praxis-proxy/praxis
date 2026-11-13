@@ -424,7 +424,7 @@ impl HttpFilter for CorsFilter {
                 ctx.extensions.insert(LocalCorsPreflightPending { headers });
             }
             #[cfg(not(feature = "local-http"))]
-            let _ = approved_headers;
+            drop(approved_headers);
             return Ok(action);
         }
 
