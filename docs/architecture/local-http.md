@@ -160,7 +160,9 @@ Neither logging nor metrics may be repeated by a transport fallback.
 `LocalCancellation::cancel` is synchronous and idempotent. Blocked handler
 execution and delivery observe cancellation. Managed exits signal it,
 terminate the response source as appropriate, and explicitly await the
-constructed handler's `finalize` once with its terminal outcome. A factory
+constructed handler's `finalize` once with its terminal outcome.
+For responses discarded after request faults, source cleanup is attempted
+for at most one second and can be interrupted by cancellation. A factory
 failure has no handler to finalize. Drop only signals cancellation: forced
 task/runtime termination cannot promise async cleanup. Services must
 recover their durable incomplete operations independently.

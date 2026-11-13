@@ -19,6 +19,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Discarded local HTTP response cleanup cannot indefinitely block handler
+  finalization, access logging, or adapter completion after a request fault.
 - Local HTTP handlers read request state under their declaring filter's identity,
   restoring the prior identity after completion, errors, or cancellation.
 - Repeated local HTTP exchanges share one delivery and completion owner,

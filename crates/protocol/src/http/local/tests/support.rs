@@ -35,6 +35,8 @@ pub(super) struct Observations {
     pub(super) completions: usize,
     pub(super) finalizations: Vec<LocalOutcome>,
     pub(super) source_cancels: usize,
+    pub(super) source_cancel_completions: usize,
+    pub(super) block_source_cancel: bool,
     pub(super) suppressed: usize,
     pub(super) max_chunk: usize,
     pub(super) reusable: Option<bool>,
@@ -440,7 +442,16 @@ impl StreamingResponseBody for Source {
 
     async fn cancel(&mut self) {
         self.record_extension("cancel");
-        self.state.inner.lock().unwrap().source_cancels += 1;
+        let blocked = {
+            let mut inner = self.state.inner.lock().unwrap();
+            inner.source_cancels += 1;
+            inner.block_source_cancel
+        };
+        if blocked {
+            std::future::pending::<()>().await;
+        }
+        tokio::task::yield_now().await;
+        self.state.inner.lock().unwrap().source_cancel_completions += 1;
     }
 
     fn swap_extensions(&mut self, extensions: &mut RequestExtensions) {

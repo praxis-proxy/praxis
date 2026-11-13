@@ -17,6 +17,13 @@ use praxis_filter::{
     local_http::{LocalCancellation, LocalClaim, LocalHttpHandler, LocalOutcome, LocalResponse},
 };
 
+// -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
+/// Discarded response cleanup must not indefinitely delay managed completion.
+const DISCARDED_RESPONSE_CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// Live adapters currently cannot install local-handler pipelines.
 ///
 /// # Errors
@@ -234,7 +241,7 @@ impl LocalExchange {
         }
         match result {
             Ok(mut response) if fault.is_some() || cancellation.is_cancelled() => {
-                response.cancel().await;
+                Self::cancel_discarded_response(&mut response, cancellation).await;
                 LocalResponse::Buffered(praxis_filter::TerminalResponse::new(
                     if fault == Some(LocalOutcome::LimitExceeded) {
                         413
@@ -251,6 +258,16 @@ impl LocalExchange {
                     500
                 },
             )),
+        }
+    }
+
+    /// Attempt source cleanup before completion, bounded by cancellation or time.
+    async fn cancel_discarded_response(response: &mut LocalResponse, cancellation: &LocalCancellation) {
+        tokio::select! {
+            biased;
+            () = response.cancel() => {},
+            () = cancellation.cancelled() => {},
+            () = tokio::time::sleep(DISCARDED_RESPONSE_CLEANUP_TIMEOUT) => {},
         }
     }
 }

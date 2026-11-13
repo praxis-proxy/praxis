@@ -1141,6 +1141,7 @@ async fn swallowed_request_fault_still_fails_closed_and_dropped_chunks_are_not_e
     let pipeline = pipeline(vec![owner]);
     let result = run(&pipeline, &state, Input::bytes(1), "/files", http::Method::POST).await;
     assert_eq!(result.status, 500);
+    assert_eq!(state.inner.lock().unwrap().source_cancel_completions, 1);
     assert_complete(&state, 1);
     let state = State::default();
     let mut dropper = Fixture::policy("dropper", state.clone());
@@ -1155,6 +1156,112 @@ async fn swallowed_request_fault_still_fails_closed_and_dropped_chunks_are_not_e
         3,
         "dropped chunks must not terminate delivery"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn discarded_response_cleanup_is_bounded_and_cancellable() {
+    for limit_fault in [false, true] {
+        for external_cancel in [false, true] {
+            let state = State::default();
+            let mut owner = Fixture::owner(state.clone());
+            owner.handler = HandlerKind::SwallowRead;
+            owner.routes.first_mut().unwrap().request_limit = 1;
+            {
+                let mut inner = state.inner.lock().unwrap();
+                inner.fail_read = !limit_fault;
+                inner.block_source_cancel = true;
+            }
+            let pipeline = pipeline(vec![owner]);
+            let request = praxis_filter::Request {
+                method: http::Method::POST,
+                uri: "/files".parse().unwrap(),
+                headers: http::HeaderMap::new(),
+            };
+            let mut head = Response {
+                status: http::StatusCode::OK,
+                headers: http::HeaderMap::new(),
+            };
+            let mut ctx = context::context(&request, &pipeline);
+            ctx.response_header = Some(&mut head);
+            let exchange = LocalExchange::claim(&pipeline, &mut ctx).unwrap();
+            let signal = exchange.cancellation();
+            let mut transport = Transport {
+                state: state.clone(),
+                input: Input::bytes(2),
+            };
+            let cancel = async {
+                if external_cancel {
+                    while state.inner.lock().unwrap().source_cancels == 0 {
+                        tokio::task::yield_now().await;
+                    }
+                    signal.cancel();
+                }
+            };
+            let started = tokio::time::Instant::now();
+            let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                tokio::join!(exchange.run(&mut ctx, &mut transport), cancel)
+            })
+            .await
+            .unwrap();
+            assert_eq!(result.status, if limit_fault { 413 } else { 500 });
+            assert_eq!(
+                result.outcome,
+                if external_cancel {
+                    LocalOutcome::Cancelled
+                } else if limit_fault {
+                    LocalOutcome::LimitExceeded
+                } else {
+                    LocalOutcome::Failed
+                }
+            );
+            if external_cancel {
+                assert_eq!(started.elapsed(), std::time::Duration::ZERO);
+            } else {
+                assert_eq!(started.elapsed(), std::time::Duration::from_secs(1));
+            }
+            assert_eq!(state.inner.lock().unwrap().source_cancels, 1);
+            assert_eq!(state.inner.lock().unwrap().source_cancel_completions, 0);
+            assert!(praxis_filter::access_record_already_emitted(&ctx));
+            assert!(!state.events().contains(&"source".into()));
+            assert_complete(&state, 1);
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn discarded_response_cleanup_is_attempted_after_cancellation() {
+    let state = State::default();
+    let mut owner = Fixture::owner(state.clone());
+    owner.handler = HandlerKind::Early;
+    state.inner.lock().unwrap().block_source_cancel = true;
+    let pipeline = pipeline(vec![owner]);
+    let request = praxis_filter::Request {
+        method: http::Method::POST,
+        uri: "/files".parse().unwrap(),
+        headers: http::HeaderMap::new(),
+    };
+    let mut ctx = context::context(&request, &pipeline);
+    let mut exchange = LocalExchange::claim(&pipeline, &mut ctx).unwrap();
+    exchange.handler = Some(exchange.claim.create_handler().unwrap());
+    let signal = exchange.cancellation();
+    let mut transport = Transport {
+        state: state.clone(),
+        input: Input::bytes(1),
+    };
+    let mut response = exchange
+        .execute_handler(&mut ctx, &mut transport, &mut LocalCompletion::pending())
+        .await;
+    signal.cancel();
+    let started = tokio::time::Instant::now();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        LocalExchange::cancel_discarded_response(&mut response, &signal),
+    )
+    .await
+    .unwrap();
+    assert_eq!(started.elapsed(), std::time::Duration::ZERO);
+    assert_eq!(state.inner.lock().unwrap().source_cancels, 1);
+    assert_eq!(state.inner.lock().unwrap().source_cancel_completions, 0);
 }
 
 #[tokio::test]
