@@ -230,6 +230,10 @@ impl ProxyHttp for PingoraHttpHandler {
         // request_filter) should context reuse ever be enabled.
         ctx.upstream_for_retry = None;
         ctx.upstream_contacted = false;
+        // Record the client's HTTP version before the admission checks below
+        // can reject, so their 503s can run the drain Connection: close marker.
+        // request_filter assigns the same value later from the same source.
+        ctx.client_http_version = Some(session.req_header().version);
 
         if praxis_core::memory::is_exceeded() {
             metrics::record_overload_reject(metrics::OVERLOAD_REASON_MEMORY);
