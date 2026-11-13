@@ -221,6 +221,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `FilterPipeline::build_with_chains` takes a new required
   `top_level_clusters: &[Cluster]` argument. Rust callers pass the
   config's top-level `clusters:` list, or `&[]` when none exists.
+- **Breaking**: the `rate_limit` filter now requires `scope`, whose only
+  supported value is `local`. Counters are process-local, so each replica
+  enforces its own `rate` and `burst`. Add `scope: local` to existing
+  configs. See `docs/filters/http/traffic_management/rate_limit.md`.
 
 ### Removed
 

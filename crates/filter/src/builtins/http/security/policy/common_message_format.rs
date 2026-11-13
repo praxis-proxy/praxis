@@ -7,7 +7,7 @@
 //! JSON-RPC bodies and stashes `mcp.method` / `mcp.name` in
 //! `ctx.filter_metadata`. This module consumes that metadata and
 //! resolves the matching CMF hook name + entity-type discriminator so
-//! APL routes annotated to `tools/<x>`, `prompts/<x>`, or
+//! policy routes annotated to `tools/<x>`, `prompts/<x>`, or
 //! `resources/<x>` get evaluated against the right pre/post hook.
 //!
 //! # Scope of CMF dispatch
@@ -26,7 +26,7 @@
 //! `roots/*`, `sampling/*`) is **identity-only by design**: the
 //! `on_request` identity gate still runs, but `on_request_body`
 //! returns `BodyDone` without dispatching CMF. The premise is that
-//! APL `route:` policy applies to entity invocations, not to
+//! route policy applies to entity invocations, not to
 //! discovery / control-plane traffic. Operators who need policy on a
 //! list operation can still gate it via praxis filter `conditions:`
 //! on path / method.
@@ -64,7 +64,7 @@ pub(super) fn entity_for_protocol_method(method: &str) -> Option<(&'static str, 
 
 /// Post-phase mirror of [`entity_for_protocol_method`]. Maps the same
 /// methods to the CMF `*_post_invoke` / `*_post_fetch` hook names so
-/// `on_response_body` can dispatch APL `result:` pipelines.
+/// `on_response_body` can dispatch policy `result:` pipelines.
 ///
 /// The method is read from `ctx.filter_metadata` — the protocol
 /// classifier filter (from `praxis-ai`) stashes it during the
