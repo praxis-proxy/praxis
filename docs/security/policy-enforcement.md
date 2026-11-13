@@ -103,9 +103,10 @@ The [approval example][approval] walks through a salary adjustment.
 
 Limit unauthenticated requests by client address, then apply limits to resolved
 identities and claims before authorization and forwarding. Policy routes can
-select different limits. The bundled limiter is experimental; counters belong to
-each limiter instance, are not shared between replicas, and reset on
-configuration reload.
+select different limits. The bundled limiter is experimental and should not be
+relied on in production. Its counters belong to each limiter instance, are not
+shared between replicas, and reset on configuration reload. For production
+request limits, use Core's [rate_limit filter][rate-limit].
 
 See [policy rate limiting][limits] for configuration and denial behavior.
 
@@ -191,6 +192,7 @@ trusted endpoints, and response behavior.
 [audit]: https://github.com/praxis-proxy/policy/blob/main/docs/content/auditing.md
 [limits]: https://github.com/praxis-proxy/policy/blob/main/docs/content/rate-limiting.md
 [ip-acl]: ../filters/http/security/ip_acl.md
+[rate-limit]: ../filters/http/traffic_management/rate_limit.md
 [guardrails]: ../filters/http/security/guardrails.md
 [credentials]: ../filters/http/security/credential_injection.md
 [core-example]: ../../examples/configs/security/policy.yaml

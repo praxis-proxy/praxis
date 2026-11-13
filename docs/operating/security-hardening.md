@@ -6,7 +6,7 @@ and operational hardening for production deployments.
 
 For application access rules, scoped upstream credentials, redaction, and
 cross-call data protection, see
-[policy enforcement with Praxis Policy Engine (PPE](../security/policy-enforcement.md).
+[policy enforcement with Praxis Policy Engine (PPE)][policy-guide].
 
 ## Default Security Posture
 
@@ -234,8 +234,11 @@ cases and the body-access and classifier requirements for each protocol.
 - **Identity-bound rate limits**: Configure policy limits after identity
   resolution to count requests by verified identity or claims. Pre-identity
   limits can bound traffic by client address before authentication. The
-  bundled limiter is experimental; counters are local to each instance,
-  are not shared between replicas, and reset on configuration reload.
+  bundled limiter is experimental and should not be relied on in
+  production. Its counters are local to each instance, are not shared
+  between replicas, and reset on configuration reload. For production
+  request limits, use the `rate_limit` filter described under
+  [Network controls](#network-controls).
   See [policy rate limiting][policy-limits].
 - **Data protection**: Apply permission-based redaction to MCP tool
   arguments and results, and use session taint to restrict later calls

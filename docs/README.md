@@ -17,7 +17,8 @@ Choose a path by the result you need:
   [TLS](operating/tls.md) before deploying.
 - **Control access and protect data:**
   [policy enforcement](security/policy-enforcement.md) explains
-  use cases, filter selection, and how to connect Core to identity and authorization policies.
+  use cases, filter selection, and how to connect Core to identity and
+  authorization policies.
 - **Proxy model APIs or agent protocols:** use the
   [Praxis AI quickstart][ai-quickstart].
 - **Contribute to Praxis:** [contributor setup](developing/getting-started.md)
