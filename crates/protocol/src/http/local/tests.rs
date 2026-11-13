@@ -1272,6 +1272,83 @@ async fn allowed_options_preflight_keeps_permissions_through_local_exchange() {
 }
 
 #[tokio::test]
+async fn allowed_options_preflight_merges_vary_fields_through_response_replacement() {
+    for private_network in [false, true] {
+        let state = State::default();
+        let mut replacement = Fixture::policy("replacement", state.clone());
+        replacement.behavior = Behavior::RejectResponse;
+        for value in ["Accept-Encoding", "Accept-Language"] {
+            replacement
+                .rejection_headers
+                .append(http::header::VARY, http::HeaderValue::from_static(value));
+        }
+        let registry = registry(vec![replacement, Fixture::owner(state.clone())]);
+        let mut entries: Vec<praxis_filter::FilterEntry> = serde_yaml::from_str(&format!(
+            r#"
+- filter: replacement
+- filter: cors
+  allow_origins: ["https://client.example"]
+  allow_methods: [POST]
+  allow_headers: [x-custom]
+  allow_private_network: {private_network}
+- filter: owner
+"#,
+        ))
+        .unwrap();
+        let pipeline = Arc::new(FilterPipeline::build(&mut entries, &registry).unwrap());
+        let request = praxis_filter::Request {
+            method: http::Method::OPTIONS,
+            uri: "/files".parse().unwrap(),
+            headers: http::HeaderMap::from_iter([
+                (
+                    http::header::ORIGIN,
+                    http::HeaderValue::from_static("https://client.example"),
+                ),
+                (
+                    http::header::ACCESS_CONTROL_REQUEST_METHOD,
+                    http::HeaderValue::from_static("POST"),
+                ),
+            ]),
+        };
+        let mut head = Response {
+            status: http::StatusCode::OK,
+            headers: http::HeaderMap::new(),
+        };
+        let mut ctx = context::context(&request, &pipeline);
+        ctx.response_header = Some(&mut head);
+        let result = LocalExchange::claim(&pipeline, &mut ctx)
+            .unwrap()
+            .run(
+                &mut ctx,
+                &mut Transport {
+                    state: state.clone(),
+                    input: Input::bytes(0),
+                },
+            )
+            .await;
+        assert_eq!(
+            result.status, 451,
+            "the earlier response policy must replace the preflight"
+        );
+        let observed = state.inner.lock().unwrap();
+        let (_, headers) = observed.head.as_ref().unwrap();
+        let generated = if private_network {
+            "Origin, Access-Control-Request-Method, Access-Control-Request-Headers, Access-Control-Request-Private-Network"
+        } else {
+            "Origin, Access-Control-Request-Method, Access-Control-Request-Headers"
+        };
+        assert_eq!(
+            headers.get_all(http::header::VARY).iter().collect::<Vec<_>>(),
+            ["Accept-Encoding", "Accept-Language", generated],
+            "generated preflight Vary fields must merge with every replacement Vary value"
+        );
+        assert_eq!(headers.get("access-control-allow-methods").unwrap(), "POST");
+        drop(observed);
+        assert_complete(&state, 0);
+    }
+}
+
+#[tokio::test]
 async fn access_logging_preserves_request_eligibility_after_header_removal() {
     for (condition, expected) in [("when", 1), ("unless", 0)] {
         let directory = tempfile::tempdir().unwrap();

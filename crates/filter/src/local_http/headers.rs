@@ -49,6 +49,13 @@ where
     }
 }
 
+/// Preserve an already-present policy value alongside later replacement values.
+pub(crate) fn record_response_header_append(extensions: &mut RequestExtensions, name: HeaderName, value: HeaderValue) {
+    if let Some(explicit) = extensions.get_mut::<PolicyHeaders>() {
+        explicit.appended.push((name, value));
+    }
+}
+
 /// Only policy edits survive replacement; handler-originated headers do not.
 #[derive(Default)]
 pub(crate) struct HeaderEdits {
@@ -57,6 +64,15 @@ pub(crate) struct HeaderEdits {
 }
 
 impl HeaderEdits {
+    /// Retain policy values that already existed before the response hook.
+    pub(crate) fn record_appends(&mut self, appended: Vec<(HeaderName, HeaderValue)>) {
+        self.operations.extend(
+            appended
+                .into_iter()
+                .map(|(name, value)| HeaderEdit::Append(name, value)),
+        );
+    }
+
     /// Record changes and explicit writes/removals, even when values match.
     pub(crate) fn record(&mut self, before: &HeaderMap, after: &HeaderMap, touched: &[HeaderName]) {
         for name in touched {
@@ -130,6 +146,8 @@ impl HeaderEdit {
 /// Explicit policy effects cannot be inferred from header value differences.
 #[derive(Default)]
 pub(crate) struct PolicyHeaders {
+    /// Values retained additively over later replacements.
+    pub(crate) appended: Vec<(HeaderName, HeaderValue)>,
     /// Fields authoritatively set or removed by the current response hook.
     pub(crate) touched: Vec<HeaderName>,
 }

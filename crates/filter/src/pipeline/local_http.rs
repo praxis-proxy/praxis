@@ -160,6 +160,7 @@ impl FilterPipeline {
         if let Some(head) = ctx.response_header.as_deref() {
             edits.record(&before, &head.headers, &explicit.touched);
         }
+        edits.record_appends(explicit.appended);
         replacement
     }
 

@@ -17,6 +17,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Local CORS preflight responses retain their generated `Vary` fields alongside
+  replacement response values when a response policy replaces the preflight.
+
 ### Changed
 
 - Update the Pingora fork dependencies to v0.11.4.
