@@ -15,14 +15,14 @@ pub mod wait;
 
 pub use backend::{
     Backend, BackendGuard, BackendReceipt, CountingBackend, GrpcBackend, GrpcBackendGuard, PayloadResponseBackend,
-    PayloadResponseFraming, PayloadResponseReceipt, ReusedConnectionLog, RoutedBackend, WsBackendGuard,
-    read_http_request, spawn_raw_http_backend, start_backend, start_backend_v6, start_backend_with_shutdown,
-    start_counting_backend, start_echo_backend, start_grpc_backend, start_gzip_encoded_backend,
-    start_header_echo_backend, start_hop_by_hop_response_backend, start_keepalive_backend,
+    PayloadResponseFraming, PayloadResponseReceipt, RecordedRequest, RequestLog, ReusedConnectionLog, RoutedBackend,
+    WsBackendGuard, read_http_request, spawn_raw_http_backend, start_backend, start_backend_v6,
+    start_backend_with_shutdown, start_counting_backend, start_echo_backend, start_grpc_backend,
+    start_gzip_encoded_backend, start_header_echo_backend, start_hop_by_hop_response_backend, start_keepalive_backend,
     start_keepalive_poison_backend, start_malicious_response_header_backend, start_payload_response_backend,
-    start_request_counting_backend, start_reserved_header_response_backend, start_response_header_backend,
-    start_reused_connection_kill_backend, start_slow_backend, start_stateful_backend, start_tagged_header_echo_backend,
-    start_uri_echo_backend, start_websocket_echo_backend,
+    start_recording_backend, start_request_counting_backend, start_reserved_header_response_backend,
+    start_response_header_backend, start_reused_connection_kill_backend, start_slow_backend, start_stateful_backend,
+    start_tagged_header_echo_backend, start_uri_echo_backend, start_websocket_echo_backend,
 };
 pub(crate) use http_client::try_http_send_on_connection_until;
 pub use http_client::{

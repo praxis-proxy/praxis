@@ -104,10 +104,7 @@ fn capture_client(flight: &mut Flight, connection: &ConnectionFacts, parts: Part
     flight.ctx.client_addr = Some(normalize_mapped_ipv4(connection.peer.ip()));
     flight.ctx.downstream_tls = connection.tls;
     flight.ctx.peer_identity = None;
-    flight.ctx.request_is_idempotent = matches!(
-        parts.method,
-        http::Method::GET | http::Method::HEAD | http::Method::OPTIONS
-    );
+    flight.ctx.request_is_idempotent = crate::http::permits_automatic_replay(&parts.method);
     flight.ctx.request_span =
         create_request_span_for(parts.method.as_str(), parts.uri.path(), &parts.headers, &flight.ctx);
 
@@ -419,15 +416,19 @@ mod tests {
     }
 
     #[test]
-    fn only_safe_methods_are_idempotent() {
+    fn capture_client_records_automatic_replay_eligibility() {
         for (method, idempotent) in [
             (Method::GET, true),
             (Method::HEAD, true),
             (Method::OPTIONS, true),
+            (Method::QUERY, true),
             (Method::POST, false),
             (Method::PUT, false),
             (Method::DELETE, false),
             (Method::PATCH, false),
+            (Method::TRACE, false),
+            (Method::CONNECT, false),
+            (Method::from_bytes(b"CUSTOM").unwrap(), false),
         ] {
             let mut flight = Flight::for_tests(empty_pipeline());
 

@@ -13,6 +13,7 @@
 //! - [RFC 9110]: HTTP Semantics
 //! - [RFC 9112]: HTTP/1.1
 //! - [RFC 9113]: HTTP/2
+//! - [RFC 10008]: The HTTP QUERY Method
 //!
 //! [RFC 6265]: https://datatracker.ietf.org/doc/html/rfc6265
 //! [RFC 6455]: https://datatracker.ietf.org/doc/html/rfc6455
@@ -20,7 +21,9 @@
 //! [RFC 9110]: https://datatracker.ietf.org/doc/html/rfc9110
 //! [RFC 9112]: https://datatracker.ietf.org/doc/html/rfc9112
 //! [RFC 9113]: https://datatracker.ietf.org/doc/html/rfc9113
+//! [RFC 10008]: https://datatracker.ietf.org/doc/html/rfc10008
 
+mod rfc10008;
 mod rfc6265;
 mod rfc6455;
 mod rfc7239;

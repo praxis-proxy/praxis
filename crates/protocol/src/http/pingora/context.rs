@@ -262,7 +262,7 @@ pub struct PingoraRequestCtx {
     /// Once true, remaining chunks bypass buffering and stream through.
     pub request_body_released: bool,
 
-    /// Whether the request method is idempotent (GET, HEAD, OPTIONS).
+    /// Whether the method permits automatic replay (GET, HEAD, OPTIONS, QUERY).
     pub request_is_idempotent: bool,
 
     /// Snapshot of the original request for body/response body phases.

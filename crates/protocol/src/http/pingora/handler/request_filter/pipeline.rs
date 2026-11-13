@@ -143,10 +143,7 @@ pub(in crate::http) async fn execute(
             })
         })
         .map(Arc::new);
-    ctx.request_is_idempotent = matches!(
-        session.req_header().method,
-        http::Method::GET | http::Method::HEAD | http::Method::OPTIONS
-    );
+    ctx.request_is_idempotent = crate::http::permits_automatic_replay(&session.req_header().method);
 
     ctx.request_span = create_request_span(session, ctx);
 
@@ -614,29 +611,6 @@ mod tests {
             result.extra_headers.is_empty(),
             "empty pipeline should produce no extra headers"
         );
-    }
-
-    #[tokio::test]
-    async fn idempotent_methods_detected_in_request() {
-        for method in [Method::GET, Method::HEAD, Method::OPTIONS] {
-            let req = Request {
-                method,
-                uri: Uri::from_static("/"),
-                headers: HeaderMap::new(),
-            };
-            let is_idempotent = matches!(req.method, Method::GET | Method::HEAD | Method::OPTIONS);
-            assert!(is_idempotent, "{} should be idempotent", req.method);
-        }
-
-        for method in [Method::POST, Method::PUT, Method::DELETE, Method::PATCH] {
-            let req = Request {
-                method,
-                uri: Uri::from_static("/"),
-                headers: HeaderMap::new(),
-            };
-            let is_idempotent = matches!(req.method, Method::GET | Method::HEAD | Method::OPTIONS);
-            assert!(!is_idempotent, "{} should not be idempotent", req.method);
-        }
     }
 
     #[test]
