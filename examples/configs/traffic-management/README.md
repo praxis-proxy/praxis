@@ -33,6 +33,6 @@ Traffic management filters control routing, load balancing, failure handling, an
 
 ## Related Documentation
 
-- [Routing Architecture](../../../docs/architecture/routing.md)
+- [Router Filter](../../../docs/filters/http/traffic_management/router.md)
 - [Load Balancing](../../../docs/filters/http/traffic_management/load_balancer.md)
-- [Failure Handling](../../../docs/operating/failure-handling.md)
+- [Health Checking](../../../docs/operating/health-checking.md)
