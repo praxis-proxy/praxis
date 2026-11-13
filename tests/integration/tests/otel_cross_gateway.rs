@@ -71,8 +71,8 @@ use praxis_core::{
     subrequest::{StreamLimits, SubRequest, SubRequestClient, SubRequestConnector},
 };
 use praxis_test_utils::{
-    Backend, free_port, http_send, parse_body, parse_status, read_http_request, spawn_raw_http_backend,
-    start_full_proxy, start_header_echo_backend, start_proxy, start_slow_backend, wait_for_tcp,
+    Backend, free_port, free_port_guard, http_send, parse_body, parse_status, read_http_request,
+    spawn_raw_http_backend, start_full_proxy, start_header_echo_backend, start_proxy, start_slow_backend, wait_for_tcp,
 };
 use tracing::Instrument as _;
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
@@ -129,55 +129,62 @@ fn exported_parentage_links_edge_provider_and_backend() {
 
     let backend = start_header_echo_backend();
     let subrequest_backend = start_header_echo_backend();
-    let provider_port = free_port();
-    let edge_port = free_port();
-    let routing_edge_port = free_port();
-    let retry_edge_port = free_port();
-    let retry_dead_port = free_port();
+    let provider_port = free_port_guard();
+    let edge_port = free_port_guard();
+    let routing_edge_port = free_port_guard();
+    let retry_edge_port = free_port_guard();
+    let retry_dead_port = free_port_guard();
     let mid_proxy_failure_port = start_slow_backend("late response", Duration::from_millis(500));
-    let mid_proxy_edge_port = free_port();
+    let mid_proxy_edge_port = free_port_guard();
     let not_found_backend = Backend::status(404, "not found").start_with_shutdown();
     let internal_error_backend = Backend::status(500, "internal error").start_with_shutdown();
-    let not_found_edge_port = free_port();
-    let internal_error_edge_port = free_port();
+    let not_found_edge_port = free_port_guard();
+    let internal_error_edge_port = free_port_guard();
     let endpoint = format!("http://127.0.0.1:{collector_port}");
-    let provider_config = proxy_config(provider_port, backend.port(), &endpoint, "provider");
-    let edge_config = proxy_config(edge_port, provider_port, &endpoint, "edge");
-    let routing_edge_config = routing_proxy_config(routing_edge_port, subrequest_backend.port(), &endpoint);
+    let provider_config = proxy_config(provider_port.port(), backend.port(), &endpoint, "provider");
+    let edge_config = proxy_config(edge_port.port(), provider_port.port(), &endpoint, "edge");
+    let routing_edge_config = routing_proxy_config(routing_edge_port.port(), subrequest_backend.port(), &endpoint);
     let retry_edge_config = retry_proxy_config(
-        retry_edge_port,
-        retry_dead_port,
+        retry_edge_port.port(),
+        retry_dead_port.port(),
         backend.port(),
         &endpoint,
         "connect_failure",
     );
     let mid_proxy_edge_config = retry_proxy_config(
-        mid_proxy_edge_port,
+        mid_proxy_edge_port.port(),
         mid_proxy_failure_port,
         backend.port(),
         &endpoint,
         "reset",
     );
     let not_found_edge_config = proxy_config(
-        not_found_edge_port,
+        not_found_edge_port.port(),
         not_found_backend.port(),
         &endpoint,
         "not-found-edge",
     );
     let internal_error_edge_config = proxy_config(
-        internal_error_edge_port,
+        internal_error_edge_port.port(),
         internal_error_backend.port(),
         &endpoint,
         "internal-error-edge",
     );
     let tracing_guard = praxis_core::logging::init_tracing(&edge_config).expect("OTLP tracing setup");
 
+    provider_port.release();
     let provider = start_proxy(&provider_config);
+    edge_port.release();
     let edge = start_proxy(&edge_config);
+    routing_edge_port.release();
     let routing_edge = start_full_proxy(&routing_edge_config);
+    retry_edge_port.release();
     let retry_edge = start_proxy(&retry_edge_config);
+    mid_proxy_edge_port.release();
     let mid_proxy_edge = start_proxy(&mid_proxy_edge_config);
+    not_found_edge_port.release();
     let not_found_edge = start_proxy(&not_found_edge_config);
+    internal_error_edge_port.release();
     let internal_error_edge = start_proxy(&internal_error_edge_config);
     wait_for_tcp(routing_edge.addr());
     wait_for_tcp(retry_edge.addr());
@@ -208,6 +215,7 @@ fn exported_parentage_links_edge_provider_and_backend() {
         Some("vendor=routed"),
     );
     let retry_trace_id = "77777777777777777777777777777777";
+    retry_dead_port.release();
     let retry_response = send_retry_request(retry_edge.addr(), &format!("00-{retry_trace_id}-8888888888888888-01"));
     let mid_proxy_trace_id = "99999999999999999999999999999999";
     let mid_proxy_response = send_retry_request(
@@ -514,14 +522,16 @@ fn sampled_remote_parent_overrides_zero_root_rate() {
     wait_for_tcp(&format!("127.0.0.1:{collector_port}"));
 
     let backend = start_header_echo_backend();
-    let provider_port = free_port();
-    let edge_port = free_port();
+    let provider_port = free_port_guard();
+    let edge_port = free_port_guard();
     let endpoint = format!("http://127.0.0.1:{collector_port}");
-    let mut edge_config = proxy_config(edge_port, provider_port, &endpoint, "zero-rate-edge");
+    let mut edge_config = proxy_config(edge_port.port(), provider_port.port(), &endpoint, "zero-rate-edge");
     edge_config.telemetry.sampling_rate = Some(0.0);
-    let provider_config = proxy_config(provider_port, backend.port(), &endpoint, "zero-rate-provider");
+    let provider_config = proxy_config(provider_port.port(), backend.port(), &endpoint, "zero-rate-provider");
     let tracing_guard = praxis_core::logging::init_tracing(&edge_config).expect("OTLP tracing setup");
+    provider_port.release();
     let provider = start_proxy(&provider_config);
+    edge_port.release();
     let edge = start_proxy(&edge_config);
 
     let trace_id = "abababababababababababababababab";
@@ -1527,6 +1537,8 @@ fn retry_proxy_config(
     endpoint: &str,
     retriable_conditions: &str,
 ) -> Config {
+    // The harness probes `/` for readiness; keep it out of the retry cluster
+    // so only the traced request advances its round-robin selection.
     let yaml = format!(
         r#"
 listeners:
@@ -1539,7 +1551,7 @@ filter_chains:
       - filter: trace_context
       - filter: router
         routes:
-          - path_prefix: "/"
+          - path_prefix: "/retry"
             cluster: backend
       - filter: load_balancer
         clusters:
