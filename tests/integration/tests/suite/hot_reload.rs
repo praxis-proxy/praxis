@@ -122,6 +122,32 @@ fn reload_adds_filter() {
     );
 }
 
+#[cfg(feature = "basic-auth-filter")]
+#[test]
+fn reload_with_deprecated_filter_warns_and_applies() {
+    let proxy_port = free_port();
+    let address = format!("127.0.0.1:{proxy_port}");
+    let proxy = PraxisProcess::spawn_with_env(&static_yaml(proxy_port, "before"), &address, &[("RUST_LOG", "info")]);
+    wait_for_process_log(&proxy, "config file watcher started");
+
+    proxy.write_config(&deprecated_basic_auth_yaml(proxy_port));
+    let logs = wait_for_process_log(&proxy, "candidate configuration contains deprecated settings");
+    assert!(
+        logs.contains("basic_auth"),
+        "warning should name the deprecated filter: {logs}"
+    );
+    assert!(
+        logs.contains("listener=\"default\""),
+        "warning should name its listener: {logs}"
+    );
+
+    let (status, _) = get_eventually(&address, "/", |code, _| code == 401);
+    assert_eq!(
+        status, 401,
+        "reload should apply basic_auth without rejecting the config"
+    );
+}
+
 #[test]
 fn reload_removes_filter() {
     let backend = start_backend_with_shutdown("backend-response");
@@ -588,6 +614,29 @@ fn wait_for_process_log(proxy: &PraxisProcess, message: &str) -> String {
         assert!(Instant::now() < deadline, "missing {message:?}: {logs}");
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// A valid pipeline containing the deprecated authentication filter.
+#[cfg(feature = "basic-auth-filter")]
+fn deprecated_basic_auth_yaml(proxy_port: u16) -> String {
+    format!(
+        r#"
+listeners:
+  - name: default
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: basic_auth
+        credentials:
+          - username: operator
+            password: secret
+      - filter: static_response
+        status: 200
+        body: "after"
+"#
+    )
 }
 
 /// A buffered request pipeline with independently configurable storage capacity.

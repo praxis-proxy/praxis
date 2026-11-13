@@ -19,6 +19,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Config loading warns when a deprecated filter or field is configured, naming
+  its location, affected listener, and replacement when one is available.
+  This includes `basic_auth` and explicitly supplied
+  `credential_injection.clusters[].strip_client_credential` settings.
 - `cargo xtask rollout` and `make test-rollout` exercise Kubernetes pod
   loss, rollouts, config reloads, TLS rotation, node drain, and upstream
   failure under continuous HTTP/1.1, HTTP/2, and HTTPS traffic.
@@ -35,6 +39,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Deprecation warnings describe settings in the candidate configuration without
+  implying that the configuration is already active.
 - **Breaking:** statically buffered request pipelines now reject a finite
   `body_limits.max_request_bytes` above `body_limits.max_buffer_bytes` at
   startup, config validation, and reload, naming both fields and byte values.
