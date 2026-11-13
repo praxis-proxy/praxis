@@ -51,12 +51,12 @@ fn get_response(state: &Arc<LogLevelState>, method: &str) -> Response<Vec<u8>> {
 
 /// Handle `PUT` and apply a validated runtime overlay.
 async fn put_response<R: AdminRequest>(state: &Arc<LogLevelState>, req: &mut R) -> Response<Vec<u8>> {
-    let body = match read_body(req).await {
+    let request_body = match read_body(req).await {
         Ok(body) => body,
         Err(resp) => return resp,
     };
 
-    let request: PutLogLevelRequest = match serde_json::from_str(&body) {
+    let request: PutLogLevelRequest = match serde_json::from_str(&request_body) {
         Ok(request) => request,
         Err(error) => {
             return bad_request(format!("invalid JSON body: {error}"));
@@ -65,7 +65,7 @@ async fn put_response<R: AdminRequest>(state: &Arc<LogLevelState>, req: &mut R) 
 
     match state.apply_put(&request) {
         Ok(snapshot) => match serde_json::to_vec(&snapshot) {
-            Ok(body) => json_response(200, &body),
+            Ok(snapshot_body) => json_response(200, &snapshot_body),
             Err(error) => serialization_failed_response("log level state", &error),
         },
         Err(LogLevelError::BadRequest(message)) => bad_request(message),
@@ -392,14 +392,14 @@ mod tests {
 
     #[test]
     fn parse_delete_query_invalid_all_value() {
-        let err = parse_delete_query(Some("all=maybe")).unwrap_err();
-        assert!(err.contains("must be true or false"));
+        let maybe_error = parse_delete_query(Some("all=maybe")).unwrap_err();
+        assert!(maybe_error.contains("must be true or false"));
 
-        let err = parse_delete_query(Some("all=1")).unwrap_err();
-        assert!(err.contains("must be true or false"));
+        let numeric_error = parse_delete_query(Some("all=1")).unwrap_err();
+        assert!(numeric_error.contains("must be true or false"));
 
-        let err = parse_delete_query(Some("all=yes")).unwrap_err();
-        assert!(err.contains("must be true or false"));
+        let text_error = parse_delete_query(Some("all=yes")).unwrap_err();
+        assert!(text_error.contains("must be true or false"));
     }
 
     #[test]
@@ -408,9 +408,10 @@ mod tests {
         assert_eq!(module, Some("foo".to_owned()));
         assert!(all);
 
-        let (module, all) = parse_delete_query(Some("all=true&module=bar")).expect("parse");
-        assert_eq!(module, Some("bar".to_owned()));
-        assert!(all);
+        let (reversed_module, reversed_all) =
+            parse_delete_query(Some("all=true&module=bar")).expect("parse");
+        assert_eq!(reversed_module, Some("bar".to_owned()));
+        assert!(reversed_all);
     }
 
     #[test]
@@ -419,9 +420,10 @@ mod tests {
         assert_eq!(module, Some("test".to_owned()));
         assert!(!all);
 
-        let (module, all) = parse_delete_query(Some("module=test&foo=bar&baz=qux")).expect("parse");
-        assert_eq!(module, Some("test".to_owned()));
-        assert!(!all);
+        let (extra_params_module, extra_params_all) =
+            parse_delete_query(Some("module=test&foo=bar&baz=qux")).expect("parse");
+        assert_eq!(extra_params_module, Some("test".to_owned()));
+        assert!(!extra_params_all);
     }
 
     #[test]
@@ -430,9 +432,10 @@ mod tests {
         assert_eq!(module, Some("foo/bar".to_owned()));
         assert!(!all);
 
-        let (module, all) = parse_delete_query(Some("module=test%3A%3Amodule")).expect("parse");
-        assert_eq!(module, Some("test::module".to_owned()));
-        assert!(!all);
+        let (encoded_colon_module, encoded_colon_all) =
+            parse_delete_query(Some("module=test%3A%3Amodule")).expect("parse");
+        assert_eq!(encoded_colon_module, Some("test::module".to_owned()));
+        assert!(!encoded_colon_all);
     }
 
     #[test]
@@ -442,9 +445,10 @@ mod tests {
         assert!(all);
 
         // Leading/trailing ampersands
-        let (module, all) = parse_delete_query(Some("&module=test&")).expect("parse");
-        assert_eq!(module, Some("test".to_owned()));
-        assert!(!all);
+        let (trimmed_module, trimmed_all) =
+            parse_delete_query(Some("&module=test&")).expect("parse");
+        assert_eq!(trimmed_module, Some("test".to_owned()));
+        assert!(!trimmed_all);
     }
 
     #[test]
@@ -457,8 +461,8 @@ mod tests {
         let (_, all) = parse_delete_query(Some("all=false&all=true")).expect("parse");
         assert!(all);
 
-        let (_, all) = parse_delete_query(Some("all=true&all=false")).expect("parse");
-        assert!(all); // all stays true, all=false is ignored per implementation
+        let (_, final_all) = parse_delete_query(Some("all=true&all=false")).expect("parse");
+        assert!(final_all); // all stays true, all=false is ignored per implementation
     }
 
     #[test]
