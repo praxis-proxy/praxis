@@ -4,6 +4,10 @@
 //! Single-chunk response delivery and irreversible commitment.
 
 use bytes::Bytes;
+use praxis_core::{
+    next_hop_headers::{StripHopByHopOptions, UpgradePreserve, strip_hop_by_hop, strip_reserved},
+    reserved_headers::RESPONSE_HOP_BY_HOP_HEADERS,
+};
 use praxis_filter::{
     FilterAction, FilterError, HttpFilterContext, Response, bodyless_response,
     local_http::{LocalByteCounter, LocalCancellation, LocalClaim, LocalOutcome, LocalResponse},
@@ -81,7 +85,7 @@ impl Delivery<'_> {
             return Err("local delivery cancelled".into());
         }
         completion.committed = true;
-        self.cancellable(transport.write_head(head)).await?;
+        self.commit_head(transport, head).await?;
         if let Some(chunk) = first {
             self.write_chunk(transport, chunk, completion).await?;
         }
@@ -144,8 +148,18 @@ impl Delivery<'_> {
             return Err("local delivery cancelled".into());
         }
         completion.committed = true;
-        self.cancellable(transport.write_head(head)).await?;
+        self.commit_head(transport, head).await?;
         self.cancellable(transport.finish(completion.request_eof)).await
+    }
+
+    /// Strip fields that cannot cross the local response hop before commitment.
+    async fn commit_head(
+        &self,
+        transport: &mut dyn LocalTransport,
+        head: &mut Response,
+    ) -> Result<(), FilterError> {
+        strip_response_head_headers(head);
+        self.cancellable(transport.write_head(head)).await
     }
 
     /// Await a write before allowing another source pull.
@@ -236,6 +250,20 @@ impl Delivery<'_> {
 /// Local 205 content is forbidden even though its framing permits a body phase.
 fn suppress_body(status: http::StatusCode, method: &http::Method) -> bool {
     status == http::StatusCode::RESET_CONTENT || bodyless_response(status, method)
+}
+
+/// Remove shared hop-by-hop and reserved internal headers from a local response.
+fn strip_response_head_headers(head: &mut Response) {
+    strip_hop_by_hop(
+        &mut head.headers,
+        StripHopByHopOptions {
+            static_headers: RESPONSE_HOP_BY_HOP_HEADERS,
+            upgrade: UpgradePreserve::None,
+            restore_chunked_framing: false,
+            suppress_chunked_restore_on_websocket: false,
+        },
+    );
+    strip_reserved(&mut head.headers);
 }
 
 /// Response EOF hooks execute once, even when filters emit a final chunk.
