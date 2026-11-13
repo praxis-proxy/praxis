@@ -1650,24 +1650,15 @@ fn request_is_grpc(ctx: &HttpFilterContext<'_>) -> bool {
     praxis_core::grpc::GrpcKind::from_headers(&ctx.request.headers).is_grpc()
 }
 
-/// Marker inserted into request extensions once an access record has been
-/// emitted for this request.
-///
-/// The protocol-layer fallback checks for it via
-/// [`access_record_already_emitted`] so a request the filter already logged
-/// (e.g. a bodyless response whose `on_response` emitted before a later
-/// response filter rejected) does not gain a duplicate fallback record.
-struct AccessRecordEmitted;
-
 /// Whether an access record has already been emitted for this request.
 #[must_use]
 pub fn access_record_already_emitted(ctx: &HttpFilterContext<'_>) -> bool {
-    ctx.extensions.get::<AccessRecordEmitted>().is_some()
+    ctx.extensions.get::<crate::extensions::AccessRecordEmitted>().is_some()
 }
 
 /// Record that an access record has been emitted for this request.
 pub fn mark_access_record_emitted(ctx: &mut HttpFilterContext<'_>) {
-    ctx.extensions.insert(AccessRecordEmitted);
+    ctx.extensions.insert(crate::extensions::AccessRecordEmitted);
 }
 
 /// Emit a structured access log record for the current request.

@@ -157,6 +157,125 @@ async fn claim_policies_and_response_chunks_have_ordered_pairing() {
 }
 
 #[tokio::test]
+async fn streamed_source_and_paired_policies_exchange_extensions_through_completion() {
+    for (kind, method, behavior, expected) in [
+        (
+            HandlerKind::Consume,
+            http::Method::POST,
+            Behavior::Pass,
+            vec!["source", "head", "pull", "chunk", "pull", "eof"],
+        ),
+        (
+            HandlerKind::Consume,
+            http::Method::HEAD,
+            Behavior::Pass,
+            vec!["source", "head", "suppress"],
+        ),
+        (
+            HandlerKind::SourceErrorBefore,
+            http::Method::POST,
+            Behavior::Pass,
+            vec!["source", "head", "pull", "cancel"],
+        ),
+        (
+            HandlerKind::SourceErrorAfter,
+            http::Method::POST,
+            Behavior::Pass,
+            vec!["source", "head", "pull", "chunk", "pull", "cancel"],
+        ),
+        (
+            HandlerKind::Consume,
+            http::Method::POST,
+            Behavior::RejectResponse,
+            vec!["source", "head", "cancel", "eof"],
+        ),
+    ] {
+        let state = State::default();
+        let mut owner = Fixture::owner(state.clone());
+        owner.handler = kind;
+        owner.source_extensions = true;
+        let mut replacement = Fixture::policy("replacement", state.clone());
+        replacement.behavior = behavior;
+        let mut policy = Fixture::policy("extensions", state.clone());
+        policy.behavior = Behavior::Extensions;
+        let pipeline = pipeline(vec![owner, replacement, policy]);
+        run(&pipeline, &state, Input::bytes(1), "/files", method).await;
+        assert_eq!(state.inner.lock().unwrap().completion_extensions, expected, "{kind:?}");
+        assert_complete(&state, 1);
+    }
+}
+
+#[tokio::test]
+async fn source_owned_extensions_keep_reentrant_local_claims_fail_closed() {
+    for behavior in [Behavior::ReclaimResponse, Behavior::ReclaimBody] {
+        let state = State::default();
+        let mut owner = Fixture::owner(state.clone());
+        owner.source_extensions = true;
+        let mut policy = Fixture::policy("reentrant", state.clone());
+        policy.behavior = behavior;
+        let pipeline = pipeline(vec![owner, policy]);
+        state.inner.lock().unwrap().pipeline = Some(Arc::downgrade(&pipeline));
+        let result = run(&pipeline, &state, Input::bytes(1), "/files", http::Method::POST).await;
+        assert_eq!(result.status, 500, "{behavior:?}");
+        assert_eq!(
+            state.inner.lock().unwrap().completion_extensions,
+            if matches!(behavior, Behavior::ReclaimBody) {
+                vec!["source", "pull", "reclaim", "cancel"]
+            } else {
+                vec!["source", "reclaim", "cancel"]
+            }
+        );
+        assert_complete(&state, 1);
+    }
+}
+
+#[tokio::test]
+async fn cancelled_header_hook_returns_extension_updates_to_the_source() {
+    let state = State::default();
+    let mut owner = Fixture::owner(state.clone());
+    owner.source_extensions = true;
+    let mut policy = Fixture::policy("waiting", state.clone());
+    policy.behavior = Behavior::WaitResponse;
+    let pipeline = pipeline(vec![owner, policy]);
+    let request = praxis_filter::Request {
+        method: http::Method::POST,
+        uri: "/files".parse().unwrap(),
+        headers: http::HeaderMap::new(),
+    };
+    let mut head = Response {
+        status: http::StatusCode::OK,
+        headers: http::HeaderMap::new(),
+    };
+    let mut ctx = context::context(&request, &pipeline);
+    ctx.response_header = Some(&mut head);
+    praxis_filter::mark_access_record_emitted(&mut ctx);
+    let exchange = LocalExchange::claim(&pipeline, &mut ctx).unwrap();
+    let cancellation = exchange.cancellation();
+    let mut transport = Transport {
+        state: state.clone(),
+        input: Input::bytes(1),
+    };
+    let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        tokio::join!(exchange.run(&mut ctx, &mut transport), async {
+            while !state.events().iter().any(|event| event == "response:waiting") {
+                tokio::task::yield_now().await;
+            }
+            cancellation.cancel();
+        })
+    })
+    .await
+    .unwrap();
+    assert_eq!(result.outcome, LocalOutcome::Cancelled);
+    assert_eq!(
+        state.inner.lock().unwrap().completion_extensions,
+        ["source", "head", "cancel"]
+    );
+    assert!(ctx.extensions.get::<LocalHttpActive>().is_some());
+    assert!(praxis_filter::access_record_already_emitted(&ctx));
+    assert_complete(&state, 1);
+}
+
+#[tokio::test]
 async fn later_denial_never_constructs_handler_or_accepts_body() {
     for behavior in [
         Behavior::RejectRequest,
@@ -296,6 +415,7 @@ async fn external_policy_header_effects_survive_denial_and_precommit_replacement
         let mut owner = Fixture::owner(state.clone());
         owner.handler = kind;
         owner.response_headers = policy.response_headers.clone();
+        owner.source_extensions = true;
         owner
             .response_headers
             .insert("x-service-secret", http::HeaderValue::from_static("private"));
@@ -1110,7 +1230,9 @@ async fn access_logging_preserves_request_eligibility_after_header_removal() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("access.jsonl");
         let state = State::default();
-        let registry = registry(vec![Fixture::owner(state.clone())]);
+        let mut owner = Fixture::owner(state.clone());
+        owner.source_extensions = true;
+        let registry = registry(vec![owner]);
         let mut entries: Vec<praxis_filter::FilterEntry> = serde_yaml::from_str(&format!(
             "
 - filter: access_log

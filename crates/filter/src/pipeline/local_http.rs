@@ -12,7 +12,7 @@ use praxis_core::config::FailureMode;
 
 use super::{FilterPipeline, check_failure_mode, filter::PipelineFilter, http_utils::skip_by_response_conditions};
 use crate::{
-    AnyFilter, FilterAction, FilterError, HttpFilterContext, Response,
+    AnyFilter, FilterAction, FilterError, HttpFilterContext,
     condition::should_execute_from,
     context::EffectiveHeaders,
     local_http::{LocalClaim, LocalCompatibility, LocalHttpActive, LocalResponse},
@@ -101,7 +101,9 @@ impl FilterPipeline {
         let mut edits = crate::local_http::headers::HeaderEdits::default();
         let mut replaced = false;
         let Some(head) = ctx.response_header.as_deref_mut() else {
-            response.replace(LocalResponse::internal_error()).await;
+            response
+                .replace_with_extensions(LocalResponse::internal_error(), &mut ctx.extensions)
+                .await;
             return true;
         };
         *head = response.head();
@@ -109,8 +111,9 @@ impl FilterPipeline {
             if ctx.executed_filter_indices.get(index) != Some(&true) {
                 continue;
             }
-            if let Some(replacement) = self.local_response_hook(filter, ctx, &mut edits).await {
-                response.replace(replacement).await;
+            let replacement = self.local_response_hook(filter, ctx, response, &mut edits).await;
+            if let Some(replacement) = replacement {
+                response.replace_with_extensions(replacement, &mut ctx.extensions).await;
                 if let Some(head) = ctx.response_header.as_deref_mut() {
                     *head = response.head();
                     edits.apply(&mut head.headers);
@@ -119,10 +122,7 @@ impl FilterPipeline {
             }
         }
         if let Some(head) = ctx.response_header.as_deref() {
-            response.set_head(Response {
-                status: head.status,
-                headers: head.headers.clone(),
-            });
+            response.set_head(head);
         }
         ctx.extensions.insert(edits);
         replaced
@@ -133,11 +133,14 @@ impl FilterPipeline {
         &self,
         filter: &PipelineFilter,
         ctx: &mut HttpFilterContext<'_>,
+        response: &mut LocalResponse,
         edits: &mut crate::local_http::headers::HeaderEdits,
     ) -> Option<LocalResponse> {
         let AnyFilter::Http(http) = &filter.filter else {
             return None;
         };
+        let exchange = response.exchange(ctx);
+        let ctx = &mut *exchange.ctx;
         if skip_by_response_conditions(http.as_ref(), &filter.response_conditions, ctx) {
             return None;
         }

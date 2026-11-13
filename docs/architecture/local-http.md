@@ -136,6 +136,13 @@ Each normal response chunk passes through compatible body hooks; source
 EOF passes through once, including when a filter drops or emits a chunk.
 The writer must complete each write before another source pull.
 
+Streamed handlers may own request extensions through
+`StreamingResponseBody::swap_extensions`. Paired response-header and chunk
+policies borrow that state and return their updates before the source runs
+again, including when a header hook is cancelled. The local claim, applied
+header edits, and completion marker stay in the coordinator's context.
+Source state is recovered for completion after delivery or replacement.
+
 One consuming `LocalExchange::run` call owns managed completion. The
 context borrows an adapter-owned response slot through `response_header`;
 request approval temporarily hides this slot. The coordinator defers

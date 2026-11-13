@@ -3,7 +3,10 @@
 
 //! Local response sources reuse terminal response representations.
 
-use crate::{FilterError, HttpFilterContext, Rejection, Response, StreamingTerminalResponse, TerminalResponse};
+use crate::{
+    FilterError, HttpFilterContext, Rejection, RequestExtensions, Response, StreamingTerminalResponse,
+    TerminalResponse, extensions::AccessRecordEmitted,
+};
 
 /// Local response before downstream commitment.
 #[derive(Debug)]
@@ -57,11 +60,47 @@ impl LocalResponse {
         *self = replacement;
     }
 
+    /// Recover source state for the remaining policies and managed completion.
+    pub(crate) async fn replace_with_extensions(&mut self, replacement: Self, extensions: &mut RequestExtensions) {
+        self.cancel().await;
+        self.swap_extensions(extensions);
+        *self = replacement;
+    }
+
     /// Abort an unread streaming source.
     pub async fn cancel(&mut self) {
         if let Self::Streamed(response) = self {
             response.body.cancel().await;
         }
+    }
+
+    /// Exchange source-owned policy state while retaining local lifecycle state.
+    #[doc(hidden)]
+    pub fn swap_extensions(&mut self, extensions: &mut RequestExtensions) {
+        if let Self::Streamed(response) = self {
+            let active = extensions.remove::<super::LocalHttpActive>();
+            let edits = extensions.remove::<super::headers::HeaderEdits>();
+            let emitted = extensions.remove::<AccessRecordEmitted>();
+            response.body.swap_extensions(extensions);
+            if let Some(active) = active {
+                extensions.insert(active);
+            }
+            if let Some(edits) = edits {
+                extensions.insert(edits);
+            }
+            if let Some(emitted) = emitted {
+                extensions.insert(emitted);
+            }
+        }
+    }
+
+    /// Return policy updates to the source even if an async hook is interrupted.
+    pub(crate) fn exchange<'response, 'context, 'request>(
+        &'response mut self,
+        ctx: &'context mut HttpFilterContext<'request>,
+    ) -> ExtensionExchange<'response, 'context, 'request> {
+        self.swap_extensions(&mut ctx.extensions);
+        ExtensionExchange { response: self, ctx }
     }
 
     /// Return a terminal response head for policy filtering and delivery.
@@ -80,16 +119,30 @@ impl LocalResponse {
     }
 
     /// Persist policy modifications before delivery or chunk filtering.
-    pub(crate) fn set_head(&mut self, head: Response) {
+    pub(crate) fn set_head(&mut self, head: &Response) {
         match self {
             Self::Buffered(response) => {
                 response.status = head.status.as_u16();
-                response.headers = head.headers;
+                response.headers = head.headers.clone();
             },
             Self::Streamed(response) => {
                 response.status = head.status.as_u16();
-                response.headers = head.headers;
+                response.headers = head.headers.clone();
             },
         }
+    }
+}
+
+/// A response hook temporarily borrows the source's extensions.
+pub(crate) struct ExtensionExchange<'response, 'context, 'request> {
+    /// Source to receive hook updates on every exit.
+    pub(crate) response: &'response mut LocalResponse,
+    /// Context retaining the local claim and completion state.
+    pub(crate) ctx: &'context mut HttpFilterContext<'request>,
+}
+
+impl Drop for ExtensionExchange<'_, '_, '_> {
+    fn drop(&mut self) {
+        self.response.swap_extensions(&mut self.ctx.extensions);
     }
 }

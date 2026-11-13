@@ -126,6 +126,7 @@ impl LocalExchange {
         }
         .deliver(ctx, transport, &mut response, &mut completion)
         .await;
+        response.swap_extensions(&mut ctx.extensions);
         self.cancellation.cancel();
         if let Some(handler) = &mut self.handler {
             handler.finalize(completion.outcome).await;

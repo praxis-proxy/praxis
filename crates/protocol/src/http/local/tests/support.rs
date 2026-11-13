@@ -9,7 +9,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use praxis_filter::{
     BodyAccess, BodyMode, FilterAction, FilterEntry, FilterError, FilterFactory, FilterPipeline, FilterRegistry,
-    HttpFilter, HttpFilterContext, Request, Response, StreamingResponseBody, StreamingTerminalResponse, local_http::*,
+    HttpFilter, HttpFilterContext, Request, RequestExtensions, Response, StreamingResponseBody,
+    StreamingTerminalResponse, local_http::*,
 };
 
 use super::super::{LocalCompletion, LocalExchange, LocalTransport};
@@ -41,6 +42,7 @@ pub(super) struct Observations {
     pub(super) write_mode: WriteMode,
     pub(super) fail_read: bool,
     pub(super) cancel_on_write: Option<LocalCancellation>,
+    pub(super) completion_extensions: Vec<&'static str>,
 }
 impl State {
     pub(super) fn event(&self, event: impl Into<String>) {
@@ -48,6 +50,9 @@ impl State {
     }
 
     fn reclaim(&self, ctx: &mut HttpFilterContext<'_>) {
+        if let Some(extensions) = ctx.extensions.get_mut::<ExtensionState>() {
+            extensions.0.push("reclaim");
+        }
         let pipeline = self.inner.lock().unwrap().pipeline.as_ref().unwrap().upgrade().unwrap();
         assert!(pipeline.claim_local_http(ctx).is_some());
     }
@@ -73,6 +78,8 @@ pub(super) enum Behavior {
     ReclaimRequest,
     ReclaimResponse,
     ReclaimBody,
+    Extensions,
+    WaitResponse,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum HandlerKind {
@@ -103,6 +110,7 @@ pub(super) struct Fixture {
     pub(super) request_access: BodyAccess,
     pub(super) selected_access: BodyAccess,
     pub(super) response_mode: BodyMode,
+    pub(super) source_extensions: bool,
 }
 impl Fixture {
     pub(super) fn policy(name: &'static str, state: State) -> Self {
@@ -120,6 +128,7 @@ impl Fixture {
             request_access: BodyAccess::None,
             selected_access: BodyAccess::None,
             response_mode: BodyMode::Stream,
+            source_extensions: false,
         }
     }
 
@@ -187,6 +196,7 @@ impl HttpFilter for Fixture {
             response_bytes: self.response_bytes,
             response_status: self.response_status,
             response_headers: self.response_headers.clone(),
+            source_extensions: self.source_extensions,
         }))
     }
 
@@ -231,12 +241,22 @@ impl HttpFilter for Fixture {
             | Behavior::TerminalBody
             | Behavior::ReclaimResponse
             | Behavior::ReclaimBody
+            | Behavior::Extensions
+            | Behavior::WaitResponse
             | Behavior::PromoteHead => Ok(FilterAction::Continue),
         }
     }
 
     async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         self.state.event(format!("response:{}", self.name));
+        if matches!(self.behavior, Behavior::Extensions | Behavior::WaitResponse) {
+            assert!(ctx.extensions.get::<LocalHttpActive>().is_some());
+            ctx.extensions.get_mut::<ExtensionState>().unwrap().0.push("head");
+        }
+        if matches!(self.behavior, Behavior::WaitResponse) {
+            assert!(praxis_filter::access_record_already_emitted(ctx));
+            std::future::pending::<()>().await;
+        }
         if matches!(self.behavior, Behavior::ReclaimResponse) {
             self.state.reclaim(ctx);
         }
@@ -272,9 +292,17 @@ impl HttpFilter for Fixture {
         &self,
         ctx: &mut HttpFilterContext<'_>,
         body: &mut Option<Bytes>,
-        _eof: bool,
+        end_of_stream: bool,
     ) -> Result<FilterAction, FilterError> {
         self.state.event(format!("chunk:{}", self.name));
+        if matches!(self.behavior, Behavior::Extensions) {
+            assert!(ctx.extensions.get::<LocalHttpActive>().is_some());
+            ctx.extensions
+                .get_mut::<ExtensionState>()
+                .unwrap()
+                .0
+                .push(if end_of_stream { "eof" } else { "chunk" });
+        }
         if matches!(self.behavior, Behavior::ReclaimBody) {
             self.state.reclaim(ctx);
         }
@@ -298,6 +326,7 @@ struct Handler {
     response_bytes: u64,
     response_status: u16,
     response_headers: http::HeaderMap,
+    source_extensions: bool,
 }
 #[async_trait]
 impl LocalHttpHandler for Handler {
@@ -322,6 +351,12 @@ impl LocalHttpHandler for Handler {
         } else if self.kind != HandlerKind::Early {
             while body.next_chunk().await?.is_some() {}
         }
+        let extensions = self.source_extensions.then(|| {
+            let mut extensions = RequestExtensions::new();
+            extensions.insert(ExtensionState(vec!["source"]));
+            ctx.extensions.insert(ExtensionState(vec!["stale"]));
+            extensions
+        });
         let mut response = StreamingTerminalResponse::new(
             self.response_status,
             Box::new(Source {
@@ -329,6 +364,7 @@ impl LocalHttpHandler for Handler {
                 kind: self.kind,
                 remaining: self.response_bytes,
                 pulled: false,
+                extensions,
             }),
         );
         response.headers = self.response_headers.clone();
@@ -345,11 +381,23 @@ struct Source {
     kind: HandlerKind,
     remaining: u64,
     pulled: bool,
+    extensions: Option<RequestExtensions>,
+}
+
+pub(super) struct ExtensionState(pub(super) Vec<&'static str>);
+
+impl Source {
+    fn record_extension(&mut self, event: &'static str) {
+        if let Some(extensions) = &mut self.extensions {
+            extensions.get_mut::<ExtensionState>().unwrap().0.push(event);
+        }
+    }
 }
 #[async_trait]
 impl StreamingResponseBody for Source {
     async fn next_chunk(&mut self) -> Result<Option<Bytes>, FilterError> {
         self.state.event("source");
+        self.record_extension("pull");
         if self.kind == HandlerKind::SourceErrorBefore || (self.kind == HandlerKind::SourceErrorAfter && self.pulled) {
             return Err("source failed".into());
         }
@@ -358,6 +406,7 @@ impl StreamingResponseBody for Source {
     }
 
     async fn suppress(&mut self) -> Result<(), FilterError> {
+        self.record_extension("suppress");
         self.state.inner.lock().unwrap().suppressed += 1;
         if self.kind == HandlerKind::SuppressWait {
             std::future::pending::<()>().await;
@@ -366,7 +415,14 @@ impl StreamingResponseBody for Source {
     }
 
     async fn cancel(&mut self) {
+        self.record_extension("cancel");
         self.state.inner.lock().unwrap().source_cancels += 1;
+    }
+
+    fn swap_extensions(&mut self, extensions: &mut RequestExtensions) {
+        if let Some(owned) = &mut self.extensions {
+            std::mem::swap(owned, extensions);
+        }
     }
 }
 
@@ -447,9 +503,13 @@ impl LocalTransport for Transport {
         self.state.event("abort");
     }
 
-    fn complete(&mut self, _completion: LocalCompletion, _ctx: &HttpFilterContext<'_>) {
+    fn complete(&mut self, _completion: LocalCompletion, ctx: &HttpFilterContext<'_>) {
         self.state.event("complete");
-        self.state.inner.lock().unwrap().completions += 1;
+        let mut inner = self.state.inner.lock().unwrap();
+        inner.completions += 1;
+        if let Some(extensions) = ctx.extensions.get::<ExtensionState>() {
+            inner.completion_extensions = extensions.0.clone();
+        }
     }
 }
 fn generated(remaining: &mut u64) -> Option<Bytes> {

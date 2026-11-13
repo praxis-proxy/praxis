@@ -186,15 +186,7 @@ impl Delivery<'_> {
                 LocalResponse::Streamed(stream) => self.cancellable(stream.body.next_chunk()).await?,
             };
             state.eof = filtered.is_none();
-            let action = self.claim.pipeline().execute_http_response_body_with_response_header(
-                ctx,
-                &mut filtered,
-                state.eof,
-                Some(head),
-            )?;
-            if !matches!(action, FilterAction::Continue | FilterAction::BodyDone) {
-                return Err("local response body policy rejected".into());
-            }
+            self.filter_chunk(ctx, response, &mut filtered, state.eof, head)?;
             if let Some(bytes) = &filtered
                 && state.counter.add(u64::try_from(bytes.len())?).is_err()
             {
@@ -205,6 +197,31 @@ impl Delivery<'_> {
                 return Ok(filtered);
             }
         }
+    }
+
+    /// Return policy updates to the source before propagating a chunk-hook error.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "chunk hooks borrow context, source, payload, EOF and response head independently"
+    )]
+    fn filter_chunk(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+        response: &mut LocalResponse,
+        body: &mut Option<Bytes>,
+        end_of_stream: bool,
+        head: &Response,
+    ) -> Result<(), FilterError> {
+        response.swap_extensions(&mut ctx.extensions);
+        let action =
+            self.claim
+                .pipeline()
+                .execute_http_response_body_with_response_header(ctx, body, end_of_stream, Some(head));
+        response.swap_extensions(&mut ctx.extensions);
+        if !matches!(action?, FilterAction::Continue | FilterAction::BodyDone) {
+            return Err("local response body policy rejected".into());
+        }
+        Ok(())
     }
 
     /// External cancellation interrupts blocked delivery operations.

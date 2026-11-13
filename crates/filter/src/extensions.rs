@@ -37,6 +37,9 @@ use bytes::Bytes;
 #[derive(Clone, Copy, Debug)]
 pub struct ClientResponseHeadersCommitted;
 
+/// An access record was emitted or managed completion handled its eligibility.
+pub(crate) struct AccessRecordEmitted;
+
 // -----------------------------------------------------------------------------
 // AuthenticatedIdentity
 // -----------------------------------------------------------------------------
