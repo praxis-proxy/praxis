@@ -2092,7 +2092,7 @@ async fn handler_connection_nominations_cannot_remove_response_policy_headers() 
 #[tokio::test]
 async fn response_policy_hop_by_hop_fields_are_stripped_at_commitment() {
     let state = State::default();
-    let mut policy = Fixture::policy("policy", state.clone());
+    let mut policy = Fixture::policy("response_policy", state.clone());
     policy.behavior = Behavior::RecordResponseHeaders;
     for (name, value) in [
         ("connection", "x-policy-hop"),
