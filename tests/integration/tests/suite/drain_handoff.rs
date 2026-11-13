@@ -458,6 +458,65 @@ fn pingora_http2_drain_finishes_streams_and_defers_goaway() {
     );
 }
 
+/// An overload rejection during drain still tells the HTTP/1 client to close.
+///
+/// The listener admission checks run in early_request_filter, before
+/// request_filter records the client's HTTP version, so the version is
+/// captured there for the 503 to run the drain `Connection: close` marker.
+#[test]
+#[cfg(not(feature = "hyper"))]
+#[cfg_attr(
+    coverage,
+    ignore = "spawns the praxis binary; deadlocks on exit under llvm-cov instrumentation"
+)]
+fn overload_rejection_during_drain_closes_http1() {
+    let upstream = start_upstream(true);
+    let port = free_port();
+    let admin_port = free_port();
+    let admin = format!("127.0.0.1:{admin_port}");
+    let mut proxy = PraxisProcess::spawn(&overload_config(port, admin_port, upstream.port()), &admin);
+
+    wait_for_ready(&admin, 200, "the proxy must serve before the drain starts");
+
+    // Hold the listener's only admission slot with an in-flight request the
+    // upstream will not answer until released (and never is here).
+    let mut holder = TcpStream::connect(("127.0.0.1", port)).expect("connect the holder");
+    holder
+        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .expect("request through the holder");
+    thread::sleep(Duration::from_millis(200));
+
+    proxy.signal("TERM");
+    wait_for_ready(&admin, 503, "the drain must fail readiness immediately");
+
+    // A second connection exceeds max_connections during the drain window.
+    // The request stays keepalive so any Connection: close on the reply can
+    // only come from the drain marker, not from echoing the client.
+    let rejected = praxis_test_utils::http_send(
+        &format!("127.0.0.1:{port}"),
+        "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    );
+    assert!(
+        rejected.starts_with("HTTP/1.1 503"),
+        "the listener limit must reject with 503 during drain: {rejected}"
+    );
+    assert!(
+        rejected.to_ascii_lowercase().contains("retry-after: 1"),
+        "the overload rejection must keep Retry-After: {rejected}"
+    );
+    assert!(
+        rejected.to_ascii_lowercase().contains("connection: close"),
+        "an overload 503 during drain must close the connection: {rejected}"
+    );
+
+    drop(holder);
+    let status = proxy.wait_for_exit(Duration::from_secs(90));
+    assert!(
+        status.is_some_and(|status| status.success()),
+        "the delayed handoff must exit cleanly"
+    );
+}
+
 /// Proxy with a delayed handoff and a local backend, plus a readiness listener.
 fn proxy_config(port: u16, admin_port: u16, upstream: u16) -> String {
     proxy_config_with_drain(port, admin_port, upstream, DRAIN_DELAY_SECS)
@@ -492,6 +551,16 @@ listeners:
     address: "127.0.0.1:{port}"
     filter_chains: [main]
 "#
+    )
+}
+
+/// Proxy whose listener admits a single connection, so a second concurrent
+/// client is rejected by the listener admission check during the drain window.
+#[cfg(not(feature = "hyper"))]
+fn overload_config(port: u16, admin_port: u16, upstream: u16) -> String {
+    proxy_config_with_drain(port, admin_port, upstream, PINGORA_DRAIN_DELAY_SECS).replace(
+        "    filter_chains: [main]",
+        "    max_connections: 1\n    filter_chains: [main]",
     )
 }
 
