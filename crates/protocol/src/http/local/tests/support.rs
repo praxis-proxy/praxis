@@ -84,6 +84,7 @@ pub(super) enum Behavior {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum HandlerKind {
     Consume,
+    Buffered,
     Early,
     Error,
     FactoryError,
@@ -350,6 +351,12 @@ impl LocalHttpHandler for Handler {
             let _ignored = body.next_chunk().await;
         } else if self.kind != HandlerKind::Early {
             while body.next_chunk().await?.is_some() {}
+        }
+        if self.kind == HandlerKind::Buffered {
+            let mut response = praxis_filter::TerminalResponse::new(self.response_status);
+            response.headers = self.response_headers.clone();
+            response.body = Some(Bytes::from_static(b"body"));
+            return Ok(LocalResponse::Buffered(response));
         }
         let extensions = self.source_extensions.then(|| {
             let mut extensions = RequestExtensions::new();

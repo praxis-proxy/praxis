@@ -85,7 +85,7 @@ impl Delivery<'_> {
         if let Some(chunk) = first {
             self.write_chunk(transport, chunk, completion).await?;
         }
-        if !bodyless_response(head.status, &ctx.request.method) && !state.eof {
+        if !suppress_body(head.status, &ctx.request.method) && !state.eof {
             while let Some(chunk) = self.next_filtered(ctx, response, head, &mut state, completion).await? {
                 self.write_chunk(transport, chunk, completion).await?;
             }
@@ -121,7 +121,7 @@ impl Delivery<'_> {
         state: &mut DeliveryState,
         completion: &mut LocalCompletion,
     ) -> Result<Option<Bytes>, FilterError> {
-        if !bodyless_response(head.status, &ctx.request.method) {
+        if !suppress_body(head.status, &ctx.request.method) {
             return self.next_filtered(ctx, response, head, state, completion).await;
         }
         if let LocalResponse::Streamed(stream) = response {
@@ -231,6 +231,11 @@ impl Delivery<'_> {
     ) -> Result<ResultValue, FilterError> {
         tokio::select! { biased; () = self.cancellation.cancelled() => Err("local delivery cancelled".into()), result = future => result }
     }
+}
+
+/// Local 205 content is forbidden even though its framing permits a body phase.
+fn suppress_body(status: http::StatusCode, method: &http::Method) -> bool {
+    status == http::StatusCode::RESET_CONTENT || bodyless_response(status, method)
 }
 
 /// Response EOF hooks execute once, even when filters emit a final chunk.

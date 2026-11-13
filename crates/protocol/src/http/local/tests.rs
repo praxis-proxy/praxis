@@ -674,11 +674,58 @@ async fn suppression_does_not_pull_a_response_source() {
     assert_complete(&state, 1);
 }
 
+/// [RFC 9110 Section 15.3.6] forbids content in a 205 response.
+///
+/// [RFC 9110 Section 15.3.6]: https://datatracker.ietf.org/doc/html/rfc9110#section-15.3.6
+#[tokio::test]
+async fn rfc9110_15_3_6_reset_content_suppresses_buffered_and_streamed_bodies() {
+    for kind in [HandlerKind::Buffered, HandlerKind::Consume] {
+        let state = State::default();
+        let mut owner = Fixture::owner(state.clone());
+        owner.handler = kind;
+        owner.response_status = 205;
+        owner.routes.first_mut().unwrap().response_limit = 1;
+        owner
+            .response_headers
+            .insert(http::header::CONTENT_LENGTH, "4".parse().unwrap());
+        owner
+            .response_headers
+            .insert(http::header::TRANSFER_ENCODING, "chunked".parse().unwrap());
+        let pipeline = pipeline(vec![owner]);
+        let result = run(&pipeline, &state, Input::bytes(1), "/files", http::Method::POST).await;
+        assert_eq!(result.status, 205, "{kind:?}");
+        assert_eq!(result.outcome, LocalOutcome::Suppressed, "{kind:?}");
+        assert!(result.committed);
+        assert_eq!(result.response_bytes, 0);
+        let events = state.events();
+        assert!(
+            !events
+                .iter()
+                .any(|event| event == "source" || event == "write" || event.starts_with("chunk:"))
+        );
+        assert!(events.contains(&"response:owner".into()));
+        assert!(events.contains(&"finish".into()));
+        let inner = state.inner.lock().unwrap();
+        let (status, headers) = inner.head.as_ref().unwrap();
+        assert_eq!(*status, 205);
+        assert_eq!(headers.get("x-owner").unwrap(), "yes");
+        assert!(!headers.contains_key(http::header::CONTENT_LENGTH));
+        assert!(!headers.contains_key(http::header::TRANSFER_ENCODING));
+        assert_eq!(inner.suppressed, usize::from(kind == HandlerKind::Consume));
+        assert_eq!(inner.source_cancels, 0);
+        assert_eq!(inner.finalizations, [LocalOutcome::Suppressed]);
+        assert_eq!(inner.reusable, Some(true));
+        drop(inner);
+        assert_complete(&state, 1);
+    }
+}
+
 #[tokio::test]
 async fn cancellation_interrupts_blocked_response_suppression() {
     for (method, status) in [
         (http::Method::HEAD, 200),
         (http::Method::GET, 204),
+        (http::Method::GET, 205),
         (http::Method::GET, 304),
     ] {
         let state = State::default();
