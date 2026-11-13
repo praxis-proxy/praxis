@@ -35,10 +35,10 @@ use serde::Deserialize;
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PolicyFilterConfig {
-    /// Body-access tier. `ReadOnly` (default) lets APL inspect request
+    /// Body-access tier. `ReadOnly` (default) lets policy inspect request
     /// and response bodies for routing / policy decisions but discards
     /// any mutations. `ReadWrite` enables the CMF → JSON-RPC
-    /// re-serialization round-trip so APL field mutators
+    /// re-serialization round-trip so policy field mutators
     /// (e.g. `args.ssn: redact(!perm.view_ssn)`) rewrite the upstream
     /// body and response. Pay the round-trip cost only when needed.
     #[serde(default)]
@@ -119,7 +119,7 @@ pub(crate) struct PolicyFilterConfig {
     /// its absence means either (a) the protocol classifier filter is missing from
     /// the chain, or (b) it is ordered AFTER `policy` instead of
     /// before. Either is a misconfiguration that would silently
-    /// bypass CMF/APL policy.
+    /// bypass CMF policy.
     ///
     /// Set to `false` only when intentionally fronting non-classified
     /// traffic through the `policy` filter for identity-only
@@ -177,7 +177,8 @@ pub(crate) struct PolicyFilterConfig {
     /// `meta.tags`, `meta.scope`, and `meta.properties` on every
     /// request processed by this filter instance.
     ///
-    /// **Important:** the PPE uses `meta.scope` for route resolution.
+    /// **Important:** [PPE](https://github.com/praxis-proxy/policy) uses
+    /// `meta.scope` for route resolution.
     /// Setting it here can change which policy route a request
     /// resolves to, not just what the audit record says.
     ///
@@ -214,14 +215,15 @@ pub(crate) struct ContextMetaConfig {
 
     /// Host-defined grouping (virtual server ID, namespace, etc.).
     ///
-    /// **Caution:** PPE scores route resolution on `meta.scope`, so
+    /// **Caution:** [PPE](https://github.com/praxis-proxy/policy) scores route
+    /// resolution on `meta.scope`, so
     /// setting it here changes which policy route a request resolves
     /// to, not just what the audit record says.
     #[serde(default)]
     pub scope: Option<String>,
 
     /// Arbitrary key-value metadata, available as
-    /// `meta.properties.<key>` in APL predicates.
+    /// `meta.properties.<key>` in policy predicates.
     #[serde(default)]
     pub properties: HashMap<String, String>,
 }
@@ -390,7 +392,7 @@ fn default_max_buffer_bytes() -> usize {
     10_485_760 // 10 MiB
 }
 
-/// What APL field-pipeline mutators on `args.<field>` and
+/// What policy field-pipeline mutators on `args.<field>` and
 /// `result.<field>` are allowed to do to the upstream body and
 /// downstream response.
 ///
@@ -401,13 +403,13 @@ fn default_max_buffer_bytes() -> usize {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum BodyAccessMode {
     /// Body is buffered for inspection / routing; mutations are
-    /// discarded. APL `require()` predicates over body content
+    /// discarded. Policy `require()` predicates over body content
     /// (`args.amount > 1000`) work; `redact()` / `assign()` are
     /// silently dropped at the executor's write boundary.
     #[default]
     ReadOnly,
 
-    /// Body is buffered + APL mutations to `args.*` and `result.*` are
+    /// Body is buffered + policy mutations to `args.*` and `result.*` are
     /// re-serialized back into the JSON-RPC body so the upstream and
     /// the downstream client see them. Costs one JSON parse +
     /// serialize per mutated request or response.

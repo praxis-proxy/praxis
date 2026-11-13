@@ -3,17 +3,43 @@
 
 # `policy`
 
-Embeds the Praxis Policy Engine in-process to enforce multi-source identity, APL route policy, RFC 8693 token exchange, field redaction, session taint, audit emission, and (under `body_access: read_write`) request / response body rewriting. Content scanning is a host plugin the engine dispatches, not a bundled one.
+The `policy` filter embeds the [Praxis Policy Engine (PPE)](https://github.com/praxis-proxy/policy) for JWT and API-key authentication, authorization, identity delegation, rate limiting and data protection across HTTP APIs, MCP tools, prompts and resources, and AI inference requests.
 
 Requires Cargo feature: `policy-engine`.
 
 ## Configuration Notes
 
-Registered under the YAML filter name `policy`. The default build selects `policy-builtins`, which registers every Policy builtin plugin kind, including the experimental `ratelimit/limitador`. A narrower build names `policy-engine` or individual `policy-*` builtins plus one crypto backend; a policy naming a plugin kind the build did not compile in fails to load. `--no-default-features` leaves the filter out.
+Policies combine shared defaults and route-specific controls, with ordered evaluation that stops on denial.
 
-A single request can carry multiple identity sources — user JWT in `Authorization`, agent JWT in `X-Agent-Token`, workload JWT in `X-Workload-Token`, etc. Each registered identity plugin reads its own configured header and contributes to a typed `Extensions` context.
+See the [PPE documentation](https://github.com/praxis-proxy/policy/blob/main/docs/content/index.md) for policy configuration, plugin references and worked examples.
 
-On the body phase, the filter consumes protocol classifier filter metadata (from the `praxis-ai` package) to dispatch the matching CMF hook chain. APL routes (declared in the policy document) gate the tool/prompt/resource call by role, attribute, or Cedar PDP decision. `delegate(...)` steps mint audience-scoped tokens (RFC 8693) that the allow path attaches as upstream headers.
+It provides:
+
+- **Identity and authorization:** independently validated user, agent and workload identities through JWTs or API keys; attribute-based rules and embedded Cedar, CEL and OPA/Rego decisions.
+
+- **Identity delegation:** act on behalf of a user or as an application or workload, select the delegation subject and actor, and obtain upstream credentials scoped to the target audience and permissions through OAuth token exchange, or retrieve upstream credentials from Vault KV v2.
+
+- **Header controls:** project verified identity and claims into upstream headers, control response headers, and strip configured names or prefixes.
+
+- **Data protection:** input validation, MCP argument and tool-result redaction and masking, inference request inspection, and session taint labels for data-flow controls across calls.
+
+- **Rate limiting:** enforce request limits before authentication by client address, or after authentication by resolved identity and claims, with configurable limits per policy route. Counters are local to each limiter instance.
+
+- **Approval and accountability:** out-of-band human approval through OIDC CIBA, and configurable decision and effect auditing.
+
+- **Extensibility:** host-provided plugins for content scanning, custom validation and audit destinations.
+
+The engine runs in process as linked Rust crates. Available plugins depend on build features. MCP body rewriting and response policy require `body_access: read_write`; inference response content inspection covers non-streaming JSON responses. Trusted host metadata can also be evaluated at end of stream without buffering the response.
+
+Registered under the YAML filter name `policy`. The default build selects `policy-builtins`, which registers every Policy builtin plugin kind, including `ratelimit/limitador`. A narrower build names `policy-engine` or individual `policy-*` builtins plus one crypto backend; a policy naming a plugin kind the build did not compile in fails to load. `--no-default-features` leaves the filter out.
+
+Authentication uses `identity/jwt` for verified JWTs, including OIDC tokens and SPIFFE JWT-SVIDs, or `identity/api-key` for opaque keys resolved through a file or HTTP directory. JWT credentials can come from headers, cookies or query parameters; header credentials can require DPoP proofs. Multiple resolvers independently populate user, client and workload identity slots. See [Identity configuration].
+
+The JWT plugin maps verified OIDC claims into identity attributes through `claim_mapper` presets (`standard`, `keycloak`, `auth0`, `cognito`, `ibmverify`) or an inline `claim_map`. Custom maps select claim paths, merge role and permission collections, and can deny when required claims are missing. See [OIDC claim mapping].
+
+Header assertions project verified identity and mapped claims onto the wire. `assertions.request` sets upstream headers; `assertions.response` controls headers sent to the client. Incoming values for asserted names are removed before injection, even when the source is absent. `strip:` removes additional header names or prefix patterns. Response contracts must be declared at `global`, `global.defaults.http` or an `http:` route; other placements fail to load. See [Header assertions].
+
+On the body phase, the filter consumes protocol classifier filter metadata (from the `praxis-ai` package) to dispatch the matching CMF hook chain. Policy routes (declared in the policy document) gate the tool/prompt/resource call by role, attribute, or Cedar PDP decision. `delegate(...)` steps mint audience-scoped tokens (RFC 8693) that the allow path attaches as upstream headers.
 
 Policies with `llm:` routes authorize the top-level request `model` through `cmf.llm_input`, without classifier metadata. Missing, unlisted, and ambiguous models fail closed by default.
 
@@ -21,9 +47,11 @@ OPA, CEL, and Cedar `pre_invocation` steps on `llm:` routes also read the parsed
 
 Chat Completions and Anthropic Messages requests also expose normalized `llm.input.*` facts for instructions, offered tools, tool choice, completion limits, sampling and stop sequences. Unsupported shapes, unknown fields and malformed values leave these facts absent; rules that require them should deny their absence. See the [normalized LLM input example].
 
-PPE 0.4.1 changes OPA and CEL `args` on `tool:` routes to native JSON. Before upgrading, review rules that read `args`: for example, a numeric ID in `args.ids` must be compared with `13`, not `"13"`. A schema-backed `cedar-direct` PDP must set `structured_context: true` or the policy fails to load. Its schema must also declare the optional `args` and `llm` context fields its actions can receive, or those requests are denied. See the [PPE 0.4.1 changelog] and [args migration guidance].
+OPA and CEL receive `args` on `tool:` routes as native JSON, so a numeric ID in `args.ids` is compared with `13`, not `"13"`. A schema-backed `cedar-direct` PDP must set `structured_context: true` or the policy fails to load. Its schema must declare the optional `args` and `llm` context fields its actions can receive, or those requests are denied.
 
-PPE 0.5.0 tightens OAuth `delegate(...)` by default. A token-exchange response must name an access-token or JWT `issued_token_type`. When the step requests scopes, a granted scope that was neither requested nor listed in `allowed_extra_scopes` is refused; a step that requests none accepts the identity provider's defaults. When the minted token is a JWT, its `aud` must contain the step's `audience`, and on a token exchange its `sub` must match the caller. `strict_response_validation: false` turns these checks off. A JWT with an unsupported `crit` header is rejected, and an `env` secret provider with settings it does not use fails to load. CEL `size()` now counts code points rather than bytes, and `exists()` returns true when one element matches even if another errors, so some requests that were denied may now be allowed. See the [PPE 0.5.0 changelog].
+`delegator/vault` retrieves upstream personal access tokens (PATs) or API keys from Vault KV v2 instead of exchanging an OAuth token. Vault JWT authentication supports caller-scoped access for users, clients and workloads; AppRole supports credentials owned by this deployment (`subject: this_workload`). The delegator is included in `policy-builtins` or selected individually with `policy-delegator-vault`. Vault policies must enforce credential isolation. See [Vault delegation recipes].
+
+OAuth `delegate(...)` validates token-exchange responses by default. A response must name an access-token or JWT `issued_token_type`. When the step requests scopes, a granted scope that was neither requested nor listed in `allowed_extra_scopes` is refused; a step that requests none accepts the identity provider's defaults. When the minted token is a JWT, its `aud` must contain the step's `audience`, and on a token exchange its `sub` must match the caller. `strict_response_validation: false` turns these checks off. A JWT with an unsupported `crit` header is rejected, and an `env` secret provider with settings it does not use fails to load. CEL `size()` counts code points, and `exists()` returns true when one element matches even if another errors.
 
 Every hook sees the downstream request as this filter first received it: method, path, raw query, the validated host lowercased without a port, the effective client address, and headers. Trusted reserved-prefix and `context_headers` updates remain visible to later hooks. The scheme is `https` only when the downstream connection is TLS; `X-Forwarded-Proto` is never trusted. Place `policy` before `path_rewrite`, `url_rewrite` and header-rewriting filters so the request it authorizes is the one the client sent. A `DPoP` issuer must set `dpop.external_base_url`, so a proof's `htu` is never checked against the client-sent `Host`.
 
@@ -33,7 +61,7 @@ A policy with `rate_limits:` runs `ratelimit.pre_identity` once per request befo
 
 Policy can read a credential from a query parameter (`credential: { kind: query_param, name: ... }`, with the `read_query` capability). The filter does not rewrite the URL, so the parameter reaches the upstream, and access logs, CDN logs and browser history outside Policy can record it. A policy that combines a query credential with `delegate(...)` fails to load. At request time, a delegated token is never forwarded while an inbound credential sits where the filter cannot strip it; that request receives HTTP 500 (`policy.unstrippable_credential`). A delegation none of whose tokens forms a valid upstream header receives HTTP 500 (`policy.delegation_failed`) rather than forwarding the inbound one.
 
-The filter registers only the `env` secret provider. A `secrets:` block naming any other provider kind, including `file`, fails to load. Secret values are read when the filter is built, so a changed value takes effect on the next restart.
+Vault delegation is separate from the policy's `secrets:` registry. The filter registers only the `env` secret provider. A `secrets:` block naming any other provider kind, including `file`, fails to load. Secret values are read when the filter is built, so a changed value takes effect on the next restart.
 
 The configured policy receives the full parsed inference request. Treat policy documents and custom plugins as trusted: a rule or an explicit outbound call can disclose fields it reads. Review policy authorship and outbound endpoints before enabling structured request input.
 
@@ -43,13 +71,15 @@ On a policy with `llm:` routes, any request body without `mcp.method` metadata t
 
 A lone differently cased field such as `Tools` is not a duplicate. `llm.request` keeps the wire spelling, so a rule checking only `tools` will not see `Tools`. If an upstream accepts such aliases, cover them explicitly in policy or require canonical field spelling at its boundary.
 
-The CMF prompt text that APL steps and scanners read is projected from `system`, Responses `instructions`, `messages[].content`, legacy `prompt`, and `input`. For Responses and embeddings `input`, only text counts: a string, string items, and `input_text`, `text`, `output_text`, `reasoning_text`, or `summary_text` parts. Message items contribute their `content`. Every other item type, including tool calls, tool outputs, and reasoning, contributes its `arguments`, `input`, `output`, `text`, `content`, and `summary`. File search result `text`, code interpreter `code` and output `logs`, and listed MCP tool `description` are also projected. Token-ID arrays, images, and files are skipped.
+The CMF prompt text that policy steps and scanners read is projected from `system`, Responses `instructions`, `messages[].content`, legacy `prompt`, and `input`. For Responses and embeddings `input`, only text counts: a string, string items, and `input_text`, `text`, `output_text`, `reasoning_text`, or `summary_text` parts. Message items contribute their `content`. Every other item type, including tool calls, tool outputs, and reasoning, contributes its `arguments`, `input`, `output`, `text`, `content`, and `summary`. File search result `text`, code interpreter `code` and output `logs`, and listed MCP tool `description` are also projected. Token-ID arrays, images, and files are skipped.
 
-`body_access: read_write` enables the JSON-RPC re-serialization round-trip so APL field mutators (`redact()`, `assign()`) rewrite the upstream request body and the downstream response. It also enables `cmf.llm_output` for non-streaming inference responses. APL field mutators do not rewrite inference bodies.
+`body_access: read_write` enables the JSON-RPC re-serialization round-trip so policy field mutators (`redact()`, `assign()`) rewrite the upstream request body and the downstream response. It also enables `cmf.llm_output` for non-streaming inference responses. Policy field mutators do not rewrite inference bodies.
+
+Host filters can provide trusted response metadata through `PolicyResponseContext`. The `cmf.llm_output` hook evaluates `custom.*` values at end of stream, including under `read_only`, and returns plugin-written values through `PolicyResponseOutput`. This path neither buffers nor exposes response content. A host filter that supplies the context must run after `policy` in the filter chain, since response-body filters execute in reverse order.
 
 `body_access: read_write` also enables response-phase `tool:`, `prompt:`, and `resource:` rules, including attribute-only `post_invocation` rules. Under `read_only`, these rules are skipped and a warning is emitted. A response-only route adds no request-phase route rule; identity checks and `global` policy still apply. When tool response hooks are configured, a nonempty classified `tools/call` response that is malformed or contains neither a result nor a valid JSON-RPC error produces a filter error instead of silently skipping inspection. The pipeline's `failure_mode` controls that error; valid JSON-RPC error responses continue unchanged.
 
-`result.<field>` projection for `prompt:` and `resource:` routes remains blocked on [policy #75]; host-side content projection is tracked in [Praxis #1330]. A `result:` field pipeline on either entity, including an inherited one, is rejected at load so its controls cannot be silently skipped.
+`result.<field>` projection is supported only for `tool:` routes; prompt and resource results are not projected into field pipelines. A `result:` field pipeline on either entity, including an inherited one, is rejected at load so its controls cannot be silently skipped.
 
 Policies with MCP entity routes cannot declare `authorization:` on an `http:` route. Use `global` for shared authorization; route-scoped `authentication:` remains supported.
 
@@ -67,14 +97,14 @@ The referenced YAML is the policy document — plugins, routes, and identity-sou
 
 | Field | Type | Required | Description |
 |-------|------|---------|-------------|
-| `body_access` | `read_only` \| `read_write` | no | Body-access tier. `ReadOnly` (default) lets APL inspect request and response bodies for routing / policy decisions but discards any mutations. `ReadWrite` enables the CMF → JSON-RPC re-serialization round-trip so APL field mutators (e.g. `args.ssn: redact(!perm.view_ssn)`) rewrite the upstream body and response. Pay the round-trip cost only when needed. |
+| `body_access` | `read_only` \| `read_write` | no | Body-access tier. `ReadOnly` (default) lets policy inspect request and response bodies for routing / policy decisions but discards any mutations. `ReadWrite` enables the CMF → JSON-RPC re-serialization round-trip so policy field mutators (e.g. `args.ssn: redact(!perm.view_ssn)`) rewrite the upstream body and response. Pay the round-trip cost only when needed. |
 | `config_path` | string | yes | Filesystem path to the policy document. |
 | `init_timeout_secs` | integer | no | Maximum time, in seconds, to wait for `PolicyEngine::initialize` at filter construction. Identity plugins fetch JWKS over HTTPS during init; a reachable-but-unresponsive identity provider would otherwise hang startup or hot-reload indefinitely. On expiry, filter construction returns an error and the server fails fast. 30s is generous for legitimate cold-cache JWKS fetches over the public internet, while short enough that misbehavior is noticed during the deploy. |
 | `max_buffer_bytes` | integer | no | Maximum request or response body size in `ReadWrite` mode. Also used as the default inference request limit. |
 | `allow_private_idp` | bool | no | Permit every policy endpoint a private or loopback address. By default, private DNS answers are skipped and calls with no public answer are rejected, so a private destination needs one of two opt-ins: `trusted_private_endpoints` to relax a specific host to the RFC 1918 and unique-local ranges, or this flag to relax every callout globally. Proxy upstreams use cluster `trusted_private_endpoints` or `allow_private_upstreams`. |
 | `trusted_private_endpoints` | string[] | no | Hosts the policy engine may reach at a private address. Narrower than `allow_private_idp`. Only a callout whose host matches an entry reaches a non-public address, and only the RFC 1918 and unique-local (`fc00::/7`) ranges an in-cluster endpoint resolves to. A listed host still cannot reach loopback, link-local (including cloud metadata), the unspecified address, or any other reserved range. Every unlisted callout stays public-only. Matched on the URL host, case-insensitive, port excluded. An IPv6 address is a bracketed literal such as `[fc00::1]`. Shared address space (`100.64.0.0/10`) is deliberately not relaxable, so a pinned endpoint on a cluster that assigns pod addresses there, such as EKS with the VPC CNI secondary-CIDR pattern, is not reachable by a pin. Relaxing that range would need a separate per-host opt-in, off by default. |
 | `trusted_proxies` | string[] | no | CIDR ranges of proxies trusted to report the client in `X-Forwarded-For`. Empty by default, so `http.client_address` is the TCP peer. When the peer is in a listed range, the field lines are joined and walked right to left, and the first hop outside every range is the client; when every hop is trusted, the leftmost is. Hops left of the client are ignored; a malformed hop reached before it leaves the request with no client address. Ports are dropped. RFC 7239 `Forwarded` is not read. This changes only what the policy engine sees; IP ACLs and upstream headers still use the TCP peer. |
-| `require_protocol_metadata` | bool | no | Fail-closed policy gate for misconfigured chains. When `true` (default), `on_request_body` rejects any request that reaches it without `mcp.method` filter-metadata. The metadata is set by the protocol classifier filter (available in the `praxis-ai` package), so its absence means either (a) the protocol classifier filter is missing from the chain, or (b) it is ordered AFTER `policy` instead of before. Either is a misconfiguration that would silently bypass CMF/APL policy. Set to `false` only when intentionally fronting non-classified traffic through the `policy` filter for identity-only enforcement (legacy behavior). Only applies to policies with MCP entity routes. Inference routes use their own gates instead. JSON-RPC methods that legitimately carry no entity (e.g. `tools/list`, `initialize`, `prompts/list`) still pass; `require_protocol_metadata` only rejects when the metadata is missing entirely. |
+| `require_protocol_metadata` | bool | no | Fail-closed policy gate for misconfigured chains. When `true` (default), `on_request_body` rejects any request that reaches it without `mcp.method` filter-metadata. The metadata is set by the protocol classifier filter (available in the `praxis-ai` package), so its absence means either (a) the protocol classifier filter is missing from the chain, or (b) it is ordered AFTER `policy` instead of before. Either is a misconfiguration that would silently bypass CMF policy. Set to `false` only when intentionally fronting non-classified traffic through the `policy` filter for identity-only enforcement (legacy behavior). Only applies to policies with MCP entity routes. Inference routes use their own gates instead. JSON-RPC methods that legitimately carry no entity (e.g. `tools/list`, `initialize`, `prompts/list`) still pass; `require_protocol_metadata` only rejects when the metadata is missing entirely. |
 | `llm` | LlmOptions | no | Inference authorization options. |
 | `llm.max_request_bytes` | integer | no | Maximum buffered inference request size, in bytes. Requests over this limit receive HTTP 413. |
 | `llm.promote_params` | string[] | no | Top-level scalar fields promoted to `custom.llm.<name>`. A configured list replaces the defaults. |
@@ -82,10 +112,10 @@ The referenced YAML is the policy document — plugins, routes, and identity-sou
 | `llm.require_model` | bool | no | Deny a request whose body carries no usable top-level `model`. Enabled by default. When disabled, an accepted unclassified request without a model runs HTTP authorization, delegation and assertions. Parsing and MCP classification checks still apply. |
 | `llm.require_route` | bool | no | Deny a model no `llm:` route selects. Enabled by default. Disable only to admit unlisted models. |
 | `context_headers` | object<`agent.conversation_id` \| `agent.turn` \| `agent.agent_id` \| `agent.parent_agent_id` \| `agent.input` \| `framework.framework` \| `framework.framework_version` \| `framework.node_id` \| `framework.graph_id`, string> | no | Maps extension field names to HTTP header names for populating host-supplied `agent.*` and `framework.*` context slots. The accepted keys are `agent.conversation_id`, `agent.turn`, `agent.agent_id`, `agent.parent_agent_id`, `agent.input`, `framework.framework`, `framework.framework_version`, `framework.node_id`, and `framework.graph_id`. Only headers with a reserved prefix (`x-praxis-*`, `x-ext-agent-*`, or `x-ext-protocol-*`) are accepted — this guarantees the value was set by a trusted gateway filter, not spoofed by the client (Praxis ingress strips reserved-prefix headers from client requests with a 400 reject). `agent.session_id` keeps its dedicated `X-Session-Id` handling and must not appear in this map. An absent or empty header leaves the extension field unset. A slot with no populated fields is left `None` on `Extensions`. |
-| `context_meta` | ContextMetaConfig | no | Static operator-supplied metadata for the `meta` extension slot. These values are per-deployment (not per-request) and populate `meta.tags`, `meta.scope`, and `meta.properties` on every request processed by this filter instance. **Important:** the PPE uses `meta.scope` for route resolution. Setting it here can change which policy route a request resolves to, not just what the audit record says. |
+| `context_meta` | ContextMetaConfig | no | Static operator-supplied metadata for the `meta` extension slot. These values are per-deployment (not per-request) and populate `meta.tags`, `meta.scope`, and `meta.properties` on every request processed by this filter instance. **Important:** [PPE](https://github.com/praxis-proxy/policy) uses `meta.scope` for route resolution. Setting it here can change which policy route a request resolves to, not just what the audit record says. |
 | `context_meta.tags` | string[] | no | Operational tags; the only source of `meta.tags` in rules. A route's own `meta.tags` are not merged in, and these do not join `groups:` bundles. |
-| `context_meta.scope` | string | no | Host-defined grouping (virtual server ID, namespace, etc.). **Caution:** PPE scores route resolution on `meta.scope`, so setting it here changes which policy route a request resolves to, not just what the audit record says. |
-| `context_meta.properties` | object<string, string> | no | Arbitrary key-value metadata, available as `meta.properties.<key>` in APL predicates. |
+| `context_meta.scope` | string | no | Host-defined grouping (virtual server ID, namespace, etc.). **Caution:** [PPE](https://github.com/praxis-proxy/policy) scores route resolution on `meta.scope`, so setting it here changes which policy route a request resolves to, not just what the audit record says. |
+| `context_meta.properties` | object<string, string> | no | Arbitrary key-value metadata, available as `meta.properties.<key>` in policy predicates. |
 
 ## Example
 
@@ -102,10 +132,9 @@ llm:
   provider: openai
 ```
 
-[PPE 0.4.1 changelog]: https://github.com/praxis-proxy/policy/blob/v0.4.1/CHANGELOG.md#041---2026-10-05
-[PPE 0.5.0 changelog]: https://github.com/praxis-proxy/policy/blob/v0.5.0/CHANGELOG.md#050---2026-10-13
-[Praxis #1330]: https://github.com/praxis-proxy/praxis/issues/1330
+[Header assertions]: https://github.com/praxis-proxy/policy/blob/main/docs/content/assertions.md
+[Identity configuration]: https://github.com/praxis-proxy/policy/blob/main/docs/content/apl/identity.md
+[OIDC claim mapping]: https://github.com/praxis-proxy/policy/blob/main/docs/content/identity-delegation.md#reading-claims-the-way-your-idp-writes-them
 [Structured request input]: https://github.com/praxis-proxy/policy/blob/main/docs/content/apl/pdp.md#structured-request-input
-[args migration guidance]: https://github.com/praxis-proxy/policy/blob/v0.4.1/docs/content/apl/pdp.md#migrating-args-policies
+[Vault delegation recipes]: https://github.com/praxis-proxy/policy/blob/main/docs/content/identity-delegation.md#recipe-8-a-users-vault-stored-credential
 [normalized LLM input example]: https://github.com/praxis-proxy/praxis/blob/main/examples/configs/security/policy-llm-input.yaml
-[policy #75]: https://github.com/praxis-proxy/policy/issues/75
