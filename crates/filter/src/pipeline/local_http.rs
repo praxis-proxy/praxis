@@ -169,10 +169,12 @@ impl FilterPipeline {
         if crate::access_record_already_emitted(ctx) {
             return;
         }
+        let before_request_hooks = !ctx.executed_filter_indices.contains(&true);
         for (index, filter) in self.filters.iter().enumerate() {
-            if ctx.executed_filter_indices.get(index) == Some(&true)
-                && let AnyFilter::Http(http) = &filter.filter
+            if let AnyFilter::Http(http) = &filter.filter
                 && http.local_http_compatibility() == LocalCompatibility::Policy
+                && (ctx.executed_filter_indices.get(index) == Some(&true)
+                    || (before_request_hooks && local_conditions_match(filter, ctx).unwrap_or(false)))
                 && !skip_by_response_conditions(http.as_ref(), &filter.response_conditions, ctx)
             {
                 ctx.current_filter_id = Some(filter.filter_id);

@@ -1481,6 +1481,117 @@ async fn access_logging_honors_final_response_conditions() {
 }
 
 #[tokio::test]
+async fn access_logging_handles_pre_approval_cancellation_with_existing_gates() {
+    for (scope, emit, denied, expected) in [
+        ("/files", "[5xx]", false, 1),
+        ("/other", "[5xx]", false, 0),
+        ("/files", "[2xx]", false, 0),
+        ("/files", "[4xx]", true, 0),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("access.jsonl");
+        let state = State::default();
+        let mut owner = Fixture::owner(state.clone());
+        if denied {
+            owner.behavior = Behavior::RejectHead;
+        }
+        let registry = registry(vec![owner]);
+        let mut entries: Vec<praxis_filter::FilterEntry> = serde_yaml::from_str(&format!(
+            "- filter: owner\n- filter: access_log\n  fields: [status]\n  sample_rate: 0.5\n  conditions:\n    status_classes: {emit}\n  sink:\n    type: file\n    path: '{}'",
+            path.display()
+        ))
+        .unwrap();
+        entries.get_mut(1).unwrap().conditions =
+            serde_yaml::from_str(&format!("- when:\n    path_prefix: {scope}")).unwrap();
+        let pipeline = Arc::new(FilterPipeline::build(&mut entries, &registry).unwrap());
+        let request = praxis_filter::Request {
+            method: http::Method::POST,
+            uri: "/files".parse().unwrap(),
+            headers: http::HeaderMap::new(),
+        };
+        for _attempt in 0..2 {
+            let mut head = Response {
+                status: http::StatusCode::OK,
+                headers: http::HeaderMap::new(),
+            };
+            let mut ctx = context::context(&request, &pipeline);
+            ctx.response_header = Some(&mut head);
+            let exchange = LocalExchange::claim(&pipeline, &mut ctx).unwrap();
+            if !denied {
+                exchange.cancellation().cancel();
+            }
+            let result = exchange
+                .run(
+                    &mut ctx,
+                    &mut Transport {
+                        state: state.clone(),
+                        input: Input::bytes(1),
+                    },
+                )
+                .await;
+            assert_eq!(
+                result.outcome,
+                if denied {
+                    LocalOutcome::PolicyDenied
+                } else {
+                    LocalOutcome::Cancelled
+                }
+            );
+            assert_eq!(ctx.executed_filter_indices.contains(&true), denied);
+            assert!(praxis_filter::access_record_already_emitted(&ctx));
+            pipeline.complete_local_http(&mut ctx, result.status);
+        }
+        assert_eq!(state.inner.lock().unwrap().completions, 2);
+        assert!(state.inner.lock().unwrap().finalizations.is_empty());
+        assert!(!state.events().contains(&"handler".into()));
+        let marker_state = State::default();
+        let mut marker_owner = Fixture::owner(marker_state.clone());
+        marker_owner.response_status = 201;
+        let marker_registry = support::registry(vec![marker_owner]);
+        let mut marker_entries: Vec<praxis_filter::FilterEntry> = serde_yaml::from_str(&format!(
+            "- filter: access_log\n  fields: [status]\n  sink:\n    type: file\n    path: '{}'\n- filter: owner",
+            path.display()
+        ))
+        .unwrap();
+        let marker_pipeline = Arc::new(FilterPipeline::build(&mut marker_entries, &marker_registry).unwrap());
+        run(
+            &marker_pipeline,
+            &marker_state,
+            Input::bytes(1),
+            "/files",
+            http::Method::POST,
+        )
+        .await;
+        let records = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                let records: Vec<serde_json::Value> = std::fs::read_to_string(&path)
+                    .unwrap_or_default()
+                    .lines()
+                    .map(|line| serde_json::from_str(line).unwrap())
+                    .collect();
+                if records
+                    .iter()
+                    .any(|record| record.get("status") == Some(&serde_json::json!("201")))
+                {
+                    break records;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            records.len(),
+            expected + 1,
+            "request/emit scope: {scope}/{emit}, denial: {denied}"
+        );
+        if expected != 0 {
+            assert_eq!(records.first().unwrap().get("status").unwrap(), "500");
+        }
+    }
+}
+
+#[tokio::test]
 async fn access_logging_is_once_and_honors_scope_and_emit_conditions() {
     for (scope, emit, expected) in [("/files", "[2xx]", 1), ("/files", "[4xx]", 0), ("/other", "[2xx]", 0)] {
         let directory = tempfile::tempdir().unwrap();

@@ -107,8 +107,9 @@ pub trait HttpFilter: Send + Sync {
     }
 
     /// Complete configured local logging, including sampling and emit conditions.
-    /// Called only for policies whose head or request hook ran, preserving
-    /// request-phase eligibility through later header mutations.
+    /// Called for policies whose head or request hook ran, preserving
+    /// request-phase eligibility through later header mutations. Before any
+    /// request hook runs, eligible policies complete against request conditions.
     #[cfg(feature = "local-http")]
     fn complete_local_http(&self, _ctx: &mut HttpFilterContext<'_>, _status: u16) {}
 
