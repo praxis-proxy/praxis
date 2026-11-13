@@ -376,6 +376,27 @@ pub async fn resolve_addresses(address: &str) -> Result<Arc<[SocketAddr]>, Addre
     Ok(Arc::from(addrs))
 }
 
+/// Resolve a client-selected bare `host` and apply `port` to every answer.
+///
+/// For names a client picks, such as a forward-proxy destination. Unlike
+/// [`resolve_addresses`], the lookup neither reads nor fills the shared DNS
+/// cache, so the caller's private-address check sees a fresh answer, and it
+/// runs under the process-wide per-call bounds (see
+/// [`UrlResolutionPolicy::ClientPerCall`](super::UrlResolutionPolicy::ClientPerCall)):
+/// slow or stalled DNS fails the call with
+/// [`AddressResolutionError::Stalled`] or [`AddressResolutionError::Saturated`]
+/// instead of pinning a blocking thread per caller. Results retain resolver
+/// order. Callers must validate each address before dialing it.
+///
+/// # Errors
+///
+/// Returns [`AddressResolutionError`] when resolution fails, stalls, finds
+/// the bounds saturated, or returns no usable addresses.
+pub async fn resolve_client_host(host: &str, port: u16) -> Result<Vec<SocketAddr>, AddressResolutionError> {
+    let ips = resolve_host_per_call(host).await?;
+    Ok(ips.into_iter().map(|ip| SocketAddr::new(ip, port)).collect())
+}
+
 /// Split `host:port`, stripping IPv6 brackets. `None` when no port is present.
 fn split_host_port(address: &str) -> Option<(&str, u16)> {
     let (host, port) = address.rsplit_once(':')?;
@@ -1174,6 +1195,30 @@ mod tests {
     #[tokio::test]
     async fn resolve_address_rejects_missing_port() {
         resolve_address("127.0.0.1").await.unwrap_err();
+    }
+
+    #[tokio::test]
+    async fn resolve_client_host_applies_the_port_without_caching() {
+        let addrs = resolve_client_host("localhost.", 8128)
+            .await
+            .expect("localhost must resolve");
+        assert!(!addrs.is_empty());
+        assert!(
+            addrs.iter().all(|addr| addr.port() == 8128 && addr.ip().is_loopback()),
+            "every answer is loopback on the requested port: {addrs:?}"
+        );
+        assert!(
+            !dns_cache().contains_key(&cache_key("localhost.")),
+            "a client-chosen name never enters the shared cache"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_client_host_reports_a_failed_lookup() {
+        // `.invalid` never resolves (RFC 6761 Section 6.4).
+        resolve_client_host("praxis-no-such-host.invalid.", 443)
+            .await
+            .unwrap_err();
     }
 
     /// An upstream built through the load balancer's `Cluster` to options path.
