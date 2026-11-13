@@ -148,7 +148,7 @@
 //! Authentication uses `identity/jwt` for verified JWTs, including OIDC tokens
 //! and SPIFFE JWT-SVIDs, or `identity/api-key` for opaque keys resolved through
 //! a file or HTTP directory. JWT credentials can come from headers, cookies
-//! or query parameters; header credentials can require DPoP proofs. Multiple
+//! or query parameters; header credentials can require `DPoP` proofs. Multiple
 //! resolvers independently populate user, client and workload identity slots.
 //! See [Identity configuration].
 //!
@@ -162,7 +162,7 @@
 //!
 //! `delegator/vault` retrieves upstream personal access tokens (PATs) or API keys
 //! from Vault KV v2 instead of exchanging an OAuth token. Vault JWT authentication supports
-//! caller-scoped access for users, clients and workloads; AppRole supports
+//! caller-scoped access for users, clients and workloads; `AppRole` supports
 //! credentials owned by this deployment (`subject: this_workload`). The
 //! delegator is included in `policy-builtins` or selected individually with
 //! `policy-delegator-vault`. Vault policies must enforce credential isolation.
