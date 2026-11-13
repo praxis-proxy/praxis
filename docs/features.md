@@ -119,6 +119,9 @@ configuration. See the
 [Security Hardening Guide](operating/security-hardening.md) for
 deployment guidance.
 
+For identity-based access, delegation, data protection, and approvals,
+start with [policy enforcement with the Praxis Policy Engine (PPE)](security/policy-enforcement.md).
+
 **Build-level guarantees:**
 
 - `unsafe_code = "deny"` in workspace lints
@@ -156,19 +159,19 @@ deployment guidance.
 - **Credential injection**: per-cluster API key injection
   into upstream request headers with environment variable
   or inline values; client credential stripping
-- **Policy engine** (`policy`, feature `policy-builtins`,
-  on by default): independently validated user, agent,
-  and workload identity; APL authorization with
-  pluggable decision points (Cedar, CEL, OPA) including
-  relationship-based; RFC 8693 delegation scoping a
-  token per upstream; field redaction and session taint
-  across tool calls; out-of-band approval; an audit
-  event per decision; and inference authorization on the
-  model in the request body. The default bundle also
-  carries Policy's experimental rate limiter. Narrower
-  builds name `policy-engine` or individual builtins
-  (`policy-api-key`, `policy-jwt`, ...) plus one crypto
-  backend; see [Build features](operating/build-features.md#selecting-policy-features)
+- **[Praxis Policy Engine (PPE)][policy-guide]** (`policy` filter):
+  authorizes API, tool, and model calls using verified user, client,
+  and workload identities. Policies can call Cedar, CEL, or OPA,
+  obtain scoped upstream credentials, redact tool data, restrict
+  later calls through session taint, and require human approval.
+  Auditing is configurable. The standard build includes PPE through
+  `policy-builtins`, along with its experimental rate limiter;
+  add the filter and a policy document to enable enforcement.
+  See the [use cases and configuration guide][policy-guide] or
+  [build features][policy-builds] for selecting individual plugins.
+
+[policy-guide]: security/policy-enforcement.md
+[policy-builds]: operating/build-features.md#selecting-policy-features
 
 ## Observability
 

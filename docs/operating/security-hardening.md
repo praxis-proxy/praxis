@@ -4,6 +4,10 @@ Security is a primary motivation of Praxis, not an
 afterthought. This guide covers the secure defaults
 and operational hardening for production deployments.
 
+For application access rules, scoped upstream credentials, redaction, and
+cross-call data protection, see
+[policy enforcement with Praxis Policy Engine (PPE](../security/policy-enforcement.md).
+
 ## Default Security Posture
 
 Praxis ships secure by default and fails closed on
@@ -171,6 +175,80 @@ relying on the bind address.
 
 ## Access Control
 
+Use the `policy` filter for authentication and authorization rules on APIs,
+MCP tools, prompts, resources, and inference requests. Core embeds the
+Praxis Policy Engine (PPE); add the filter to the listener's chain and point
+it at a policy document. The [PPE guide][policy-guide] explains the use
+cases and the body-access and classifier requirements for each protocol.
+
+### Authentication and authorization
+
+- **Authentication**: Configure the `policy` filter to authenticate JWTs or
+  opaque API keys. JWT authentication covers OIDC tokens and SPIFFE JWT-SVIDs. Configure trusted issuers, accepted audiences, and claim mapping;
+  user, client, and workload identities can be verified independently.
+  See [identity configuration][policy-identity].
+- **Authorization models**: Express role-based (RBAC), attribute-based
+  (ABAC), and relationship-based (ReBAC) policies. For example, allow HR
+  staff to read compensation records, restrict access by repository
+  visibility, or allow members of the owning team to access a repository.
+- **Policy languages**: Configure authorization rules for each API or tool,
+  using embedded Cedar, CEL, or OPA/Rego for policy decisions. Choose the
+  language that fits your existing policies. See
+  [PDP integration][policy-pdp] for inputs and examples.
+- **Basic authentication**: Basic auth identity support is being added to
+  PPE so username/password authentication can use the same authorization
+  rules as JWT and API-key identities. Check availability in the PPE version
+  included in your Core build before configuring it. Core's existing
+  [basic_auth filter][basic-auth] is a separate, deprecated implementation
+  intended for development and testing; it stores credentials in plaintext.
+
+### Credentials, approvals, and headers
+
+- **OAuth delegation**: Use RFC 8693 token exchange to obtain an upstream
+  token for a specified audience and permissions. Select the delegation
+  subject and actor explicitly, and retain the default token-response
+  validation. See [identity and delegation][policy-delegation].
+- **Workload credentials from Vault**: A caller's verified JWT-SVID can
+  authenticate to Vault's JWT auth method. A delegation rule in the PPE
+  policy document then retrieves the workload's upstream PAT or API key
+  from KV v2. Bind the Vault role to the trusted
+  issuer and audience, and enforce credential isolation in Vault policy.
+  This retrieves a stored credential; it does not mint an OAuth token.
+  See the [workload Vault recipe][policy-vault].
+- **Human approval**: Require OIDC CIBA approval before a consequential
+  action, such as a salary adjustment above a threshold. Bind the approval
+  to the permitted action and arguments. The call remains suspended until
+  the caller retries with the approval identifier.
+  See [approval flows][policy-approval].
+- **Header assertions**: In the PPE policy document, use `assertions.request`
+  to inject verified identity and mapped claims into upstream headers, and
+  `assertions.response` to control headers returned to the client. Asserted
+  header names are removed
+  before injection, even when the source value is absent; `strip` removes
+  additional names or prefixes. Restrict backend access to trusted proxy
+  paths so callers cannot bypass these assertions.
+  See [header assertions][policy-headers].
+
+### Quotas and data protection
+
+- **Identity-bound rate limits**: Configure policy limits after identity
+  resolution to count requests by verified identity or claims. Pre-identity
+  limits can bound traffic by client address before authentication. The
+  bundled limiter is experimental; counters are local to each instance,
+  are not shared between replicas, and reset on configuration reload.
+  See [policy rate limiting][policy-limits].
+- **Data protection**: Apply permission-based redaction to MCP tool
+  arguments and results, and use session taint to restrict later calls
+  after sensitive reads. MCP rewriting and response rules require
+  `body_access: read_write` on the `policy` filter. See the
+  [PPE guide][policy-guide] for supported
+  request and response controls.
+- **Auditing**: Configure audit sinks for policy decisions and effects,
+  including delegation and approval. See [auditing][policy-audit] for the
+  record types and sink configuration.
+
+### Network controls
+
 - **IP ACLs**: Use the `ip_acl` filter to restrict
   access by source IP. Use either `allow` or `deny`,
   not both (mutually exclusive). An allow-list
@@ -282,3 +360,14 @@ in development:
   principle of least privilege and only allow access
   from the
   networks that require it.
+
+[policy-guide]: ../security/policy-enforcement.md
+[policy-identity]: https://github.com/praxis-proxy/policy/blob/main/docs/content/apl/identity.md
+[policy-pdp]: https://github.com/praxis-proxy/policy/blob/main/docs/content/apl/pdp.md
+[basic-auth]: ../filters/http/security/basic_auth.md
+[policy-delegation]: https://github.com/praxis-proxy/policy/blob/main/docs/content/identity-delegation.md
+[policy-vault]: https://github.com/praxis-proxy/policy/blob/main/docs/content/identity-delegation.md#recipe-9-a-caller-workloads-vault-stored-credential
+[policy-approval]: https://github.com/praxis-proxy/policy/blob/main/docs/content/apl/elicitation.md
+[policy-headers]: https://github.com/praxis-proxy/policy/blob/main/docs/content/assertions.md
+[policy-limits]: https://github.com/praxis-proxy/policy/blob/main/docs/content/rate-limiting.md
+[policy-audit]: https://github.com/praxis-proxy/policy/blob/main/docs/content/auditing.md

@@ -24,11 +24,18 @@ The full documentation is available [here](docs/README.md).
 The following are some good places to start:
 
 - [Configuration](docs/operating/configuration.md)
+- [Policy enforcement](docs/security/policy-enforcement.md)
 - [Features](docs/features.md)
 - [Filters](docs/filters/README.md)
 - [Extensions](docs/filters/extensions.md)
 - [TLS](docs/operating/tls.md)
 - [Security Hardening](docs/operating/security-hardening.md)
+
+Core embeds the [Praxis Policy Engine (PPE)][ppe] through its `policy`
+filter for access control, delegation, and data protection. Start with
+[policy enforcement](docs/security/policy-enforcement.md) for use cases.
+
+[ppe]: https://github.com/praxis-proxy/policy
 
 > **Note**: AI Features are developed and maintained in a separate repository.
 > If you're looking for AI-specific source, see [praxis-proxy/ai].

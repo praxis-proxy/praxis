@@ -15,6 +15,9 @@ Choose a path by the result you need:
   [configuration](operating/configuration.md), then review
   [security hardening](operating/security-hardening.md) and
   [TLS](operating/tls.md) before deploying.
+- **Control access and protect data:**
+  [policy enforcement](security/policy-enforcement.md) explains
+  use cases, filter selection, and how to connect Core to identity and authorization policies.
 - **Proxy model APIs or agent protocols:** use the
   [Praxis AI quickstart][ai-quickstart].
 - **Contribute to Praxis:** [contributor setup](developing/getting-started.md)
@@ -35,6 +38,8 @@ For capabilities and configurations:
   YAML config, listeners, chains, runtime
 - [Filter Reference](filters/reference.md):
   all built-in filter configurations
+- [Policy Enforcement](security/policy-enforcement.md):
+  identity, authorization, delegation, data protection, and approvals
 - [TLS](operating/tls.md):
   certificates, mTLS, SNI, hot-reload
 - [Observability](operating/observability.md):
