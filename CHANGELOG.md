@@ -19,6 +19,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Core policy-enforcement guide with PPE use cases, integration conditions,
+  and links from onboarding, architecture, and security documentation.
+
 - `cargo xtask rollout` and `make test-rollout` exercise Kubernetes pod
   loss, rollouts, config reloads, TLS rotation, node drain, and upstream
   failure under continuous HTTP/1.1, HTTP/2, and HTTPS traffic.

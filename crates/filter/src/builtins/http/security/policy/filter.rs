@@ -102,6 +102,11 @@ pub(super) enum ResponseCustomState {
 /// See the [PPE documentation](https://github.com/praxis-proxy/policy/blob/main/docs/content/index.md)
 /// for policy configuration, plugin references and worked examples.
 ///
+/// Start with [Policy enforcement with PPE] for use cases, filter selection,
+/// and the Core integration requirements.
+///
+/// [Policy enforcement with PPE]: https://github.com/praxis-proxy/praxis/blob/main/docs/security/policy-enforcement.md
+///
 /// It provides:
 ///
 /// - **Identity and authorization:** independently validated user, agent and workload identities through JWTs or API

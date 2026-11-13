@@ -13,6 +13,8 @@ Policies combine shared defaults and route-specific controls, with ordered evalu
 
 See the [PPE documentation](https://github.com/praxis-proxy/policy/blob/main/docs/content/index.md) for policy configuration, plugin references and worked examples.
 
+Start with [Policy enforcement with PPE] for use cases, filter selection, and the Core integration requirements.
+
 It provides:
 
 - **Identity and authorization:** independently validated user, agent and workload identities through JWTs or API keys; attribute-based rules and embedded Cedar, CEL and OPA/Rego decisions.
@@ -135,6 +137,7 @@ llm:
 [Header assertions]: https://github.com/praxis-proxy/policy/blob/main/docs/content/assertions.md
 [Identity configuration]: https://github.com/praxis-proxy/policy/blob/main/docs/content/apl/identity.md
 [OIDC claim mapping]: https://github.com/praxis-proxy/policy/blob/main/docs/content/identity-delegation.md#reading-claims-the-way-your-idp-writes-them
+[Policy enforcement with PPE]: https://github.com/praxis-proxy/praxis/blob/main/docs/security/policy-enforcement.md
 [Structured request input]: https://github.com/praxis-proxy/policy/blob/main/docs/content/apl/pdp.md#structured-request-input
 [Vault delegation recipes]: https://github.com/praxis-proxy/policy/blob/main/docs/content/identity-delegation.md#recipe-8-a-users-vault-stored-credential
 [normalized LLM input example]: https://github.com/praxis-proxy/praxis/blob/main/examples/configs/security/policy-llm-input.yaml
