@@ -1308,10 +1308,7 @@ mod tests {
             status: http::StatusCode::OK,
             headers: HeaderMap::new(),
         };
-        let (action, _) =
-            super::super::super::response_filter::run_response_filters(&pipeline, &mut ctx, &mut response)
-                .await
-                .unwrap();
+        let (action, _) = run_response_filters(&pipeline, &mut ctx, &mut response).await.unwrap();
         assert!(matches!(action.unwrap(), FilterAction::Continue));
         assert_eq!(ctx.response_body_mode, BodyMode::StreamBuffer { max_bytes: Some(7) });
     }
@@ -1472,6 +1469,197 @@ mod tests {
         let mut ctx = make_ctx();
         ctx.cluster = Some(Arc::from("web"));
         ctx
+    }
+
+    /// Exercise the streaming request-body context writeback without changing the body.
+    struct AdmissionBodyObserver;
+
+    #[async_trait::async_trait]
+    impl praxis_filter::HttpFilter for AdmissionBodyObserver {
+        fn name(&self) -> &'static str {
+            "admission_body_observer"
+        }
+
+        async fn on_request(
+            &self,
+            _ctx: &mut praxis_filter::HttpFilterContext<'_>,
+        ) -> Result<FilterAction, FilterError> {
+            Ok(FilterAction::Continue)
+        }
+
+        fn request_body_access(&self) -> praxis_filter::BodyAccess {
+            praxis_filter::BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional)
+        }
+    }
+
+    /// Prefer the first endpoint on equal load so counter leaks and double releases affect selection.
+    fn admission_cleanup_pipeline() -> FilterPipeline {
+        let mut entries = serde_yaml::from_str::<Vec<praxis_filter::FilterEntry>>(
+            r#"
+- filter: load_balancer
+  response_conditions:
+    - when:
+        status: [201]
+  clusters:
+    - name: web
+      max_connections: 3
+      load_balancer_strategy: least_connections
+      endpoints:
+        - { address: "127.0.0.1:8080", weight: 2 }
+        - { address: "127.0.0.1:8081", weight: 1 }
+      retry_policy:
+        max_retries: 1
+        retriable_conditions: [status_5xx]
+        backoff: { base_interval_ms: 1, max_interval_ms: 1 }
+- filter: admission_body_observer
+"#,
+        )
+        .unwrap();
+        let mut registry = FilterRegistry::with_builtins();
+        registry
+            .register(
+                "admission_body_observer",
+                praxis_filter::FilterFactory::Http(Arc::new(|_| Ok(Box::new(AdmissionBodyObserver)))),
+            )
+            .unwrap();
+        FilterPipeline::build(&mut entries, &registry).unwrap()
+    }
+
+    /// An active attempt whose request-body hook restored a copy of the selected upstream.
+    async fn body_filtered_attempt(pipeline: &FilterPipeline) -> PingoraRequestCtx {
+        let mut ctx = ctx_for_web();
+        drop(run_pipeline(pipeline, make_request(), &mut ctx).await.unwrap());
+        ctx.request_is_idempotent = true;
+        let _target = super::super::super::upstream_peer::prepare_attempt(&mut ctx)
+            .await
+            .unwrap();
+        let mut body = Some(Bytes::from_static(b"body"));
+        assert!(
+            super::super::super::request_body_filter::run_request_body(pipeline, &mut body, true, &mut ctx)
+                .await
+                .is_ok()
+        );
+        assert_eq!(ctx.upstream.as_ref().unwrap().address.as_ref(), "127.0.0.1:8080");
+        assert_eq!(
+            ctx.upstream_for_retry.as_ref().unwrap().address,
+            ctx.upstream.as_ref().unwrap().address
+        );
+        ctx
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "keeps the fallback and repeated-cleanup scenario together"
+    )]
+    async fn fallback_cleanup_returns_the_selected_endpoint_once() {
+        for contacted in [false, true] {
+            let pipeline = admission_cleanup_pipeline();
+            let mut first = ctx_for_web();
+            drop(run_pipeline(&pipeline, make_request(), &mut first).await.unwrap());
+            assert_eq!(first.upstream.as_ref().unwrap().address.as_ref(), "127.0.0.1:8080");
+            if contacted {
+                first.upstream_for_retry = first.upstream.take();
+            }
+            let lease = Arc::clone(first.cluster_admission.as_ref().unwrap());
+            release_retry_state(&mut first);
+            assert!(lease.is_released());
+
+            let mut second = ctx_for_web();
+            drop(run_pipeline(&pipeline, make_request(), &mut second).await.unwrap());
+            assert_eq!(
+                second.upstream.as_ref().unwrap().address.as_ref(),
+                "127.0.0.1:8080",
+                "fallback must return the first endpoint's counter before response hooks run"
+            );
+            super::super::super::logging_util::logging_cleanup(&pipeline, &mut first).await;
+            release_retry_state(&mut first);
+
+            let mut third = ctx_for_web();
+            drop(run_pipeline(&pipeline, make_request(), &mut third).await.unwrap());
+            assert_eq!(
+                third.upstream.as_ref().unwrap().address.as_ref(),
+                "127.0.0.1:8081",
+                "repeated cleanup must leave the second request's endpoint counter alone"
+            );
+            assert_eq!(lease.state().active_requests.load(AtomicOrdering::Relaxed), 2);
+            release_retry_state(&mut second);
+            release_retry_state(&mut third);
+        }
+    }
+
+    #[cfg(feature = "pingora")]
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "follows admission and both endpoint counters across a retry"
+    )]
+    async fn final_header_cleanup_waits_for_the_retry_decision() {
+        let pipeline = admission_cleanup_pipeline();
+        let mut ctx = body_filtered_attempt(&pipeline).await;
+        let lease = Arc::clone(ctx.cluster_admission.as_ref().unwrap());
+        let mut retryable = pingora_http::ResponseHeader::build(503, None).unwrap();
+        let error = super::super::super::response_filter::execute(&pipeline, &mut retryable, &mut ctx)
+            .await
+            .expect_err("the 503 should be retried before final-header cleanup");
+        assert!(error.retry());
+        assert!(!lease.is_released(), "admission must span all retry attempts");
+        assert_eq!(lease.state().active_requests.load(AtomicOrdering::Relaxed), 1);
+
+        let _target = super::super::super::upstream_peer::prepare_attempt(&mut ctx)
+            .await
+            .unwrap();
+        let mut final_response = pingora_http::ResponseHeader::build(200, None).unwrap();
+        super::super::super::response_filter::execute(&pipeline, &mut final_response, &mut ctx)
+            .await
+            .unwrap();
+        assert!(lease.is_released(), "the accepted final response must return admission");
+        assert_eq!(lease.state().active_requests.load(AtomicOrdering::Relaxed), 0);
+        let mut next = ctx_for_web();
+        drop(run_pipeline(&pipeline, make_request(), &mut next).await.unwrap());
+        assert_eq!(next.upstream.as_ref().unwrap().address.as_ref(), "127.0.0.1:8080");
+        let mut other = ctx_for_web();
+        drop(run_pipeline(&pipeline, make_request(), &mut other).await.unwrap());
+        assert_eq!(
+            other.upstream.as_ref().unwrap().address.as_ref(),
+            "127.0.0.1:8081",
+            "final cleanup must return the reselected endpoint, not the original attempt"
+        );
+        release_retry_state(&mut next);
+        release_retry_state(&mut other);
+    }
+
+    #[tokio::test]
+    async fn fallback_cleanup_during_retry_backoff_keeps_another_requests_endpoint() {
+        let pipeline = admission_cleanup_pipeline();
+        let mut abandoned = body_filtered_attempt(&pipeline).await;
+        let lease = Arc::clone(abandoned.cluster_admission.as_ref().unwrap());
+        assert!(super::super::super::retry_util::response_status_retry(
+            &mut abandoned,
+            503
+        ));
+        assert!(
+            abandoned.upstream_for_retry.is_none(),
+            "the failed attempt is already released"
+        );
+
+        let mut active = ctx_for_web();
+        drop(run_pipeline(&pipeline, make_request(), &mut active).await.unwrap());
+        assert_eq!(active.upstream.as_ref().unwrap().address.as_ref(), "127.0.0.1:8080");
+        release_retry_state(&mut abandoned);
+        super::super::super::logging_util::logging_cleanup(&pipeline, &mut abandoned).await;
+        assert!(lease.is_released());
+        assert_eq!(lease.state().active_requests.load(AtomicOrdering::Relaxed), 1);
+
+        let mut next = ctx_for_web();
+        drop(run_pipeline(&pipeline, make_request(), &mut next).await.unwrap());
+        assert_eq!(
+            next.upstream.as_ref().unwrap().address.as_ref(),
+            "127.0.0.1:8081",
+            "cancellation before reselection must not release the old endpoint a second time"
+        );
+        release_retry_state(&mut active);
+        release_retry_state(&mut next);
     }
 
     /// A context as the response phase finds it: request answered by the

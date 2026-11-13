@@ -264,12 +264,18 @@ impl FilterPipeline {
     /// that ran `on_request` unwind in reverse just before their host
     /// filter.
     ///
+    /// Final responses return cluster admission and the selected endpoint
+    /// before any conditional hooks run. Callers must decide against retrying
+    /// an upstream response before passing it to this phase.
+    ///
     /// # Errors
     ///
     /// Returns [`FilterError`] if any filter fails.
     ///
     /// [`executed_filter_indices`]: HttpFilterContext::executed_filter_indices
     pub async fn execute_http_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        // Admission cleanup must not depend on conditions or a preceding hook completing.
+        ctx.finish_upstream_response();
         // Reset body-done tracking at the request -> response boundary. The
         // request-body and response-body loops share body_done_indices, so a
         // filter with both request- and response-body access that returned

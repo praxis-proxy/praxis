@@ -174,13 +174,20 @@ fn budget_state(ctx: &PingoraRequestCtx) -> Option<&praxis_core::retry::ClusterR
     ctx.cluster_admission.as_deref().map(AdmissionLease::state)
 }
 
-/// Give the cluster admission slot back, if this request still holds one.
+/// Give the cluster admission slot and selected endpoint back, if still held.
 ///
 /// Releasing a lease twice is a no-op, so this runs safely after a phase
 /// that already released, and after one that was cancelled before it could.
 pub(in crate::http) fn release_retry_state(ctx: &mut PingoraRequestCtx) {
-    if let Some(lease) = ctx.cluster_admission.take() {
-        lease.release();
+    if let Some(lease) = ctx.cluster_admission.take()
+        && lease.release()
+        && ctx.filter_metadata.contains_key("lb.selected")
+        && let (Some(reselector), Some(upstream)) = (
+            ctx.endpoint_reselector.as_ref(),
+            ctx.upstream_for_retry.as_ref().or(ctx.upstream.as_ref()),
+        )
+    {
+        reselector.release(&upstream.address);
     }
 }
 
@@ -189,6 +196,8 @@ pub(in crate::http) fn release_retry_state(ctx: &mut PingoraRequestCtx) {
 /// presented for the reselected upstream to reuse.
 fn clear_for_reselection(ctx: &mut PingoraRequestCtx) {
     let failed = ctx.upstream_for_retry.take();
+    // Body hooks restore a copy here; it must not outlive the attempt's endpoint counter.
+    ctx.upstream = None;
     if let Some(upstream) = failed.as_ref()
         && let Some(reselector) = ctx.endpoint_reselector.as_ref()
     {
