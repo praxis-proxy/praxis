@@ -144,7 +144,7 @@ impl Delivery<'_> {
     async fn write_empty(
         &self,
         transport: &mut dyn LocalTransport,
-        head: &Response,
+        head: &mut Response,
         completion: &mut LocalCompletion,
     ) -> Result<(), FilterError> {
         if self.cancellation.is_cancelled() {
@@ -156,11 +156,7 @@ impl Delivery<'_> {
     }
 
     /// Strip fields that cannot cross the local response hop before commitment.
-    async fn commit_head(
-        &self,
-        transport: &mut dyn LocalTransport,
-        head: &mut Response,
-    ) -> Result<(), FilterError> {
+    async fn commit_head(&self, transport: &mut dyn LocalTransport, head: &mut Response) -> Result<(), FilterError> {
         strip_response_head_headers(head);
         self.cancellable(transport.write_head(head)).await
     }
@@ -260,8 +256,7 @@ fn preserve_representation_length(status: http::StatusCode, method: &http::Metho
     (method == http::Method::HEAD
         && status != http::StatusCode::NO_CONTENT
         && status != http::StatusCode::RESET_CONTENT)
-        || (status == http::StatusCode::NOT_MODIFIED
-            && (method == http::Method::GET || method == http::Method::HEAD))
+        || (status == http::StatusCode::NOT_MODIFIED && (method == http::Method::GET || method == http::Method::HEAD))
 }
 
 /// Remove shared hop-by-hop and reserved internal headers from a local response.
