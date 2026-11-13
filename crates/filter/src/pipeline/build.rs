@@ -118,6 +118,8 @@ impl FilterPipeline {
         insecure_options: &InsecureOptions,
         top_level_clusters: &[praxis_core::config::Cluster],
     ) -> Result<Self, FilterError> {
+        #[cfg(feature = "local-http")]
+        let declares_branches = entries.iter().any(|entry| entry.branch_chains.is_some());
         let filters = super::build_branch::resolve_chain_filters(
             entries,
             registry,
@@ -130,7 +132,7 @@ impl FilterPipeline {
         #[cfg(feature = "local-http")]
         {
             pipeline.validate_local_http()?;
-            if pipeline.has_local_http_routes() && entries.iter().any(|entry| entry.branch_chains.is_some()) {
+            if pipeline.has_local_http_routes() && declares_branches {
                 return Err("local HTTP pipelines cannot contain branch chains".into());
             }
         }

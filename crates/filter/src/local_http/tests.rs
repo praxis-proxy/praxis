@@ -64,6 +64,58 @@ fn prefix_overlap_is_symmetric_and_retains_repeated_slash_semantics() {
 }
 
 #[test]
+fn local_route_builders_reject_empty_branch_declarations() {
+    let mut registry = crate::FilterRegistry::with_builtins();
+    registry
+        .register(
+            "owner",
+            crate::FilterFactory::Http(Arc::new(|_| Ok(Box::new(InvalidOwner(vec![test_route()]))))),
+        )
+        .unwrap();
+    for config in [
+        "- filter: owner\n  branch_chains: []",
+        "- filter: owner\n- filter: headers\n  branch_chains: []",
+    ] {
+        let mut entries = serde_yaml::from_str::<Vec<crate::FilterEntry>>(config).unwrap();
+        let error = FilterPipeline::build(&mut entries, &registry).err().unwrap();
+        assert!(error.to_string().contains("cannot contain branch chains"), "{error}");
+
+        let mut entries = serde_yaml::from_str::<Vec<crate::FilterEntry>>(config).unwrap();
+        let error = FilterPipeline::build_with_chains(
+            &mut entries,
+            &registry,
+            &std::collections::HashMap::new(),
+            &praxis_core::config::InsecureOptions::default(),
+            &[],
+        )
+        .err()
+        .unwrap();
+        assert!(error.to_string().contains("cannot contain branch chains"), "{error}");
+    }
+}
+
+#[test]
+fn nonlocal_builders_accept_empty_branch_declarations() {
+    let registry = crate::FilterRegistry::with_builtins();
+    let mut entries =
+        serde_yaml::from_str::<Vec<crate::FilterEntry>>("- filter: headers\n  branch_chains: []").unwrap();
+    let pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
+    assert_eq!(pipeline.len(), 1, "ordinary pipelines still accept empty branches");
+
+    let mut entries =
+        serde_yaml::from_str::<Vec<crate::FilterEntry>>("- filter: headers\n  branch_chains: []").unwrap();
+    let pipeline = FilterPipeline::build_with_chains(
+        &mut entries,
+        &registry,
+        &std::collections::HashMap::new(),
+        &praxis_core::config::InsecureOptions::default(),
+        &[],
+    )
+    .unwrap();
+    assert_eq!(pipeline.len(), 1, "ordinary pipelines still accept empty branches");
+}
+
+#[test]
 fn response_replacement_retains_policy_edits_without_leaking_source_headers() {
     let mut original = http::HeaderMap::new();
     original.insert("x-service-secret", http::HeaderValue::from_static("private"));

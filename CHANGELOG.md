@@ -19,6 +19,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Local HTTP pipeline construction consistently rejects branch-chain
+  declarations, including empty lists, before branch resolution.
 - Local CORS preflight responses retain their generated `Vary` fields alongside
   replacement response values when a response policy replaces the preflight.
 
