@@ -57,7 +57,9 @@ influence downstream processing:
   upstream request.
 - `ctx.request_headers_to_remove`: remove headers from the
   upstream request.
-- `ctx.filter_metadata`: write durable per-request metadata.
+- `ctx.filter_metadata`: write durable per-request metadata
+  (`FilterMetadata`: keys up to 64 bytes, values up to 256
+  bytes, at most 128 entries).
 - `ctx.filter_results`: write key-value results for
   [branch chain](branch-chains.md) evaluation. Results
   are keyed by the filter's TYPE name (the return value
@@ -383,7 +385,7 @@ pub struct HttpFilterContext<'a> {
     pub downstream_tls: bool,
     pub extensions: RequestExtensions,
     pub extra_request_headers: Vec<(Cow<'static, str>, String)>,
-    pub filter_metadata: HashMap<String, String>,
+    pub filter_metadata: FilterMetadata,
     pub filter_results: HashMap<&'static str, FilterResultSet>,
     pub filter_state: HashMap<usize, Box<dyn Any + Send + Sync>>,
     pub health_registry: Option<&'a HealthRegistry>,

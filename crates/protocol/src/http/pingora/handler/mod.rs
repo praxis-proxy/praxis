@@ -223,7 +223,7 @@ mod tests {
         connectivity::{ConnectionOptions, Upstream},
         health::{ClusterHealthEntry, EndpointHealth},
     };
-    use praxis_filter::{BodyBuffer, BodyMode, RequestExtensions};
+    use praxis_filter::{BodyBuffer, BodyMode, FilterMetadata, RequestExtensions};
 
     use super::*;
     use crate::http::pingora::context::PingoraRequestCtx;
@@ -478,8 +478,7 @@ mod tests {
         let pipeline = FilterPipeline::build(&mut [], &registry).unwrap();
         let mut ctx = PingoraRequestCtx::default();
         ctx.response_phase_done = false;
-        ctx.filter_metadata
-            .insert("json_rpc.method".to_owned(), "service/invoke".to_owned());
+        ctx.filter_metadata.insert("json_rpc.method", "service/invoke").unwrap();
         ctx.request_snapshot = Some(praxis_filter::Request {
             method: http::Method::POST,
             uri: "/api".parse().unwrap(),
@@ -487,7 +486,7 @@ mod tests {
         });
         logging_util::logging_cleanup(&pipeline, &mut ctx).await;
         assert_eq!(
-            ctx.filter_metadata.get("json_rpc.method").map(String::as_str),
+            ctx.filter_metadata.get("json_rpc.method"),
             Some("service/invoke"),
             "filter_metadata should survive logging_cleanup"
         );
@@ -1014,6 +1013,9 @@ mod tests {
         let state_val: Box<dyn std::any::Any + Send + Sync> = Box::new(99_i32);
         let filter_state = HashMap::from([(0_usize, state_val)]);
 
+        let mut filter_metadata = FilterMetadata::default();
+        filter_metadata.insert("key", "val").unwrap();
+
         let output = body_util::BodyFilterOutput {
             cluster: Some(Arc::from("test-cluster")),
             upstream: Some(Upstream {
@@ -1025,7 +1027,7 @@ mod tests {
             }),
             extensions,
             attempted_endpoints: Vec::new(),
-            filter_metadata: HashMap::from([("key".to_owned(), "val".to_owned())]),
+            filter_metadata,
             filter_state,
             executed_branch_filters: vec![false, true, true],
             executed_filter_indices: vec![true, false],
@@ -1037,7 +1039,7 @@ mod tests {
         assert!(ctx.upstream.is_some(), "upstream should transfer");
         assert_eq!(ctx.upstream.as_ref().unwrap().address.as_ref(), "10.0.0.1:80");
         assert_eq!(ctx.extensions.get::<u32>(), Some(&42));
-        assert_eq!(ctx.filter_metadata.get("key").map(String::as_str), Some("val"));
+        assert_eq!(ctx.filter_metadata.get("key"), Some("val"));
         assert_eq!(ctx.filter_state.len(), 1, "filter_state should transfer");
         assert_eq!(
             ctx.filter_state.get(&0).and_then(|v| v.downcast_ref::<i32>()),

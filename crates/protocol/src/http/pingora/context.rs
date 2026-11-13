@@ -112,7 +112,7 @@ pub struct PingoraRequestCtx {
     /// after filter execution.
     ///
     /// [`HttpFilterContext`]: praxis_filter::HttpFilterContext
-    pub filter_metadata: std::collections::HashMap<String, String>,
+    pub filter_metadata: praxis_filter::FilterMetadata,
 
     /// Ordered log of trusted header mutations from pre-read body
     /// processing. Swapped into each [`HttpFilterContext`] and written
@@ -636,7 +636,7 @@ impl Default for PingoraRequestCtx {
             downstream_tls: false,
             peer_identity: None,
             extensions: praxis_filter::RequestExtensions::new(),
-            filter_metadata: std::collections::HashMap::new(),
+            filter_metadata: praxis_filter::FilterMetadata::default(),
             pre_read_mutations: Vec::new(),
             structured_metadata: std::collections::HashMap::new(),
             mutated_request_body_len: None,
@@ -992,8 +992,8 @@ mod tests {
         };
 
         let mut ctx = default_ctx();
-        ctx.filter_metadata.insert("rpc.method".to_owned(), "echo".to_owned());
-        ctx.filter_metadata.insert("rpc.status".to_owned(), "ok".to_owned());
+        ctx.filter_metadata.insert("rpc.method", "echo").unwrap();
+        ctx.filter_metadata.insert("rpc.status", "ok").unwrap();
 
         let fctx = ctx.build_filter_context(&pipeline, &request, None);
         assert_eq!(
@@ -1025,12 +1025,12 @@ mod tests {
 
         ctx.filter_metadata = fctx.filter_metadata;
         assert_eq!(
-            ctx.filter_metadata.get("trace.id").map(String::as_str),
+            ctx.filter_metadata.get("trace.id"),
             Some("abc-123"),
             "metadata set in filter context should persist back to protocol context"
         );
         assert_eq!(
-            ctx.filter_metadata.get("trace.span").map(String::as_str),
+            ctx.filter_metadata.get("trace.span"),
             Some("42"),
             "multiple metadata keys should persist back"
         );

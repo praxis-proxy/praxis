@@ -304,7 +304,7 @@ mod tests {
 
         assert!(matches!(outcome, RequestHeadOutcome::Continue), "head filter continues");
         assert_eq!(
-            ctx.filter_metadata.get("head_key").map(String::as_str),
+            ctx.filter_metadata.get("head_key"),
             Some("head_value"),
             "head-published metadata must round-trip onto ctx for pre-read and the request phase"
         );
@@ -355,7 +355,7 @@ mod tests {
             "a closed head failure must propagate so the caller returns 500"
         );
         assert_eq!(
-            ctx.filter_metadata.get("head_key").map(String::as_str),
+            ctx.filter_metadata.get("head_key"),
             Some("head_value"),
             "head-published facts must still round-trip to ctx on a closed-failure error, \
              so the 500's fallback access record sees them"
