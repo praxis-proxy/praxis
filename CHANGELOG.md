@@ -33,6 +33,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   remains the default. Pipeline introspection exposes this declaration as
   `requirement: "optional"` or `"required"`, omitted when there is no body access.
 
+### Added
+
+- The policy filter reference documents the HTTP request-line attributes
+  rules can read (`http.method`, `http.path`, `http.host`, `http.scheme`,
+  `http.query`), with the example `security/policy-query.yaml`, which
+  authorizes a request on its query string through a CEL rule.
+
 ### Fixed
 
 - **Breaking:** statically buffered request pipelines now reject a finite

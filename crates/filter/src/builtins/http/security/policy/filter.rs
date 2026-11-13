@@ -346,6 +346,18 @@ pub(super) enum ResponseCustomState {
 /// `http:` route. Use `global` for shared authorization; route-scoped
 /// `authentication:` remains supported.
 ///
+/// Rules read the HTTP request line as `http.method`, `http.path`,
+/// `http.host`, `http.scheme`, and `http.query`. `http.path` excludes the
+/// query string; `http.query` carries it separately, without the leading `?`
+/// (e.g. `action=read`), so a rule can gate on the query and distinguish two
+/// requests that share a path and differ only by query. `http.query` is
+/// absent when the request carried no query, so a query-specific rule fails
+/// closed rather than matching an empty string. A query can embed a
+/// credential, so built-in PDPs (OPA/CEL/Cedar) read `http.query` from the
+/// attribute bag directly, while an external plugin needs the `read_query`
+/// capability to receive it, and the value is redacted from diagnostics. See
+/// `examples/configs/security/policy-query.yaml` for a runnable example.
+///
 /// Response-body hooks run on a small dedicated runtime while the worker
 /// waits, for at most twice the engine's per-plugin timeout
 /// (`engine_settings.plugin_timeout`, so 60 seconds by default). A hook

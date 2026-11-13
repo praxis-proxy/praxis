@@ -176,6 +176,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | [policy-llm-input.yaml](configs/security/policy-llm-input.yaml) | Denies inference requests by what they ask of the model, using the normalized `llm.input.*` facts the proxy derives from the request body: offered tools, tool choice, completion cap, and ordered instructions |
 | [policy-llm.yaml](configs/security/policy-llm.yaml) | Authorizes body-addressed inference requests against `llm:` policy routes |
 | [policy-query-credential.yaml](configs/security/policy-query-credential.yaml) | Authenticates requests whose API key arrives in the query string, as WebSocket and SSE clients that cannot set headers send it |
+| [policy-query.yaml](configs/security/policy-query.yaml) | HTTP query-string authorization using the Praxis Policy Engine |
 | [policy-rate-limit.yaml](configs/security/policy-rate-limit.yaml) | Rate limits requests in two stages with the Praxis Policy Engine's in-process limiter (`ratelimit/limitador`, experimental) |
 | [policy.yaml](configs/security/policy.yaml) | Embeds the Praxis Policy Engine in-process to enforce multi-source identity, APL route policy, RFC 8693 OAuth 2.0 token exchange, field redaction, session taint, audit emission, and (under `body_access: read_write`) request / response body rewriting |
 
