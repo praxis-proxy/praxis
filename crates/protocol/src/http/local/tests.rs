@@ -466,6 +466,7 @@ async fn external_policy_header_effects_survive_denial_and_precommit_replacement
 async fn generated_512_mib_stream_is_bounded_and_ignores_global_buffer_ceilings() {
     let state = State::default();
     let mut owner = Fixture::owner(state.clone());
+    owner.handler = HandlerKind::ObserveRequestChunks;
     owner.response_bytes = 536_870_912;
     let mut pipeline = build(vec![owner]);
     pipeline
@@ -488,6 +489,18 @@ async fn generated_512_mib_stream_is_bounded_and_ignores_global_buffer_ceilings(
     let inner = state.inner.lock().unwrap();
     assert_eq!(inner.max_chunk, 65_536);
     assert_eq!(inner.completions, 1);
+    let mut reads = inner
+        .events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| (event == "read").then_some(index));
+    let first_read = reads.next().unwrap();
+    let second_read = reads.next().unwrap();
+    let first_handoff = inner.events.iter().position(|event| event == "request-chunk").unwrap();
+    assert!(
+        first_read < first_handoff && first_handoff < second_read,
+        "the handler must receive the first chunk before the transport reads the second"
+    );
 }
 
 #[tokio::test]

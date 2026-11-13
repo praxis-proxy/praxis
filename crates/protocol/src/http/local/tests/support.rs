@@ -86,6 +86,7 @@ pub(super) enum Behavior {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum HandlerKind {
     Consume,
+    ObserveRequestChunks,
     Buffered,
     Early,
     Error,
@@ -369,7 +370,11 @@ impl LocalHttpHandler for Handler {
         if self.kind == HandlerKind::SwallowRead {
             let _ignored = body.next_chunk().await;
         } else if self.kind != HandlerKind::Early {
-            while body.next_chunk().await?.is_some() {}
+            while body.next_chunk().await?.is_some() {
+                if self.kind == HandlerKind::ObserveRequestChunks {
+                    self.state.event("request-chunk");
+                }
+            }
         }
         if self.kind == HandlerKind::Buffered {
             let mut response = praxis_filter::TerminalResponse::new(self.response_status);
