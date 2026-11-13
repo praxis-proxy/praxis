@@ -27,7 +27,7 @@ pub use head_classifier::HeadClassifierFilter;
 #[cfg(feature = "iterative-request-router")]
 pub use iterative_request_router::IterativeRequestRouterFilter;
 pub use load_balancer::{EndpointReselector, LoadBalancerFilter};
-pub use rate_limit::{RateLimitFilter, RateLimitMode};
+pub use rate_limit::{RateLimitFilter, RateLimitMode, RateLimitScope};
 pub use redirect::{RedirectFilter, RedirectStatus};
 pub use router::RouterFilter;
 pub use static_response::StaticResponseFilter;

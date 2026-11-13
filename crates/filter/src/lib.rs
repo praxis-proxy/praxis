@@ -119,9 +119,9 @@ pub use builtins::BasicAuthFilter;
 pub use builtins::{
     CircuitBreakerFilter, ContainsValue, CredentialInjectionFilter, DisallowedOriginMode, EndpointReselector,
     EndpointSelectorFilter, GuardrailsAction, GuardrailsFilter, LoadBalancerFilter, PiiKind, RateLimitMode,
-    RedirectStatus, RouterFilter, RuleTargetKind, SessionStore, SessionStoreRegistry, StickySessionsFilter,
-    access_record_already_emitted, bodyless_response, emit_access_record, encode_trailer_frame, has_dot_dot_traversal,
-    http::payload_processing::compression_config::CompressionConfig, mark_access_record_emitted,
+    RateLimitScope, RedirectStatus, RouterFilter, RuleTargetKind, SessionStore, SessionStoreRegistry,
+    StickySessionsFilter, access_record_already_emitted, bodyless_response, emit_access_record, encode_trailer_frame,
+    has_dot_dot_traversal, http::payload_processing::compression_config::CompressionConfig, mark_access_record_emitted,
     normalize_rewritten_path, shutdown_access_log_sinks,
 };
 #[cfg(feature = "policy-engine")]

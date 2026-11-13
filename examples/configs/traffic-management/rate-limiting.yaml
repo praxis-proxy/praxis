@@ -8,7 +8,7 @@
 # keys IPv4 clients by address and IPv6 clients by network prefix
 # (one address by default; this example groups by /64 as an
 # internet-facing listener should), so rotating addresses within one
-# IPv6 allocation does not reset the limit.
+# IPv6 allocation does not reset the limit. Bucket counters scope is local (per-process).
 #
 # Usage:
 #   cargo run -p praxis-proxy -- -c examples/configs/traffic-management/rate-limiting.yaml
@@ -31,7 +31,8 @@ filter_chains:
   - name: per-ip-chain
     filters:
       - filter: rate_limit
-        mode: per_ip         # independent bucket per source IP
+        mode: per_ip         # bucket per source IP or IPv6 prefix
+        scope: local         # required; counters stay in this process
         rate: 10             # demo value; tune for production
         burst: 20            # demo value; tune for production
         ipv6_prefix_len: 64  # IPv6 clients share one bucket per /64 (default 128)
@@ -50,7 +51,8 @@ filter_chains:
   - name: global-chain
     filters:
       - filter: rate_limit
-        mode: global         # one shared bucket for all clients
+        mode: global         # one bucket for this process's clients
+        scope: local         # required; counters stay in this process
         rate: 50             # demo value; tune for production
         burst: 100           # demo value; tune for production
 

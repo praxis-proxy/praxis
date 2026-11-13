@@ -69,8 +69,8 @@ pub(super) fn refuse_fips_blockers(required: bool) -> Result<(), FilterError> {
 /// Map an engine load or initialization error to a construction error.
 ///
 /// A crypto backend failure names the stable failure code and the remedy;
-/// PPE has already raised the `policy_crypto_failure` alarm. Any other
-/// error keeps its message.
+/// [PPE](https://github.com/praxis-proxy/policy) has already raised the
+/// `policy_crypto_failure` alarm. Any other error keeps its message.
 pub(super) fn engine_error(stage: &str, config_path: &str, error: &PluginError) -> FilterError {
     match error {
         PluginError::Crypto { source } => format!(
