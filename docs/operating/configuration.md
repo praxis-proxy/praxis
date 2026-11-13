@@ -135,13 +135,11 @@ rather than silently adopted as the baseline.
   has one, or a change to
   `insecure_options.allow_private_upstreams` while a
   bound listener has an enabled block. The CONNECT
-  runtime (not yet in this release; the block is parsed
-  and validated but accepts no CONNECT) captures the
-  CONNECT gate, destination rules, tunnel timeouts, and
-  the private-address setting when the handler starts.
-  These reloads are refused now so that applying only
-  the new pipeline can never leave CONNECT open with
-  the egress filters removed once it lands.
+  runtime captures the CONNECT gate, destination rules,
+  tunnel timeouts, and the private-address setting when
+  the handler starts, so these reloads are refused:
+  applying only the new pipeline could leave CONNECT open
+  with the egress filters removed.
 
 Stateful filters (rate limiter, circuit breaker) reset
 their state on reload. Operators should expect a brief

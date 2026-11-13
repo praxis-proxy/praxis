@@ -53,6 +53,59 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   preceding ordered body-filter mutations, including stripped headers
   introduced during earlier pre-read passes.
 
+### Added
+
+- The HTTP CONNECT runtime for the experimental `forward_proxy` listener
+  block (the `forward-proxy` cargo feature, off by default), which turns
+  the block from inert config into an egress gateway: `CONNECT host:port`
+  requests pass the same inbound admission as other requests (reserved
+  `x-praxis-*` headers are refused with 400), run the request-head and
+  request filter phases (`head_classifier`, `ip_acl`, `policy`,
+  conditions), then the destination rules and the private-IP guard decide
+  the dial. The response filters then run on the tunnel's 200 before it is
+  sent: a rejection, a filter error, or a non-2xx status answers the CONNECT
+  instead, and their header edits reach the 200. The tunnel relays raw bytes
+  in both directions at once with the configured idle timeout and optional
+  max duration, both enforced even while a peer has stopped reading, and
+  passes each peer's half-close on to the other, so a client's upload keeps
+  flowing after the destination finishes its answer. The destination host
+  is read in one canonical form that filters (through the URI and `Host`),
+  the destination rules, and the dialer all share: a name lowercased without a trailing dot, an IP
+  literal in its standard text form (`[2001:DB8:0::1]` reads as
+  `2001:db8::1`, and IPv4-mapped `[::ffff:93.184.216.34]` as
+  `93.184.216.34`); a target whose host is not an IP literal or DNS name,
+  such as `[blocked.example]:443`, is answered with 400. Destination names resolve under the bounded per-call
+  DNS limits, so slow DNS fails a CONNECT with 502 instead of pinning a
+  thread per request. A target without a port is answered with 400, and a
+  filter's 2xx answer to a CONNECT with 502, since a 2xx would claim a
+  tunnel that was never opened. HTTP/2 CONNECT is answered with 501.
+  Absolute-form plain requests (`GET http://host/path`, what `HTTP_PROXY`
+  clients send for `http://` URLs) run the same pipeline, pass the same
+  destination rules, and are forwarded to their origin (TLS-originated with
+  SNI for `https`), with private and reserved IP-literal destinations
+  refused unless `insecure_options.allow_private_upstreams` is set.
+  Origin-form requests keep using the reverse-proxy pipeline when it selects
+  an upstream, and are answered with 400 when it does not. Tunneled payloads
+  are opaque to body-inspecting filters. Example configs:
+  `security/forward-proxy.yaml`
+  (destination allowlist) and `security/forward-proxy-ip-acl.yaml` (client
+  ACL).
+- Forward-proxy `allow_destinations` entries can list an IP address with a
+  port (`host: 127.0.0.1`, `port: 11434`), matching only that address on
+  that port, so a forward proxy can reach one service on its own host, such
+  as a local Ollama server. A listed address skips the runtime
+  private-address guard; a loopback, link-local, or cloud-metadata entry
+  needs `insecure_options.allow_private_endpoints` instead, the config-time
+  flag cluster endpoints use, so `allow_private_upstreams` can stay off for
+  the destinations clients choose. An IP entry without a port is rejected.
+  Example config: `security/forward-proxy-local-service.yaml`.
+- `praxis_protocol::http::load_http_handler_with_options` and
+  `HttpHandlerOptions`, for library callers that load HTTP listeners
+  themselves and need settings from outside the listener, such as
+  `insecure_options.allow_private_upstreams` for a forward-proxy
+  listener. `load_http_handler` keeps its signature and uses the
+  defaults.
+
 ## [0.8.0] - 2026-11-06
 
 ### Added

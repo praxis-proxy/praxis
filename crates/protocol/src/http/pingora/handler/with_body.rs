@@ -27,6 +27,8 @@ use praxis_filter::{BodyMode, CompressionConfig, FilterPipeline};
 use tokio::sync::Semaphore;
 use tracing::{Instrument as _, debug};
 
+#[cfg(feature = "forward-proxy")]
+use super::connect;
 use super::{
     compression::{adjust_compression, configure_compression},
     connected_to_upstream, fail_to_proxy,
@@ -102,18 +104,27 @@ pub struct PingoraHttpHandler {
     /// Listener name for connection metrics.
     listener_name: ::metrics::SharedString,
 
+    /// Forward-proxy (CONNECT) runtime, when the listener enables it.
+    #[cfg(feature = "forward-proxy")]
+    forward_proxy: Option<connect::ForwardProxyRuntime>,
+
     /// Swappable filter pipeline.
     pipeline: Arc<ArcSwap<FilterPipeline>>,
 }
 
 impl PingoraHttpHandler {
     /// Create a handler with body filter support.
+    #[cfg_attr(
+        feature = "forward-proxy",
+        expect(clippy::too_many_arguments, reason = "per-listener configuration")
+    )]
     pub(super) fn new(
         pipeline: Arc<ArcSwap<FilterPipeline>>,
         downstream_read_timeout: Option<Duration>,
         downstream_keepalive_timeout_secs: Option<u64>,
         connection_semaphore: Option<Arc<Semaphore>>,
         listener_name: ::metrics::SharedString,
+        #[cfg(feature = "forward-proxy")] forward_proxy: Option<connect::ForwardProxyRuntime>,
     ) -> Self {
         let compression = pipeline.load().compression_config().cloned();
         Self {
@@ -122,6 +133,8 @@ impl PingoraHttpHandler {
             downstream_keepalive_timeout_secs,
             downstream_read_timeout,
             listener_name,
+            #[cfg(feature = "forward-proxy")]
+            forward_proxy,
             pipeline,
         }
     }
@@ -251,9 +264,29 @@ impl ProxyHttp for PingoraHttpHandler {
         Ok(())
     }
 
+    #[cfg_attr(
+        feature = "forward-proxy",
+        expect(
+            clippy::large_stack_frames,
+            reason = "session and pinned pipeline state across the pipeline await"
+        )
+    )]
     async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
         let pipeline = ctx.pin_pipeline(&self.pipeline);
-        request_filter::execute(&pipeline, session, ctx).await
+        #[cfg(feature = "forward-proxy")]
+        if let Some(forward_proxy) = &self.forward_proxy
+            && session.req_header().method == http::Method::CONNECT
+        {
+            return connect::handle(forward_proxy, &pipeline, session, ctx).await;
+        }
+        let handled = request_filter::execute(&pipeline, session, ctx).await?;
+        #[cfg(feature = "forward-proxy")]
+        if !handled && let Some(forward_proxy) = &self.forward_proxy {
+            // Forward-proxy egress for absolute-form plain requests; every
+            // other shape continues through the reverse-proxy path.
+            return connect::forward_egress(forward_proxy, session, ctx).await;
+        }
+        Ok(handled)
     }
 
     async fn request_body_filter(
@@ -720,6 +753,8 @@ mod replay_tests {
             None,
             None,
             "test".into(),
+            #[cfg(feature = "forward-proxy")]
+            None,
         );
         let (_client, stream) = tokio::io::duplex(1024);
         let mut session = Session::new_h1(Box::new(stream));
@@ -748,6 +783,8 @@ mod replay_tests {
             None,
             None,
             "test".into(),
+            #[cfg(feature = "forward-proxy")]
+            None,
         );
         let (_client, stream) = tokio::io::duplex(1024);
         let mut session = Session::new_h1(Box::new(stream));
