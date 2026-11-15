@@ -47,6 +47,36 @@ struct GeneratedDownloadSchedules {
     schedules: Vec<Arc<Schedule>>,
 }
 
+/// Active generated-download state at entry to a nested body.
+pub(crate) struct GeneratedDownloadScope {
+    /// Parent schedules precede any schedules introduced by the nested chain.
+    schedules: usize,
+    /// Whether the parent already required an early response-head flush.
+    limited: bool,
+}
+
+impl GeneratedDownloadScope {
+    /// Checkpoint active schedules without changing their shared debt.
+    pub(crate) fn capture(extensions: &RequestExtensions) -> Self {
+        Self {
+            schedules: extensions
+                .get::<GeneratedDownloadSchedules>()
+                .map_or(0, |plans| plans.schedules.len()),
+            limited: limits_download(extensions),
+        }
+    }
+
+    /// Remove only schedules and markers introduced by the nested chain.
+    pub(crate) fn restore(self, extensions: &mut RequestExtensions) {
+        if let Some(plans) = extensions.get_mut::<GeneratedDownloadSchedules>() {
+            plans.schedules.truncate(self.schedules);
+        }
+        if !self.limited {
+            extensions.remove::<DownloadLimited>();
+        }
+    }
+}
+
 /// Remember a download budget for responses that bypass body filters.
 pub(crate) fn push_download_schedule(extensions: &mut RequestExtensions, schedule: Arc<Schedule>) {
     extensions
@@ -251,6 +281,10 @@ impl PaceReservation {
 
     /// Reserve and acquire one bounded output prefix without holding shared locks.
     ///
+    /// When one transformed output byte represents more input than a burst can
+    /// admit, processed input is charged in bounded portions before that byte
+    /// is returned. Cancellation refunds only the unadmitted remainder.
+    ///
     /// # Errors
     /// Returns an error if the prefix cannot be released before `deadline`.
     pub async fn acquire_prefix(
@@ -274,6 +308,7 @@ impl PaceReservation {
             prefix: Some(prefix),
         };
         if let Some(prefix) = pending.prefix.as_mut() {
+            prefix.drain_transformed_charge(deadline).await?;
             prefix.wait_ready(deadline).await?;
         }
         let prefix = pending
@@ -281,6 +316,46 @@ impl PaceReservation {
             .take()
             .ok_or_else(|| -> crate::FilterError { "missing bandwidth prefix".into() })?;
         Ok((usize::try_from(bytes).unwrap_or(usize::MAX), prefix))
+    }
+
+    /// Account for transformed input that cannot fit behind one output byte.
+    ///
+    /// These bytes already passed the limiter before the body shrank. Admit them
+    /// in bounded portions; cancellation refunds the unadmitted remainder.
+    async fn drain_transformed_charge(&mut self, deadline: Option<Instant>) -> Result<(), crate::FilterError> {
+        while let Some(portion) = self.transformed_portion() {
+            let mut pending = PendingPrefix {
+                parent: self,
+                prefix: Some(portion),
+            };
+            if let Some(portion) = pending.prefix.as_mut() {
+                portion.wait_ready(deadline).await?;
+            }
+            if let Some(portion) = pending.prefix.take() {
+                portion.commit();
+            }
+        }
+        for grant in &mut self.grants {
+            grant.reserve();
+        }
+        Ok(())
+    }
+
+    /// Take one bounded portion from each oversized leg so their waits overlap.
+    fn transformed_portion(&mut self) -> Option<Self> {
+        let grants: Vec<_> = self
+            .grants
+            .iter_mut()
+            .filter(|grant| grant.bytes > grant.max_prefix())
+            .map(|grant| {
+                let quantum = grant.max_prefix();
+                grant.split_prefix(grant.bytes.saturating_sub(quantum).min(quantum))
+            })
+            .collect();
+        (!grants.is_empty()).then_some(Self {
+            grants,
+            output_bytes: None,
+        })
     }
 
     /// Bound one write by the tightest configured progress quantum.
@@ -319,9 +394,6 @@ impl PaceReservation {
     /// Acquire every leg, releasing earlier claims before any asynchronous wait.
     async fn wait_ready(&mut self, deadline: Option<Instant>) -> Result<(), crate::FilterError> {
         loop {
-            if deadline.is_some_and(|deadline| deadline <= Instant::now()) {
-                return Err("bandwidth reservation exceeds the step deadline".into());
-            }
             let blocked = self.grants.iter_mut().find_map(|grant| match grant.try_acquire() {
                 Admission::Ready => None,
                 wait @ (Admission::At(_) | Admission::Busy(_) | Admission::Overflow) => Some(wait),
@@ -530,6 +602,9 @@ fn max_delay(grants: &[BandwidthGrant]) -> Duration {
 
 /// Wait for either an absolute release time or the active writer to settle.
 async fn wait_for_admission(wait: Admission, deadline: Option<Instant>) -> Result<(), crate::FilterError> {
+    if deadline.is_some_and(|deadline| deadline <= Instant::now()) {
+        return Err("bandwidth reservation exceeds the step deadline".into());
+    }
     if matches!(wait, Admission::Overflow) {
         return Err("bandwidth release time exceeds the monotonic clock range".into());
     }
@@ -616,6 +691,68 @@ mod tests {
             assert!(first.prepare(u64::try_from(2001 - expected_first).unwrap()).delay() > Duration::ZERO);
             assert!(second.prepare(u64::try_from(2001 - expected_second).unwrap()).delay() > Duration::ZERO);
         }
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one trace checks transformed charges and overlapping stacked budgets"
+    )]
+    async fn shrinking_to_one_byte_drains_charges_larger_than_the_burst() {
+        let first = Schedule::new(1000, 100);
+        let second = Schedule::new(1, 100);
+        let stacked = Schedule::new(1000, 100);
+        let mut plan = PaceReservation {
+            grants: vec![first.prepare(1000), second.prepare(1), stacked.prepare(1000)],
+            output_bytes: None,
+        };
+        let started = Instant::now();
+        let (bytes, permit) = plan
+            .acquire_prefix(1, Some(started + Duration::from_secs(2)))
+            .await
+            .unwrap();
+        assert_eq!(bytes, 1);
+        assert_eq!(plan.remaining(), 0);
+        permit.commit_bytes(bytes);
+        assert!(
+            started.elapsed() >= Duration::from_millis(850),
+            "all 1000 input bytes must be paced"
+        );
+        assert!(
+            first.prepare(100).delay() >= Duration::from_millis(80),
+            "the final portion remains charged"
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(1500),
+            "stacked budgets share each wait"
+        );
+        assert!(stacked.prepare(100).delay() >= Duration::from_millis(80));
+        assert!(
+            second.prepare(99).delay().is_zero(),
+            "the other limiter charges only its own byte"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_shrinking_output_keeps_only_admitted_input_charged() {
+        let schedule = Schedule::new(1, 1);
+        let mut plan = PaceReservation {
+            grants: vec![schedule.prepare(3)],
+            output_bytes: None,
+        };
+        let wait = tokio::time::timeout(Duration::from_millis(20), plan.acquire_prefix(1, None)).await;
+        assert!(wait.is_err(), "the second input portion must wait for refill");
+        assert_eq!(plan.remaining(), 2, "the unadmitted remainder stays refundable");
+        drop(plan);
+        let delay = schedule.prepare(1).delay();
+        assert!(
+            delay > Duration::from_millis(800),
+            "the processed first input byte stays charged"
+        );
+        assert!(
+            delay <= Duration::from_secs(1),
+            "the two unadmitted input bytes were refunded"
+        );
     }
 
     #[tokio::test]

@@ -43,6 +43,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Pace strongly shrinking bodies without oversized admission stalls, isolate
+  nested-body bandwidth attachments, and check completion output limits before
+  pacing. Completion output within an available burst survives a step timeout.
 - Preserve bandwidth charges across body transformations and release streaming
   completion output in refundable, bounded prefixes. HTTP `per_connection`
   library hosts must supply a stable identity and a live `ConnectionAlive` watch.

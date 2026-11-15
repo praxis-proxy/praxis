@@ -29,8 +29,8 @@ use crate::{
     RequestExtensions, TcpFilter, TcpFilterContext,
     bandwidth::{
         AcquireError, Acquired, BandwidthGrant, BandwidthTable, BudgetKey, ConnectionAlive, DownloadLimited,
-        DownstreamConnectionId, InFlightGuard, Schedule, TcpBandwidthPacer, pointer_key, push_download,
-        push_download_schedule, push_upload, request_connection_close,
+        DownstreamConnectionId, GeneratedDownloadScope, InFlightGuard, Schedule, TcpBandwidthPacer, pointer_key,
+        push_download, push_download_schedule, push_upload, request_connection_close,
     },
     factory::parse_filter_config,
 };
@@ -157,6 +157,9 @@ struct BandwidthAttachment {
     /// [`BandwidthLimitFilter::instance`] that created this claim.
     instance: u64,
 
+    /// Whether this limiter applies to the current body's generated output.
+    active: bool,
+
     /// Upload schedule for this claim.
     upload: Option<Arc<Schedule>>,
 
@@ -169,7 +172,7 @@ struct BandwidthAttachment {
     /// Download bytes already reserved for this request.
     paced_download: u64,
 
-    /// Held until the request ends so the slot stays tracked.
+    /// Keep even inactive scopes tracked until queued completion plans settle.
     _guard: InFlightGuard,
 }
 
@@ -180,9 +183,17 @@ struct BandwidthAttachments {
     items: Vec<BandwidthAttachment>,
 }
 
-/// Counter checkpoints for nested bodies, bounded by the existing subrequest depth.
+/// Active attachments and counters at entry to one nested body.
+struct BodyScope {
+    /// Parent attachment identities and their per-body byte counts.
+    counters: Vec<(u64, u64, u64)>,
+    /// Generated-response schedules belonging to the parent body.
+    generated: GeneratedDownloadScope,
+}
+
+/// Body checkpoints bounded by the existing subrequest depth.
 #[derive(Default)]
-struct BodyScopes(Vec<Vec<(u64, u64, u64)>>);
+struct BodyScopes(Vec<BodyScope>);
 
 /// A body chunk to pace.
 #[derive(Clone, Copy)]
@@ -259,21 +270,32 @@ impl BandwidthLimitFilter {
                 attachments
                     .items
                     .iter()
+                    .filter(|item| item.active)
                     .map(|item| (item.instance, item.paced_upload, item.paced_download))
                     .collect()
             });
-        extensions.get_or_insert_with(BodyScopes::default).0.push(counters);
+        let generated = GeneratedDownloadScope::capture(extensions);
+        extensions
+            .get_or_insert_with(BodyScopes::default)
+            .0
+            .push(BodyScope { counters, generated });
         Self::reset_body_counters(extensions, &[]);
     }
 
     /// Restore the parent counters without replacing any shared byte budget.
     pub(crate) fn leave_body_scope(extensions: &mut RequestExtensions) {
-        if let Some(counters) = extensions.get_mut::<BodyScopes>().and_then(|scopes| scopes.0.pop()) {
-            Self::reset_body_counters(extensions, &counters);
+        if let Some(scope) = extensions.get_mut::<BodyScopes>().and_then(|scopes| scopes.0.pop()) {
+            Self::reset_body_counters(extensions, &scope.counters);
+            if let Some(attachments) = extensions.get_mut::<BandwidthAttachments>() {
+                for item in &mut attachments.items {
+                    item.active = scope.counters.iter().any(|saved| saved.0 == item.instance);
+                }
+            }
+            scope.generated.restore(extensions);
         }
     }
 
-    /// Restore known parent counters and reset attachments introduced by the nested body.
+    /// Restore known counters, or start fresh counters when entering a nested body.
     fn reset_body_counters(extensions: &mut RequestExtensions, counters: &[(u64, u64, u64)]) {
         if let Some(attachments) = extensions.get_mut::<BandwidthAttachments>() {
             for item in &mut attachments.items {
@@ -545,7 +567,7 @@ fn connection_lease(ctx: &HttpFilterContext<'_>, key: BudgetKey) -> Option<Conne
 fn attached(extensions: &RequestExtensions, instance: u64) -> bool {
     extensions
         .get::<BandwidthAttachments>()
-        .is_some_and(|items| items.items.iter().any(|item| item.instance == instance))
+        .is_some_and(|items| items.items.iter().any(|item| item.instance == instance && item.active))
 }
 
 /// Remember a new claim.
@@ -554,16 +576,22 @@ fn store_attachment(extensions: &mut RequestExtensions, instance: u64, acquired:
         extensions.insert(DownloadLimited);
         push_download_schedule(extensions, Arc::clone(schedule));
     }
-    extensions
-        .get_or_insert_with(BandwidthAttachments::default)
-        .items
-        .push(BandwidthAttachment::from_acquired(instance, acquired));
+    let attachments = extensions.get_or_insert_with(BandwidthAttachments::default);
+    let attachment = BandwidthAttachment::from_acquired(instance, acquired);
+    if let Some(previous) = attachments.items.iter_mut().find(|item| item.instance == instance) {
+        *previous = attachment;
+    } else {
+        attachments.items.push(attachment);
+    }
 }
 
 /// Reserve the chunk and advance the per-request counters.
 fn take_grant(extensions: &mut RequestExtensions, instance: u64, chunk: &PaceChunk) -> Option<BandwidthGrant> {
     let items = extensions.get_mut::<BandwidthAttachments>()?;
-    let attachment = items.items.iter_mut().find(|item| item.instance == instance)?;
+    let attachment = items
+        .items
+        .iter_mut()
+        .find(|item| item.instance == instance && item.active)?;
     let (schedule, paced) = match chunk.direction {
         ChargeDirection::Upload => (attachment.upload.as_ref(), &mut attachment.paced_upload),
         ChargeDirection::Download => (attachment.download.as_ref(), &mut attachment.paced_download),
@@ -582,6 +610,7 @@ impl BandwidthAttachment {
     fn from_acquired(instance: u64, acquired: Acquired) -> Self {
         Self {
             instance,
+            active: true,
             upload: acquired.upload,
             download: acquired.download,
             paced_upload: 0,
@@ -1069,6 +1098,51 @@ mod tests {
             "the same address shares the upload budget"
         );
     }
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one scope trace verifies sibling isolation, tracking, and reentry debt"
+    )]
+    async fn sibling_body_does_not_inherit_a_nested_limiter_but_reentry_keeps_its_debt() {
+        let filter = parse("mode: per_connection\ndownload_bytes_per_sec: 1\nburst_bytes: 1000\n");
+        let req = make_request(Method::GET, "/");
+        let mut ctx = make_filter_context(&req);
+        let socket = Arc::new(());
+        remember_connection(&mut ctx, 23, &socket);
+        BandwidthLimitFilter::enter_body_scope(&mut ctx.extensions);
+        expect_continue(&filter.on_request(&mut ctx).await.unwrap());
+        crate::bandwidth::reserve_generated_download(&mut ctx.extensions, 1000);
+        crate::bandwidth::take_download(&mut ctx.extensions).unwrap().commit();
+        BandwidthLimitFilter::leave_body_scope(&mut ctx.extensions);
+        BandwidthLimitFilter::enter_body_scope(&mut ctx.extensions);
+        crate::bandwidth::reserve_generated_download(&mut ctx.extensions, 1000);
+        assert!(!attached(&ctx.extensions, filter.instance));
+        assert_eq!(
+            ctx.extensions.get::<BandwidthAttachments>().unwrap().items.len(),
+            1,
+            "inactive attachments keep queued plans' shared table slots tracked"
+        );
+        assert!(!crate::bandwidth::limits_download(&ctx.extensions));
+        assert!(
+            crate::bandwidth::take_download(&mut ctx.extensions).is_none_or(|plan| plan.remaining() == 0),
+            "unlimited sibling has no charge"
+        );
+        BandwidthLimitFilter::leave_body_scope(&mut ctx.extensions);
+        BandwidthLimitFilter::enter_body_scope(&mut ctx.extensions);
+        expect_continue(&filter.on_request(&mut ctx).await.unwrap());
+        crate::bandwidth::reserve_generated_download(&mut ctx.extensions, 1);
+        assert_eq!(
+            ctx.extensions.get::<BandwidthAttachments>().unwrap().items.len(),
+            1,
+            "reentry reuses the same attachment instead of accumulating inactive guards"
+        );
+        assert!(
+            crate::bandwidth::take_download(&mut ctx.extensions).unwrap().delay() > Duration::ZERO,
+            "reattaching the limiter must preserve the shared table's debt"
+        );
+        BandwidthLimitFilter::leave_body_scope(&mut ctx.extensions);
+    }
+
     #[tokio::test]
     async fn repeated_nested_buffered_bodies_charge_again_without_resetting_the_shared_budget() {
         let filter = parse("mode: per_connection\nupload_bytes_per_sec: 1000\nburst_bytes: 2000\n");

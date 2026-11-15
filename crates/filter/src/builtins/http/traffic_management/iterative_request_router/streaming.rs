@@ -182,17 +182,22 @@ impl IrrStreamingSession {
 
     /// Account for one outgoing chunk against the logical byte ceiling.
     fn checked_chunk(&mut self, chunk: Bytes) -> Result<Option<Bytes>, FilterError> {
+        self.emitted_bytes = self.checked_chunk_total(chunk.len())?;
+        Ok(Some(chunk))
+    }
+
+    /// Reject a complete logical chunk before it can spend bandwidth allowance.
+    fn checked_chunk_total(&self, bytes: usize) -> Result<usize, FilterError> {
         let total = self
             .emitted_bytes
-            .checked_add(chunk.len())
+            .checked_add(bytes)
             .ok_or_else(|| -> FilterError { "iterative_request_router: stream byte count overflow".into() })?;
         if self.max_stream_response_bytes.is_some_and(|limit| total > limit) {
             return Err("iterative_request_router: logical stream byte limit exceeded"
                 .to_owned()
                 .into());
         }
-        self.emitted_bytes = total;
-        Ok(Some(chunk))
+        Ok(total)
     }
 
     /// Transition rules for the current step.
@@ -447,6 +452,13 @@ impl IrrStreamingSession {
         if let Some(chunk) = self.pending_chunks.pop_front() {
             return self.checked_chunk(chunk);
         }
+        if let Some(completion) = self.pending_completion.as_ref()
+            && let Err(error) = self.checked_chunk_total(completion.next_chunk_len())
+        {
+            self.pending_completion = None;
+            self.done = true;
+            return Err(error);
+        }
         if let Some(completion) = self.pending_completion.as_mut() {
             let result = completion.next_chunk().await;
             if result.is_err() {
@@ -567,6 +579,80 @@ mod tests {
     use bytes::Bytes;
 
     use super::ensure_combined_retained_limit;
+
+    /// A completed session with no transport, ready to drain selected completion.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "initialize the owned logical session without opening a transport"
+    )]
+    fn completed_session(limit: usize, emitted: usize) -> super::IrrStreamingSession {
+        use std::{
+            collections::{HashMap, VecDeque},
+            sync::Arc,
+            time::{Duration, Instant},
+        };
+        let client = praxis_core::subrequest::SubRequestClient::new(crate::test_support::connector(1, None));
+        let runner = super::super::runner::IrrStepRunner::new(
+            client,
+            0,
+            100,
+            100,
+            crate::filtered_subrequest::SubrequestRuntime::new(None, false, None, Instant::now()),
+            HashMap::new(),
+            Duration::from_secs(1),
+        );
+        super::IrrStreamingSession {
+            current: None,
+            current_outcome: None,
+            current_request: crate::SubRequest {
+                method: http::Method::GET,
+                uri: http::Uri::from_static("/"),
+                headers: http::HeaderMap::new(),
+                body: Bytes::new(),
+            },
+            current_step: Arc::from("completed"),
+            done: false,
+            deferred_error: None,
+            emitted_bytes: emitted,
+            extensions: None,
+            finish_after_pending: true,
+            max_state_bytes: 100,
+            max_stream_response_bytes: Some(limit),
+            next_step: None,
+            pending_chunks: VecDeque::new(),
+            pending_completion: Some(crate::filtered_subrequest::CompletionOutput::buffered(
+                Bytes::from_static(b"end"),
+            )),
+            runner,
+            state: None,
+            step_transitions: HashMap::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn completion_limit_rejects_the_logical_chunk_and_drops_its_plan_before_release() {
+        for emitted in [3, 5] {
+            let mut session = completed_session(5, emitted);
+            let result = session.next_pending().await;
+            assert!(result.is_err_and(|error| error.to_string().contains("logical stream byte limit")));
+            assert!(session.done);
+            assert!(
+                session.pending_completion.is_none(),
+                "an oversized completion must be dropped before admission"
+            );
+            assert_eq!(session.emitted_bytes, emitted);
+            drop(session);
+        }
+        let mut exact = completed_session(5, 2);
+        assert!(
+            exact
+                .next_pending()
+                .await
+                .is_ok_and(|chunk| chunk == Some(Bytes::from_static(b"end")))
+        );
+        assert_eq!(exact.emitted_bytes, 5);
+        drop(exact);
+    }
 
     #[test]
     fn completion_rechecks_final_state_with_pending_output() {

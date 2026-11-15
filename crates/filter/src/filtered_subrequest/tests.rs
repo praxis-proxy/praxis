@@ -4848,6 +4848,48 @@ async fn subrequest_pace_streaming_waits_for_both_directions() {
 
 #[cfg(feature = "bandwidth")]
 #[tokio::test]
+async fn sibling_local_response_does_not_inherit_the_previous_chains_bandwidth() {
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+    let registry = crate::FilterRegistry::with_builtins();
+    let mut limited: Vec<crate::FilterEntry> = serde_yaml::from_str(
+        "- filter: bandwidth_limit\n  mode: per_connection\n  download_bytes_per_sec: 1\n  burst_bytes: 2\n- filter: static_response\n  status: 200\n  body: ok\n").unwrap();
+    let mut unlimited: Vec<crate::FilterEntry> =
+        serde_yaml::from_str("- filter: static_response\n  status: 200\n  body: ok\n").unwrap();
+    let limited = Arc::new(crate::FilterPipeline::build(&mut limited, &registry).unwrap());
+    let unlimited = Arc::new(crate::FilterPipeline::build(&mut unlimited, &registry).unwrap());
+    let executor = buffered_executor(100);
+    let request = crate::SubRequest {
+        method: http::Method::GET,
+        uri: http::Uri::from_static("/"),
+        headers: HeaderMap::new(),
+        body: bytes::Bytes::new(),
+    };
+    let mut extensions = paced_extensions();
+    for pipeline in [&limited, &unlimited] {
+        let input = super::FilteredSubrequestInput::callout(
+            pipeline,
+            &request,
+            Instant::now() + Duration::from_millis(200),
+            extensions,
+        );
+        let super::OpenedSubrequest { continuation, kind } = Box::pin(executor.execute(input))
+            .await
+            .map_err(|error| error.into_parts().0)
+            .expect("local sibling chain must complete");
+        extensions = continuation.into_parent_extensions();
+        let super::OpenedResponse::Complete(outcome) = kind else {
+            panic!("local response is buffered")
+        };
+        assert_eq!(outcome.response.status, http::StatusCode::OK);
+        assert_eq!(outcome.response.body, bytes::Bytes::from_static(b"ok"));
+    }
+}
+
+#[cfg(feature = "bandwidth")]
+#[tokio::test]
 #[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
 async fn subrequest_pace_refunds_when_the_deadline_cannot_cover() {
     use std::{

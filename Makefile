@@ -32,7 +32,7 @@ RUST_TARGETS := all build release check \
 	test-schema test-integration test-conformance \
 	test-security test-security-suite test-resilience \
 	test-config-validation test-config \
-	bench build-benches check-features \
+	bench build-benches check-features check-library-consumer \
 	lint fmt doc audit coverage coverage-check \
 	build-fips release-fips check-fips lint-fips test-fips fips-deps fips-report \
 	build-hyper check-hyper lint-hyper test-hyper \
@@ -57,7 +57,7 @@ endif
 # Meta-lint tools checked by lint-extra.
 LINT_EXTRA_CMDS := typos taplo shellcheck actionlint
 
-.PHONY: all build build-dev release check check-features clean \
+.PHONY: all build build-dev release check check-features check-library-consumer clean \
 	test test-unit test-harness test-harness-hyper \
 	test-schema test-integration test-conformance \
 	test-security test-security-suite test-resilience \
@@ -147,6 +147,9 @@ check: ## cargo check of the default and lean feature sets
 	cargo check -p praxis-proxy-core --no-default-features
 	cargo check -p praxis-proxy-protocol --no-default-features
 	cargo check -p praxis-proxy-protocol --no-default-features --features admin-api --all-targets
+
+check-library-consumer: ## check a standalone default library consumer
+	cargo run -q -p xtask --no-default-features -- check-library-consumer
 
 # Verify every optional and experimental feature compiles in isolation.
 # `lint` and `test` build the extremes (every feature but the other backend,

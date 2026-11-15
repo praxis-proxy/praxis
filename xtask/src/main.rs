@@ -35,6 +35,7 @@ mod features;
 #[cfg(feature = "dev")]
 mod filter_docs;
 mod fips;
+mod library_consumer;
 mod lint_deps;
 mod lint_example_tests;
 mod paths;
@@ -91,6 +92,9 @@ enum Command {
     /// three-component semver.
     LintDeps(lint_deps::Args),
 
+    /// Check a standalone library consumer without workspace patches.
+    CheckLibraryConsumer,
+
     /// Check that every example config has a corresponding
     /// integration test.
     LintExampleTests(lint_example_tests::Args),
@@ -136,6 +140,7 @@ fn main() {
         Command::Features(args) => features::run(&args),
         Command::Fips(args) => fips::run(args),
         Command::LintDeps(args) => lint_deps::run(args),
+        Command::CheckLibraryConsumer => library_consumer::run(),
         Command::LintExampleTests(args) => lint_example_tests::run(args),
         Command::Publish(args) => publish::run(&args),
         Command::SyncExampleReadme(args) => sync_example_readme::run(&args),

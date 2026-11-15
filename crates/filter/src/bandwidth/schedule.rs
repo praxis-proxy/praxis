@@ -5,7 +5,9 @@
 //!
 //! Body hooks prepare charges without spending capacity. Writers reserve a
 //! bounded prefix, wait for its absolute release time, then commit only bytes
-//! accepted by the writer. Cancelled plans never debit a budget.
+//! accepted by the writer. Strongly shrinking transformations drain processed
+//! input charges before their final output byte; cancellation refunds the
+//! unadmitted remainder. Untouched plans never debit a budget.
 
 use std::{
     sync::{Arc, Mutex, MutexGuard, PoisonError},
@@ -190,6 +192,11 @@ impl BandwidthGrant {
             .min(self.schedule.quantum)
     }
 
+    /// Largest admissible charge, independent of allowance already reserved.
+    pub(super) fn max_prefix(&self) -> u64 {
+        self.schedule.quantum
+    }
+
     /// Coalesce prepared charges from repeated body callbacks on one budget.
     pub(super) fn merge(&mut self, mut other: Self) -> Result<(), Self> {
         if !Arc::ptr_eq(&self.schedule, &other.schedule) {
@@ -295,7 +302,7 @@ impl BandwidthGrant {
     }
 
     /// Record this prefix in planned debt exactly once.
-    fn reserve(&mut self) {
+    pub(super) fn reserve(&mut self) {
         if self.reserved || self.cost_ns == 0 {
             return;
         }

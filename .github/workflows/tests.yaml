@@ -110,7 +110,7 @@ jobs:
         run: make check-features
 
       - name: Check an external library consumer without workspace patches
-        run: bash .github/scripts/check-library-consumer.sh
+        run: make check-library-consumer
 
       - name: Run bandwidth runtime regression suites
         run: |

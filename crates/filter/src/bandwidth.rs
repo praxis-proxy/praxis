@@ -18,7 +18,8 @@ pub use pace::{
     settle_download_write, take_download, take_upload, upload_pace_delay,
 };
 pub(crate) use pace::{
-    generated_download_plan, push_download, push_download_schedule, push_upload, request_connection_close,
+    GeneratedDownloadScope, generated_download_plan, push_download, push_download_schedule, push_upload,
+    request_connection_close,
 };
 pub(crate) use schedule::{BandwidthGrant, Schedule};
 pub use table::ConnectionAlive;
