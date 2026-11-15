@@ -56,6 +56,8 @@ spiffe = ["praxis/spiffe"]
 access-log-syslog = ["praxis/access-log-syslog"]
 # Off by default; races hedged requests in the example test.
 hedged-requests = ["praxis/hedged-requests"]
+# Off by default; paces `bandwidth_limit` on HTTP, TCP, and sub-requests.
+bandwidth = ["praxis/bandwidth"]
 no-mac-cert-rotation-tests = []
 otel = ["praxis/otel"]
 

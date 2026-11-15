@@ -17,7 +17,7 @@ use pingora_proxy::Session;
 use praxis_core::next_hop_headers::is_forbidden_client_response_header;
 use praxis_filter::Rejection;
 #[cfg(feature = "pingora")]
-use praxis_filter::{Request, Response};
+use praxis_filter::{Request, RequestExtensions, Response};
 #[cfg(feature = "pingora")]
 use tracing::debug;
 
@@ -120,7 +120,7 @@ pub(crate) async fn send_rejection_for(
         return;
     }
     // Path 3: plain HTTP rejection.
-    send_rejection(session, rejection).await;
+    send_rejection_with_pace(session, rejection, Some(&mut ctx.extensions)).await;
 }
 
 /// The text to carry as `grpc-message` for a rejection.
@@ -158,28 +158,75 @@ pub(in crate::http) fn grpc_error_message(rejection: &Rejection) -> &str {
 /// ```
 ///
 /// [`Rejection`]: praxis_filter::Rejection
-#[cfg(feature = "pingora")]
+#[cfg(all(test, feature = "pingora"))]
 pub(crate) async fn send_rejection(session: &mut Session, rejection: Rejection) {
+    send_rejection_with_pace(session, rejection, None).await;
+}
+
+/// Write a rejection with any download budgets already attached by filters.
+#[cfg(feature = "pingora")]
+async fn send_rejection_with_pace(
+    session: &mut Session,
+    rejection: Rejection,
+    mut extensions: Option<&mut RequestExtensions>,
+) {
     debug!(status = rejection.status, "sending rejection response");
     if !rejection.preserve_keepalive {
         session.set_keepalive(None);
     }
+    let (header, has_body) = prepare_paced_rejection(session, &rejection, extensions.as_deref_mut());
+    if let Err(error) = session.write_response_header(Box::new(header), !has_body).await {
+        debug!(%error, "failed to write rejection response header");
+        if let Some(extensions) = extensions {
+            praxis_filter::cancel_download_pace(extensions);
+        }
+        return;
+    }
+    let wrote = write_rejection_body(session, rejection.body, has_body, extensions.as_deref_mut()).await;
+    if let Some(extensions) = extensions {
+        praxis_filter::settle_download_write(extensions, wrote);
+    }
+}
 
-    let mut header = build_rejection_header(&rejection);
+/// Frame a rejection and reserve its body against the request's download budgets.
+#[cfg(feature = "pingora")]
+fn prepare_paced_rejection(
+    session: &Session,
+    rejection: &Rejection,
+    extensions: Option<&mut RequestExtensions>,
+) -> (pingora_http::ResponseHeader, bool) {
+    let mut header = build_rejection_header(rejection);
     let has_body = rejection.body.is_some() && session.req_header().method != http::Method::HEAD;
     if let Some(body) = &rejection.body {
         let _insert = header.insert_header("content-length", body.len().to_string());
+        if has_body && let Some(extensions) = extensions {
+            praxis_filter::reserve_generated_download(extensions, u64::try_from(body.len()).unwrap_or(u64::MAX));
+            super::handler::bandwidth::frame_paced_head(
+                &mut header,
+                extensions,
+                super::handler::bandwidth::downstream_version(session),
+            );
+        }
     }
-    if let Err(e) = session.write_response_header(Box::new(header), !has_body).await {
-        debug!(error = %e, "failed to write rejection response header");
-        return;
-    }
+    (header, has_body)
+}
+
+/// Write the rejection body, reporting whether the downstream accepted it.
+#[cfg(feature = "pingora")]
+async fn write_rejection_body(
+    session: &mut Session,
+    body: Option<bytes::Bytes>,
+    has_body: bool,
+    extensions: Option<&mut RequestExtensions>,
+) -> bool {
     if has_body
-        && let Some(body) = rejection.body
-        && let Err(e) = session.write_response_body(Some(body), true).await
+        && let Some(body) = body
+        && let Err(error) = super::handler::bandwidth::write_download(session, extensions, Some(body), true).await
     {
-        debug!(error = %e, "failed to write rejection response body");
+        debug!(%error, "failed to write rejection response body");
+        return false;
     }
+    true
 }
 
 /// Build a Pingora [`ResponseHeader`] from a [`Rejection`], falling back

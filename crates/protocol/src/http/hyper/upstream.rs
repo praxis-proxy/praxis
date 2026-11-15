@@ -81,6 +81,10 @@ pub(super) async fn proxy(
             Outcome::Retry(_) if attempts < MAX_ATTEMPTS => {},
             Outcome::Retry(failure) | Outcome::Failed(failure) => return fail(flight, &failure).await,
             Outcome::Reply(reply) => return Ok(flight.reply(reply).await),
+            Outcome::Close => {
+                flight.complete().await;
+                return Err(ResponseAbort);
+            },
         }
     }
 }
@@ -95,6 +99,9 @@ pub(super) enum Outcome {
 
     /// Answer locally (a body or response filter rejected the request).
     Reply(LocalReply),
+
+    /// Drop the connection without writing a response.
+    Close,
 
     /// Try again; the failure stands if no attempt is left.
     Retry(Failure),
@@ -239,7 +246,13 @@ fn exchange_failed(flight: &mut Flight, upload: &Upload, end: UploadEnd) -> Outc
             debug!(status = ?halt.status, reason = %halt.reason, "request body phase stopped the request");
             flight.error = Some(ErrorOrigin::Other);
             match halt.rejection {
-                Some(refusal) => Outcome::Reply(reply::rejection(refusal, &flight.ctx, flight.version)),
+                Some(refusal) => {
+                    if reply::drops_connection(&flight.ctx) {
+                        Outcome::Close
+                    } else {
+                        Outcome::Reply(reply::rejection(refusal, &flight.ctx, flight.version))
+                    }
+                },
                 None => Outcome::Failed(Failure::internal(halt.reason)),
             }
         },
@@ -661,10 +674,10 @@ mod tests {
         let (request, client) = client_request(b"GET / HTTP/1.1\r\nhost: a\r\n\r\n").await;
         let (parts, incoming) = request.into_parts();
         let mut body = DownstreamBody::new(incoming, None);
-        let facts = ConnectionFacts {
+        let facts = Arc::new(ConnectionFacts {
             peer: "127.0.0.1:40000".parse().unwrap(),
             tls: false,
-        };
+        });
 
         let phase = run_request_phase(&mut flight, &facts, parts, &mut body).await;
 

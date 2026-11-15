@@ -231,22 +231,7 @@ async fn deliver(
 ) -> Step {
     source.swap_extensions(&mut flight.ctx.extensions);
     match pulled {
-        Ok(Some(chunk)) => {
-            let mut body = Some(chunk);
-            if run_parent_terminal_body_filters(&flight.pipeline, &mut flight.ctx, head, &mut body, false).is_err()
-                || streaming_size_limit_exceeded(&flight.ctx, &flight.pipeline)
-            {
-                return Step::Cancel;
-            }
-            source.swap_extensions(&mut flight.ctx.extensions);
-            if relay.data(body.unwrap_or_default()).await.is_err() {
-                debug!("failed to write streaming terminal response body");
-                flight.error = Some(crate::http::pingora::handler::health_util::ErrorOrigin::Downstream);
-                source.swap_extensions(&mut flight.ctx.extensions);
-                return Step::Cancel;
-            }
-            Step::Next
-        },
+        Ok(Some(chunk)) => send_chunk(flight, source, relay, head, chunk).await,
         Ok(None) => finish(flight, relay, head).await,
         Err(err) => {
             warn!(error = %err, "streaming terminal response source failed after commitment");
@@ -255,17 +240,47 @@ async fn deliver(
     }
 }
 
+/// Filter one chunk, write it, and settle the download grant from that write.
+///
+/// On success the source takes the extensions back. On a failed write they
+/// stay on the flight, with the grant already refunded, for request cleanup.
+async fn send_chunk(
+    flight: &mut Flight,
+    source: &mut dyn StreamingResponseBody,
+    relay: &Relay,
+    head: &praxis_filter::Response,
+    chunk: bytes::Bytes,
+) -> Step {
+    let mut body = Some(chunk);
+    if run_parent_terminal_body_filters(&flight.pipeline, &mut flight.ctx, head, &mut body, false).is_err()
+        || streaming_size_limit_exceeded(&flight.ctx, &flight.pipeline)
+    {
+        return Step::Cancel;
+    }
+    let wrote = super::stream::write_paced(relay, flight, body.unwrap_or_default())
+        .await
+        .is_ok();
+    if !wrote {
+        debug!("failed to write streaming terminal response body");
+        flight.error = Some(crate::http::pingora::handler::health_util::ErrorOrigin::Downstream);
+        return Step::Cancel;
+    }
+    source.swap_extensions(&mut flight.ctx.extensions);
+    Step::Next
+}
+
 /// Run the end-of-stream body filters and end the relayed body.
 async fn finish(flight: &mut Flight, relay: &Relay, head: &praxis_filter::Response) -> Step {
     let mut last = None;
     if run_parent_terminal_body_filters(&flight.pipeline, &mut flight.ctx, head, &mut last, true).is_err() {
         return Step::Cancel;
     }
-    let delivered = match last {
-        Some(chunk) => relay.data(chunk).await,
-        None => Ok(()),
+    let wrote = if let Some(chunk) = last {
+        super::stream::write_paced(relay, flight, chunk).await.is_ok()
+    } else {
+        true
     };
-    if delivered.is_err() || relay.end().await.is_err() {
+    if !wrote || relay.end().await.is_err() {
         debug!("failed to finish streaming terminal response");
     }
     Step::Done

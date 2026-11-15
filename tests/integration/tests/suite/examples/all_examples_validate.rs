@@ -74,6 +74,7 @@ fn every_example_resolves_its_pipelines() {
 /// Built-in filters that exist only behind a build feature, so an example
 /// using one is skipped when this test binary lacks the feature.
 const GATED_FILTERS: &[(&str, bool)] = &[
+    ("bandwidth_limit", cfg!(feature = "bandwidth")),
     ("basic_auth", cfg!(feature = "basic-auth-filter")),
     ("cloud_events", cfg!(feature = "cloud-events-filter")),
     ("iterative_request_router", cfg!(feature = "iterative-request-router")),

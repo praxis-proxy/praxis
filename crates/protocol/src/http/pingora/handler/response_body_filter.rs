@@ -16,7 +16,7 @@
 use std::time::Duration;
 
 use bytes::Bytes;
-use praxis_filter::{BodyMode, FilterAction, FilterPipeline};
+use praxis_filter::{BodyMode, FilterAction, FilterPipeline, cancel_download_pace};
 use tracing::{debug, error};
 
 use super::{
@@ -42,12 +42,35 @@ pub(super) fn execute(
     ctx: &mut PingoraRequestCtx,
 ) -> pingora_core::Result<Option<Duration>> {
     run_response_body(pipeline, body, end_of_stream, ctx)
-        .map(|()| None)
+        .map(|()| download_wait(ctx))
         .map_err(|reason| pingora_core::Error::explain(pingora_core::ErrorType::InternalError, reason))
+}
+
+/// Delay before this response chunk is written.
+///
+/// Pingora sleeps a returned delay before it writes the filtered batch, which
+/// still includes an unsent head. [`super::bandwidth::finish_response_body_wait`]
+/// flushes that head first and only then lets this delay hold the body.
+///
+/// Without the `bandwidth` feature there is nothing to wait for.
+#[cfg(feature = "pingora")]
+fn download_wait(ctx: &PingoraRequestCtx) -> Option<Duration> {
+    #[cfg(feature = "bandwidth")]
+    {
+        praxis_filter::download_pace_delay(&ctx.extensions)
+    }
+    #[cfg(not(feature = "bandwidth"))]
+    {
+        let _ = ctx;
+        None
+    }
 }
 
 /// Run body filters on a response body chunk; the backend-neutral core of
 /// `execute`.
+///
+/// Download grants reserved here stay uncommitted. The protocol commits
+/// them after Pingora sends the bytes, and refunds them when the write fails.
 ///
 /// # Errors
 ///
@@ -144,6 +167,11 @@ pub(in crate::http) fn run_response_body(
             Ok(())
         },
         Ok(FilterAction::Reject(rejection)) => {
+            cancel_download_pace(&mut ctx.extensions);
+            if let Some(reason) = praxis_filter::connection_close_reason(&ctx.extensions) {
+                tracing::warn!(%reason, "closing connection");
+                return Err(reason.to_owned());
+            }
             debug!(
                 status = rejection.status,
                 "response body filter rejected response; aborting connection"
@@ -154,6 +182,7 @@ pub(in crate::http) fn run_response_body(
             ))
         },
         Err(e) => {
+            cancel_download_pace(&mut ctx.extensions);
             error!(error = %e, "filter pipeline error during response body");
             Err(format!("response body filter error: {e}"))
         },

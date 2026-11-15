@@ -34,8 +34,11 @@ use super::{
 };
 use crate::http::pingora::{
     handler::{
-        health_util::ErrorOrigin, hop_by_hop::strip_reserved_internal_header_map,
-        response_body_filter::run_response_body, response_trailer_filter, response_trailers,
+        bandwidth::{cancel_upload_hold, release_upload, upload_release_at},
+        health_util::ErrorOrigin,
+        hop_by_hop::strip_reserved_internal_header_map,
+        response_body_filter::run_response_body,
+        response_trailer_filter, response_trailers,
     },
     metrics,
 };
@@ -110,7 +113,9 @@ impl Relaying {
         let mut body = Some(chunk);
         run_response_body(&self.flight.pipeline, &mut body, false, &mut self.flight.ctx).map_err(Ended::Filter)?;
         match body {
-            Some(chunk) => self.relay.data(chunk).await.map_err(|_gone| Ended::ClientGone),
+            Some(chunk) => write_paced(&self.relay, &mut self.flight, chunk)
+                .await
+                .map_err(|_gone| Ended::ClientGone),
             None => Ok(()),
         }
     }
@@ -134,7 +139,7 @@ impl Relaying {
             return Ended::Filter(reason);
         }
         if let Some(chunk) = body
-            && self.relay.data(chunk).await.is_err()
+            && write_paced(&self.relay, &mut self.flight, chunk).await.is_err()
         {
             return Ended::ClientGone;
         }
@@ -148,7 +153,12 @@ impl Relaying {
         if let Err(reason) = run_response_body(&self.flight.pipeline, &mut body, true, &mut self.flight.ctx) {
             return Ended::Filter(reason);
         }
-        end_with(&self.relay, body, None).await
+        if let Some(chunk) = body
+            && write_paced(&self.relay, &mut self.flight, chunk).await.is_err()
+        {
+            return Ended::ClientGone;
+        }
+        end_with(&self.relay, None, None).await
     }
 
     /// Filter and queue one more frame of the client's body.
@@ -166,13 +176,16 @@ impl Relaying {
     }
 
     /// Wait for whatever happens next: the client leaving, an upstream
-    /// chunk, a client body frame when nothing is queued for the upstream,
-    /// or the time to offer the queued body again.
+    /// chunk, the upload deadline, a client body frame when nothing is
+    /// queued and no upload wait is outstanding, or the time to offer the
+    /// queued body again.
     ///
     /// `due` is when the awaited upstream chunk is overdue. It is kept
-    /// across the turns spent offering the queued body again, so those do
-    /// not restart the read timeout the way every other step does.
+    /// across upload waits and the turns spent offering the queued body
+    /// again, so those do not restart the read timeout.
     async fn next_step(&mut self, due: &mut Option<Due>) -> Step {
+        let release_at = upload_release_at(&self.flight.ctx.extensions);
+        let held = release_at.is_some_and(|at| at > Instant::now());
         let queued = self.upload.has_outgoing();
         if due.is_none() {
             *due = self.read_timeout.and_then(Due::within);
@@ -182,10 +195,11 @@ impl Relaying {
             () = self.relay.closed() => Step::ClientGone,
             chunk = self.session.read_response_body() => Step::Upstream(chunk.map_err(|err| Failure::exchange(&err))),
             limit = overdue(*due) => Step::Upstream(Err(Failure::read_timeout(limit))),
-            frame = self.upload.next_live(), if self.upload.is_live() && !queued => Step::Client(frame),
-            () = tokio::time::sleep(UPLOAD_RETRY), if queued => Step::Retry,
+            () = sleep_until_release(release_at), if held => Step::Release,
+            frame = self.upload.next_live(), if self.upload.is_live() && !queued && !held => Step::Client(frame),
+            () = tokio::time::sleep(UPLOAD_RETRY), if queued && !held => Step::Retry,
         };
-        if !matches!(step, Step::Retry) {
+        if !matches!(step, Step::Retry | Step::Release) {
             *due = None;
         }
         step
@@ -198,7 +212,8 @@ impl Relaying {
         }
         let mut due = None;
         loop {
-            if self.upload.has_outgoing() && self.push_upload().await {
+            self.release_elapsed_upload();
+            if self.may_push_upload() && self.push_upload().await {
                 due = None;
             }
             let step = Box::pin(self.next_step(&mut due)).await;
@@ -206,6 +221,19 @@ impl Relaying {
                 return ended;
             }
         }
+    }
+
+    /// Commit an upload wait whose deadline has already passed.
+    fn release_elapsed_upload(&mut self) {
+        let elapsed = upload_release_at(&self.flight.ctx.extensions).is_some_and(|at| at <= Instant::now());
+        if elapsed {
+            release_upload(&mut self.flight.ctx.extensions);
+        }
+    }
+
+    /// Whether queued upload bytes are waiting on no deadline.
+    fn may_push_upload(&self) -> bool {
+        self.upload.has_outgoing() && upload_release_at(&self.flight.ctx.extensions).is_none()
     }
 
     /// Hand what is queued of the client's body to the upstream, for as long
@@ -224,16 +252,28 @@ impl Relaying {
 
     /// Hand on what the response phase already read and filtered; `Some`
     /// when that was the whole body.
+    ///
+    /// The bandwidth wait for that chunk runs here, after the response head
+    /// has already been handed to the client.
     async fn resume(&mut self) -> Option<Ended> {
         match std::mem::replace(&mut self.start, Start::Fresh) {
             Start::Fresh => None,
-            Start::Chunk { body, ends: false } => {
-                let chunk = body?;
-                self.relay.data(chunk).await.err().map(|_gone| Ended::ClientGone)
-            },
-            Start::Chunk { body, ends: true } => Some(end_with(&self.relay, body, None).await),
+            Start::Chunk { body, ends } => self.send_preread(body, ends).await,
             Start::Ended => Some(Box::pin(self.deliver_end()).await),
         }
+    }
+
+    /// Write the pre-read chunk, and end the body when that chunk finished it.
+    async fn send_preread(&mut self, body: Option<Bytes>, ends: bool) -> Option<Ended> {
+        if let Some(chunk) = body
+            && write_paced(&self.relay, &mut self.flight, chunk).await.is_err()
+        {
+            return Some(Ended::ClientGone);
+        }
+        if ends {
+            return Some(end_with(&self.relay, None, None).await);
+        }
+        None
     }
 
     /// Relay the body, then release the connection and complete.
@@ -252,6 +292,7 @@ impl Relaying {
             relay.flushed().await;
         }
         drop(relay);
+        cancel_upload_hold(&mut flight.ctx.extensions);
         super::upstream::release(&connector, session, keepalive);
         flight.complete().await;
     }
@@ -266,6 +307,7 @@ impl Relaying {
             reason,
             "stopped forwarding the request body while relaying the response"
         );
+        cancel_upload_hold(&mut self.flight.ctx.extensions);
         self.upload.abandon();
     }
 
@@ -273,6 +315,10 @@ impl Relaying {
     async fn take_step(&mut self, step: Step) -> Option<Ended> {
         match step {
             Step::Retry => None,
+            Step::Release => {
+                release_upload(&mut self.flight.ctx.extensions);
+                None
+            },
             Step::ClientGone => Some(Ended::ClientGone),
             Step::Upstream(Ok(Some(chunk))) if self.session.response_done() => {
                 Some(Box::pin(self.deliver_last(chunk)).await)
@@ -312,6 +358,9 @@ enum Step {
     /// Time to offer the queued request body to the upstream again.
     Retry,
 
+    /// The upload deadline passed. Its grants may be committed.
+    Release,
+
     /// A frame of the client's body.
     Client(Result<DownstreamFrame, Failure>),
 
@@ -337,6 +386,14 @@ enum Ended {
     Upstream(Failure),
 }
 
+/// Sleep until an upload deadline. Pending when `deadline` is absent.
+async fn sleep_until_release(deadline: Option<Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
+    }
+}
+
 /// When the awaited upstream chunk is overdue.
 #[derive(Clone, Copy)]
 struct Due {
@@ -358,7 +415,42 @@ impl Due {
 // Utilities
 // -----------------------------------------------------------------------------
 
+/// Release bounded response prefixes after the head, refunding cancelled output.
+#[cfg_attr(
+    not(feature = "bandwidth"),
+    expect(
+        clippy::needless_pass_by_ref_mut,
+        reason = "only bandwidth-enabled writes consume mutable request grants"
+    )
+)]
+pub(super) async fn write_paced(
+    relay: &Relay,
+    flight: &mut Flight,
+    chunk: Bytes,
+) -> Result<(), super::body::ClientGone> {
+    #[cfg(feature = "bandwidth")]
+    if let Some(mut plan) = praxis_filter::take_download_pace(&mut flight.ctx.extensions) {
+        let mut chunk = chunk;
+        while !chunk.is_empty() {
+            let (bytes, permit) = tokio::select! {
+                biased;
+                () = relay.closed() => return Err(super::body::ClientGone),
+                result = plan.acquire_prefix(chunk.len(), None) => result.map_err(|_error| super::body::ClientGone)?,
+            };
+            relay.data(chunk.split_to(bytes)).await?;
+            permit.commit_bytes(bytes);
+        }
+        return Ok(());
+    }
+    #[cfg(not(feature = "bandwidth"))]
+    let _ = flight;
+    relay.data(chunk).await
+}
+
 /// Send the last bytes and trailers, ending the client's body.
+///
+/// `last` did not pass the bandwidth filter. The paced chunk is written
+/// with [`write_paced`] before this runs.
 async fn end_with(relay: &Relay, last: Option<Bytes>, trailers: Option<http::HeaderMap>) -> Ended {
     if let Some(chunk) = last
         && relay.data(chunk).await.is_err()

@@ -122,6 +122,17 @@ pub(super) fn pending_rejection(rejection: Rejection, ctx: &PingoraRequestCtx, v
     plain_rejection(rejection)
 }
 
+/// Whether `rejection` drops the connection instead of being written.
+///
+/// The close cause is logged here for the hyper backend.
+pub(super) fn drops_connection(ctx: &PingoraRequestCtx) -> bool {
+    let Some(reason) = praxis_filter::connection_close_reason(&ctx.extensions) else {
+        return false;
+    };
+    warn!(%reason, "closing connection");
+    true
+}
+
 /// Render a rejection as a plain HTTP response.
 ///
 /// A status that cannot end a response becomes 500, reserved and
@@ -288,6 +299,9 @@ pub(super) fn classified_error(error: &ClassifiedError, ctx: &PingoraRequestCtx,
 
 /// Run the response filters over a filter's buffered terminal response and
 /// build it; a filter that rejects it is answered instead.
+///
+/// A download bandwidth wait stays pending. The head is returned before
+/// that wait, and the body is written afterwards.
 pub(super) async fn terminal(flight: &mut Flight, terminal: TerminalResponse) -> LocalReply {
     let prepared = Box::pin(prepare_terminal_response(
         &flight.pipeline,

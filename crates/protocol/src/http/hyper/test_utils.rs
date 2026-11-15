@@ -456,6 +456,12 @@ impl Upstream {
         Self::listen(move |stream| answer_early(stream, reply)).await
     }
 
+    /// An upstream that answers with `reply` only after it has read one
+    /// byte of the request body.
+    pub(super) async fn answering_after_body(reply: &'static [u8]) -> Self {
+        Self::listen(move |stream| answer_after_body(stream, reply)).await
+    }
+
     /// An upstream that reads each request head, answers with `reply`, and
     /// closes the connection, cutting short a body `reply` promised.
     pub(super) async fn answering_then_closing(reply: &'static [u8]) -> Self {
@@ -559,6 +565,18 @@ async fn answer_and_close(mut stream: TcpStream, reply: &'static [u8]) {
     if read_head(&mut stream).await && stream.write_all(reply).await.is_ok() {
         drop(stream.shutdown().await);
     }
+}
+
+/// Answer `stream` with `reply` once one body byte has arrived.
+async fn answer_after_body(mut stream: TcpStream, reply: &'static [u8]) {
+    if !read_head(&mut stream).await {
+        return;
+    }
+    let mut byte = [0_u8; 1];
+    if stream.read(&mut byte).await.unwrap_or(0) == 0 {
+        return;
+    }
+    drop(stream.write_all(reply).await);
 }
 
 /// Answer the request on `stream` with `reply` once its head arrived, then

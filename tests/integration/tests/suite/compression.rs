@@ -591,7 +591,7 @@ fn reload_to_generation(proxy: &ReloadableProxyGuard, yaml: &str, body: &str) {
     );
 }
 
-fn assert_gzip_response(addr: &str, path: &str, expected: &str, compressed: bool) {
+pub(super) fn assert_gzip_response(addr: &str, path: &str, expected: &str, compressed: bool) {
     let (headers, body) = send_and_read_body(addr, path, Some("gzip"));
     assert_eq!(parse_status(&headers), 200, "{path}: {headers}");
     let encoding = parse_header(&headers, "content-encoding");

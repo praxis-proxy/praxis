@@ -324,6 +324,9 @@ fn handle_response_result(
             Ok(())
         },
         Ok(FilterAction::Reject(rejection)) => {
+            if let Some(reason) = praxis_filter::connection_close_reason(&ctx.extensions) {
+                return Err(super::bandwidth::close_error(reason));
+            }
             warn!(status = rejection.status, "filter rejected response");
             let status = rejection.status;
             // Carry the full rejection across the error boundary so

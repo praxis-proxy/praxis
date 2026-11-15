@@ -28,6 +28,7 @@ use tokio::sync::Semaphore;
 use tracing::{Instrument as _, debug};
 
 use super::{
+    bandwidth,
     compression::{adjust_compression, configure_compression},
     connected_to_upstream, fail_to_proxy,
     health_util::{ended_by_client, record_passive_health},
@@ -256,6 +257,16 @@ impl ProxyHttp for PingoraHttpHandler {
         request_filter::execute(&pipeline, session, ctx).await
     }
 
+    #[cfg(feature = "bandwidth")]
+    fn request_body_pacer(
+        &self,
+        _session: &mut Session,
+        bytes: usize,
+        ctx: &mut Self::CTX,
+    ) -> Option<Box<dyn pingora_proxy::RequestBodyPacer>> {
+        super::upload_prefix::take(&mut ctx.extensions, bytes)
+    }
+
     async fn request_body_filter(
         &self,
         _session: &mut Session,
@@ -330,7 +341,7 @@ impl ProxyHttp for PingoraHttpHandler {
 
     async fn response_body_filter(
         &self,
-        _session: &mut Session,
+        session: &mut Session,
         body: &mut Option<Bytes>,
         end_of_stream: bool,
         ctx: &mut Self::CTX,
@@ -354,7 +365,14 @@ impl ProxyHttp for PingoraHttpHandler {
         let span = ctx.request_span.clone();
         let _entered = span.enter();
         let pipeline = ctx.pipeline(&self.pipeline);
-        response_body_filter::execute(&pipeline, body, end_of_stream, ctx)
+        #[cfg(feature = "bandwidth")]
+        super::body_prefix::restore_compression(session, &mut ctx.extensions);
+        let wait = filter_response_chunk(session, &pipeline, body, end_of_stream, ctx)?;
+        #[cfg(feature = "bandwidth")]
+        if super::body_prefix::write_response_prefixes(session, ctx, body, end_of_stream).await? {
+            return Ok(None);
+        }
+        bandwidth::finish_response_body_wait(session, ctx, wait).await
     }
 
     fn fail_to_connect(
@@ -518,6 +536,8 @@ impl ProxyHttp for PingoraHttpHandler {
             // the header.
             via::append_response_via(upstream_response, upstream_ver);
             adjust_compression(session, upstream_response, pipeline.compression_config());
+            bandwidth::remember_response_head(ctx, upstream_response);
+            bandwidth::flush_limited_head(session, upstream_response, &ctx.extensions);
         }
         result
     }
@@ -577,6 +597,8 @@ impl ProxyHttp for PingoraHttpHandler {
             release_retry_state(ctx);
             ctx.ended_by_client = ended_by_client(e, ctx.upstream_response_status);
             logging_cleanup(&pipeline, ctx).await;
+            bandwidth::settle_download_send(session.as_downstream().body_bytes_sent(), &mut ctx.extensions);
+            praxis_filter::settle_bandwidth(&mut ctx.extensions, e.is_none());
             maybe_emit_fallback_access_log(&pipeline, written_status, ctx);
         }
         .instrument(span)
@@ -616,6 +638,21 @@ fn inject_upstream_trace_context(
 // -----------------------------------------------------------------------------
 // Utilities
 // -----------------------------------------------------------------------------
+
+/// Run one response-body hook and keep download grants tied to bytes already sent.
+fn filter_response_chunk(
+    session: &Session,
+    pipeline: &FilterPipeline,
+    body: &mut Option<Bytes>,
+    end_of_stream: bool,
+    ctx: &mut PingoraRequestCtx,
+) -> Result<Option<Duration>> {
+    let sent = session.as_downstream().body_bytes_sent();
+    bandwidth::commit_sent_download(sent, &mut ctx.extensions);
+    let filtered = response_body_filter::execute(pipeline, body, end_of_stream, ctx);
+    bandwidth::note_download_grants(session.as_downstream().body_bytes_sent(), &mut ctx.extensions);
+    filtered
+}
 
 /// Write a 503 response with `Retry-After` and return the corresponding error.
 async fn reject_503(session: &mut Session, retry_after: &'static str, reason: &'static str) -> Result<()> {

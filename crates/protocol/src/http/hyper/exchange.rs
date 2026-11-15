@@ -16,11 +16,17 @@
 //! on Pingora: it restarts when the client sends another body frame or the
 //! upstream takes part of the body, and trips when the upstream neither
 //! answers nor takes the body for that long.
+//!
+//! A bandwidth upload wait is a deadline in this loop, raced with the
+//! response head and that read timeout. The reserved bytes stay queued
+//! until the deadline. An earlier response is delivered without waiting
+//! out the byte rate, and a read timeout still fires during the wait.
 
 use std::time::Duration;
 
 use http::Version;
 use praxis_core::egress::{EgressError, Session as _, hyper::HyperSession};
+use tokio::time::Instant;
 
 use super::{
     downstream::DownstreamFrame,
@@ -28,6 +34,7 @@ use super::{
     service::Flight,
     upload::{Flush, Upload, UploadEnd},
 };
+use crate::http::pingora::handler::bandwidth::{release_upload, upload_release_at};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -84,6 +91,9 @@ pub(super) async fn send_until_head(
     upload.begin(&mut flight.ctx, h2, timeouts.write)?;
     let read_timeout = timeouts.read;
     loop {
+        if Box::pin(release_or_answer(flight, session, read_timeout)).await? {
+            return Ok(());
+        }
         if Box::pin(drain(upload, session, read_timeout)).await? {
             return Ok(());
         }
@@ -224,6 +234,85 @@ async fn answered_instead(session: &mut HyperSession, failure: Failure) -> Resul
 }
 
 // -----------------------------------------------------------------------------
+// Upload Deadline
+// -----------------------------------------------------------------------------
+
+/// What the deadline select observed.
+enum Held {
+    /// The upload deadline passed.
+    Ready,
+
+    /// The session read a response head.
+    Head(Result<(), EgressError>),
+
+    /// The read timeout elapsed.
+    Overdue(Duration),
+}
+
+/// Wait until the upload deadline, a final head, or the read timeout.
+///
+/// `true` when the final head won. The reserved bytes stay queued, and
+/// their grants stay uncommitted, so the response relay can still send
+/// them once the deadline passes. A retry of this attempt keeps the same
+/// deadline. There is nothing to wait for when no deadline is armed.
+///
+/// # Errors
+///
+/// Returns [`UploadEnd::Upstream`] when the head read fails or the
+/// upstream sends too many interim responses. The deadline is left in
+/// place for a retry; a finished request refunds the grants at completion.
+async fn release_or_answer(
+    flight: &mut Flight,
+    session: &mut HyperSession,
+    read_timeout: Option<Duration>,
+) -> Result<bool, UploadEnd> {
+    let Some(deadline) = upload_release_at(&flight.ctx.extensions) else {
+        return Ok(false);
+    };
+    let overdue = read_timeout.and_then(|limit| Instant::now().checked_add(limit).map(|at| (at, limit)));
+    let mut interims = 0_u32;
+    loop {
+        match wait_for_release(session, deadline, overdue).await {
+            Held::Ready => {
+                release_upload(&mut flight.ctx.extensions);
+                return Ok(false);
+            },
+            Held::Head(Ok(())) if is_final(session) => return Ok(true),
+            Held::Head(Ok(())) => interims = interims.saturating_add(1),
+            Held::Head(Err(error)) => return Err(UploadEnd::upstream(error)),
+            Held::Overdue(limit) => return Err(UploadEnd::Upstream(Failure::read_timeout(limit))),
+        }
+        if interims > MAX_INTERIM_RESPONSES {
+            return Err(UploadEnd::Upstream(Failure::new(
+                FailureKind::ReadError,
+                "upstream sent too many 1xx interim responses",
+            )));
+        }
+    }
+}
+
+/// Race the upload deadline against the upstream head and read timeout.
+async fn wait_for_release(session: &mut HyperSession, deadline: Instant, overdue: Option<(Instant, Duration)>) -> Held {
+    tokio::select! {
+        biased;
+        head = session.read_response_head() => Held::Head(head),
+        limit = until_overdue(overdue) => Held::Overdue(limit),
+        () = tokio::time::sleep_until(deadline) => Held::Ready,
+    }
+}
+
+/// Resolves with the read timeout's limit at its absolute instant.
+async fn until_overdue(overdue: Option<(Instant, Duration)>) -> Duration {
+    match overdue {
+        Some((at, limit)) => {
+            tokio::time::sleep_until(at).await;
+            limit
+        },
+        None => std::future::pending().await,
+    }
+}
+
+// -----------------------------------------------------------------------------
 // Utilities
 // -----------------------------------------------------------------------------
 
@@ -257,11 +346,14 @@ mod tests {
     use tokio::io::AsyncWriteExt as _;
 
     use super::*;
-    use crate::http::hyper::{
-        downstream::DownstreamBody,
-        test_utils::{
-            Upstream, answered, client_request, empty_pipeline, queue_unread_body, session_to, streaming_upload,
+    use crate::http::{
+        hyper::{
+            downstream::DownstreamBody,
+            test_utils::{
+                Upstream, answered, client_request, empty_pipeline, queue_unread_body, session_to, streaming_upload,
+            },
         },
+        pingora::handler::bandwidth::hold_upload_until,
     };
 
     #[tokio::test]
@@ -535,6 +627,79 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn early_answer_arrives_during_an_upload_hold() {
+        let upstream = Upstream::answering_early(b"HTTP/1.1 413 Payload Too Large\r\ncontent-length: 0\r\n\r\n").await;
+        let (_connector, mut session) = session_to(&upstream, Method::POST).await;
+        let mut flight = Flight::for_tests(empty_pipeline());
+        let (mut upload, _client) = streaming_upload(&flight.ctx).await;
+        queue_one_chunk(&mut upload, &mut flight).await;
+        hold_upload_until(&mut flight.ctx.extensions, Instant::now() + Duration::from_secs(30));
+
+        let sent = tokio::time::timeout(
+            Duration::from_secs(2),
+            send_until_head(&mut upload, &mut flight, &mut session, timeouts()),
+        )
+        .await;
+
+        assert!(
+            matches!(sent, Ok(Ok(()))),
+            "the 413 is not stuck behind the upload hold"
+        );
+        assert_eq!(session.response_head().unwrap().status, 413, "the client gets the 413");
+        assert!(upload.has_outgoing(), "the held body is not sent before its deadline");
+    }
+
+    #[tokio::test]
+    async fn read_timeout_fires_during_an_upload_hold() {
+        let upstream = Upstream::stalled().await;
+        let (_connector, mut session) = session_to(&upstream, Method::POST).await;
+        let mut flight = Flight::for_tests(empty_pipeline());
+        let (mut upload, _client) = streaming_upload(&flight.ctx).await;
+        queue_one_chunk(&mut upload, &mut flight).await;
+        hold_upload_until(&mut flight.ctx.extensions, Instant::now() + Duration::from_secs(30));
+
+        let sent = tokio::time::timeout(
+            Duration::from_secs(2),
+            send_until_head(&mut upload, &mut flight, &mut session, read_within(200)),
+        )
+        .await;
+
+        assert!(
+            matches!(&sent, Ok(Err(UploadEnd::Upstream(failure))) if failure.kind == FailureKind::ReadTimeout),
+            "the read timeout fires while the upload hold is still outstanding"
+        );
+        assert!(upload.has_outgoing(), "the held body is not sent before its deadline");
+    }
+
+    #[tokio::test]
+    async fn upload_hold_keeps_the_body_until_its_deadline() {
+        let upstream = Upstream::answering_after_body(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n").await;
+        let (_connector, mut session) = session_to(&upstream, Method::POST).await;
+        let mut flight = Flight::for_tests(empty_pipeline());
+        let (mut upload, _client) = streaming_upload(&flight.ctx).await;
+        queue_one_chunk(&mut upload, &mut flight).await;
+        hold_upload_until(&mut flight.ctx.extensions, Instant::now() + Duration::from_millis(400));
+
+        let started = Instant::now();
+        let sent = tokio::time::timeout(
+            Duration::from_secs(3),
+            send_until_head(&mut upload, &mut flight, &mut session, timeouts()),
+        )
+        .await;
+
+        assert!(matches!(sent, Ok(Ok(()))), "the body is sent once the hold elapses");
+        assert_eq!(
+            session.response_head().unwrap().status,
+            200,
+            "the upstream answers after the body"
+        );
+        assert!(
+            started.elapsed() >= Duration::from_millis(300),
+            "the body waits for the upload deadline"
+        );
+    }
+
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
@@ -552,6 +717,13 @@ mod tests {
         let (connector, mut session) = session_to(&upstream, Method::GET).await;
         session.finish_request().await.unwrap();
         (upstream, connector, session)
+    }
+
+    /// Queue one small client chunk so a hold can keep it from being sent.
+    async fn queue_one_chunk(upload: &mut Upload, flight: &mut Flight) {
+        let frame = DownstreamFrame::Data(Bytes::from_static(b"hello"));
+        let accepted = Box::pin(upload.accept(flight, Ok(frame), false)).await;
+        assert!(accepted.is_ok(), "the chunk is queued");
     }
 
     /// Exchange bounds with a read timeout of `millis` and no write timeout.

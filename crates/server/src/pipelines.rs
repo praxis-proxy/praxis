@@ -215,6 +215,8 @@ pub(crate) fn resolve_pipelines_with_composition(
         // the full configuration or conditional filters and branch chains would
         // appear absent.
         let entry_snapshot = entries.clone();
+        #[cfg(feature = "bandwidth")]
+        let registry = registry.for_protocol(listener.protocol);
         let mut pipeline = FilterPipeline::build_with_chains(
             &mut entries,
             &registry,

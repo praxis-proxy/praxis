@@ -322,9 +322,10 @@ fn resolve_listener_pipeline(config: &Config, listener: &Listener, registry: &Fi
         .for_listener(listener)
         .unwrap_or_else(|err| panic!("{err}"));
 
+    let registry = registry.for_protocol(listener.protocol);
     let mut pipeline = FilterPipeline::build_with_chains(
         &mut entries,
-        registry,
+        &registry,
         &chains,
         &config.insecure_options,
         &config.clusters,

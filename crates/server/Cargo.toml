@@ -72,6 +72,10 @@ config-reload = ["dep:notify", "praxis-protocol/config-reload"]
 admin-api = ["praxis-protocol/admin-api"]
 dev = ["basic-auth-filter"]
 basic-auth-filter = ["praxis-filter/basic-auth-filter", "experimental"]
+# The `bandwidth_limit` filter. Off by default; experimental. HTTP and TCP
+# payloads wait for its reservations, and IRR steps and bound outbound chains
+# wait in the filtered sub-request executor.
+bandwidth = ["praxis-filter/bandwidth", "praxis-protocol/bandwidth", "experimental"]
 cloud-events-filter = ["praxis-filter/cloud-events-filter", "experimental"]
 # Logical upstream binding (`bound_upstream` conditions, bound load balancers).
 # Off by default; experimental. Implied by `iterative-request-router` and

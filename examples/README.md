@@ -185,6 +185,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | ------ | ------------- |
 | [authority-from-endpoint.yaml](configs/traffic-management/authority-from-endpoint.yaml) | Sends each upstream request's Host header as the address of the endpoint the load balancer picked, so one cluster can front endpoints that answer to different hostnames |
 | [authority-override.yaml](configs/traffic-management/authority-override.yaml) | Demonstrates overriding the HTTP Host header sent to a specific upstream cluster, including requests received over HTTP/2 |
+| [bandwidth-limiting.yaml](configs/traffic-management/bandwidth-limiting.yaml) | Delays HTTP request and response bodies, and TCP payloads, to a byte rate |
 | [basic-reverse-proxy.yaml](configs/traffic-management/basic-reverse-proxy.yaml) | Minimal config: one listener, one upstream, default filter chain |
 | [bound-upstream-condition.yaml](configs/traffic-management/bound-upstream-condition.yaml) | Gates a filter on the logical upstream the router bound for the request |
 | [bound-upstream-dispatch.yaml](configs/traffic-management/bound-upstream-dispatch.yaml) | Selects an upstream endpoint straight from the logical binding, with no second router |

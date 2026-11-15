@@ -51,6 +51,8 @@ mod stream;
 mod terminal;
 /// The request body sent upstream, with its replay copy for retries.
 mod upload;
+#[cfg(feature = "bandwidth")]
+mod upload_pace;
 /// Upstream attempts: dialing, retries and the exchange.
 mod upstream;
 

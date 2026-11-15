@@ -46,6 +46,10 @@ pub(super) struct Upload {
     /// A whole body kept for every attempt, once taken from the context.
     buffered: Option<VecDeque<Bytes>>,
 
+    /// Prefix ownership remains on the exchange across cancelled send slices.
+    #[cfg(feature = "bandwidth")]
+    pace: super::upload_pace::UploadPace,
+
     /// Whether the client's body was read to its end.
     ended: bool,
 
@@ -124,6 +128,8 @@ impl Upload {
         };
         Self {
             buffered: None,
+            #[cfg(feature = "bandwidth")]
+            pace: super::upload_pace::UploadPace::default(),
             ended: mode != Mode::Streaming,
             trailers: body.pre_read_trailers.take(),
             live: (mode == Mode::Streaming).then_some(body),
@@ -141,6 +147,8 @@ impl Upload {
     pub(super) fn abandon(&mut self) {
         self.live = None;
         self.outgoing.clear();
+        #[cfg(feature = "bandwidth")]
+        self.pace.cancel();
     }
 
     /// Run one client frame through the body filters and queue what they
@@ -164,6 +172,8 @@ impl Upload {
             DownstreamFrame::Data(chunk) => {
                 let mut body = Some(chunk);
                 filter(flight, &mut body, false).await?;
+                #[cfg(feature = "bandwidth")]
+                self.pace.capture(&mut flight.ctx.extensions);
                 if let Some(chunk) = body.filter(|chunk| !chunk.is_empty()) {
                     self.keep(&chunk);
                     self.outgoing.push_back(Outgoing::Chunk(chunk));
@@ -186,6 +196,8 @@ impl Upload {
         self.ended = true;
         let mut last = None;
         filter(flight, &mut last, true).await?;
+        #[cfg(feature = "bandwidth")]
+        self.pace.capture(&mut flight.ctx.extensions);
         let last = last.filter(|chunk| !chunk.is_empty());
         if let Some(chunk) = &last {
             self.keep(chunk);
@@ -226,6 +238,16 @@ impl Upload {
                 }
             },
         }
+        #[cfg(feature = "bandwidth")]
+        self.pace.begin(
+            &mut ctx.extensions,
+            self.outgoing
+                .iter()
+                .filter_map(Outgoing::body)
+                .fold(0_u64, |total, bytes| {
+                    total.saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX))
+                }),
+        );
         Ok(())
     }
 
@@ -251,15 +273,18 @@ impl Upload {
     /// one waits past the write timeout.
     pub(super) async fn flush(&mut self, session: &mut HyperSession, slice: Duration) -> Result<Flush, UploadEnd> {
         let mut taken = false;
-        while let Some(next) = self.outgoing.front() {
-            match tokio::time::timeout(slice, push(session, next)).await {
+        while !self.outgoing.is_empty() {
+            match tokio::time::timeout(slice, self.push_next(session)).await {
                 Ok(Ok(())) => {
-                    self.outgoing.pop_front();
                     self.stalled_since = None;
                     taken = true;
                 },
                 Ok(Err(err)) => return Err(UploadEnd::upstream(err)),
                 Err(_blocked) => {
+                    #[cfg(feature = "bandwidth")]
+                    if self.pace.waiting {
+                        return Ok(Flush::Blocked);
+                    }
                     let stalled = self.stalled()?;
                     return Ok(if taken { Flush::Taken } else { stalled });
                 },
@@ -364,7 +389,55 @@ impl Upload {
     /// How long the upstream has refused the item at the front of the queue;
     /// zero while it is taking the body.
     pub(super) fn stalled_for(&self) -> Duration {
-        self.stalled_since.map_or(Duration::ZERO, |since| since.elapsed())
+        let stalled = self.stalled_since.map_or(Duration::ZERO, |since| since.elapsed());
+        #[cfg(feature = "bandwidth")]
+        {
+            stalled.max(self.pace.admission_age())
+        }
+        #[cfg(not(feature = "bandwidth"))]
+        {
+            stalled
+        }
+    }
+
+    /// Advance the queue only after the upstream writer accepts this prefix.
+    async fn push_next(&mut self, session: &mut HyperSession) -> Result<(), EgressError> {
+        let Some(next) = self.outgoing.front() else {
+            return Ok(());
+        };
+        #[cfg(feature = "bandwidth")]
+        if self.pace.enabled()
+            && let Some(body) = next.body().filter(|body| !body.is_empty())
+        {
+            let bytes = self.pace.send(session, body).await?;
+            self.advance_prefix(bytes);
+            return Ok(());
+        }
+        push(session, next).await?;
+        self.outgoing.pop_front();
+        Ok(())
+    }
+
+    /// Keep a final EOS separate from paced payload so every prefix can stream.
+    #[cfg(feature = "bandwidth")]
+    fn advance_prefix(&mut self, bytes: usize) {
+        match self.outgoing.front_mut() {
+            Some(Outgoing::Chunk(body)) => {
+                let _accepted = body.split_to(bytes);
+                if body.is_empty() {
+                    self.outgoing.pop_front();
+                }
+            },
+            Some(item @ Outgoing::Last(_)) => {
+                if let Outgoing::Last(body) = item {
+                    let _accepted = body.split_to(bytes);
+                    if body.is_empty() {
+                        *item = Outgoing::Finish;
+                    }
+                }
+            },
+            Some(Outgoing::Finish | Outgoing::Trailers(_)) | None => {},
+        }
     }
 
     /// The whole in-memory body for this attempt: the adapted body when
@@ -413,6 +486,17 @@ enum Outgoing {
 
     /// End the body with trailers (HTTP/2 only).
     Trailers(HeaderMap),
+}
+
+impl Outgoing {
+    /// Payload available to a bounded writer; trailers and EOS carry no bytes.
+    #[cfg(feature = "bandwidth")]
+    fn body(&self) -> Option<&Bytes> {
+        match self {
+            Self::Chunk(body) | Self::Last(body) => Some(body),
+            Self::Finish | Self::Trailers(_) => None,
+        }
+    }
 }
 
 // -----------------------------------------------------------------------------

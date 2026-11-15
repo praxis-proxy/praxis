@@ -17,6 +17,7 @@
 use std::{fmt, mem, sync::Arc};
 
 use arc_swap::ArcSwap;
+use bytes::Bytes;
 use http::{HeaderValue, Method, Request, Response, Version};
 use hyper::body::Incoming;
 use praxis_filter::FilterPipeline;
@@ -24,7 +25,7 @@ use tracing::{Instrument as _, debug};
 
 use super::{
     admission,
-    body::ProxyBody,
+    body::{ProxyBody, Relay},
     downstream::DownstreamBody,
     listener::{ConnectionFacts, ListenerShared},
     reply::LocalReply,
@@ -63,7 +64,7 @@ pub(super) async fn handle(
 /// Answer the request the way its request phase decided.
 async fn answer(
     listener: &ListenerShared,
-    flight: Flight,
+    mut flight: Flight,
     body: DownstreamBody,
     phase: RequestPhase,
 ) -> Result<Response<ProxyBody>, ResponseAbort> {
@@ -76,6 +77,10 @@ async fn answer(
         },
         RequestPhase::Reply(reply) => Ok(flight.reply(reply).await),
         RequestPhase::Stream(response) => Ok(Box::pin(terminal::stream(flight, *response)).await),
+        RequestPhase::Close => {
+            flight.complete().await;
+            Err(ResponseAbort)
+        },
     }
 }
 
@@ -164,17 +169,61 @@ impl Flight {
         response
     }
 
-    /// Answer the request with `reply`, complete it, and hand back the
-    /// response for hyper to write.
+    /// Answer the request with `reply` and hand back the response for hyper
+    /// to write.
+    ///
+    /// A pending download wait does not hold this return. The head goes
+    /// back immediately and the body is written after that wait.
     pub(super) async fn reply(mut self, reply: LocalReply) -> Response<ProxyBody> {
+        if !self.is_head() && !reply.body_suppressed {
+            let bytes = u64::try_from(reply.body.as_ref().map_or(0, Bytes::len)).unwrap_or(u64::MAX);
+            praxis_filter::reserve_generated_download(&mut self.ctx.extensions, bytes);
+        }
+        if praxis_filter::download_pace_delay(&self.ctx.extensions).is_some() {
+            return self.reply_after_head(reply);
+        }
         let response = self.local_response(reply);
         self.complete().await;
         response
+    }
+
+    /// Return the head now. The bandwidth wait and the body write follow.
+    fn reply_after_head(mut self, mut reply: LocalReply) -> Response<ProxyBody> {
+        let chunk = if self.is_head() || reply.body_suppressed {
+            None
+        } else {
+            reply.body.take().filter(|bytes| !bytes.is_empty())
+        };
+        let mut response = self.local_response(reply);
+        let relay = chunk.is_some().then(|| {
+            let (relay, body) = Relay::new();
+            *response.body_mut() = body;
+            relay
+        });
+        let span = self.ctx.request_span.clone();
+        drop(tokio::spawn(self.finish_paced_reply(relay, chunk).instrument(span)));
+        response
+    }
+
+    /// Settle a generated body and complete its request after the head is returned.
+    async fn finish_paced_reply(mut self, relay: Option<Relay>, chunk: Option<Bytes>) {
+        match (relay, chunk) {
+            (Some(relay), Some(chunk)) => {
+                let wrote = super::stream::write_paced(&relay, &mut self, chunk).await.is_ok();
+                if !wrote {
+                    self.error = Some(ErrorOrigin::Downstream);
+                }
+                let _end = relay.end().await;
+            },
+            _ => praxis_filter::cancel_download_pace(&mut self.ctx.extensions),
+        }
+        self.complete().await;
     }
 }
 
 impl Drop for Flight {
     fn drop(&mut self) {
+        praxis_filter::cancel_bandwidth(&mut self.ctx.extensions);
         // An orphan dropped unfinished means the runtime is shutting down
         // and cancelled its completion; handing it on again would recurse.
         if self.completed || self.orphaned {
@@ -240,9 +289,51 @@ impl std::error::Error for ResponseAbort {}
     reason = "tests"
 )]
 mod tests {
+    #[cfg(feature = "bandwidth")]
+    #[tokio::test]
+    async fn dropped_flight_refunds_before_background_completion() {
+        let mut entries = serde_yaml::from_str::<Vec<praxis_core::config::FilterEntry>>(
+            "- filter: bandwidth_limit\n  mode: per_ip\n  download_bytes_per_sec: 1",
+        )
+        .unwrap();
+        let pipeline = FilterPipeline::build(&mut entries, &praxis_filter::FilterRegistry::with_builtins()).unwrap();
+        let pipelines = ArcSwap::from_pointee(pipeline);
+        let first = reserved_flight(&pipelines);
+        assert!(
+            praxis_filter::download_pace_delay(&first.ctx.extensions).unwrap() > Duration::from_secs(900),
+            "the first request must hold a reservation"
+        );
+        drop(first);
+        let second = reserved_flight(&pipelines);
+        assert!(
+            praxis_filter::download_pace_delay(&second.ctx.extensions).unwrap() < Duration::from_secs(1100),
+            "unsent bytes must be refunded before completion is polled"
+        );
+    }
+
+    /// Hold one download reservation on a shared source-IP budget.
+    #[cfg(feature = "bandwidth")]
+    fn reserved_flight(pipelines: &ArcSwap<FilterPipeline>) -> Flight {
+        let mut flight = Flight::new(pipelines, Method::GET, Version::HTTP_11);
+        flight.ctx.client_addr = Some("127.0.0.1".parse().unwrap());
+        flight.ctx.request_snapshot = Some(praxis_filter::Request {
+            method: Method::GET,
+            uri: "/".parse().unwrap(),
+            headers: http::HeaderMap::new(),
+        });
+        let mut body = Some(Bytes::from(vec![1_u8; 1000]));
+        crate::http::pingora::handler::response_body_filter::run_response_body(
+            &flight.pipeline,
+            &mut body,
+            false,
+            &mut flight.ctx,
+        )
+        .unwrap();
+        flight
+    }
+
     use std::{sync::atomic::Ordering, time::Duration};
 
-    use bytes::Bytes;
     use http::StatusCode;
     use hyper::body::Body as _;
     use praxis_core::retry::ClusterRetryState;
