@@ -110,6 +110,11 @@ impl CompletionOutput {
             .fold(0, usize::saturating_add)
     }
 
+    /// Size of the next logical chunk before bandwidth splits it into prefixes.
+    pub(crate) fn next_chunk_len(&self) -> usize {
+        self.chunks.front().map_or(0, |chunk| chunk.body.len())
+    }
+
     /// Return one admitted prefix, refunding all unreturned output on abandonment.
     pub(crate) async fn next_chunk(&mut self) -> Result<Option<Bytes>, FilterError> {
         if self.releasing {
@@ -738,6 +743,15 @@ impl CalloutStreamingBody {
         if let Some(chunk) = self.pending.pop_front() {
             return self.checked(chunk);
         }
+        if self.pending_completion.as_ref().is_some_and(|completion| {
+            completion.next_chunk_len() > self.max_response_bytes.saturating_sub(self.emitted_bytes)
+        }) {
+            self.pending_completion = None;
+            self.finished = true;
+            return Err(Box::new(CalloutResponseTooLarge {
+                limit: self.max_response_bytes,
+            }));
+        }
         if let Some(completion) = self.pending_completion.as_mut() {
             let result = completion.next_chunk().await;
             if result.is_err() {
@@ -1086,6 +1100,100 @@ mod tests {
         inner.continuation.completed = true;
         inner.deferred_completion_output = inner.release_completion(body).unwrap();
         (CalloutStreamingBody::new(inner, 10000), schedule)
+    }
+
+    #[cfg(feature = "bandwidth")]
+    struct DeadlineCompletionFilter;
+
+    #[cfg(feature = "bandwidth")]
+    #[async_trait]
+    impl crate::HttpFilter for DeadlineCompletionFilter {
+        fn name(&self) -> &'static str {
+            "deadline_completion_test"
+        }
+
+        async fn on_request(
+            &self,
+            _ctx: &mut crate::HttpFilterContext<'_>,
+        ) -> Result<crate::FilterAction, crate::FilterError> {
+            Ok(crate::FilterAction::Continue)
+        }
+
+        fn response_body_access(&self) -> crate::BodyAccess {
+            crate::BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
+        }
+
+        fn on_response_body(
+            &self,
+            ctx: &mut crate::HttpFilterContext<'_>,
+            _body: &mut Option<Bytes>,
+            end_of_stream: bool,
+        ) -> Result<crate::FilterAction, crate::FilterError> {
+            if end_of_stream {
+                ctx.emit_stream_chunk(Bytes::from_static(b"timeout completion"))?;
+                assert!(ctx.mark_stream_termination_handled());
+            }
+            Ok(crate::FilterAction::Continue)
+        }
+    }
+
+    #[cfg(feature = "bandwidth")]
+    #[tokio::test]
+    async fn deadline_completion_delivers_emitted_output_with_available_burst() {
+        let (mut inner, schedule) = paced_output(1, 100, 0, 0);
+        inner.continuation.step_deadline = Instant::now() - Duration::from_secs(1);
+        inner.continuation.pipeline = Arc::new(crate::FilterPipeline::from_filters(vec![
+            crate::pipeline::filter::PipelineFilter::new(
+                0,
+                crate::AnyFilter::Http(Box::new(DeadlineCompletionFilter)),
+                vec![],
+                vec![],
+            ),
+        ]));
+        inner
+            .handle_upstream_error(SubRequestError::DeadlineExceeded)
+            .await
+            .unwrap();
+        let mut body = CalloutStreamingBody::new(inner, 100);
+        assert_eq!(
+            crate::StreamingResponseBody::next_chunk(&mut body).await.unwrap(),
+            Some(Bytes::from_static(b"timeout completion"))
+        );
+        assert!(
+            crate::StreamingResponseBody::next_chunk(&mut body)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        drop(body);
+        assert!(
+            schedule.prepare(83).delay() > Duration::ZERO,
+            "the delivered completion remains charged"
+        );
+    }
+
+    #[cfg(feature = "bandwidth")]
+    #[tokio::test]
+    async fn completion_ceiling_rejects_before_waiting_or_spending_burst() {
+        for emitted in [false, true] {
+            let (mut body, schedule) = completion_body(1, 100, 200, emitted);
+            body.max_response_bytes = 100;
+            let result = tokio::time::timeout(
+                Duration::from_millis(50),
+                crate::StreamingResponseBody::next_chunk(&mut body),
+            )
+            .await;
+            let error = result
+                .expect("the size check must precede a bandwidth wait")
+                .unwrap_err();
+            assert_eq!(error.downcast_ref::<CalloutResponseTooLarge>().unwrap().limit, 100);
+            assert!(body.pending_completion.is_none());
+            drop(body);
+            assert!(
+                schedule.prepare(100).delay().is_zero(),
+                "oversized completion cannot spend the initial burst"
+            );
+        }
     }
 
     #[cfg(feature = "bandwidth")]
