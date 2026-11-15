@@ -13,6 +13,8 @@ readme.workspace = true
 name = "praxis_protocol"
 
 [features]
+# Shared byte-budget types used by protocol adapters. Off by default.
+bandwidth = ["praxis-filter/bandwidth"]
 # TLS and HTTPS active probes. Off by default.
 tls-health-check = ["pingora", "praxis-core/tls-health-check"]
 # The Pingora network backend: the HTTP and TCP protocol adapters, the

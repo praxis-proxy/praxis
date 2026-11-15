@@ -109,5 +109,15 @@ jobs:
       - name: Check each optional feature in isolation
         run: make check-features
 
+      - name: Check an external library consumer without workspace patches
+        run: bash .github/scripts/check-library-consumer.sh
+
+      - name: Run bandwidth runtime regression suites
+        run: |
+          for suite in bandwidth filtered_subrequest iterative_request_router; do
+            cargo test -p praxis-proxy-filter --no-default-features \
+              --features bandwidth,iterative-request-router,chain-binding --lib "$suite"
+          done
+
       - name: Check backend-neutral admin handlers
         run: cargo check -p praxis-proxy-protocol --no-default-features --features admin-api --all-targets

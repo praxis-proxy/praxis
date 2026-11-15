@@ -43,6 +43,10 @@
 
 mod actions;
 mod any_filter;
+#[cfg(feature = "bandwidth")]
+mod bandwidth;
+#[cfg(not(feature = "bandwidth"))]
+mod bandwidth_absent;
 mod binding;
 pub mod body;
 pub mod builtins;
@@ -110,12 +114,27 @@ pub use actions::{
     TerminalResponse,
 };
 pub use any_filter::AnyFilter;
+#[cfg(feature = "bandwidth")]
+pub use bandwidth::{
+    ConnectionAlive, DownloadLimited, DownstreamConnectionId, PaceReservation, TcpBandwidthPacer, cancel_bandwidth,
+    cancel_download_pace, cancel_upload_pace, commit_download_pace, commit_upload_pace, connection_close_reason,
+    download_grants_pending, download_pace_delay, limits_download, reserve_generated_download, settle_bandwidth,
+    settle_download_write, upload_pace_delay,
+};
+#[cfg(not(feature = "bandwidth"))]
+pub use bandwidth_absent::{
+    ConnectionAlive, cancel_bandwidth, cancel_download_pace, cancel_upload_pace, commit_download_pace,
+    commit_upload_pace, connection_close_reason, download_pace_delay, reserve_generated_download, settle_bandwidth,
+    settle_download_write, upload_pace_delay,
+};
 pub use binding::ChainBindingContext;
 #[cfg(feature = "chain-binding")]
 pub use binding::ChainBindingHttpFactory;
 pub use body::{BodyAccess, BodyBuffer, BodyBufferOverflow, BodyCapabilities, BodyMode, BodyRequirement};
 #[cfg(feature = "basic-auth-filter")]
 pub use builtins::BasicAuthFilter;
+#[cfg(feature = "bandwidth")]
+pub use builtins::{BandwidthLimitFilter, BandwidthMode};
 pub use builtins::{
     CircuitBreakerFilter, ContainsValue, CredentialInjectionFilter, DisallowedOriginMode, EndpointReselector,
     EndpointSelectorFilter, GuardrailsAction, GuardrailsFilter, LoadBalancerFilter, PiiKind, RateLimitMode,
@@ -139,6 +158,8 @@ pub use builtins::{
 pub fn fips_crypto_blocker() -> Option<String> {
     Some("this build has no Policy crypto capability evidence for a `policy` filter".to_owned())
 }
+#[cfg(feature = "bandwidth")]
+pub use bandwidth::{take_download as take_download_pace, take_upload as take_upload_pace};
 pub use condition::{should_execute, should_execute_response, should_execute_response_ref};
 pub use context::{
     HttpFilterContext, PendingHeaderResult, Request, Response, StreamTermination, StreamTerminationCause,
@@ -177,6 +198,8 @@ pub use praxis_core::{
 pub use praxis_tls::TlsPeerIdentity;
 pub use registry::{FilterRegistry, SecurityClass};
 pub use results::{FilterResultSet, matches_filter_result};
+#[cfg(feature = "bandwidth")]
+pub use tcp_filter::TcpConnectState;
 pub use tcp_filter::{TcpFilter, TcpFilterContext};
 pub use trace_context::TraceContext;
 

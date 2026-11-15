@@ -155,6 +155,7 @@ check: ## cargo check of the default and lean feature sets
 # enabled) is caught on every PR rather than only in the all-on or all-off
 # build.
 check-features: ## check each optional feature on its own
+	cargo check -p praxis-proxy-filter --no-default-features --features bandwidth --all-targets
 	@for f in policy-builtins config-reload admin-api otel basic-auth-filter \
 	          cloud-events-filter upstream-binding iterative-request-router \
 	          router-json-aliases slow-start bound-upstream-request-body chain-binding spiffe \

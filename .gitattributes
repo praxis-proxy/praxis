@@ -2,3 +2,4 @@
 # excluded first and Rust is put back. This only affects the language bar.
 * linguist-detectable=false
 *.rs linguist-detectable=true
+/.github/scripts/check-library-consumer.sh text eol=lf

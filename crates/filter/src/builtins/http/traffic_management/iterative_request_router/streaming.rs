@@ -32,7 +32,9 @@ use crate::{
     FilterError, IterationState, NextIterationBody, StreamTermination,
     actions::StreamingResponseBody,
     extensions::RequestExtensions,
-    filtered_subrequest::{FilteredStreamingBody, FilteredSubrequestContinuation, SubrequestCompletion},
+    filtered_subrequest::{
+        CompletionOutput, FilteredStreamingBody, FilteredSubrequestContinuation, SubrequestCompletion,
+    },
     results::FilterResultSet,
 };
 
@@ -129,6 +131,8 @@ pub(super) struct IrrStreamingSession {
     next_step: Option<Arc<str>>,
     /// Locally emitted or terminal buffered chunks awaiting delivery.
     pending_chunks: VecDeque<Bytes>,
+    /// Transition-selected completion retains its pacing plan until each pull.
+    pending_completion: Option<CompletionOutput>,
     /// Reusable one-step executor.
     runner: super::runner::IrrStepRunner,
     /// Iteration state held between active steps.
@@ -169,6 +173,7 @@ impl IrrStreamingSession {
             max_stream_response_bytes,
             next_step: None,
             pending_chunks,
+            pending_completion: None,
             runner,
             state: None,
             step_transitions,
@@ -204,7 +209,7 @@ impl IrrStreamingSession {
         &mut self,
         mut completion: StepCompletion,
         outcome: &super::StepOutcome,
-        completion_output: Option<Bytes>,
+        completion_output: Option<CompletionOutput>,
         terminal_body: Option<Bytes>,
     ) -> Result<(), FilterError> {
         completion.state.previous_response = Some(outcome.response.clone());
@@ -239,8 +244,7 @@ impl IrrStreamingSession {
         }
         let completion_output = (!abnormal_completion || !matches!(transition, super::TransitionResult::Next(_)))
             .then_some(completion_output)
-            .flatten()
-            .filter(|body| !body.is_empty());
+            .flatten();
         if abnormal_completion && matches!(transition, super::TransitionResult::Next(_)) {
             completion.pending_chunks.clear();
         }
@@ -256,9 +260,9 @@ impl IrrStreamingSession {
             self.pending_chunks
                 .iter()
                 .chain(completion.pending_chunks.iter())
-                .chain(completion_output.iter())
                 .chain(terminal_body.iter())
-                .map(Bytes::len),
+                .map(Bytes::len)
+                .chain(completion_output.iter().map(CompletionOutput::len_bytes)),
             self.max_state_bytes,
         ) {
             self.extensions = Some(completion.extensions);
@@ -266,7 +270,7 @@ impl IrrStreamingSession {
             return Err(error);
         }
         self.pending_chunks.extend(completion.pending_chunks);
-        self.pending_chunks.extend(completion_output);
+        self.pending_completion = completion_output;
         self.extensions = Some(completion.extensions);
         self.state = Some(completion.state);
         match transition {
@@ -429,12 +433,31 @@ impl IrrStreamingSession {
                     },
                 };
                 let abnormal_completion = completion.termination.is_some();
-                let completion_output = abnormal_completion.then(|| outcome.response.body.clone());
+                let completion_output =
+                    abnormal_completion.then(|| CompletionOutput::buffered(outcome.response.body.clone()));
                 let terminal_body = (!abnormal_completion).then(|| outcome.response.body.clone());
                 self.apply_completion(completion, &outcome, completion_output, terminal_body)?;
             },
         }
         Ok(())
+    }
+
+    /// Drain selected completion only when the consumer requests another prefix.
+    async fn next_pending(&mut self) -> Result<Option<Bytes>, FilterError> {
+        if let Some(chunk) = self.pending_chunks.pop_front() {
+            return self.checked_chunk(chunk);
+        }
+        if let Some(completion) = self.pending_completion.as_mut() {
+            let result = completion.next_chunk().await;
+            if result.is_err() {
+                self.done = true;
+            }
+            if let Some(chunk) = result? {
+                return self.checked_chunk(chunk);
+            }
+            self.pending_completion = None;
+        }
+        Ok(None)
     }
 }
 
@@ -462,8 +485,8 @@ pub(super) fn ensure_combined_retained_limit(
 impl StreamingResponseBody for IrrStreamingSession {
     async fn next_chunk(&mut self) -> Result<Option<Bytes>, FilterError> {
         loop {
-            if let Some(chunk) = self.pending_chunks.pop_front() {
-                return self.checked_chunk(chunk);
+            if let Some(chunk) = self.next_pending().await? {
+                return Ok(Some(chunk));
             }
             if let Some(error) = self.deferred_error.take() {
                 self.done = true;
@@ -491,6 +514,7 @@ impl StreamingResponseBody for IrrStreamingSession {
     }
 
     async fn suppress(&mut self) -> Result<(), FilterError> {
+        self.pending_completion = None;
         loop {
             self.pending_chunks.clear();
             if let Some(error) = self.deferred_error.take() {
@@ -519,6 +543,7 @@ impl StreamingResponseBody for IrrStreamingSession {
     }
 
     async fn cancel(&mut self) {
+        self.pending_completion = None;
         if let Some(current) = self.current.as_mut() {
             current.cancel().await;
         }

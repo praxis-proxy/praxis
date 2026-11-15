@@ -19,6 +19,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Experimental `bandwidth` filter-library support for independent upload
+  and download budgets, per downstream connection or source IP, with burst
+  allowances, bounded tracking, and cancellable prefix reservations. Optional
+  `ipv6_prefix_len` groups IPv6 clients by a configured network prefix.
 - `cargo xtask rollout` and `make test-rollout` exercise Kubernetes pod
   loss, rollouts, config reloads, TLS rotation, node drain, and upstream
   failure under continuous HTTP/1.1, HTTP/2, and HTTPS traffic.
@@ -35,6 +39,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Preserve bandwidth charges across body transformations and release streaming
+  completion output in refundable, bounded prefixes. HTTP `per_connection`
+  library hosts must supply a stable identity and a live `ConnectionAlive` watch.
+- Resolve the pinned Pingora upload APIs for external source consumers without
+  requiring their workspaces to inherit dependency patches.
 - **Breaking:** statically buffered request pipelines now reject a finite
   `body_limits.max_request_bytes` above `body_limits.max_buffer_bytes` at
   startup, config validation, and reload, naming both fields and byte values.
