@@ -292,17 +292,8 @@ impl PaceReservation {
         available: usize,
         deadline: Option<Instant>,
     ) -> Result<(usize, Self), crate::FilterError> {
-        let bytes = self.prefix_size(available);
-        let grants = self
-            .grants
-            .iter_mut()
-            .filter(|grant| grant.bytes != 0)
-            .map(|grant| grant.split_prefix(mapped_charge(grant.bytes, bytes, available)))
-            .collect();
-        let prefix = Self {
-            grants,
-            output_bytes: Some(bytes),
-        };
+        let prefix = self.mapped_prefix(available);
+        let bytes = prefix.output_bytes.unwrap_or_default();
         let mut pending = PendingPrefix {
             parent: self,
             prefix: Some(prefix),
@@ -316,6 +307,21 @@ impl PaceReservation {
             .take()
             .ok_or_else(|| -> crate::FilterError { "missing bandwidth prefix".into() })?;
         Ok((usize::try_from(bytes).unwrap_or(usize::MAX), prefix))
+    }
+
+    /// Map output to limiter-position charges without reserving an oversized debt.
+    fn mapped_prefix(&mut self, available: usize) -> Self {
+        let bytes = self.prefix_size(available);
+        let grants = self
+            .grants
+            .iter_mut()
+            .filter(|grant| grant.bytes != 0)
+            .map(|grant| grant.split_plan(mapped_charge(grant.bytes, bytes, available)))
+            .collect();
+        Self {
+            grants,
+            output_bytes: Some(bytes),
+        }
     }
 
     /// Account for transformed input that cannot fit behind one output byte.
@@ -730,6 +736,60 @@ mod tests {
         assert!(
             second.prepare(99).delay().is_zero(),
             "the other limiter charges only its own byte"
+        );
+    }
+
+    #[tokio::test]
+    async fn intervening_writer_does_not_inherit_the_full_transformed_charge() {
+        let schedule = Schedule::new(1000, 100);
+        let mut plan = PaceReservation {
+            grants: vec![schedule.prepare(1000)],
+            output_bytes: None,
+        };
+        let mut mapped = plan.mapped_prefix(1);
+        let intervening = schedule.reserve(1);
+        assert!(
+            intervening.delay().is_zero(),
+            "mapping must not reserve all 1000 input bytes"
+        );
+        let mut portion = mapped.transformed_portion().unwrap();
+        assert_eq!(portion.remaining(), 100);
+        portion
+            .wait_ready(Some(Instant::now() + Duration::from_millis(100)))
+            .await
+            .expect("only the intervening byte may delay this bounded portion");
+        portion.commit();
+        assert_eq!(mapped.remaining(), 900);
+        assert_eq!(plan.remaining(), 0);
+        drop(intervening);
+        drop(mapped);
+        drop(plan);
+        assert!(
+            schedule.prepare(1000).delay() > Duration::from_millis(950),
+            "the admitted portion stays charged"
+        );
+    }
+
+    #[test]
+    fn dropping_a_mapped_plan_does_not_leave_debt_behind_an_intervening_writer() {
+        let schedule = Schedule::new(1, 100);
+        let mut plan = PaceReservation {
+            grants: vec![schedule.prepare(1000)],
+            output_bytes: None,
+        };
+        let mapped = plan.mapped_prefix(1);
+        let intervening = schedule.reserve(1);
+        drop(mapped);
+        drop(plan);
+        assert!(
+            intervening.delay().is_zero(),
+            "dropping an unadmitted map cannot leave ghost debt"
+        );
+        intervening.commit();
+        assert!(schedule.prepare(99).delay().is_zero());
+        assert!(
+            schedule.prepare(100).delay() > Duration::ZERO,
+            "only the other writer's accepted byte is charged"
         );
     }
 

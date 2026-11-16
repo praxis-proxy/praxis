@@ -210,13 +210,18 @@ impl BandwidthGrant {
         Ok(())
     }
 
-    /// Take a bounded prefix while leaving the unsent tail as a non-debiting plan.
-    pub(super) fn split_prefix(&mut self, bytes: u64) -> Self {
+    /// Split a prepared charge without adding any debt to the shared schedule.
+    pub(super) fn split_plan(&mut self, bytes: u64) -> Self {
         self.refund();
         let taken = self.bytes.min(bytes);
         self.bytes = self.bytes.saturating_sub(taken);
         self.cost_ns = bytes_to_ns(self.bytes, self.schedule.rate);
-        let mut prefix = self.schedule.grant(taken, self.created_at, self.synthetic_now);
+        self.schedule.grant(taken, self.created_at, self.synthetic_now)
+    }
+
+    /// Reserve a bounded prefix, leaving its unsent tail as a non-debiting plan.
+    pub(super) fn split_prefix(&mut self, bytes: u64) -> Self {
+        let mut prefix = self.split_plan(bytes);
         prefix.reserve();
         prefix
     }
