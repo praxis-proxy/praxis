@@ -73,6 +73,10 @@ impl FilterMetadata {
     /// Replacing the value of an existing key succeeds even when the metadata
     /// already holds the maximum number of entries.
     ///
+    /// An owned `key` or `value` whose buffer is larger than its limit is
+    /// shrunk to that limit, so the stored entry doesn't keep the excess.
+    /// Smaller buffers are stored as they are.
+    ///
     /// # Errors
     ///
     /// Returns [`MetadataRejected`], leaving the metadata unchanged, if:
@@ -99,8 +103,8 @@ impl FilterMetadata {
         key: impl Into<String>,
         value: impl Into<String>,
     ) -> Result<Option<String>, MetadataRejected> {
-        let key = key.into();
-        let value = value.into();
+        let mut key = key.into();
+        let mut value = value.into();
         if key.is_empty() || key.len() > MAX_KEY_LEN {
             return Err(MetadataRejected::KeyLength { len: key.len() });
         }
@@ -110,6 +114,10 @@ impl FilterMetadata {
         if !self.entries.contains_key(&key) && self.entries.len() >= MAX_ENTRIES {
             return Err(MetadataRejected::EntryLimit { key });
         }
+        // A moved-in String keeps its buffer: bound what is retained, not just
+        // what is readable. No-op when the capacity is already within the limit.
+        key.shrink_to(MAX_KEY_LEN);
+        value.shrink_to(MAX_VALUE_LEN);
         Ok(self.entries.insert(key, value))
     }
 
@@ -303,6 +311,44 @@ mod tests {
             "257-byte value should be rejected"
         );
         assert!(!metadata.contains_key("big"), "rejected value should not be stored");
+    }
+
+    #[test]
+    fn insert_does_not_retain_excess_capacity() {
+        let mut metadata = FilterMetadata::default();
+        let mut key = String::with_capacity(4 * MAX_KEY_LEN);
+        key.push_str("big.key");
+        let mut value = String::with_capacity(1 << 20);
+        value.push_str("small");
+        metadata
+            .insert(key, value)
+            .expect("entry must fit in the filter's metadata");
+
+        let (key, value) = metadata.entries.get_key_value("big.key").expect("entry was stored");
+        assert!(
+            key.capacity() <= MAX_KEY_LEN,
+            "key kept {} bytes of capacity",
+            key.capacity()
+        );
+        assert!(
+            value.capacity() <= MAX_VALUE_LEN,
+            "value kept {} bytes of capacity",
+            value.capacity()
+        );
+    }
+
+    #[test]
+    fn insert_keeps_buffers_within_the_limits() {
+        let mut metadata = FilterMetadata::default();
+        let mut value = String::with_capacity(MAX_VALUE_LEN);
+        value.push_str("small");
+        let capacity = value.capacity();
+        metadata
+            .insert("small.key", value)
+            .expect("entry must fit in the filter's metadata");
+
+        let value = metadata.entries.get("small.key").expect("entry was stored");
+        assert_eq!(value.capacity(), capacity, "a buffer within the limit is moved as is");
     }
 
     #[test]
