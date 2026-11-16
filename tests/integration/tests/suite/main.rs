@@ -63,6 +63,7 @@ mod credential_store_parity;
 mod csrf;
 mod downstream_keepalive;
 mod downstream_read_timeout;
+mod drain_handoff;
 mod error_response;
 mod examples;
 mod failure_mode;
