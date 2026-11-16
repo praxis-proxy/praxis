@@ -461,6 +461,20 @@ pub(crate) fn warn_admin_configured_without_feature(config: &Config) {
     }
 }
 
+/// Warn when the `jobs` section is configured but no job runtime exists yet.
+///
+/// The `jobs` bounds land before the queue that reads them, so an operator
+/// who configures the section now would otherwise get no behaviour and no
+/// explanation. Remove this once the job runtime consumes the section.
+pub(crate) fn warn_jobs_configured_without_runtime(config: &Config) {
+    if config.jobs.is_some() {
+        tracing::warn!(
+            "jobs is set but this version has no background job runtime yet; \
+            the queue settings have no effect"
+        );
+    }
+}
+
 /// Why this binary cannot honor `PRAXIS_REQUIRE_FIPS`, if it cannot.
 ///
 /// The provider and kernel checks cover rustls only. When the `policy` filter
@@ -1263,6 +1277,29 @@ filter_chains:
 "#,
         )
         .expect("minimal config should parse")
+    }
+
+    #[test]
+    fn warn_jobs_configured_without_runtime_emits_warning() {
+        let mut config = minimal_config();
+        config.jobs = Some(praxis_core::config::JobsConfig::default());
+        let warnings = capture_warnings(|| super::warn_jobs_configured_without_runtime(&config));
+        assert_eq!(warnings.len(), 1, "a jobs section should produce one warning");
+        assert!(
+            warnings[0].contains("jobs"),
+            "warning should name the section: got {:?}",
+            warnings[0]
+        );
+    }
+
+    #[test]
+    fn warn_jobs_configured_without_runtime_absent_section_emits_nothing() {
+        let config = minimal_config();
+        let warnings = capture_warnings(|| super::warn_jobs_configured_without_runtime(&config));
+        assert!(
+            warnings.is_empty(),
+            "no jobs section should produce no warnings, got: {warnings:?}"
+        );
     }
 
     #[cfg(unix)]
