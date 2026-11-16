@@ -13,6 +13,7 @@
 //! [`notify`]: notify
 
 use std::{
+    io::Read as _,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -33,12 +34,28 @@ use crate::{CertKeyPair, ClientCertMode, setup::loader};
 const DEBOUNCE_MS: u64 = 500; // 500 ms
 
 /// Backoff value after a successful reload. It only seeds the failure retry
-/// timer, which is idle after a success; new filesystem events always debounce
-/// for [`DEBOUNCE_MS`] and restart the backoff.
+/// timer, which is idle after a success; each newly detected change debounces
+/// for [`DEBOUNCE_MS`] and restarts the backoff, whether the filesystem
+/// reported it or the fallback poll found it.
 const MIN_SUCCESS_COOLDOWN_MS: u64 = 5_000; // 5 seconds
 
 /// Maximum backoff delay on consecutive reload failures.
 const MAX_BACKOFF_MS: u64 = 60_000; // 60 seconds
+
+/// Fallback interval for filesystems whose atomic updates generate no events.
+const CERTIFICATE_POLL_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Chunk size for streaming a file digest, so large CRLs are never loaded whole.
+const DIGEST_BUFFER_BYTES: usize = 16 * 1024; // 16 KiB
+
+// Completed certificate polls on this thread. Tests use it to wait for an
+// explicit poll instead of inferring completion from a sleep. Thread-local
+// keeps parallel tests from waking each other.
+#[cfg(test)]
+thread_local! {
+    /// Number of polls this thread has finished.
+    static POLLS_COMPLETED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 
 // -----------------------------------------------------------------------------
 // ClientVerifierReload
@@ -110,23 +127,62 @@ impl CertWatcher {
     /// `shutdown` to request early termination: send `true` to
     /// stop the watcher, or drop the sender to keep it running
     /// indefinitely.
+    ///
+    /// `file_hashes` is the polling baseline read before the startup load.
+    /// Taking it before the load keeps a rotation that lands between the load
+    /// and this call visible: the first poll sees the new digests and reloads,
+    /// so the served certificate always matches the files. A baseline hashed
+    /// after the load would instead record the new bytes while the loaded
+    /// state is still the old one, and the poll would skip the change.
     pub fn spawn(
         current: Arc<ArcSwap<CertifiedKey>>,
         pair: CertKeyPair,
         verifier_reload: Option<ClientVerifierReload>,
         shutdown: tokio::sync::watch::Receiver<bool>,
+        file_hashes: Vec<Option<[u8; 32]>>,
     ) -> std::thread::JoinHandle<()> {
-        std::thread::spawn(move || {
-            let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-                Ok(rt) => rt,
-                Err(err) => {
-                    tracing::warn!(error = %err, "failed to start certificate watcher runtime; hot reload disabled");
-                    return;
-                },
-            };
-            rt.block_on(watch_loop(current, pair, verifier_reload, shutdown));
+        spawn_watcher(move || watch_loop(current, pair, verifier_reload, file_hashes, shutdown))
+    }
+
+    /// Spawn the watcher in polling-only mode.
+    ///
+    /// Use this when filesystem notifications are unavailable or unwanted.
+    /// The watcher reads and hashes the watched files every ten seconds and
+    /// reloads any change it finds.
+    ///
+    /// This exists for the polling integration test; production callers use
+    /// [`CertWatcher::spawn`], which also handles filesystem notifications.
+    #[doc(hidden)]
+    pub fn spawn_polling(
+        current: Arc<ArcSwap<CertifiedKey>>,
+        pair: CertKeyPair,
+        verifier_reload: Option<ClientVerifierReload>,
+        shutdown: tokio::sync::watch::Receiver<bool>,
+        file_hashes: Vec<Option<[u8; 32]>>,
+    ) -> std::thread::JoinHandle<()> {
+        spawn_watcher(move || {
+            let (_notifications, events) = mpsc::channel(1);
+            watch_events(current, pair, verifier_reload, file_hashes, shutdown, events)
         })
     }
+}
+
+/// Run a watcher future on a dedicated current-thread runtime.
+fn spawn_watcher<F, Fut>(make_future: F) -> std::thread::JoinHandle<()>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + 'static,
+{
+    std::thread::spawn(move || {
+        let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            Ok(rt) => rt,
+            Err(err) => {
+                tracing::warn!(error = %err, "failed to start certificate watcher runtime; hot reload disabled");
+                return;
+            },
+        };
+        rt.block_on(make_future());
+    })
 }
 
 /// How the watch loop should react to a change on the shutdown channel.
@@ -157,27 +213,44 @@ fn on_shutdown_change(changed_ok: bool, requested: bool) -> ShutdownAction {
 
 /// Core watch loop: sets up the notify watcher, debounces events,
 /// and reloads certificates (and optionally the client verifier).
-#[expect(clippy::too_many_lines, reason = "event loop with tokio::select")]
 async fn watch_loop(
     current: Arc<ArcSwap<CertifiedKey>>,
     pair: CertKeyPair,
     verifier_reload: Option<ClientVerifierReload>,
-    mut shutdown: tokio::sync::watch::Receiver<bool>,
+    file_hashes: Vec<Option<[u8; 32]>>,
+    shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
-    let (tx, mut rx) = mpsc::channel::<()>(16);
+    let (tx, rx) = mpsc::channel::<()>(16);
 
     let cert_dir = parent_dir(&pair.cert_path);
     let key_dir = parent_dir(&pair.key_path);
 
     let extra_dirs = verifier_extra_dirs(verifier_reload.as_ref());
     let _watcher = match setup_watcher(tx, &cert_dir, &key_dir, &extra_dirs) {
-        Ok(w) => w,
+        Ok(watcher) => Some(watcher),
         Err(err) => {
-            tracing::warn!(error = %err, "failed to start certificate file watcher");
-            return;
+            tracing::warn!(error = %err, "failed to start certificate file watcher; using polling");
+            None
         },
     };
 
+    watch_events(current, pair, verifier_reload, file_hashes, shutdown, rx).await;
+}
+
+/// Watches a notification stream and polls watched files for missed changes.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the event loop borrows every watcher input for the process lifetime"
+)]
+#[expect(clippy::too_many_lines, reason = "event loop with tokio::select")]
+async fn watch_events(
+    current: Arc<ArcSwap<CertifiedKey>>,
+    pair: CertKeyPair,
+    verifier_reload: Option<ClientVerifierReload>,
+    mut file_hashes: Vec<Option<[u8; 32]>>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+    mut rx: mpsc::Receiver<()>,
+) {
     if verifier_reload.is_some() {
         tracing::info!(
             cert_path = %pair.cert_path,
@@ -195,6 +268,8 @@ async fn watch_loop(
     let mut backoff_ms = DEBOUNCE_MS;
     let mut watch_shutdown = true;
     let mut retry_pending = false;
+    let mut certificate_poll = tokio::time::interval(CERTIFICATE_POLL_INTERVAL);
+    certificate_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
         tokio::select! {
@@ -206,11 +281,20 @@ async fn watch_loop(
                 }
 
                 backoff_ms = DEBOUNCE_MS;
-                retry_pending = !reload_with_backoff(&current, &pair, verifier_reload.as_ref(), &mut backoff_ms);
+                retry_pending = !reload_tracked(&current, &pair, verifier_reload.as_ref(), &mut backoff_ms, &mut file_hashes).await;
+            }
+            _ = certificate_poll.tick(), if !retry_pending => {
+                let observed = watched_file_hashes(&pair, verifier_reload.as_ref()).await;
+                if observed != file_hashes || observed.iter().any(Option::is_none) {
+                    backoff_ms = DEBOUNCE_MS;
+                    retry_pending = !reload_tracked(&current, &pair, verifier_reload.as_ref(), &mut backoff_ms, &mut file_hashes).await;
+                }
+                #[cfg(test)]
+                POLLS_COMPLETED.with(|completed| completed.set(completed.get().saturating_add(1)));
             }
             () = tokio::time::sleep(Duration::from_millis(backoff_ms)), if retry_pending => {
                 tracing::info!("retrying the failed certificate reload");
-                retry_pending = !reload_with_backoff(&current, &pair, verifier_reload.as_ref(), &mut backoff_ms);
+                retry_pending = !reload_tracked(&current, &pair, verifier_reload.as_ref(), &mut backoff_ms, &mut file_hashes).await;
             }
             result = shutdown.changed(), if watch_shutdown => {
                 // Copy the flag out of the borrow guard before the match so the
@@ -304,6 +388,54 @@ async fn drain_and_debounce(
     false
 }
 
+/// Reloads and records a digest baseline that matches what the load installed.
+///
+/// Digests are taken before and after the load. When they differ, a file
+/// changed while it was being read, so no baseline is recorded and the caller
+/// schedules another reload. Recording the pre-load digests would leave a
+/// baseline for bytes that were never installed, and the next poll would skip
+/// the change.
+async fn reload_tracked(
+    current: &Arc<ArcSwap<CertifiedKey>>,
+    pair: &CertKeyPair,
+    verifier: Option<&ClientVerifierReload>,
+    backoff_ms: &mut u64,
+    file_hashes: &mut Vec<Option<[u8; 32]>>,
+) -> bool {
+    reload_tracked_with(current, pair, verifier, backoff_ms, file_hashes, || {}).await
+}
+
+/// [`reload_tracked`] with a hook between the load and the post-load digest.
+///
+/// The hook lets a test change a watched file in that window, proving a
+/// digest taken after the load cannot record bytes the load never installed.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "forwards the tracked reload inputs plus the test-only hook"
+)]
+async fn reload_tracked_with<AfterLoad: FnOnce()>(
+    current: &Arc<ArcSwap<CertifiedKey>>,
+    pair: &CertKeyPair,
+    verifier: Option<&ClientVerifierReload>,
+    backoff_ms: &mut u64,
+    file_hashes: &mut Vec<Option<[u8; 32]>>,
+    after_load: AfterLoad,
+) -> bool {
+    let before = watched_file_hashes(pair, verifier).await;
+    if !reload_with_backoff(current, pair, verifier, backoff_ms) {
+        return false;
+    }
+    after_load();
+    let after = watched_file_hashes(pair, verifier).await;
+    if before == after {
+        *file_hashes = after;
+        true
+    } else {
+        tracing::debug!("watched files changed during the reload; scheduling another");
+        false
+    }
+}
+
 /// Reload the certificate and client verifier and update `backoff_ms`,
 /// returning whether both loaded. A failure is retried on the backoff timer,
 /// so a file caught mid-write heals without waiting for the next change.
@@ -336,6 +468,71 @@ fn next_backoff(reloaded: bool, backoff_ms: u64) -> u64 {
     } else {
         backoff_ms.saturating_mul(2).min(MAX_BACKOFF_MS)
     }
+}
+
+/// Fingerprints every certificate, key, CA and CRL monitored by the watcher.
+///
+/// The reads and hashing run on the blocking pool so a slow filesystem or a
+/// large CRL cannot stall the watcher's runtime while a poll is in flight.
+async fn watched_file_hashes(pair: &CertKeyPair, verifier: Option<&ClientVerifierReload>) -> Vec<Option<[u8; 32]>> {
+    let (ca_path, crl_paths) = verifier_paths(verifier);
+    let paths = watched_paths(pair, ca_path, crl_paths);
+    let count = paths.len();
+    tokio::task::spawn_blocking(move || paths.iter().map(|path| file_digest(path)).collect())
+        .await
+        .unwrap_or_else(|_| vec![None; count])
+}
+
+/// Paths the watcher fingerprints, shared with the startup snapshot.
+///
+/// The order is the primary certificate, its key, then the client CA and any
+/// CRLs. Both the startup baseline and polling must use this one function so a
+/// mismatch in order or membership cannot masquerade as an unchanged file.
+pub(crate) fn watched_paths(pair: &CertKeyPair, ca_path: Option<&str>, crl_paths: &[String]) -> Vec<String> {
+    let mut paths = vec![pair.cert_path.clone(), pair.key_path.clone()];
+    if let Some(ca_path) = ca_path {
+        paths.push(ca_path.to_owned());
+        paths.extend(crl_paths.iter().cloned());
+    }
+    paths
+}
+
+/// Split a verifier reload into the CA and CRL inputs [`watched_paths`] takes.
+fn verifier_paths(verifier: Option<&ClientVerifierReload>) -> (Option<&str>, &[String]) {
+    match verifier {
+        Some(verifier) => (Some(verifier.ca_path.as_str()), verifier.crl_paths.as_slice()),
+        None => (None, &[]),
+    }
+}
+
+/// Fingerprints the watched files on the calling thread.
+///
+/// Test helper that mirrors the pre-load snapshot the startup path takes.
+#[cfg(test)]
+fn file_hashes_now(pair: &CertKeyPair, verifier: Option<&ClientVerifierReload>) -> Vec<Option<[u8; 32]>> {
+    let (ca_path, crl_paths) = verifier_paths(verifier);
+    watched_paths(pair, ca_path, crl_paths)
+        .iter()
+        .map(|path| file_digest(path))
+        .collect()
+}
+
+/// SHA-256 of one watched file, or `None` when it cannot be read.
+///
+/// The setup path uses it to snapshot the files before the startup load.
+pub(crate) fn file_digest(path: &str) -> Option<[u8; 32]> {
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut hasher = openssl::hash::Hasher::new(openssl::hash::MessageDigest::sha256()).ok()?;
+    let mut buffer = zeroize::Zeroizing::new(vec![0_u8; DIGEST_BUFFER_BYTES]);
+    loop {
+        let read = file.read(buffer.as_mut_slice()).ok()?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(buffer.get(..read)?).ok()?;
+    }
+    let digest = hasher.finish().ok()?;
+    digest.as_ref().try_into().ok()
 }
 
 /// Attempt to reload the certificate, logging success or failure.
@@ -527,7 +724,8 @@ mod tests {
         let current = Arc::new(ArcSwap::from_pointee(certified));
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-        let handle = CertWatcher::spawn(current, pair, None, shutdown_rx);
+        let baseline = file_hashes_now(&pair, None);
+        let handle = CertWatcher::spawn(current, pair, None, shutdown_rx, baseline);
 
         std::thread::sleep(Duration::from_millis(50));
         let _sent = shutdown_tx.send(true);
@@ -647,6 +845,182 @@ mod tests {
     }
 
     #[test]
+    fn file_digest_hashes_past_the_streaming_buffer() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let first = directory.path().join("first.pem");
+        let second = directory.path().join("second.pem");
+        let mut first_contents = vec![b'x'; DIGEST_BUFFER_BYTES + 1024];
+        first_contents.extend_from_slice(b"first tail");
+        let mut second_contents = vec![b'x'; DIGEST_BUFFER_BYTES + 1024];
+        second_contents.extend_from_slice(b"second tail");
+        std::fs::write(&first, &first_contents).expect("write first file");
+        std::fs::write(&second, &second_contents).expect("write second file");
+
+        assert_ne!(
+            file_digest(first.to_str().expect("first path")),
+            file_digest(second.to_str().expect("second path")),
+            "a difference after the first digest chunk must change the digest"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "builds the trust fixture and asserts the retry installs the changed CRL"
+    )]
+    async fn a_change_after_the_load_is_retried_instead_of_recorded() {
+        let certs = gen_test_certs();
+        let pair = CertKeyPair {
+            cert_path: certs.cert_path.to_str().expect("cert path").to_owned(),
+            default: false,
+            key_path: certs.key_path.to_str().expect("key path").to_owned(),
+            server_names: Vec::new(),
+        };
+        let current = Arc::new(ArcSwap::from_pointee(
+            loader::load_certified_key(&pair).expect("load cert"),
+        ));
+        let trust_dir = tempfile::tempdir().expect("temporary directory");
+        let trust = gen_ca_and_crl(trust_dir.path(), "Race Client CA");
+        let ca_path = trust.ca_path.to_str().expect("CA path").to_owned();
+        let crl_path = trust.crl_path.to_str().expect("CRL path").to_owned();
+        let verifier = crate::reload::ReloadableClientVerifier::new(
+            &ca_path,
+            ClientCertMode::Require,
+            std::slice::from_ref(&crl_path),
+            &[],
+        )
+        .expect("client verifier");
+        let swap = verifier.arc();
+        let reload = ClientVerifierReload {
+            ca_path,
+            crl_paths: vec![crl_path.clone()],
+            mode: ClientCertMode::Require,
+            trusted_spiffe_ids: Vec::new(),
+            swap_handle: Arc::clone(&swap),
+        };
+        let mut file_hashes = file_hashes_now(&pair, Some(&reload));
+        let mut backoff_ms = DEBOUNCE_MS;
+        let revoked_crl = trust.revoked_crl.clone();
+        let changed_path = crl_path.clone();
+
+        let changed = reload_tracked_with(
+            &current,
+            &pair,
+            Some(&reload),
+            &mut backoff_ms,
+            &mut file_hashes,
+            || {
+                std::fs::write(&changed_path, &revoked_crl).expect("write changed CRL");
+            },
+        )
+        .await;
+        assert!(
+            !changed,
+            "a change between the load and the post-load digest must schedule a retry"
+        );
+
+        let retried =
+            reload_tracked_with(&current, &pair, Some(&reload), &mut backoff_ms, &mut file_hashes, || {}).await;
+        assert!(retried, "the retry must install the changed CRL");
+        let now = rustls::pki_types::UnixTime::now();
+        assert!(
+            matches!(
+                swap.load_full().verifier.verify_client_cert(&trust.leaf, &[], now),
+                Err(rustls::Error::InvalidCertificate(rustls::CertificateError::Revoked))
+            ),
+            "the retry, not the post-load digest, must install the revocation"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "builds the listener fixture and drives a real handshake after the retry"
+    )]
+    async fn a_repaired_crl_is_installed_by_the_retry_and_rejects_a_fresh_handshake() {
+        let certs = gen_test_certs();
+        let trust_dir = tempfile::tempdir().expect("temporary directory");
+        let trust = gen_ca_and_crl(trust_dir.path(), "Repair Client CA");
+        let ca_path = trust.ca_path.to_str().expect("CA path").to_owned();
+        let crl_path = trust.crl_path.to_str().expect("CRL path").to_owned();
+        let pair = CertKeyPair {
+            cert_path: certs.cert_path.to_str().expect("cert path").to_owned(),
+            default: false,
+            key_path: certs.key_path.to_str().expect("key path").to_owned(),
+            server_names: Vec::new(),
+        };
+        let tls = crate::ListenerTls {
+            certificates: vec![pair.clone()],
+            cipher_suites: None,
+            client_ca: Some(crate::CaConfig {
+                ca_path: ca_path.clone(),
+                crl_paths: vec![crl_path.clone()],
+            }),
+            client_cert_mode: ClientCertMode::Require,
+            trusted_spiffe_ids: Vec::new(),
+            hot_reload: None,
+            min_version: None,
+        };
+        let server = crate::setup::build_reloadable_server_config(&tls, false).expect("reloadable server");
+        let swap = server.verifier_handle.clone().expect("verifier handle");
+        let reload = ClientVerifierReload {
+            ca_path,
+            crl_paths: vec![crl_path.clone()],
+            mode: ClientCertMode::Require,
+            trusted_spiffe_ids: Vec::new(),
+            swap_handle: Arc::clone(&swap),
+        };
+
+        // The certificate and key paths stay valid while the watched CRL goes
+        // malformed, so the failed reload is the verifier's alone and the
+        // retry, not the next poll, owns the recovery.
+        std::fs::write(&crl_path, b"not a CRL").expect("write malformed CRL");
+        let mut file_hashes = server.startup_hashes.clone();
+        let mut backoff_ms = DEBOUNCE_MS;
+        let before = swap.load_full();
+
+        let polled = reload_tracked(
+            &server.cert_handle,
+            &pair,
+            Some(&reload),
+            &mut backoff_ms,
+            &mut file_hashes,
+        )
+        .await;
+        assert!(!polled, "a malformed CRL must fail the reload");
+        assert!(
+            Arc::ptr_eq(&before, &swap.load_full()),
+            "a failed verifier reload must leave the serving verifier in place"
+        );
+        assert!(
+            backoff_ms > DEBOUNCE_MS,
+            "the failed reload must schedule a retry on the failure backoff"
+        );
+
+        // Repair before the retry fires; the next poll is a full interval away.
+        std::fs::write(&crl_path, &trust.revoked_crl).expect("repair the CRL");
+
+        let retried = reload_tracked(
+            &server.cert_handle,
+            &pair,
+            Some(&reload),
+            &mut backoff_ms,
+            &mut file_hashes,
+        )
+        .await;
+        assert!(retried, "the retry must install the repaired CRL");
+
+        let client = revoked_client_config(&certs, &trust);
+        assert!(
+            matches!(
+                complete_handshake(&server.config, &client),
+                Err(rustls::Error::InvalidCertificate(rustls::CertificateError::Revoked))
+            ),
+            "a fresh handshake after the retry must reject the revoked client"
+        );
+    }
+
+    #[test]
     fn watcher_reloads_on_file_change() {
         let certs = gen_test_certs();
         let temp_dir = certs.temp_dir.as_ref().expect("temp dir");
@@ -661,7 +1035,8 @@ mod tests {
         let current = Arc::new(ArcSwap::from_pointee(certified));
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-        let _handle = CertWatcher::spawn(Arc::clone(&current), pair.clone(), None, shutdown_rx);
+        let baseline = file_hashes_now(&pair, None);
+        let _handle = CertWatcher::spawn(Arc::clone(&current), pair.clone(), None, shutdown_rx, baseline);
 
         std::thread::sleep(Duration::from_millis(100));
 
@@ -677,6 +1052,347 @@ mod tests {
         assert_ne!(
             before_der, after_der,
             "certificate should change after file modification"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[expect(clippy::too_many_lines, reason = "end-to-end polling setup and assertion")]
+    async fn polling_reloads_when_notify_setup_fails() {
+        let certs = gen_test_certs();
+        let pair = CertKeyPair {
+            cert_path: certs.cert_path.to_str().expect("cert path").to_owned(),
+            default: false,
+            key_path: certs.key_path.to_str().expect("key path").to_owned(),
+            server_names: Vec::new(),
+        };
+        let current = Arc::new(ArcSwap::from_pointee(
+            loader::load_certified_key(&pair).expect("load cert"),
+        ));
+        let before = current.load_full();
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let missing_dir = directory.path().join("missing");
+        let missing_pair = CertKeyPair {
+            cert_path: missing_dir.join("cert.pem").to_str().expect("cert path").to_owned(),
+            key_path: missing_dir.join("key.pem").to_str().expect("key path").to_owned(),
+            ..pair
+        };
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(watch_loop(
+            Arc::clone(&current),
+            missing_pair.clone(),
+            None,
+            vec![None, None],
+            shutdown_rx,
+        ));
+        tokio::task::yield_now().await;
+        let rotated = gen_test_certs();
+        std::fs::create_dir(&missing_dir).expect("create missing directory");
+        std::fs::copy(&rotated.cert_path, &missing_pair.cert_path).expect("copy cert");
+        std::fs::copy(&rotated.key_path, &missing_pair.key_path).expect("copy key");
+        tokio::time::advance(CERTIFICATE_POLL_INTERVAL).await;
+        wait_until(|| before.cert != current.load().cert).await;
+        shutdown_tx.send(true).expect("stop polling");
+        task.await.expect("watch task");
+        assert_ne!(
+            before.cert,
+            current.load().cert,
+            "polling alone must reload after notify setup fails"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "builds the projected Secret fixture and asserts the poll swap"
+    )]
+    async fn polling_follows_a_projected_secret_symlink_swap() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("temporary directory");
+        let version_a = root.path().join("..2026_a");
+        let version_b = root.path().join("..2026_b");
+        std::fs::create_dir_all(&version_a).expect("version a");
+        std::fs::create_dir_all(&version_b).expect("version b");
+        let certs_a = gen_test_certs_in(&version_a);
+        let certs_b = gen_test_certs_in(&version_b);
+        let projection = root.path().join("projection");
+        std::fs::create_dir(&projection).expect("projection directory");
+        let data = projection.join("..data");
+        let cert_link = projection.join("tls.crt");
+        let key_link = projection.join("tls.key");
+        symlink(&version_a, &data).expect("data symlink");
+        symlink(data.join(certs_a.cert_path.file_name().expect("cert name")), &cert_link).expect("certificate symlink");
+        symlink(data.join(certs_a.key_path.file_name().expect("key name")), &key_link).expect("key symlink");
+
+        let pair = CertKeyPair {
+            cert_path: cert_link.to_str().expect("cert path").to_owned(),
+            default: false,
+            key_path: key_link.to_str().expect("key path").to_owned(),
+            server_names: Vec::new(),
+        };
+        let expected = loader::load_cert_and_key(&CertKeyPair {
+            cert_path: certs_b.cert_path.to_str().expect("cert path").to_owned(),
+            default: false,
+            key_path: certs_b.key_path.to_str().expect("key path").to_owned(),
+            server_names: Vec::new(),
+        })
+        .expect("load rotated cert")
+        .0;
+        let current = Arc::new(ArcSwap::from_pointee(
+            loader::load_certified_key(&pair).expect("load cert"),
+        ));
+        let loaded = current.load_full().cert[0].as_ref().to_vec();
+
+        let (_notifications, events) = mpsc::channel(1);
+        let (stop, shutdown) = tokio::sync::watch::channel(false);
+        let baseline = file_hashes_now(&pair, None);
+        let task = tokio::spawn(watch_events(
+            Arc::clone(&current),
+            pair,
+            None,
+            baseline,
+            shutdown,
+            events,
+        ));
+        wait_for(|| polls_completed() > 0).await;
+
+        let staging = projection.join("..data.tmp");
+        symlink(&version_b, &staging).expect("staging symlink");
+        std::fs::rename(&staging, &data).expect("swap data symlink");
+        advance_one_poll().await;
+        wait_until(|| current.load().cert[0].as_ref() != loaded.as_slice()).await;
+
+        assert_eq!(
+            current.load().cert[0].as_ref(),
+            expected[0].as_ref(),
+            "polling must follow a projected Secret symlink swap"
+        );
+        stop.send(true).expect("stop polling");
+        task.await.expect("watch task");
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[expect(clippy::too_many_lines, reason = "startup rotation fixture and polling assertions")]
+    async fn startup_baseline_taken_before_the_load_reloads_a_changed_file() {
+        let certs = gen_test_certs();
+        let directory = certs.temp_dir.as_ref().expect("temp dir");
+        let pair = CertKeyPair {
+            cert_path: certs.cert_path.to_str().expect("cert path").to_owned(),
+            default: false,
+            key_path: certs.key_path.to_str().expect("key path").to_owned(),
+            server_names: Vec::new(),
+        };
+        let current = Arc::new(ArcSwap::from_pointee(
+            loader::load_certified_key(&pair).expect("load cert"),
+        ));
+        let loaded = current.load_full().cert[0].as_ref().to_vec();
+        // The startup path snapshots the files before loading them, so the
+        // baseline describes the certificate the load is expected to read.
+        let startup_baseline = file_hashes_now(&pair, None);
+
+        // A projection swap lands between that load and the watcher start.
+        let rotated = gen_test_certs_in(directory.path());
+        let expected = loader::load_certified_key(&pair).expect("load rotated cert").cert[0]
+            .as_ref()
+            .to_vec();
+        drop(rotated);
+        assert_ne!(loaded, expected, "the fixture must rotate the certificate");
+
+        let (_notifications, events) = mpsc::channel(1);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(watch_events(
+            Arc::clone(&current),
+            pair,
+            None,
+            startup_baseline,
+            shutdown_rx,
+            events,
+        ));
+        tokio::time::advance(CERTIFICATE_POLL_INTERVAL).await;
+        wait_until(|| current.load().cert[0].as_ref() != loaded.as_slice()).await;
+        assert_eq!(
+            current.load().cert[0].as_ref(),
+            expected.as_slice(),
+            "the first poll must install a rotation that landed after the startup load"
+        );
+        shutdown_tx.send(true).expect("stop polling");
+        task.await.expect("watch task");
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "CA-only and CRL-only polling and notification assertions"
+    )]
+    async fn polling_installs_client_trust_without_filesystem_notifications() {
+        let certs = gen_test_certs();
+        let pair = CertKeyPair {
+            cert_path: certs.cert_path.to_str().unwrap().to_owned(),
+            key_path: certs.key_path.to_str().unwrap().to_owned(),
+            default: false,
+            server_names: Vec::new(),
+        };
+        let current = Arc::new(ArcSwap::from_pointee(loader::load_certified_key(&pair).unwrap()));
+        let server_chain = current.load_full().cert.clone();
+        let original = tempfile::tempdir().unwrap();
+        let replacement = tempfile::tempdir().unwrap();
+        let original_trust = gen_ca_and_crl(original.path(), "Original Client CA");
+        let replacement_trust = gen_ca_and_crl(replacement.path(), "Replacement Client CA");
+        let crls = format!(
+            "{}\n{}",
+            std::fs::read_to_string(&original_trust.crl_path).unwrap(),
+            std::fs::read_to_string(&replacement_trust.crl_path).unwrap()
+        );
+        std::fs::write(&original_trust.crl_path, crls).unwrap();
+        let ca_path = original_trust.ca_path.to_str().unwrap().to_owned();
+        let crl_path = original_trust.crl_path.to_str().unwrap().to_owned();
+        let verifier = crate::reload::ReloadableClientVerifier::new(
+            &ca_path,
+            ClientCertMode::Require,
+            std::slice::from_ref(&crl_path),
+            &[],
+        )
+        .unwrap();
+        let swap = verifier.arc();
+        let reload = ClientVerifierReload {
+            ca_path: ca_path.clone(),
+            crl_paths: vec![crl_path.clone()],
+            mode: ClientCertMode::Require,
+            trusted_spiffe_ids: Vec::new(),
+            swap_handle: Arc::clone(&swap),
+        };
+        let (notifications, events) = mpsc::channel(1);
+        let (stop, shutdown) = tokio::sync::watch::channel(false);
+        let baseline = file_hashes_now(&pair, Some(&reload));
+        let task = tokio::spawn(watch_events(
+            Arc::clone(&current),
+            pair,
+            Some(reload),
+            baseline,
+            shutdown,
+            events,
+        ));
+        // The first interval tick is immediate. Consume it so a later poll
+        // counter increment can only come from the poll this test schedules.
+        wait_for(|| polls_completed() > 0).await;
+        let before = swap.load_full();
+        let now = rustls::pki_types::UnixTime::now();
+        assert!(
+            before
+                .verifier
+                .verify_client_cert(&original_trust.leaf, &[], now)
+                .is_ok(),
+            "the original CA must initially be trusted"
+        );
+        assert!(
+            before
+                .verifier
+                .verify_client_cert(&replacement_trust.leaf, &[], now)
+                .is_err(),
+            "the replacement CA must initially be untrusted"
+        );
+        std::fs::copy(&replacement_trust.ca_path, &ca_path).unwrap();
+        advance_one_poll().await;
+        let after_ca = swap.load_full();
+        assert!(
+            !Arc::ptr_eq(&before, &after_ca),
+            "CA-only polling must install a new verifier"
+        );
+        assert!(
+            after_ca
+                .verifier
+                .verify_client_cert(&replacement_trust.leaf, &[], now)
+                .is_ok(),
+            "CA-only polling must trust a client issued by the new CA"
+        );
+        assert!(
+            after_ca
+                .verifier
+                .verify_client_cert(&original_trust.leaf, &[], now)
+                .is_err(),
+            "CA-only polling must reject a client issued by the retired CA"
+        );
+        std::fs::write(&crl_path, &replacement_trust.revoked_crl).unwrap();
+        advance_one_poll().await;
+        let after_crl = swap.load_full();
+        assert!(
+            !Arc::ptr_eq(&after_ca, &after_crl),
+            "CRL-only polling must install a new verifier"
+        );
+        assert!(
+            matches!(
+                after_crl.verifier.verify_client_cert(&replacement_trust.leaf, &[], now),
+                Err(rustls::Error::InvalidCertificate(rustls::CertificateError::Revoked))
+            ),
+            "CRL-only polling must reject the newly revoked client"
+        );
+        let polls_before_notification = polls_completed();
+        let notification_ca = crate::test_utils::gen_ca_file();
+        std::fs::copy(&notification_ca.ca_path, &ca_path).unwrap();
+        notifications.send(()).await.unwrap();
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(DEBOUNCE_MS)).await;
+        // Do not advance the poll interval here: the reload must come from the
+        // notification, not from a poll racing it to the same file change.
+        wait_for(|| !Arc::ptr_eq(&after_crl, &swap.load_full())).await;
+        let after_notification = swap.load_full();
+        assert!(
+            !Arc::ptr_eq(&after_crl, &after_notification),
+            "a notification reload must install a new verifier"
+        );
+        assert_eq!(
+            polls_completed(),
+            polls_before_notification,
+            "the notification reload must not be a poll in disguise"
+        );
+        advance_one_poll().await;
+        assert!(
+            Arc::ptr_eq(&after_notification, &swap.load_full()),
+            "a successful notification reload must not be repeated by the next poll"
+        );
+        stop.send(true).unwrap();
+        task.await.unwrap();
+        assert_eq!(
+            server_chain,
+            current.load().cert,
+            "trust-file changes leave the server certificate unchanged"
+        );
+    }
+
+    #[test]
+    #[expect(clippy::too_many_lines, reason = "certificate and trust-file fixtures")]
+    fn polling_detects_ca_and_crl_changes_with_an_unchanged_server_certificate() {
+        use crate::test_utils::gen_ca_file;
+        let certs = gen_test_certs();
+        let pair = CertKeyPair {
+            cert_path: certs.cert_path.to_str().expect("cert path").to_owned(),
+            default: false,
+            key_path: certs.key_path.to_str().expect("key path").to_owned(),
+            server_names: Vec::new(),
+        };
+        let ca = gen_ca_file();
+        let ca_path = ca.ca_path.to_str().expect("CA path").to_owned();
+        let verifier = crate::reload::ReloadableClientVerifier::new(&ca_path, ClientCertMode::Require, &[], &[])
+            .expect("client verifier");
+        let crl = tempfile::NamedTempFile::new().expect("CRL file");
+        let reload = ClientVerifierReload {
+            ca_path,
+            crl_paths: vec![crl.path().to_str().expect("CRL path").to_owned()],
+            mode: ClientCertMode::Require,
+            trusted_spiffe_ids: Vec::new(),
+            swap_handle: verifier.arc(),
+        };
+        let original = file_hashes_now(&pair, Some(&reload));
+        let replacement = gen_ca_file();
+        std::fs::copy(&replacement.ca_path, &reload.ca_path).expect("replace CA");
+        let ca_changed = file_hashes_now(&pair, Some(&reload));
+        assert_ne!(original, ca_changed, "CA-only changes must trigger polling reload");
+        std::fs::write(crl.path(), b"changed CRL").expect("replace CRL");
+        assert_ne!(
+            ca_changed,
+            file_hashes_now(&pair, Some(&reload)),
+            "CRL-only changes must trigger polling reload"
         );
     }
 
@@ -718,5 +1434,176 @@ mod tests {
         assert_eq!(dirs.len(), 2, "should include CA dir and CRL dir");
         assert_eq!(dirs[0], ca_dir, "first dir should be CA parent");
         assert_eq!(dirs[1], PathBuf::from("/etc/ssl"), "second dir should be CRL parent");
+    }
+    // -----------------------------------------------------------------------------
+    // Test Utilities
+    // -----------------------------------------------------------------------------
+
+    /// Waits until `condition` holds, advancing the paused clock between polls.
+    ///
+    /// Blocking hash tasks complete in real time, while timers only fire when
+    /// virtual time moves, so each iteration advances both.
+    async fn wait_until(mut condition: impl FnMut() -> bool) {
+        for _ in 0..100 {
+            if condition() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+            tokio::task::yield_now().await;
+            tokio::time::advance(CERTIFICATE_POLL_INTERVAL).await;
+        }
+    }
+
+    /// Waits until `condition` holds without moving the paused clock.
+    ///
+    /// Use this when a timer-driven branch (such as a poll) must not run while
+    /// waiting for another branch, so a reload cannot be attributed to the
+    /// wrong trigger.
+    async fn wait_for(mut condition: impl FnMut() -> bool) {
+        for _ in 0..1000 {
+            if condition() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+            tokio::task::yield_now().await;
+        }
+        assert!(condition(), "condition did not become true in time");
+    }
+
+    /// Advances exactly one poll interval and waits for that poll to finish.
+    async fn advance_one_poll() {
+        let before = polls_completed();
+        tokio::time::advance(CERTIFICATE_POLL_INTERVAL).await;
+        wait_for(|| polls_completed() > before).await;
+    }
+
+    /// Completed certificate polls on this thread.
+    fn polls_completed() -> u64 {
+        POLLS_COMPLETED.with(std::cell::Cell::get)
+    }
+
+    /// Client identity and trust files used to prove polling changes decisions.
+    struct ClientTrustFixture {
+        /// Trust anchor PEM installed by a CA-only update.
+        ca_path: PathBuf,
+        /// Initially empty CRL PEM for this CA.
+        crl_path: PathBuf,
+        /// Client leaf with serial one, signed by this CA.
+        leaf: rustls::pki_types::CertificateDer<'static>,
+        /// PKCS#8 DER private key matching `leaf`, so a test can authenticate.
+        leaf_key: Vec<u8>,
+        /// Replacement CRL revoking the fixture leaf.
+        revoked_crl: String,
+    }
+
+    /// Generates a CA, client leaf, and empty/revoked CRLs for polling tests.
+    fn gen_ca_and_crl(dir: &Path, common_name: &str) -> ClientTrustFixture {
+        let ca_key = rcgen::KeyPair::generate().expect("CA key generation");
+        let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("CA params");
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        ca_params.key_usages = vec![rcgen::KeyUsagePurpose::KeyCertSign, rcgen::KeyUsagePurpose::CrlSign];
+        ca_params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, common_name);
+        let ca_cert = ca_params.self_signed(&ca_key).expect("CA self-sign");
+        let issuer = rcgen::Issuer::new(ca_params, ca_key);
+
+        let leaf_key = rcgen::KeyPair::generate().unwrap();
+        let mut leaf_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        leaf_params.serial_number = Some(1_u64.into());
+        leaf_params.key_usages = vec![rcgen::KeyUsagePurpose::DigitalSignature];
+        leaf_params.extended_key_usages = vec![
+            rcgen::ExtendedKeyUsagePurpose::ClientAuth,
+            rcgen::ExtendedKeyUsagePurpose::ServerAuth,
+        ];
+        leaf_params.subject_alt_names = vec![rcgen::SanType::URI("spiffe://example.org/client".try_into().unwrap())];
+        let leaf = leaf_params.signed_by(&leaf_key, &issuer).unwrap();
+        let ca_path = dir.join("ca.pem");
+        let crl_path = dir.join("crl.pem");
+        std::fs::write(&ca_path, ca_cert.pem()).expect("write CA PEM");
+        std::fs::write(&crl_path, client_crl(&issuer, false)).expect("write CRL PEM");
+        ClientTrustFixture {
+            ca_path,
+            crl_path,
+            leaf: leaf.der().clone(),
+            leaf_key: leaf_key.serialize_der(),
+            revoked_crl: client_crl(&issuer, true),
+        }
+    }
+
+    /// Signs an empty CRL or one that revokes the polling fixture client.
+    fn client_crl(issuer: &rcgen::Issuer<'_, rcgen::KeyPair>, revoke: bool) -> String {
+        let revoked_certs = if revoke {
+            vec![rcgen::RevokedCertParams {
+                serial_number: 1_u64.into(),
+                revocation_time: rcgen::date_time_ymd(2026, 1, 1),
+                reason_code: None,
+                invalidity_date: None,
+            }]
+        } else {
+            Vec::new()
+        };
+        rcgen::CertificateRevocationListParams {
+            this_update: rcgen::date_time_ymd(2026, 1, 1),
+            next_update: rcgen::date_time_ymd(2036, 1, 1),
+            crl_number: u64::from(revoke).into(),
+            issuing_distribution_point: None,
+            revoked_certs,
+            key_identifier_method: rcgen::KeyIdMethod::Sha256,
+        }
+        .signed_by(issuer)
+        .expect("CRL signing")
+        .pem()
+        .expect("CRL PEM encoding")
+    }
+
+    /// Builds a client that authenticates as the trust fixture leaf and
+    /// trusts the generated server CA.
+    fn revoked_client_config(
+        certs: &crate::test_utils::TestCerts,
+        trust: &ClientTrustFixture,
+    ) -> Arc<rustls::ClientConfig> {
+        use rustls::pki_types::pem::PemObject as _;
+        let mut roots = rustls::RootCertStore::empty();
+        let ca_pem = std::fs::read(&certs.ca_cert_path).expect("server CA PEM");
+        for cert in rustls::pki_types::CertificateDer::pem_slice_iter(&ca_pem) {
+            roots.add(cert.expect("server CA certificate")).expect("server root");
+        }
+        let key = rustls::pki_types::PrivatePkcs8KeyDer::from(trust.leaf_key.clone());
+        Arc::new(
+            rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_client_auth_cert(vec![trust.leaf.clone()], key.into())
+                .expect("client identity"),
+        )
+    }
+
+    /// Drives an in-memory TLS handshake, returning the server's rejection.
+    fn complete_handshake(
+        config: &Arc<rustls::ServerConfig>,
+        client_config: &Arc<rustls::ClientConfig>,
+    ) -> Result<(), rustls::Error> {
+        let mut server = rustls::ServerConnection::new(Arc::clone(config))?;
+        let mut client = rustls::ClientConnection::new(
+            Arc::clone(client_config),
+            rustls::pki_types::ServerName::try_from("localhost").expect("server name"),
+        )?;
+        let mut completed = false;
+        for _ in 0..16 {
+            let mut flight = Vec::new();
+            client.write_tls(&mut flight).expect("client flight");
+            server.read_tls(&mut flight.as_slice()).expect("server read");
+            server.process_new_packets()?;
+            let mut response = Vec::new();
+            server.write_tls(&mut response).expect("server flight");
+            client.read_tls(&mut response.as_slice()).expect("client read");
+            client.process_new_packets()?;
+            if !server.is_handshaking() && !client.is_handshaking() {
+                completed = true;
+                break;
+            }
+        }
+        assert!(completed, "handshake did not complete in 16 flights");
+        Ok(())
     }
 }
