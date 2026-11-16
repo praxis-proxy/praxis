@@ -4,7 +4,7 @@
 # health/metrics listener serves:
 #
 #   GET /healthy  liveness probe (always 200)
-#   GET /ready    readiness probe (checks upstream clusters)
+#   GET /ready    serving readiness probe (use readiness: upstreams for cluster health)
 #   GET /metrics  Prometheus text exposition format
 #
 # With `verbose: true`, the /ready response includes
@@ -22,6 +22,7 @@ admin:
   address: "127.0.0.1:9901"
   metrics_address: "127.0.0.1:9902"
   verbose: true
+  readiness: serving
 
 metrics:
   filter_duration: true

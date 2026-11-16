@@ -200,6 +200,29 @@ impl IrrStreamingSession {
         Ok(total)
     }
 
+    /// Pass the remaining logical ceiling into the active body before pacing.
+    async fn next_current(&mut self) -> Result<Option<Bytes>, FilterError> {
+        let result = {
+            let current = self
+                .current
+                .as_mut()
+                .ok_or_else(|| -> FilterError { "iterative_request_router: no active body".into() })?;
+            if let Some(limit) = self.max_stream_response_bytes {
+                current.limit_active_output(limit.saturating_sub(self.emitted_bytes), limit);
+            }
+            current.next_chunk().await
+        };
+        if result.as_ref().is_err_and(|error| {
+            error
+                .downcast_ref::<crate::filtered_subrequest::CalloutResponseTooLarge>()
+                .is_some()
+        }) {
+            self.done = true;
+            return Err("iterative_request_router: logical stream byte limit exceeded".into());
+        }
+        result
+    }
+
     /// Transition rules for the current step.
     fn transitions(&self) -> &[super::config::StepTransition] {
         self.step_transitions.get(&self.current_step).map_or(&[], Vec::as_slice)
@@ -508,8 +531,8 @@ impl StreamingResponseBody for IrrStreamingSession {
                 self.done = true;
                 return Ok(None);
             }
-            if let Some(current) = self.current.as_mut() {
-                if let Some(chunk) = current.next_chunk().await? {
+            if self.current.is_some() {
+                if let Some(chunk) = self.next_current().await? {
                     return self.checked_chunk(chunk);
                 }
                 self.finish_current()?;
@@ -652,6 +675,39 @@ mod tests {
         );
         assert_eq!(exact.emitted_bytes, 5);
         drop(exact);
+    }
+
+    #[cfg(feature = "bandwidth")]
+    #[tokio::test]
+    async fn ordinary_output_is_rejected_before_any_bandwidth_wait_or_debit() {
+        use crate::StreamingResponseBody as _;
+        for emitted in [false, true] {
+            for burst in [0, 100] {
+                let (inner, schedule) = crate::filtered_subrequest::paced_test_output(
+                    1,
+                    burst,
+                    if emitted { 100 } else { 0 },
+                    if emitted { 0 } else { 100 },
+                );
+                let mut session = completed_session(100, 100);
+                session.finish_after_pending = false;
+                session.pending_completion = None;
+                session.current = Some(inner);
+                let result = tokio::time::timeout(std::time::Duration::from_millis(50), session.next_chunk()).await;
+                assert!(
+                    result
+                        .is_ok_and(|outcome| outcome
+                            .is_err_and(|error| error.to_string().contains("logical stream byte limit"))),
+                    "size rejection must precede pacing"
+                );
+                assert_eq!(session.emitted_bytes, 100);
+                session.cancel().await;
+                drop(session);
+                if burst != 0 {
+                    assert!(schedule.prepare(100).delay().is_zero());
+                }
+            }
+        }
     }
 
     #[test]

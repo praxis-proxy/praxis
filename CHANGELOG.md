@@ -23,6 +23,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   and download budgets, per downstream connection or source IP, with burst
   allowances, bounded tracking, and cancellable prefix reservations. Optional
   `ipv6_prefix_len` groups IPv6 clients by a configured network prefix.
+- Add `shutdown_drain_delay_secs` for readiness-first SIGTERM handoff. The
+  process becomes unready, waits for the configured delay, then begins
+  graceful connection shutdown; HTTP/1 responses during the drain advertise
+  `Connection: close`. The orchestrator's termination timeout must cover
+  `shutdown_timeout_secs` (which already includes this delay), any `preStop`
+  hook, and final cleanup.
+
+- Add configurable `/ready` policy: `admin.readiness: serving` (the default)
+  keeps a serving replica ready during upstream degradation, while
+  `admin.readiness: upstreams` preserves upstream-dependent readiness.
+  `/ready` also reports the `initializing`, `draining`, and `stopped`
+  lifecycle phases with `503` instead of claiming readiness.
+
 - `cargo xtask rollout` and `make test-rollout` exercise Kubernetes pod
   loss, rollouts, config reloads, TLS rotation, node drain, and upstream
   failure under continuous HTTP/1.1, HTTP/2, and HTTPS traffic.
@@ -36,8 +49,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   when admitting a transport that bypasses HTTP body hooks. `BodyAccess::None`
   remains the default. Pipeline introspection exposes this declaration as
   `requirement: "optional"` or `"required"`, omitted when there is no body access.
+- **Breaking:** Rust API: `ServerRuntime` implementations must implement
+  `lifecycle()`, explicit `Config` struct literals must set
+  `shutdown_drain_delay_secs`, and `UnavailableRuntime` is no longer a unit
+  value or `Copy`; use `UnavailableRuntime::default()` or `from_config`, and
+  `clone()` where a copy was relied on.
+- **Behavior change:** `/ready` defaults to `admin.readiness: serving`, so a
+  serving replica stays ready when a checked cluster has no healthy endpoints.
+  Set `admin.readiness: upstreams` to preserve upstream-dependent readiness.
 
 ### Fixed
+
+- Preserve bandwidth accounting for successful body-consuming transforms,
+  reject ordinary IRR output above its ceiling before pacing, and allow
+  independent writers to use burst allowance not held by pending writes.
 
 - Keep transformed bandwidth charges as unreserved plans until each bounded
   portion is admitted, preventing oversized shared debt when another writer
