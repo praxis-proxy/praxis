@@ -60,6 +60,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Pace chunks emitted by buffered IRR steps using their originating download
+  budgets, including selected abnormal terminal output.
+
 - Preserve bandwidth accounting for successful body-consuming transforms,
   reject ordinary IRR output above its ceiling before pacing, and allow
   independent writers to use burst allowance not held by pending writes.

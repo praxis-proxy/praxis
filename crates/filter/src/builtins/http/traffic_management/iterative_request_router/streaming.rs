@@ -47,7 +47,7 @@ pub(super) struct StepCompletion {
     /// Optional request body for the next step.
     pub(super) next_iteration_body: Option<Bytes>,
     /// Bounded locally emitted chunks.
-    pub(super) pending_chunks: VecDeque<Bytes>,
+    pub(super) pending_chunks: VecDeque<CompletionOutput>,
     /// Updated iteration state.
     pub(super) state: IterationState,
     /// Typed abnormal source termination, when present.
@@ -71,19 +71,22 @@ impl StepCompletionError {
 
 /// Adapt the executor's generic completion into the router's step vocabulary.
 ///
-/// The generic [`SubrequestCompletion`] already lifted the executor-owned
-/// mechanisms into typed fields and left caller-injected types in its
-/// extensions. This recovers the router's [`IterationState`] and
+/// Emitted output captures the step's budgets before the continuation restores
+/// the caller's scope. The generic [`SubrequestCompletion`] then lifts the
+/// executor-owned state into typed fields. This recovers [`IterationState`] and
 /// [`NextIterationBody`]; a missing iteration state is a lifecycle error whose
 /// recoverable extensions have both router-owned types stripped, matching the
 /// parent-facing end state of every other exit path.
-pub(super) fn step_completion_from(completion: SubrequestCompletion) -> Result<StepCompletion, StepCompletionError> {
+pub(super) fn step_completion_from(
+    mut continuation: FilteredSubrequestContinuation,
+) -> Result<StepCompletion, StepCompletionError> {
+    let pending_chunks = continuation.take_pending_output();
     let SubrequestCompletion {
         mut extensions,
         filter_results,
-        pending_chunks,
         termination,
-    } = completion;
+        ..
+    } = continuation.into_completion();
     let Some(state) = extensions.remove::<IterationState>() else {
         return Err(StepCompletionError {
             error: "iterative_request_router: iteration state missing after step completion"
@@ -130,7 +133,7 @@ pub(super) struct IrrStreamingSession {
     /// Step selected after the current completion.
     next_step: Option<Arc<str>>,
     /// Locally emitted or terminal buffered chunks awaiting delivery.
-    pending_chunks: VecDeque<Bytes>,
+    pending_chunks: VecDeque<CompletionOutput>,
     /// Transition-selected completion retains its pacing plan until each pull.
     pending_completion: Option<CompletionOutput>,
     /// Reusable one-step executor.
@@ -154,7 +157,7 @@ impl IrrStreamingSession {
         outcome: super::StepOutcome,
         body: Box<SubResponseBody>,
         continuation: FilteredSubrequestContinuation,
-        pending_chunks: VecDeque<Bytes>,
+        pending_chunks: VecDeque<CompletionOutput>,
         step_transitions: HashMap<Arc<str>, Vec<super::config::StepTransition>>,
         max_state_bytes: usize,
         max_stream_response_bytes: Option<usize>,
@@ -244,7 +247,7 @@ impl IrrStreamingSession {
         completion.state.iteration += 1;
         if let Err(error) = ensure_combined_retained_limit(
             completion.state.retained_bytes(),
-            self.pending_chunks.iter().map(Bytes::len),
+            self.pending_chunks.iter().map(CompletionOutput::len_bytes),
             self.max_state_bytes,
         ) {
             self.extensions = Some(completion.extensions);
@@ -288,8 +291,8 @@ impl IrrStreamingSession {
             self.pending_chunks
                 .iter()
                 .chain(completion.pending_chunks.iter())
-                .chain(terminal_body.iter())
-                .map(Bytes::len)
+                .map(CompletionOutput::len_bytes)
+                .chain(terminal_body.iter().map(Bytes::len))
                 .chain(completion_output.iter().map(CompletionOutput::len_bytes)),
             self.max_state_bytes,
         ) {
@@ -315,7 +318,8 @@ impl IrrStreamingSession {
                 self.next_step = Some(next);
             },
             super::TransitionResult::Done | super::TransitionResult::NoMatch => {
-                self.pending_chunks.extend(terminal_body);
+                self.pending_chunks
+                    .extend(terminal_body.map(CompletionOutput::buffered));
                 self.finish_after_pending = true;
             },
         }
@@ -333,7 +337,7 @@ impl IrrStreamingSession {
             .take()
             .ok_or_else(|| -> FilterError { "iterative_request_router: current stream missing at EOF".into() })?;
         let (continuation, completion_output) = current.into_finished_parts();
-        let completion = match step_completion_from(continuation.into_completion()) {
+        let completion = match step_completion_from(continuation) {
             Ok(completion) => completion,
             Err(error) => {
                 let (error, restored_extensions) = error.into_parts();
@@ -412,7 +416,7 @@ impl IrrStreamingSession {
                             self.state = Some(state);
                             return Err(error);
                         }
-                        let mut completion = match step_completion_from(skipped.into_continuation().into_completion()) {
+                        let mut completion = match step_completion_from(skipped.into_continuation()) {
                             Ok(completion) => completion,
                             Err(error) => {
                                 let (error, restored_extensions) = error.into_parts();
@@ -425,7 +429,7 @@ impl IrrStreamingSession {
                         completion.state.iteration += 1;
                         if let Err(error) = ensure_combined_retained_limit(
                             completion.state.retained_bytes(),
-                            self.pending_chunks.iter().map(Bytes::len),
+                            self.pending_chunks.iter().map(CompletionOutput::len_bytes),
                             self.max_state_bytes,
                         ) {
                             self.extensions = Some(completion.extensions);
@@ -451,7 +455,7 @@ impl IrrStreamingSession {
                 }
             },
             super::runner::OpenedStepKind::Complete(outcome) => {
-                let completion = match step_completion_from(continuation.into_completion()) {
+                let completion = match step_completion_from(continuation) {
                     Ok(completion) => completion,
                     Err(error) => {
                         let (error, restored_extensions) = error.into_parts();
@@ -472,8 +476,8 @@ impl IrrStreamingSession {
 
     /// Drain selected completion only when the consumer requests another prefix.
     async fn next_pending(&mut self) -> Result<Option<Bytes>, FilterError> {
-        if let Some(chunk) = self.pending_chunks.pop_front() {
-            return self.checked_chunk(chunk);
+        if let Some(chunk) = self.next_queued().await? {
+            return Ok(Some(chunk));
         }
         if let Some(completion) = self.pending_completion.as_ref()
             && let Err(error) = self.checked_chunk_total(completion.next_chunk_len())
@@ -491,6 +495,32 @@ impl IrrStreamingSession {
                 return self.checked_chunk(chunk);
             }
             self.pending_completion = None;
+        }
+        Ok(None)
+    }
+
+    /// Admit queued buffered-step output only after its logical ceiling check.
+    async fn next_queued(&mut self) -> Result<Option<Bytes>, FilterError> {
+        while let Some(output) = self.pending_chunks.front() {
+            if let Err(error) = self.checked_chunk_total(output.next_chunk_len()) {
+                self.pending_chunks.clear();
+                self.done = true;
+                return Err(error);
+            }
+            let Some(output) = self.pending_chunks.front_mut() else {
+                break;
+            };
+            match output.next_chunk().await {
+                Ok(Some(chunk)) => return self.checked_chunk(chunk),
+                Ok(None) => {
+                    self.pending_chunks.pop_front();
+                },
+                Err(error) => {
+                    self.pending_chunks.clear();
+                    self.done = true;
+                    return Err(error);
+                },
+            }
         }
         Ok(None)
     }
@@ -720,6 +750,70 @@ mod tests {
                 .is_err_and(|error| error.to_string().contains("retained state limit")),
             "combined limit failure should identify retained state: {result:?}"
         );
+    }
+
+    #[cfg(feature = "bandwidth")]
+    fn queued_session(burst: u64) -> (super::IrrStreamingSession, std::sync::Arc<crate::bandwidth::Schedule>) {
+        let schedule = crate::bandwidth::Schedule::new(1, burst);
+        let mut extensions = crate::RequestExtensions::new();
+        crate::bandwidth::push_download_schedule(&mut extensions, std::sync::Arc::clone(&schedule));
+        let mut session = completed_session(1000, 0);
+        session.pending_completion = None;
+        session
+            .pending_chunks
+            .push_back(crate::filtered_subrequest::CompletionOutput::generated(
+                Bytes::from(vec![b'e'; 1000]),
+                &extensions,
+                std::time::Instant::now() + std::time::Duration::from_secs(10),
+            ));
+        (session, schedule)
+    }
+
+    #[cfg(feature = "bandwidth")]
+    #[tokio::test]
+    async fn buffered_emission_limit_precedes_waiting_and_spending() {
+        for burst in [0, 1000] {
+            let (mut session, schedule) = queued_session(burst);
+            session.emitted_bytes = 1000;
+            let result = tokio::time::timeout(std::time::Duration::from_millis(30), session.next_pending()).await;
+            assert!(result.is_ok_and(|result| {
+                result.is_err_and(|error| error.to_string().contains("logical stream byte limit"))
+            }));
+            assert!(session.done && session.pending_chunks.is_empty());
+            if burst != 0 {
+                assert!(schedule.prepare(1000).delay().is_zero());
+            }
+        }
+    }
+
+    #[cfg(feature = "bandwidth")]
+    #[tokio::test]
+    async fn cancelled_buffered_emission_refunds_every_unreturned_byte() {
+        let (mut session, schedule) = queued_session(10);
+        assert!(matches!(session.next_pending().await, Ok(Some(chunk)) if chunk.len() == 10));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), session.next_pending())
+                .await
+                .is_err_and(|_| session.emitted_bytes == 10)
+        );
+        assert!(schedule.prepare(10).delay() <= std::time::Duration::from_secs(10));
+        assert_eq!(session.emitted_bytes, 10);
+        assert!(
+            session
+                .next_pending()
+                .await
+                .is_err_and(|error| error.to_string().contains("output release was cancelled"))
+        );
+        assert!(session.done && session.pending_chunks.is_empty());
+        drop(session);
+    }
+
+    #[cfg(feature = "bandwidth")]
+    #[test]
+    fn abandoned_buffered_emission_never_spends_its_burst() {
+        let (session, schedule) = queued_session(1000);
+        drop(session);
+        assert!(schedule.prepare(1000).delay().is_zero());
     }
 
     #[test]
