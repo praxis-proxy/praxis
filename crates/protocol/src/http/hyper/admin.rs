@@ -23,8 +23,12 @@ use hyper_util::{
     server::graceful::GracefulShutdown,
 };
 use praxis_core::{
+    config::ReadinessMode,
     health::HealthRegistry,
-    server::{HyperRuntime, hyper::ShutdownWatch},
+    server::{
+        HyperRuntime, LifecycleHandle, ServerRuntime as _,
+        hyper::{Readiness, ShutdownWatch},
+    },
 };
 use tokio::net::{TcpSocket, TcpStream};
 use tracing::{debug, error, info};
@@ -133,11 +137,40 @@ pub fn add_health_endpoint_with_pipelines(
     verbose: bool,
     pipelines: Option<(Arc<crate::ListenerPipelines>, ListenerMetaStore)>,
 ) {
+    let lifecycle = runtime.lifecycle();
+    add_health_endpoint_with_pipelines_and_policy(
+        runtime,
+        metrics_addr,
+        registry,
+        verbose,
+        pipelines,
+        ReadinessMode::Serving,
+        Some(lifecycle),
+    );
+}
+
+/// Add health and metrics endpoints with readiness policy and lifecycle state.
+#[expect(clippy::too_many_arguments, reason = "endpoint wiring mirrors its configuration")]
+pub fn add_health_endpoint_with_pipelines_and_policy(
+    runtime: &mut HyperRuntime,
+    metrics_addr: &str,
+    registry: Option<HealthRegistry>,
+    verbose: bool,
+    pipelines: Option<(Arc<crate::ListenerPipelines>, ListenerMetaStore)>,
+    readiness: ReadinessMode,
+    lifecycle: Option<LifecycleHandle>,
+) {
     let Some(listener) = bind_listener("metrics", metrics_addr) else {
         return;
     };
     let require_loopback_host = admin_host::is_loopback_host(metrics_addr);
-    let health = PingoraHealthService::new(registry, verbose).require_loopback_host(require_loopback_host);
+    let health = PingoraHealthService::new(registry, verbose)
+        .with_readiness(readiness)
+        .require_loopback_host(require_loopback_host);
+    let health = match lifecycle {
+        Some(lifecycle) => health.with_lifecycle(lifecycle),
+        None => health,
+    };
     let health = match pipelines {
         Some((pipelines, meta)) => health.with_live_pipelines(pipelines, meta),
         None => health,
@@ -195,17 +228,24 @@ impl ManagementHandler {
 /// Register the runtime service `name` that serves `handler` on `socket`.
 fn serve_on(runtime: &mut HyperRuntime, name: &'static str, socket: TcpSocket, handler: ManagementHandler) {
     let handler = Arc::new(handler);
-    runtime.add_required_service(name, move |shutdown| serve_management(name, socket, handler, shutdown));
+    runtime.add_required_service(name, move |shutdown, ready| {
+        serve_management(name, socket, handler, shutdown, ready)
+    });
 }
 
 /// Listen on `socket` and serve management connections until `shutdown`
 /// flips, then let the requests in flight finish. `name` labels the
 /// listener in logs.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one accept loop owns readiness reporting and graceful drain"
+)]
 async fn serve_management(
     name: &'static str,
     socket: TcpSocket,
     handler: Arc<ManagementHandler>,
     mut shutdown: ShutdownWatch,
+    ready: Readiness,
 ) {
     let listener = match socket.listen(LISTEN_BACKLOG) {
         Ok(listener) => listener,
@@ -214,6 +254,7 @@ async fn serve_management(
             return;
         },
     };
+    ready.ready();
     let builder = connection_builder();
     let connections = GracefulShutdown::new();
 
@@ -295,18 +336,22 @@ struct HyperAdminRequest {
 }
 
 impl AdminRequest for HyperAdminRequest {
+    /// Return the request method.
     fn method(&self) -> &Method {
         &self.parts.method
     }
 
+    /// Return the request target.
     fn uri(&self) -> &Uri {
         &self.parts.uri
     }
 
+    /// Return the request headers.
     fn headers(&self) -> &HeaderMap {
         &self.parts.headers
     }
 
+    /// Read the request body up to `limit` bytes.
     async fn read_body(&mut self, limit: usize) -> Result<Vec<u8>, BodyReadError> {
         let mut buf = Vec::new();
 
@@ -401,7 +446,15 @@ mod tests {
         let degraded: HealthRegistry = Arc::new([(Arc::from("backend"), Arc::new(entry))].into_iter().collect());
         let addr = free_addr();
         let mut runtime = empty_runtime();
-        add_health_endpoint_with_pipelines(&mut runtime, &addr, Some(degraded), false, None);
+        add_health_endpoint_with_pipelines_and_policy(
+            &mut runtime,
+            &addr,
+            Some(degraded),
+            false,
+            None,
+            ReadinessMode::Upstreams,
+            None,
+        );
         let _running = start(runtime);
 
         let ready = get(&addr, "/ready");
@@ -425,7 +478,15 @@ mod tests {
         let registry: HealthRegistry = Arc::new([(Arc::from("backend"), Arc::clone(&entry))].into_iter().collect());
         let addr = free_addr();
         let mut runtime = empty_runtime();
-        add_health_endpoint_with_pipelines(&mut runtime, &addr, Some(registry), false, None);
+        add_health_endpoint_with_pipelines_and_policy(
+            &mut runtime,
+            &addr,
+            Some(registry),
+            false,
+            None,
+            ReadinessMode::Upstreams,
+            None,
+        );
         let _running = start(runtime);
 
         let degraded = get(&addr, "/ready");
@@ -437,6 +498,41 @@ mod tests {
             "/ready must be 503 while the cluster has no healthy endpoint"
         );
         assert_eq!(recovered.status, 200, "/ready must be 200 once the endpoint recovers");
+    }
+
+    #[test]
+    /// Readiness reports lifecycle phases while the listener serves.
+    fn readiness_reports_lifecycle_phases_while_the_listener_serves() {
+        let addr = free_addr();
+        let lifecycle = LifecycleHandle::new();
+        let mut runtime = empty_runtime();
+        add_health_endpoint_with_pipelines_and_policy(
+            &mut runtime,
+            &addr,
+            None,
+            false,
+            None,
+            ReadinessMode::Serving,
+            Some(lifecycle.clone()),
+        );
+        let _running = start(runtime);
+
+        let initializing = get(&addr, "/ready");
+        lifecycle.mark_serving().unwrap();
+        let serving = get(&addr, "/ready");
+        lifecycle.begin_drain();
+        let draining = get(&addr, "/ready");
+        lifecycle.mark_stopped();
+        let stopped = get(&addr, "/ready");
+
+        assert_eq!(initializing.status, 503, "an initializing server must not report ready");
+        assert_eq!(initializing.body, br#"{"status":"initializing"}"#);
+        assert_eq!(serving.status, 200, "a serving server must report ready");
+        assert_eq!(serving.body, br#"{"status":"ok"}"#);
+        assert_eq!(draining.status, 503, "a draining server must not report ready");
+        assert_eq!(draining.body, br#"{"status":"draining"}"#);
+        assert_eq!(stopped.status, 503, "a stopped server must not report ready");
+        assert_eq!(stopped.body, br#"{"status":"stopped"}"#);
     }
 
     #[test]
