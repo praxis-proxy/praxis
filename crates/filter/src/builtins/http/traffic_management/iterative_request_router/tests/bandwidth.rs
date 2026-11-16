@@ -4,6 +4,7 @@
 //! Buffered-step emissions must cross their own bandwidth boundary.
 
 use std::{
+    fmt::Write as _,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -75,6 +76,116 @@ fn emitting_step(address: std::net::SocketAddr, streaming: bool) -> String {
         },
         super::routed_step_yaml(address),
     )
+}
+
+/// Later steps each fit their own timeout but outlive the producing step.
+fn retained_router(
+    address: std::net::SocketAddr,
+    final_address: std::net::SocketAddr,
+    terminal: bool,
+    timeout_ms: u64,
+    rate: u64,
+) -> Box<dyn HttpFilter> {
+    let mut waits = String::new();
+    for (name, next) in [("wait1", "wait2"), ("wait2", "wait3"), ("wait3", "final")] {
+        write!(
+            waits,
+            "
+  - name: {name}
+    filters:
+      - filter: test_slow_request
+{}
+    on_result: [{{default: true, next: {next}}}]
+",
+            super::routed_step_yaml(address)
+        )
+        .unwrap();
+    }
+    filter(&format!(
+        "
+initial_step: buffered
+step_timeout_ms: 900
+timeout_ms: {timeout_ms}
+steps:
+  - name: buffered
+    filters:
+{}
+    on_result: [{{default: true, next: wait1}}]
+{waits}
+  - name: final
+    filters:
+      - filter: test_streaming_selector
+{}
+{}
+    on_result: [{{default: true, done: true}}]
+",
+        emitting_step(address, false).replace(
+            "download_bytes_per_sec: 1000",
+            &format!("download_bytes_per_sec: {rate}")
+        ),
+        if terminal {
+            "      - filter: test_emit_completion"
+        } else {
+            ""
+        },
+        super::routed_step_yaml(final_address)
+    ))
+}
+
+async fn retained_response(terminal: bool, timeout_ms: u64, rate: u64) -> Result<Vec<u8>, FilterError> {
+    let (address, backend) = super::spawn_raw_backend("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
+    let final_address = if terminal {
+        super::closed_port_addr().await
+    } else {
+        address
+    };
+    let router = retained_router(address, final_address, terminal, timeout_ms, rate);
+    let request = crate::test_utils::make_request(http::Method::GET, "/");
+    let client = super::make_client();
+    let mut ctx = super::make_iteration_context(&request, &client, b"");
+    ctx.client_addr = Some("127.0.0.1".parse().unwrap());
+    let result = async {
+        match router.on_request(&mut ctx).await? {
+            FilterAction::StreamingTerminalResponse(mut response) => {
+                let mut output = Vec::new();
+                while let Some(chunk) = response.body.next_chunk().await? {
+                    output.extend_from_slice(&chunk);
+                }
+                Ok(output)
+            },
+            FilterAction::TerminalResponse(response) => Ok(response.body.unwrap_or_default().to_vec()),
+            other => panic!("expected a terminal response, got {other:?}"),
+        }
+    }
+    .await;
+    backend.abort();
+    result
+}
+
+#[tokio::test]
+async fn retained_emissions_survive_the_producing_step_timeout_in_a_stream() {
+    let output = retained_response(false, 5000, 1000).await.unwrap();
+    assert_eq!(output, vec![b'e'; 100]);
+}
+
+#[tokio::test]
+async fn retained_emissions_survive_the_producing_step_timeout_in_a_terminal_body() {
+    let output = retained_response(true, 5000, 1000).await.unwrap();
+    assert_eq!(output, vec![b'e'; 200]);
+}
+
+#[tokio::test]
+async fn retained_emissions_still_obey_the_overall_deadline() {
+    let started = Instant::now();
+    let result = tokio::time::timeout(Duration::from_secs(4), retained_response(false, 2200, 1)).await;
+    assert!(
+        result
+            .is_ok_and(|result| result.is_err_and(|error| error.to_string().contains("bandwidth reservation exceeds")))
+    );
+    assert!(
+        started.elapsed() >= Duration::from_millis(2100),
+        "the request must not fail at the producing step's expired deadline"
+    );
 }
 
 #[tokio::test]

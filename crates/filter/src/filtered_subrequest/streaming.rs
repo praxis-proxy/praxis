@@ -103,7 +103,7 @@ impl PendingOutput {
 pub(crate) struct CompletionOutput {
     /// Separate logical chunks with their original limiter-position charges.
     chunks: VecDeque<PendingOutput>,
-    /// Completion shares the original exchange deadline.
+    /// Deadline of the exchange or logical response owning these bytes.
     deadline: Instant,
     /// Dropping a release future must not silently skip its output.
     releasing: bool,

@@ -37,6 +37,7 @@ mod filter_docs;
 mod fips;
 mod library_consumer;
 mod lint_deps;
+mod lint_doc_links;
 mod lint_example_tests;
 mod paths;
 #[cfg(feature = "dev")]
@@ -95,6 +96,10 @@ enum Command {
     /// Check a standalone library consumer without workspace patches.
     CheckLibraryConsumer,
 
+    /// Check that relative Markdown links resolve to files
+    /// that exist on disk.
+    LintDocLinks(lint_doc_links::Args),
+
     /// Check that every example config has a corresponding
     /// integration test.
     LintExampleTests(lint_example_tests::Args),
@@ -141,6 +146,7 @@ fn main() {
         Command::Fips(args) => fips::run(args),
         Command::LintDeps(args) => lint_deps::run(args),
         Command::CheckLibraryConsumer => library_consumer::run(),
+        Command::LintDocLinks(args) => lint_doc_links::run(args),
         Command::LintExampleTests(args) => lint_example_tests::run(args),
         Command::Publish(args) => publish::run(&args),
         Command::SyncExampleReadme(args) => sync_example_readme::run(&args),

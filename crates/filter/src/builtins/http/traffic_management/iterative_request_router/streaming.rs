@@ -80,7 +80,14 @@ impl StepCompletionError {
 pub(super) fn step_completion_from(
     mut continuation: FilteredSubrequestContinuation,
 ) -> Result<StepCompletion, StepCompletionError> {
-    let pending_chunks = continuation.take_pending_output();
+    // Retained emissions belong to the logical response, which can outlive this step.
+    let deadline = continuation
+        .extensions()
+        .get::<IterationState>()
+        .map(IterationState::deadline);
+    let pending_chunks = deadline
+        .map(|deadline| continuation.take_pending_output(deadline))
+        .unwrap_or_default();
     let SubrequestCompletion {
         mut extensions,
         filter_results,
