@@ -184,7 +184,8 @@ cases and the body-access and classifier requirements for each protocol.
 ### Authentication and authorization
 
 - **Authentication**: Configure the `policy` filter to authenticate JWTs or
-  opaque API keys. JWT authentication covers OIDC tokens and SPIFFE JWT-SVIDs. Configure trusted issuers, accepted audiences, and claim mapping;
+  opaque API keys. JWT authentication covers OIDC tokens and SPIFFE JWT-SVIDs.
+  Configure trusted issuers, accepted audiences, and claim mapping;
   user, client, and workload identities can be verified independently.
   See [identity configuration][policy-identity].
 - **Authorization models**: Express role-based (RBAC), attribute-based
@@ -363,12 +364,20 @@ in development:
   networks that require it.
 
 [policy-guide]: ../security/policy-enforcement.md
-[policy-identity]: https://github.com/praxis-proxy/policy/blob/main/docs/content/apl/identity.md
-[policy-pdp]: https://github.com/praxis-proxy/policy/blob/main/docs/content/apl/pdp.md
+[policy-identity]:
+  https://github.com/praxis-proxy/policy/blob/main/docs/content/apl/identity.md
+[policy-pdp]:
+  https://github.com/praxis-proxy/policy/blob/main/docs/content/apl/pdp.md
 [basic-auth]: ../filters/http/security/basic_auth.md
-[policy-delegation]: https://github.com/praxis-proxy/policy/blob/main/docs/content/identity-delegation.md
-[policy-vault]: https://github.com/praxis-proxy/policy/blob/main/docs/content/identity-delegation.md#recipe-9-a-caller-workloads-vault-stored-credential
-[policy-approval]: https://github.com/praxis-proxy/policy/blob/main/docs/content/apl/elicitation.md
-[policy-headers]: https://github.com/praxis-proxy/policy/blob/main/docs/content/assertions.md
-[policy-limits]: https://github.com/praxis-proxy/policy/blob/main/docs/content/rate-limiting.md
-[policy-audit]: https://github.com/praxis-proxy/policy/blob/main/docs/content/auditing.md
+[policy-delegation]:
+  https://github.com/praxis-proxy/policy/blob/main/docs/content/identity-delegation.md
+[policy-vault]:
+  https://github.com/praxis-proxy/policy/blob/main/docs/content/identity-delegation.md#recipe-9-a-caller-workloads-vault-stored-credential
+[policy-approval]:
+  https://github.com/praxis-proxy/policy/blob/main/docs/content/apl/elicitation.md
+[policy-headers]:
+  https://github.com/praxis-proxy/policy/blob/main/docs/content/assertions.md
+[policy-limits]:
+  https://github.com/praxis-proxy/policy/blob/main/docs/content/rate-limiting.md
+[policy-audit]:
+  https://github.com/praxis-proxy/policy/blob/main/docs/content/auditing.md
