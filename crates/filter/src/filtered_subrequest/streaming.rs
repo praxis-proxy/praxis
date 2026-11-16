@@ -52,6 +52,24 @@ struct PendingOutput {
 }
 
 impl PendingOutput {
+    /// Generated output has its own charge, independent of the callback body.
+    fn generated(
+        body: Bytes,
+        #[cfg_attr(
+            not(feature = "bandwidth"),
+            expect(unused_variables, reason = "only bandwidth uses schedules")
+        )]
+        extensions: &RequestExtensions,
+    ) -> Self {
+        #[cfg(feature = "bandwidth")]
+        let plan = crate::bandwidth::generated_download_plan(extensions, u64::try_from(body.len()).unwrap_or(u64::MAX));
+        Self {
+            body,
+            #[cfg(feature = "bandwidth")]
+            plan,
+        }
+    }
+
     /// Settle only the bounded prefix being returned to the streaming consumer.
     #[cfg_attr(
         not(feature = "bandwidth"),
@@ -92,6 +110,16 @@ pub(crate) struct CompletionOutput {
 }
 
 impl CompletionOutput {
+    /// Buffered-step emissions keep their originating schedules until delivery.
+    #[cfg(feature = "iterative-request-router")]
+    pub(crate) fn generated(body: Bytes, extensions: &RequestExtensions, deadline: Instant) -> Self {
+        Self {
+            chunks: VecDeque::from([PendingOutput::generated(body, extensions)]),
+            deadline,
+            releasing: false,
+        }
+    }
+
     /// Preserve a buffered result whose executor already settled its byte charges.
     #[cfg(feature = "iterative-request-router")]
     pub(crate) fn buffered(body: Bytes) -> Self {
@@ -338,16 +366,8 @@ impl FilteredStreamingBody {
             .get_mut::<PendingStreamChunks>()
             .map_or_else(VecDeque::new, PendingStreamChunks::drain_chunks);
         for body in emitted {
-            #[cfg(feature = "bandwidth")]
-            let plan = crate::bandwidth::generated_download_plan(
-                &self.continuation.extensions,
-                u64::try_from(body.len()).unwrap_or(u64::MAX),
-            );
-            self.pending_chunks.push_back(PendingOutput {
-                body,
-                #[cfg(feature = "bandwidth")]
-                plan,
-            });
+            self.pending_chunks
+                .push_back(PendingOutput::generated(body, &self.continuation.extensions));
         }
         self.enqueue_callback(body);
     }

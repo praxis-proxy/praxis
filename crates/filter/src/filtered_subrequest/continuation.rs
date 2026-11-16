@@ -169,6 +169,17 @@ impl FilteredSubrequestContinuation {
         }
     }
 
+    /// Capture emitted charges before restoring the parent's bandwidth scope.
+    #[cfg(feature = "iterative-request-router")]
+    pub(crate) fn take_pending_output(&mut self) -> VecDeque<super::CompletionOutput> {
+        self.extensions
+            .remove::<PendingStreamChunks>()
+            .map_or_else(VecDeque::new, PendingStreamChunks::into_chunks)
+            .into_iter()
+            .map(|body| super::CompletionOutput::generated(body, &self.extensions, self.step_deadline))
+            .collect()
+    }
+
     /// Borrow the retained request extensions.
     ///
     /// The caller reads its own injected extension types (for example an
