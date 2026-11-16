@@ -1441,3 +1441,6 @@ impl FilteredSubrequestExecutor {
         Ok(OpenedSubrequest { continuation, kind })
     }
 }
+
+#[cfg(all(test, feature = "bandwidth", feature = "iterative-request-router"))]
+pub(crate) use streaming::tests::paced_output as paced_test_output;

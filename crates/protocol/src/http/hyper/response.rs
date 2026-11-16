@@ -14,7 +14,10 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use http::{HeaderMap, Response, StatusCode, Version};
-use praxis_core::egress::{Session as _, hyper::HyperSession};
+use praxis_core::{
+    egress::{Session as _, hyper::HyperSession},
+    server::LifecyclePhase,
+};
 use praxis_filter::{FilterAction, FilterError, Rejection};
 use tracing::{Instrument as _, error, warn};
 
@@ -235,6 +238,25 @@ fn rejected_response(flight: &mut Flight, refusal: Rejection) -> Outcome {
     Outcome::Reply(reply::pending_rejection(refusal, &flight.ctx, flight.version))
 }
 
+/// Ask a draining data plane to close its non-HTTP/2 client connection.
+fn close_connection_on_drain(flight: &Flight, response: &mut praxis_filter::Response) {
+    if matches!(flight.lifecycle.phase(), LifecyclePhase::Draining)
+        && flight.version != Version::HTTP_2
+        && !successful_connect_tunnel(
+            &flight
+                .ctx
+                .request_snapshot
+                .as_ref()
+                .map_or(http::Method::GET, |request| request.method.clone()),
+            response.status,
+        )
+    {
+        response
+            .headers
+            .insert(http::header::CONNECTION, http::HeaderValue::from_static("close"));
+    }
+}
+
 /// Act on the response pipeline's result.
 fn settle(
     listener: &ListenerShared,
@@ -248,6 +270,7 @@ fn settle(
         return Outcome::Failed(Failure::internal("request snapshot not set during response phase"));
     };
     reframe(flight, &mut head, &result);
+    close_connection_on_drain(flight, &mut head.response);
     match result {
         Ok(
             FilterAction::Continue
@@ -347,6 +370,9 @@ pub(super) async fn commit(
         mut session,
         start,
     } = answer;
+    // The head was checked when the response phase settled, but the drain can
+    // start while the first body chunk is read; recheck at the commit point.
+    close_connection_on_drain(&flight, &mut response);
     flight.written_status = response.status.as_u16();
     if bodyless {
         let keepalive = session.response_done() && upload.is_settled();
@@ -916,6 +942,32 @@ mod tests {
             .unwrap()
             .to_bytes();
         assert_eq!(body, "hello", "the body reaches the client");
+    }
+
+    #[tokio::test]
+    async fn drain_after_the_head_still_closes_the_committed_connection() {
+        let mut flight = get_flight(empty_pipeline());
+        flight.lifecycle.mark_serving().unwrap();
+        let listener = listener_shared();
+        let (upload, _client) = streaming_upload(&flight.ctx).await;
+        let (_upstream, _connector, session) = answered(b"HTTP/1.1 200 OK\r\ncontent-length: 5\r\n\r\nhello").await;
+        let answer =
+            answer_of(head(&listener, &mut flight, session, &upload, None).await).expect("a plain 200 is answered");
+
+        assert!(
+            flight.lifecycle.begin_drain(),
+            "the drain starts after the head settled"
+        );
+        let response = commit(&listener, flight, upload, *answer).await;
+
+        assert_eq!(
+            response
+                .headers()
+                .get(http::header::CONNECTION)
+                .map(|value| value.to_str().unwrap()),
+            Some("close"),
+            "the commit must recheck the lifecycle"
+        );
     }
 
     #[tokio::test]

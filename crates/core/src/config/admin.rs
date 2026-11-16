@@ -6,6 +6,21 @@
 use serde::Deserialize;
 
 // -----------------------------------------------------------------------------
+// ReadinessMode
+// -----------------------------------------------------------------------------
+
+/// Selects whether upstream health affects `/ready` status.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReadinessMode {
+    /// Report the replica ready when Praxis itself can serve requests.
+    #[default]
+    Serving,
+    /// Report the replica unready when any checked cluster is degraded.
+    Upstreams,
+}
+
+// -----------------------------------------------------------------------------
 // AdminConfig
 // -----------------------------------------------------------------------------
 
@@ -54,6 +69,9 @@ pub struct AdminConfig {
 
     /// Include per-cluster detail in `/ready` response.
     pub verbose: bool,
+
+    /// Whether `/ready` follows replica serving state or upstream health.
+    pub readiness: ReadinessMode,
 }
 
 // -----------------------------------------------------------------------------
@@ -82,6 +100,7 @@ mod tests {
             "metrics_address should default to None"
         );
         assert!(!admin.verbose, "verbose should default to false");
+        assert_eq!(admin.readiness, ReadinessMode::Serving);
     }
 
     #[test]
@@ -91,6 +110,7 @@ mod tests {
 address: "127.0.0.1:9901"
 metrics_address: "127.0.0.1:9910"
 verbose: true
+readiness: upstreams
 "#,
         )
         .unwrap();
@@ -105,6 +125,27 @@ verbose: true
             "metrics_address should be parsed"
         );
         assert!(admin.verbose, "verbose should be true");
+        assert_eq!(admin.readiness, ReadinessMode::Upstreams);
+    }
+
+    #[test]
+    fn readiness_parses_every_supported_value_and_rejects_unknown() {
+        let serving: AdminConfig = serde_yaml::from_str("readiness: serving").unwrap();
+        assert_eq!(
+            serving.readiness,
+            ReadinessMode::Serving,
+            "serving readiness must parse"
+        );
+        let upstreams: AdminConfig = serde_yaml::from_str("readiness: upstreams").unwrap();
+        assert_eq!(
+            upstreams.readiness,
+            ReadinessMode::Upstreams,
+            "upstream readiness must parse"
+        );
+        assert!(
+            serde_yaml::from_str::<AdminConfig>("readiness: sometime").is_err(),
+            "an unknown readiness mode must be rejected"
+        );
     }
 
     #[test]
@@ -116,5 +157,6 @@ verbose: true
             "metrics_address should default to None"
         );
         assert!(!admin.verbose, "verbose should default to false");
+        assert_eq!(admin.readiness, ReadinessMode::Serving);
     }
 }

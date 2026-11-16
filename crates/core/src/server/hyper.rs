@@ -19,12 +19,12 @@ use praxis_tls::CachedCaCerts;
 use tokio::{
     runtime::{Builder, Runtime as TokioRuntime},
     signal::unix::{Signal, SignalKind, signal},
-    sync::watch,
+    sync::{oneshot, watch},
     task::{Id, JoinError, JoinSet},
 };
 use tracing::{error, info, warn};
 
-use super::{RuntimeOptions, ServerRuntime, ShutdownFuture, resolve_thread_count};
+use super::{LifecycleHandle, RuntimeOptions, ServerRuntime, ShutdownFuture, resolve_thread_count};
 use crate::config::Config;
 
 // -----------------------------------------------------------------------------
@@ -41,6 +41,9 @@ const FAST_SHUTDOWN_BOUND: Duration = Duration::from_secs(1); // 1 s
 /// How long dropping the tokio runtime waits for blocking work to stop.
 const RUNTIME_DROP_TIMEOUT: Duration = Duration::from_secs(1); // 1 s
 
+/// How long an aborted service gets to finish before shutdown proceeds.
+const ABORT_JOIN_BOUND: Duration = Duration::from_secs(1); // 1 s
+
 /// Name of every tokio worker thread.
 const WORKER_THREAD_NAME: &str = "praxis-worker";
 
@@ -55,6 +58,23 @@ const WORKER_THREAD_NAME: &str = "praxis-worker";
 /// flight; [`HyperRuntime`] bounds how long that may take. It is the same
 /// type Pingora hands its services.
 pub type ShutdownWatch = watch::Receiver<bool>;
+
+// -----------------------------------------------------------------------------
+// Readiness
+// -----------------------------------------------------------------------------
+
+/// A required service's handle for reporting that it can accept work.
+///
+/// Call [`ready`](Self::ready) after every socket is listening. Dropping it
+/// without calling `ready` leaves the service unready, so startup fails.
+pub struct Readiness(oneshot::Sender<()>);
+
+impl Readiness {
+    /// Report that every socket the service owns is listening.
+    pub fn ready(self) {
+        _ = self.0.send(());
+    }
+}
 
 // -----------------------------------------------------------------------------
 // HyperRuntime
@@ -93,14 +113,21 @@ pub struct HyperRuntime {
     /// How long a graceful shutdown waits for services to finish.
     shutdown_timeout: Duration,
 
+    /// How long readiness-first handoff waits before stopping listeners.
+    shutdown_drain_delay: Duration,
+
     /// Worker threads the tokio runtime runs.
     threads: usize,
 
     /// Trust anchors loaded from `runtime.upstream_ca_file`.
     trust_anchors: Option<Arc<CachedCaCerts>>,
+
+    /// Shared lifecycle state for management services and handlers.
+    lifecycle: LifecycleHandle,
 }
 
 impl fmt::Debug for HyperRuntime {
+    /// Format the runtime's tuning and registered services.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HyperRuntime")
             .field("services", &self.services)
@@ -138,8 +165,10 @@ impl HyperRuntime {
             options,
             services: Vec::new(),
             shutdown_timeout: Duration::from_secs(config.shutdown_timeout_secs),
+            shutdown_drain_delay: Duration::from_secs(config.shutdown_drain_delay_secs),
             threads,
             trust_anchors,
+            lifecycle: LifecycleHandle::new(),
         }
     }
 
@@ -160,7 +189,13 @@ impl HyperRuntime {
         self.services.push(Service {
             name: name.to_owned(),
             required: false,
-            start: Box::new(move |shutdown| -> ServiceFuture { Box::pin(service(shutdown)) }),
+            start: Box::new(move |shutdown, ready| {
+                let running = service(shutdown);
+                Box::pin(async move {
+                    _ = ready.send(());
+                    running.await;
+                })
+            }),
         });
     }
 
@@ -170,13 +205,13 @@ impl HyperRuntime {
     /// runtime so another listener cannot mask the outage with healthy probes.
     pub fn add_required_service<F, Fut>(&mut self, name: &str, service: F)
     where
-        F: FnOnce(ShutdownWatch) -> Fut + Send + 'static,
+        F: FnOnce(ShutdownWatch, Readiness) -> Fut + Send + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
         self.services.push(Service {
             name: name.to_owned(),
             required: true,
-            start: Box::new(move |shutdown| -> ServiceFuture { Box::pin(service(shutdown)) }),
+            start: Box::new(move |shutdown, ready| Box::pin(service(shutdown, Readiness(ready)))),
         });
     }
 
@@ -220,23 +255,18 @@ impl HyperRuntime {
     ///
     /// Panics when the tokio runtime cannot be built or a required service exits early.
     #[expect(
-        clippy::panic,
-        reason = "a proxy without a runtime must not look like a clean shutdown"
+        clippy::too_many_lines,
+        reason = "startup supervision, serving, drain, and stop ordering stay together"
     )]
     fn run<Stop, MakeStop>(self, make_stop: MakeStop)
     where
         Stop: Future<Output = ShutdownMode> + Send,
         MakeStop: FnOnce() -> Stop + Send,
     {
-        let runtime = match build_tokio(self.threads, &self.options) {
-            Ok(runtime) => runtime,
-            Err(err) => {
-                error!(error = %err, threads = self.threads, "failed to build the tokio runtime; nothing to serve");
-                panic!("failed to build the tokio runtime: {err}");
-            },
-        };
+        let runtime = self.runtime_or_panic();
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let graceful = self.shutdown_timeout;
+        let graceful = self.shutdown_timeout.saturating_sub(self.shutdown_drain_delay);
+        let lifecycle = self.lifecycle.clone();
         info!(
             services = self.services.len(),
             threads = self.threads,
@@ -244,10 +274,39 @@ impl HyperRuntime {
         );
 
         let (mode, aborted) = runtime.block_on(async move {
-            let stop = make_stop();
+            /// Which event ended startup.
+            enum Startup {
+                /// Required services reported readiness, or one exited.
+                Ready(bool),
+                /// The stop future resolved before readiness.
+                Stop(ShutdownMode),
+            }
+
+            let mut stop = Box::pin(make_stop());
             let mut services = ServiceSet::start(self.services, &shutdown_rx);
-            let mode = services.serve_until(stop).await;
-            (mode, services.stop(&shutdown_tx, mode.bound(graceful)).await)
+            let mut readiness = Box::pin(services.wait_for_required_ready());
+            let startup = tokio::select! {
+                ready = &mut readiness => Startup::Ready(ready),
+                requested = &mut stop => Startup::Stop(requested),
+            };
+            drop(readiness);
+            let mode = match startup {
+                Startup::Ready(true) => {
+                    if let Err(error) = lifecycle.mark_serving() {
+                        warn!(%error, "lifecycle shutdown began before hyper startup completed");
+                    }
+                    services.serve_until(stop).await
+                },
+                Startup::Ready(false) => {
+                    error!("required service failed before becoming ready");
+                    ShutdownMode::Failed
+                },
+                Startup::Stop(mode) => mode,
+            };
+            lifecycle.begin_drain();
+            let result = services.stop(&shutdown_tx, mode.bound(graceful)).await;
+            lifecycle.mark_stopped();
+            (mode, result)
         });
 
         runtime.shutdown_timeout(RUNTIME_DROP_TIMEOUT);
@@ -255,10 +314,36 @@ impl HyperRuntime {
         assert_ne!(mode, ShutdownMode::Failed, "required service exited before shutdown");
     }
 
+    /// Build the service runtime, failing the process when it cannot start.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the tokio runtime cannot be built; returning would let the
+    /// server report a clean shutdown with nothing ever served.
+    #[expect(
+        clippy::panic,
+        reason = "a proxy without a runtime must not look like a clean shutdown"
+    )]
+    fn runtime_or_panic(&self) -> TokioRuntime {
+        match build_tokio(self.threads, &self.options) {
+            Ok(runtime) => runtime,
+            Err(err) => {
+                error!(error = %err, threads = self.threads, "failed to build the tokio runtime; nothing to serve");
+                panic!("failed to build the tokio runtime: {err}");
+            },
+        }
+    }
+
     /// How long a graceful shutdown may take (`shutdown_timeout_secs`).
     #[must_use]
     pub fn shutdown_timeout(&self) -> Duration {
         self.shutdown_timeout
+    }
+
+    /// Readiness-first delay before graceful connection shutdown.
+    #[must_use]
+    pub fn shutdown_drain_delay(&self) -> Duration {
+        self.shutdown_drain_delay
     }
 
     /// Trust anchors from `runtime.upstream_ca_file`, for the egress
@@ -275,21 +360,30 @@ impl HyperRuntime {
 }
 
 impl ServerRuntime for HyperRuntime {
+    /// Build the runtime from `config`; the same as [`HyperRuntime::new`].
     fn from_config(config: &Config) -> Self {
         Self::new(config)
     }
 
-    /// `SIGTERM` and `SIGHUP` stop gracefully, giving services up to
-    /// `shutdown_timeout_secs`; `SIGINT` stops fast, giving them a second.
+    /// `SIGTERM` begins the readiness-first handoff and then stops gracefully,
+    /// giving services up to `shutdown_timeout_secs`; `SIGHUP` is ignored and
+    /// `SIGINT` stops fast, giving them a second.
     /// The handlers are installed before any listener accepts, so a signal
     /// that lands during startup is honoured.
     fn run_until_shutdown(self) {
-        self.run(|| signal_stop(SignalListeners::install()));
+        let delay = self.shutdown_drain_delay;
+        let lifecycle = self.lifecycle.clone();
+        self.run(move || signal_stop(SignalListeners::install(), delay, lifecycle));
     }
 
     /// Stops fast once `shutdown` resolves, giving services a second.
     fn run_with_shutdown(self, shutdown: ShutdownFuture) {
         self.run(move || future_stop(shutdown));
+    }
+
+    /// Return the lifecycle handle shared with registered protocol services.
+    fn lifecycle(&self) -> LifecycleHandle {
+        self.lifecycle.clone()
     }
 }
 
@@ -301,7 +395,7 @@ impl ServerRuntime for HyperRuntime {
 type ServiceFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 
 /// Turns a service's shutdown watch into the future to spawn.
-type ServiceStart = Box<dyn FnOnce(ShutdownWatch) -> ServiceFuture + Send>;
+type ServiceStart = Box<dyn FnOnce(ShutdownWatch, oneshot::Sender<()>) -> ServiceFuture + Send>;
 
 /// A registered service, waiting for the runtime to start it.
 struct Service {
@@ -316,6 +410,7 @@ struct Service {
 }
 
 impl fmt::Debug for Service {
+    /// Format the service's registered name.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Service")
             .field("name", &self.name)
@@ -340,21 +435,38 @@ struct ServiceSet {
 
     /// The service tasks.
     tasks: JoinSet<()>,
+
+    /// Readiness signals for required services.
+    ready: Vec<oneshot::Receiver<()>>,
 }
 
 impl ServiceSet {
     /// Abort every service still running and return how many there were.
-    fn abort_remaining(&mut self) -> usize {
+    async fn abort_remaining(&mut self) -> usize {
         while let Some(joined) = self.tasks.try_join_next_with_id() {
             self.record(&joined);
         }
         self.tasks.abort_all();
 
-        let aborted: Vec<String> = self.names.drain(..).map(|(_, name)| name).collect();
+        let aborted = self.names.iter().map(|(_, name)| name.clone()).collect::<Vec<_>>();
+        if tokio::time::timeout(ABORT_JOIN_BOUND, self.join_all()).await.is_err() {
+            warn!("aborted services did not finish before the abort join bound");
+        }
         if !aborted.is_empty() {
             warn!(aborted = aborted.len(), services = ?aborted, "aborted services that outlived the shutdown bound");
         }
         aborted.len()
+    }
+
+    /// Wait until every required service has started accepting work.
+    async fn wait_for_required_ready(&mut self) -> bool {
+        let mut ready = true;
+        for signal in self.ready.drain(..) {
+            if signal.await.is_err() {
+                ready = false;
+            }
+        }
+        ready
     }
 
     /// Wait for every service to finish.
@@ -416,13 +528,16 @@ impl ServiceSet {
             required: Vec::new(),
             stopping: false,
             tasks: JoinSet::new(),
+            ready: Vec::new(),
         };
 
         for service in services {
             info!(service = service.name.as_str(), "starting service");
-            let task = set.tasks.spawn((service.start)(shutdown.clone()));
+            let (ready_tx, ready_rx) = oneshot::channel();
+            let task = set.tasks.spawn((service.start)(shutdown.clone(), ready_tx));
             if service.required {
                 set.required.push(task.id());
+                set.ready.push(ready_rx);
             }
             set.names.push((task.id(), service.name));
         }
@@ -440,7 +555,7 @@ impl ServiceSet {
         if tokio::time::timeout(bound, self.join_all()).await.is_ok() {
             return 0;
         }
-        self.abort_remaining()
+        self.abort_remaining().await
     }
 
     /// Remove and return the name of the service running as task `id`.
@@ -519,14 +634,6 @@ impl StopSignal {
             Self::Terminate => SignalKind::terminate(),
         }
     }
-
-    /// How the runtime stops on this signal.
-    fn mode(self) -> ShutdownMode {
-        match self {
-            Self::Hangup | Self::Terminate => ShutdownMode::Graceful,
-            Self::Interrupt => ShutdownMode::Fast,
-        }
-    }
 }
 
 // -----------------------------------------------------------------------------
@@ -560,7 +667,7 @@ impl SignalListeners {
     }
 
     /// Wait for `SIGHUP`, `SIGINT` or `SIGTERM`, whichever arrives first.
-    async fn wait(mut self) -> StopSignal {
+    async fn wait(&mut self) -> StopSignal {
         tokio::select! {
             () = next_signal(self.hangup.as_mut()) => StopSignal::Hangup,
             () = next_signal(self.interrupt.as_mut()) => StopSignal::Interrupt,
@@ -630,11 +737,46 @@ fn build_tokio(threads: usize, options: &RuntimeOptions) -> io::Result<TokioRunt
 }
 
 /// Wait for a stop signal and return the shutdown mode it asks for.
-async fn signal_stop(listeners: SignalListeners) -> ShutdownMode {
-    let received = listeners.wait().await;
-    let mode = received.mode();
-    info!(signal = received.name(), mode = mode.name(), "shutdown signal received");
-    mode
+async fn signal_stop(mut listeners: SignalListeners, delay: Duration, lifecycle: LifecycleHandle) -> ShutdownMode {
+    loop {
+        let received = listeners.wait().await;
+        match received {
+            StopSignal::Hangup => {
+                warn!("SIGHUP received during shutdown wait; ignoring because file watching owns reload");
+            },
+            StopSignal::Interrupt => {
+                info!(
+                    signal = received.name(),
+                    mode = ShutdownMode::Fast.name(),
+                    "shutdown signal received"
+                );
+                return ShutdownMode::Fast;
+            },
+            StopSignal::Terminate => {
+                let _ = lifecycle.begin_drain();
+                info!(signal = received.name(), "shutdown drain delay started");
+                let mode = wait_for_drain_delay(&mut listeners, delay).await;
+                info!(signal = received.name(), mode = mode.name(), "shutdown signal received");
+                return mode;
+            },
+        }
+    }
+}
+
+/// Wait for readiness-first handoff while retaining the fast-stop signal.
+async fn wait_for_drain_delay(listeners: &mut SignalListeners, delay: Duration) -> ShutdownMode {
+    let sleep = tokio::time::sleep(delay);
+    tokio::pin!(sleep);
+    loop {
+        tokio::select! {
+            () = &mut sleep => return ShutdownMode::Graceful,
+            received = listeners.wait() => match received {
+                StopSignal::Interrupt => return ShutdownMode::Fast,
+                StopSignal::Hangup => warn!("SIGHUP received during shutdown drain delay; ignoring"),
+                StopSignal::Terminate => warn!("repeated SIGTERM received during shutdown drain delay; continuing"),
+            },
+        }
+    }
 }
 
 /// Install a listener for `stop`; `None`, logged, when that fails.
@@ -688,13 +830,13 @@ mod tests {
     use tracing::Level;
 
     use super::*;
-    use crate::config::DEFAULT_CONFIG;
+    use crate::{config::DEFAULT_CONFIG, server::LifecyclePhase};
 
     #[test]
     fn run_with_shutdown_flips_the_watch_once_the_future_resolves() {
         let observed = Arc::new(AtomicBool::new(false));
         let seen = Arc::clone(&observed);
-        let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+        let (started_tx, started_rx) = oneshot::channel::<()>();
         let mut runtime = HyperRuntime::new(&config_with("runtime:\n  threads: 2\n"));
         runtime.add_service("watcher", move |mut shutdown| async move {
             _ = started_tx.send(());
@@ -714,10 +856,92 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one test covers every lifecycle phase the runtime publishes"
+    )]
+    /// Serve, drain, and stop publish the expected lifecycle phases.
+    fn run_with_shutdown_reports_serving_draining_and_stopped() {
+        let mut runtime = HyperRuntime::new(&config_with("runtime:\n  threads: 2\n"));
+        let lifecycle = runtime.lifecycle();
+        let serving = Arc::new(Mutex::new(None));
+        let serving_seen = Arc::clone(&serving);
+        let shutdown_lifecycle = lifecycle.clone();
+        let draining = Arc::new(Mutex::new(None));
+        let draining_seen = Arc::clone(&draining);
+        let service_lifecycle = lifecycle.clone();
+        runtime.add_required_service("probe", move |mut shutdown, ready| async move {
+            ready.ready();
+            drop(shutdown.wait_for(|stopping| *stopping).await);
+            *draining_seen.lock().unwrap() = Some(service_lifecycle.phase());
+        });
+        runtime.run_with_shutdown(Box::pin(async move {
+            for _ in 0..100 {
+                if shutdown_lifecycle.phase() == LifecyclePhase::Serving {
+                    *serving_seen.lock().unwrap() = Some(LifecyclePhase::Serving);
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        }));
+        assert_eq!(
+            *serving.lock().unwrap(),
+            Some(LifecyclePhase::Serving),
+            "required services must reach serving"
+        );
+        assert_eq!(
+            *draining.lock().unwrap(),
+            Some(LifecyclePhase::Draining),
+            "drain must precede service stop"
+        );
+        assert_eq!(
+            lifecycle.phase(),
+            LifecyclePhase::Stopped,
+            "runtime must be stopped after return"
+        );
+    }
+
+    #[tokio::test]
+    async fn required_services_gate_readiness_until_they_report_listening() {
+        let mut runtime = HyperRuntime::new(&config_with(""));
+        runtime.add_required_service("silent", |_shutdown, ready| async move {
+            std::future::pending::<()>().await;
+            ready.ready();
+        });
+        let (_sender, receiver) = watch::channel(false);
+        let mut services = ServiceSet::start(runtime.services, &receiver);
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), services.wait_for_required_ready())
+                .await
+                .is_err(),
+            "serving must wait while the required service holds back readiness"
+        );
+    }
+
+    #[tokio::test]
+    async fn required_service_readiness_completes_startup() {
+        let mut runtime = HyperRuntime::new(&config_with(""));
+        runtime.add_required_service("listening", |_shutdown, ready| async move {
+            ready.ready();
+            std::future::pending::<()>().await;
+        });
+        let (_sender, receiver) = watch::channel(false);
+        let mut services = ServiceSet::start(runtime.services, &receiver);
+
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), services.wait_for_required_ready())
+                .await
+                .is_ok_and(|ready| ready),
+            "a required service that reports readiness should complete startup"
+        );
+    }
+
+    #[test]
     fn service_that_ignores_the_watch_is_aborted_within_the_fast_bound() {
         let dropped = Arc::new(AtomicBool::new(false));
         let guard = DropFlag(Arc::clone(&dropped));
-        let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+        let (started_tx, started_rx) = oneshot::channel::<()>();
         let mut runtime = HyperRuntime::new(&config_with("runtime:\n  threads: 1\n"));
         runtime.add_service("stubborn", move |_shutdown| async move {
             _ = started_tx.send(());
@@ -795,7 +1019,7 @@ mod tests {
     fn a_panicking_service_is_logged_and_the_others_keep_running() {
         let observed = Arc::new(AtomicBool::new(false));
         let seen = Arc::clone(&observed);
-        let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+        let (started_tx, started_rx) = oneshot::channel::<()>();
         let mut runtime = HyperRuntime::new(&config_with("runtime:\n  threads: 2\n"));
         runtime.add_service("doomed", |_shutdown| async { panic!("service blew up") });
         runtime.add_service("survivor", move |mut shutdown| async move {
@@ -823,8 +1047,9 @@ mod tests {
         let observed = Arc::new(AtomicBool::new(false));
         let seen = Arc::clone(&observed);
         let mut runtime = HyperRuntime::new(&config_with("runtime:\n  threads: 2\n"));
-        runtime.add_required_service("failed-listener", |_shutdown| std::future::ready(()));
-        runtime.add_required_service("health", move |mut shutdown| async move {
+        runtime.add_required_service("failed-listener", |_shutdown, _ready| std::future::ready(()));
+        runtime.add_required_service("health", move |mut shutdown, ready| async move {
+            ready.ready();
             drop(shutdown.wait_for(|stopping| *stopping).await);
             seen.store(true, Ordering::SeqCst);
         });
@@ -845,7 +1070,7 @@ mod tests {
     #[expect(clippy::panic, reason = "exercise required-service panic supervision")]
     async fn required_service_panic_stops_supervision() {
         let mut runtime = HyperRuntime::new(&config_with(""));
-        runtime.add_required_service("failed-listener", |_shutdown| async { panic!("failed") });
+        runtime.add_required_service("failed-listener", |_shutdown, _ready| async { panic!("failed") });
         let (_sender, receiver) = watch::channel(false);
         let mut services = ServiceSet::start(runtime.services, &receiver);
         let mode = tokio::time::timeout(Duration::from_secs(2), services.serve_until(std::future::pending()))
@@ -885,14 +1110,8 @@ mod tests {
     }
 
     #[test]
-    fn sigterm_and_sighup_stop_gracefully_and_sigint_stops_fast() {
-        assert_eq!(
-            StopSignal::Terminate.mode(),
-            ShutdownMode::Graceful,
-            "SIGTERM is graceful"
-        );
-        assert_eq!(StopSignal::Hangup.mode(), ShutdownMode::Graceful, "SIGHUP is graceful");
-        assert_eq!(StopSignal::Interrupt.mode(), ShutdownMode::Fast, "SIGINT is fast");
+    /// Map each stop signal to its configured kind.
+    fn stop_signal_kind_maps_sigterm_sighup_and_sigint() {
         assert_eq!(
             StopSignal::Terminate.kind(),
             SignalKind::terminate(),
@@ -926,8 +1145,11 @@ mod tests {
     }
 
     #[test]
+    /// New runtimes read threads and the shutdown timeout.
     fn new_reads_threads_and_shutdown_timeout() {
-        let runtime = HyperRuntime::new(&config_with("shutdown_timeout_secs: 7\nruntime:\n  threads: 3\n"));
+        let runtime = HyperRuntime::new(&config_with(
+            "shutdown_timeout_secs: 7\nshutdown_drain_delay_secs: 2\nruntime:\n  threads: 3\n",
+        ));
 
         assert_eq!(runtime.options().threads, 3, "options should carry runtime.threads");
         assert_eq!(runtime.threads, 3, "the worker count should follow runtime.threads");
@@ -936,6 +1158,7 @@ mod tests {
             Duration::from_secs(7),
             "shutdown_timeout should follow shutdown_timeout_secs"
         );
+        assert_eq!(runtime.shutdown_drain_delay, Duration::from_secs(2));
     }
 
     #[test]

@@ -292,21 +292,25 @@ impl PaceReservation {
         available: usize,
         deadline: Option<Instant>,
     ) -> Result<(usize, Self), crate::FilterError> {
-        let prefix = self.mapped_prefix(available);
-        let bytes = prefix.output_bytes.unwrap_or_default();
-        let mut pending = PendingPrefix {
-            parent: self,
-            prefix: Some(prefix),
-        };
-        if let Some(prefix) = pending.prefix.as_mut() {
-            prefix.drain_transformed_charge(deadline).await?;
-            prefix.wait_ready(deadline).await?;
+        loop {
+            let prefix = self.mapped_prefix(available);
+            let bytes = prefix.output_bytes.unwrap_or_default();
+            let mut pending = PendingPrefix {
+                parent: self,
+                prefix: Some(prefix),
+            };
+            if let Some(prefix) = pending.prefix.as_mut() {
+                prefix.drain_transformed_charge(deadline).await?;
+                if !prefix.wait_ready(deadline).await? {
+                    continue;
+                }
+            }
+            let prefix = pending
+                .prefix
+                .take()
+                .ok_or_else(|| -> crate::FilterError { "missing bandwidth prefix".into() })?;
+            return Ok((usize::try_from(bytes).unwrap_or(usize::MAX), prefix));
         }
-        let prefix = pending
-            .prefix
-            .take()
-            .ok_or_else(|| -> crate::FilterError { "missing bandwidth prefix".into() })?;
-        Ok((usize::try_from(bytes).unwrap_or(usize::MAX), prefix))
     }
 
     /// Map output to limiter-position charges without reserving an oversized debt.
@@ -334,28 +338,30 @@ impl PaceReservation {
                 parent: self,
                 prefix: Some(portion),
             };
-            if let Some(portion) = pending.prefix.as_mut() {
-                portion.wait_ready(deadline).await?;
+            if let Some(portion) = pending.prefix.as_mut()
+                && !portion.wait_ready(deadline).await?
+            {
+                continue;
             }
             if let Some(portion) = pending.prefix.take() {
                 portion.commit();
             }
-        }
-        for grant in &mut self.grants {
-            grant.reserve();
         }
         Ok(())
     }
 
     /// Take one bounded portion from each oversized leg so their waits overlap.
     fn transformed_portion(&mut self) -> Option<Self> {
+        if self.output_bytes != Some(1) {
+            return None;
+        }
         let grants: Vec<_> = self
             .grants
             .iter_mut()
             .filter(|grant| grant.bytes > grant.max_prefix())
             .map(|grant| {
                 let quantum = grant.max_prefix();
-                grant.split_prefix(grant.bytes.saturating_sub(quantum).min(quantum))
+                grant.split_plan(grant.bytes.saturating_sub(quantum).min(quantum))
             })
             .collect();
         (!grants.is_empty()).then_some(Self {
@@ -397,18 +403,21 @@ impl PaceReservation {
         }
     }
 
-    /// Acquire every leg, releasing earlier claims before any asynchronous wait.
-    async fn wait_ready(&mut self, deadline: Option<Instant>) -> Result<(), crate::FilterError> {
+    /// Acquire every leg, or request remapping if concurrent claims reduce capacity.
+    async fn wait_ready(&mut self, deadline: Option<Instant>) -> Result<bool, crate::FilterError> {
         loop {
             let blocked = self.grants.iter_mut().find_map(|grant| match grant.try_acquire() {
                 Admission::Ready => None,
-                wait @ (Admission::At(_) | Admission::Busy(_) | Admission::Overflow) => Some(wait),
+                wait @ (Admission::At(..) | Admission::Busy(_) | Admission::Resize | Admission::Overflow) => Some(wait),
             });
             let Some(blocked) = blocked else {
-                return Ok(());
+                return Ok(true);
             };
             for grant in &mut self.grants {
                 grant.unclaim();
+            }
+            if matches!(blocked, Admission::Resize) {
+                return Ok(false);
             }
             wait_for_admission(blocked, deadline).await?;
         }
@@ -449,8 +458,8 @@ pub(crate) fn push_download(extensions: &mut RequestExtensions, grant: Bandwidth
 fn append_charge(charges: &mut Vec<BandwidthGrant>, mut grant: BandwidthGrant) {
     for charge in charges.iter_mut() {
         match charge.merge(grant) {
-            Ok(()) => return,
-            Err(unmerged) => grant = unmerged,
+            None => return,
+            Some(unmerged) => grant = unmerged,
         }
     }
     charges.push(grant);
@@ -614,15 +623,7 @@ async fn wait_for_admission(wait: Admission, deadline: Option<Instant>) -> Resul
     if matches!(wait, Admission::Overflow) {
         return Err("bandwidth release time exceeds the monotonic clock range".into());
     }
-    let waiting = async {
-        match wait {
-            Admission::At(release) => tokio::time::sleep_until(release.into()).await,
-            Admission::Busy(mut changed) => {
-                let _settled = changed.changed().await;
-            },
-            Admission::Ready | Admission::Overflow => {},
-        }
-    };
+    let waiting = admission_changed(wait);
     if let Some(deadline) = deadline {
         tokio::time::timeout_at(deadline.into(), waiting)
             .await
@@ -631,6 +632,22 @@ async fn wait_for_admission(wait: Admission, deadline: Option<Instant>) -> Resul
         waiting.await;
     }
     Ok(())
+}
+
+/// Wake on the planned refill time or any settlement that can return allowance.
+async fn admission_changed(wait: Admission) {
+    match wait {
+        Admission::At(release, mut changed) => {
+            tokio::select! {
+                () = tokio::time::sleep_until(release.into()) => {},
+                _settled = changed.changed() => {},
+            }
+        },
+        Admission::Busy(mut changed) => {
+            let _settled = changed.changed().await;
+        },
+        Admission::Ready | Admission::Resize | Admission::Overflow => {},
+    }
 }
 
 /// Commit each grant so its drop does not refund sent bytes.
@@ -737,6 +754,80 @@ mod tests {
             second.prepare(99).delay().is_zero(),
             "the other limiter charges only its own byte"
         );
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_claim_wakes_a_writer_waiting_for_refill() {
+        let schedule = Schedule::new(1, 1000);
+        let mut used = PaceReservation {
+            grants: vec![schedule.prepare(999)],
+            output_bytes: None,
+        };
+        let (_, permit) = used.acquire_prefix(999, None).await.unwrap();
+        permit.commit_bytes(999);
+        let mut pending = PaceReservation {
+            grants: vec![schedule.prepare(1)],
+            output_bytes: None,
+        };
+        let (_, held) = pending.acquire_prefix(1, None).await.unwrap();
+        let mut sibling = PaceReservation {
+            grants: vec![schedule.prepare(1)],
+            output_bytes: None,
+        };
+        let release = async {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            drop(held);
+        };
+        let admission = sibling.acquire_prefix(1, Some(Instant::now() + Duration::from_millis(100)));
+        let ((), admitted) = tokio::join!(release, admission);
+        let (bytes, permit) = admitted.expect("returned allowance must wake an obsolete refill timer");
+        assert_eq!(bytes, 1);
+        permit.commit_bytes(bytes);
+        drop(used);
+        drop(pending);
+        drop(sibling);
+        assert!(schedule.prepare(1).delay() > Duration::from_millis(800));
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one trace verifies remapping and refund around an outstanding write"
+    )]
+    async fn resizing_a_prefix_uses_allowance_left_by_a_concurrent_writer() {
+        let schedule = Schedule::new(1, 1000);
+        let mut large = PaceReservation {
+            grants: vec![schedule.prepare(1000)],
+            output_bytes: None,
+        };
+        let mut selected = large.mapped_prefix(1000);
+        let mut small = PaceReservation {
+            grants: vec![schedule.prepare(1)],
+            output_bytes: None,
+        };
+        let (_, held) = small.acquire_prefix(1, None).await.unwrap();
+        assert!(
+            !selected.wait_ready(None).await.unwrap(),
+            "the raced prefix must be remapped"
+        );
+        large.append(selected);
+        let (bytes, permit) = large
+            .acquire_prefix(1000, Some(Instant::now() + Duration::from_millis(30)))
+            .await
+            .unwrap();
+        assert_eq!(
+            bytes, 999,
+            "remaining allowance must progress without waiting for the held write"
+        );
+        permit.commit_bytes(0);
+        held.commit_bytes(1);
+        drop(large);
+        drop(small);
+        assert!(
+            schedule.prepare(999).delay().is_zero(),
+            "the cancelled tail is fully refunded"
+        );
+        assert!(schedule.prepare(1000).delay() > Duration::from_millis(900));
     }
 
     #[tokio::test]

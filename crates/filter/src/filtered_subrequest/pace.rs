@@ -150,6 +150,36 @@ mod tests {
     use super::*;
     use crate::bandwidth::{Schedule, push_upload};
 
+    fn test_upload(schedule: &Arc<Schedule>) -> Arc<Upload> {
+        let mut extensions = RequestExtensions::new();
+        push_upload(&mut extensions, schedule.prepare(1));
+        Upload::from_extensions(
+            &mut extensions,
+            Instant::now() + std::time::Duration::from_secs(1),
+            &Arc::new(AtomicBool::new(true)),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn another_upload_uses_the_burst_while_a_prepared_write_is_stalled() {
+        let schedule = Schedule::new(1, 1000);
+        let stalled = test_upload(&schedule);
+        let sibling = test_upload(&schedule);
+        assert_eq!(stalled.prepare(1).await.unwrap(), 1);
+        let admitted = tokio::time::timeout(std::time::Duration::from_millis(30), sibling.prepare(1)).await;
+        assert_eq!(
+            admitted.expect("999 unused burst bytes must remain available").unwrap(),
+            1
+        );
+        sibling.sent(1);
+        stalled.sent(0);
+        drop(sibling);
+        drop(stalled);
+        assert!(schedule.prepare(999).delay().is_zero());
+        assert!(schedule.prepare(1000).delay() > std::time::Duration::from_millis(900));
+    }
+
     #[tokio::test]
     async fn dropping_after_admission_refunds_the_entire_unsent_initial_burst() {
         let schedule = Schedule::new(1, 1_000_000);

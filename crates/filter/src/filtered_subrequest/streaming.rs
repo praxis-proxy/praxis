@@ -66,6 +66,11 @@ impl PendingOutput {
         deadline: Instant,
     ) -> Result<Bytes, FilterError> {
         #[cfg(feature = "bandwidth")]
+        if self.body.is_empty() {
+            super::pace::finish_plan(self.plan.take(), deadline).await?;
+            return Ok(Bytes::new());
+        }
+        #[cfg(feature = "bandwidth")]
         if let Some(plan) = self.plan.as_mut() {
             let (bytes, permit) = plan.acquire_prefix(self.body.len(), Some(deadline)).await?;
             let prefix = self.body.split_to(bytes);
@@ -133,18 +138,29 @@ async fn release_output(
     deadline: Instant,
 ) -> Result<Option<Bytes>, FilterError> {
     let mut pending = std::mem::take(chunks);
-    let Some(mut output) = pending.pop_front() else {
-        return Ok(None);
-    };
-    *releasing = true;
-    let result = output.next_prefix(deadline).await;
-    *releasing = false;
-    let prefix = result?;
-    if !output.body.is_empty() {
-        pending.push_front(output);
+    while let Some(mut output) = pending.pop_front() {
+        *releasing = true;
+        let result = output.next_prefix(deadline).await;
+        *releasing = false;
+        let prefix = result?;
+        if !output.body.is_empty() {
+            pending.push_front(output);
+        }
+        if !prefix.is_empty() {
+            *chunks = pending;
+            return Ok(Some(prefix));
+        }
     }
-    *chunks = pending;
-    Ok(Some(prefix))
+    Ok(None)
+}
+
+/// Completion is checked by either the callout or the IRR transition owner.
+enum OutputLimitScope {
+    /// A callout's remaining bound also applies to its completion hooks.
+    IncludingCompletion,
+    /// IRR selects completion output before applying its own ceiling.
+    #[cfg(feature = "iterative-request-router")]
+    ActiveBody,
 }
 
 /// Streaming body implementation for a filtered sub-request's response.
@@ -161,6 +177,8 @@ pub(crate) struct FilteredStreamingBody {
     pending_chunks: VecDeque<PendingOutput>,
     /// Callout admission ceiling checked before waiting on any logical output.
     remaining_limit: Option<(usize, usize)>,
+    /// Application callouts bound completion here; IRR checks it after transitions.
+    limit_scope: OutputLimitScope,
     /// Transport byte ceiling that ended this stream, when it overflowed.
     transport_overflow_limit: Option<usize>,
     /// A cancelled release must not let a later pull skip missing output.
@@ -177,6 +195,7 @@ impl FilteredStreamingBody {
             deferred_completion_output: None,
             pending_chunks: VecDeque::new(),
             remaining_limit: None,
+            limit_scope: OutputLimitScope::IncludingCompletion,
             transport_overflow_limit: None,
             release_in_progress: false,
         }
@@ -330,17 +349,32 @@ impl FilteredStreamingBody {
                 plan,
             });
         }
-        if let Some(body) = body.filter(|body| !body.is_empty()) {
-            #[cfg(feature = "bandwidth")]
-            let plan = crate::bandwidth::take_download(&mut self.continuation.extensions);
+        self.enqueue_callback(body);
+    }
+
+    /// Keep a successful consuming callback's plan even when it has no output.
+    fn enqueue_callback(&mut self, body: Option<Bytes>) {
+        let body = body.unwrap_or_default();
+        #[cfg(feature = "bandwidth")]
+        let plan = crate::bandwidth::take_download(&mut self.continuation.extensions);
+        #[cfg(feature = "bandwidth")]
+        let consumed = plan.as_ref().is_some_and(|plan| plan.remaining() != 0);
+        #[cfg(not(feature = "bandwidth"))]
+        let consumed = false;
+        if !body.is_empty() || consumed {
             self.pending_chunks.push_back(PendingOutput {
                 body,
                 #[cfg(feature = "bandwidth")]
                 plan,
             });
-        } else {
-            crate::cancel_download_pace(&mut self.continuation.extensions);
         }
+    }
+
+    /// Bound ordinary IRR output while leaving completion to transition selection.
+    #[cfg(feature = "iterative-request-router")]
+    pub(crate) fn limit_active_output(&mut self, remaining: usize, limit: usize) {
+        self.remaining_limit = Some((remaining, limit));
+        self.limit_scope = OutputLimitScope::ActiveBody;
     }
 
     /// Admit the complete logical output before a wait can consume its allowance.
@@ -372,7 +406,9 @@ impl FilteredStreamingBody {
             .extensions
             .get::<PendingStreamChunks>()
             .map_or(0, PendingStreamChunks::len_bytes);
-        self.check_output_limit(emitted_len.saturating_add(body.as_ref().map_or(0, Bytes::len)))?;
+        if matches!(self.limit_scope, OutputLimitScope::IncludingCompletion) {
+            self.check_output_limit(emitted_len.saturating_add(body.as_ref().map_or(0, Bytes::len)))?;
+        }
         self.enqueue_filtered(body);
         Ok((!self.pending_chunks.is_empty()).then(|| CompletionOutput {
             chunks: std::mem::take(&mut self.pending_chunks),
@@ -514,8 +550,10 @@ impl StreamingResponseBody for FilteredStreamingBody {
             self.cancel().await;
             return Err("filtered_subrequest: output release was cancelled".into());
         }
-        if !self.pending_chunks.is_empty() {
-            return Box::pin(self.release_pending()).await;
+        if !self.pending_chunks.is_empty()
+            && let Some(chunk) = Box::pin(self.release_pending()).await?
+        {
+            return Ok(Some(chunk));
         }
         if self.finished {
             return Ok(None);
@@ -835,7 +873,7 @@ impl StreamingResponseBody for CalloutStreamingBody {
     clippy::unwrap_used,
     reason = "streaming deadline integration setup"
 )]
-mod tests {
+pub(crate) mod tests {
     use std::{
         collections::{HashMap, VecDeque},
         sync::Arc,
@@ -847,6 +885,8 @@ mod tests {
     use http::HeaderMap;
     use praxis_core::subrequest::{StreamLimits, SubRequest, SubRequestClient, SubRequestError};
 
+    #[cfg(feature = "bandwidth")]
+    use super::OutputLimitScope;
     use super::{CalloutResponseTooLarge, CalloutStreamingBody, FilteredStreamingBody, std_instant_to_tokio};
 
     #[cfg(feature = "bandwidth")]
@@ -934,7 +974,7 @@ mod tests {
 
 
     #[cfg(feature = "bandwidth")]
-    fn paced_output(
+    pub(crate) fn paced_output(
         rate: u64,
         burst: u64,
         emitted: usize,
@@ -969,11 +1009,146 @@ mod tests {
             deferred_completion_output: None,
             pending_chunks: VecDeque::new(),
             remaining_limit: None,
+            limit_scope: OutputLimitScope::IncludingCompletion,
             transport_overflow_limit: None,
             release_in_progress: false,
         };
         body.enqueue_filtered((callback != 0).then(|| Bytes::from(vec![b'b'; callback])));
         (body, schedule)
+    }
+
+    #[cfg(feature = "bandwidth")]
+    struct ConsumeResponse {
+        empty: bool,
+        fail: bool,
+    }
+
+    #[cfg(feature = "bandwidth")]
+    #[async_trait]
+    impl crate::HttpFilter for ConsumeResponse {
+        fn name(&self) -> &'static str {
+            "consume_response_test"
+        }
+
+        async fn on_request(
+            &self,
+            _ctx: &mut crate::HttpFilterContext<'_>,
+        ) -> Result<crate::FilterAction, crate::FilterError> {
+            Ok(crate::FilterAction::Continue)
+        }
+
+        fn response_body_access(&self) -> crate::BodyAccess {
+            crate::BodyAccess::ReadWrite(crate::BodyRequirement::Optional)
+        }
+
+        fn on_response_body(
+            &self,
+            _ctx: &mut crate::HttpFilterContext<'_>,
+            body: &mut Option<Bytes>,
+            end_of_stream: bool,
+        ) -> Result<crate::FilterAction, crate::FilterError> {
+            if !end_of_stream {
+                if self.fail {
+                    return Err("consuming transform failed".into());
+                }
+                *body = self.empty.then(Bytes::new);
+            }
+            Ok(crate::FilterAction::Continue)
+        }
+    }
+
+    #[cfg(feature = "bandwidth")]
+    fn consuming_body(empty: bool, fail: bool) -> FilteredStreamingBody {
+        let (mut inner, _) = paced_output(1, 1000, 0, 0);
+        let config = serde_yaml::from_str("mode: per_ip\ndownload_bytes_per_sec: 1\nburst_bytes: 1000").unwrap();
+        let limiter = crate::BandwidthLimitFilter::from_config(&config).unwrap();
+        let filters: Vec<Box<dyn crate::HttpFilter>> = vec![Box::new(ConsumeResponse { empty, fail }), limiter];
+        inner.continuation.pipeline = Arc::new(crate::FilterPipeline::from_filters(
+            filters
+                .into_iter()
+                .enumerate()
+                .map(|(id, filter)| {
+                    crate::pipeline::filter::PipelineFilter::new(id, crate::AnyFilter::Http(filter), vec![], vec![])
+                })
+                .collect(),
+        ));
+        inner.continuation.client_addr = Some(std::net::IpAddr::from([192, 0, 2, 1]));
+        inner.continuation.response_body_mode = crate::BodyMode::Stream;
+        inner
+    }
+
+    #[cfg(all(feature = "bandwidth", feature = "iterative-request-router"))]
+    #[test]
+    fn active_irr_ceiling_does_not_preempt_completion_transition_selection() {
+        let (mut body, schedule) = paced_output(1, 100, 0, 0);
+        body.limit_active_output(0, 100);
+        crate::bandwidth::push_download(&mut body.continuation.extensions, schedule.prepare(100));
+        let output = body
+            .release_completion(Some(Bytes::from(vec![b'x'; 100])))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            output.len_bytes(),
+            100,
+            "IRR must still select or suppress completion after the step"
+        );
+        drop(output);
+        drop(body);
+        assert!(
+            schedule.prepare(100).delay().is_zero(),
+            "unselected completion is refundable"
+        );
+    }
+
+    #[cfg(feature = "bandwidth")]
+    #[tokio::test]
+    async fn consuming_transforms_charge_input_for_none_and_empty_output() {
+        for empty in [false, true] {
+            let mut body = consuming_body(empty, false);
+            let output = body.filter_upstream_chunk(Bytes::from(vec![b'x'; 1000])).unwrap();
+            assert!(output.as_ref().is_none_or(Bytes::is_empty));
+            let template = crate::bandwidth::generated_download_plan(&body.continuation.extensions, 1000).unwrap();
+            body.enqueue_filtered(output);
+            assert!(
+                body.release_pending().await.unwrap().is_none(),
+                "input-only accounting is not a stream chunk"
+            );
+            assert!(
+                template.delay() > Duration::from_secs(900),
+                "the successful consuming transform spends its input allowance"
+            );
+            let output = body.filter_upstream_chunk(Bytes::from(vec![b'x'; 1000])).unwrap();
+            body.enqueue_filtered(output);
+            assert!(
+                body.release_pending().await.is_err(),
+                "the second consumed input cannot bypass pacing"
+            );
+            crate::StreamingResponseBody::cancel(&mut body).await;
+            drop(body);
+        }
+    }
+
+    #[cfg(feature = "bandwidth")]
+    #[tokio::test]
+    async fn failed_or_cancelled_consumption_refunds_the_unadmitted_input() {
+        for empty in [false, true] {
+            for fail in [false, true] {
+                let mut body = consuming_body(empty, fail);
+                let result = body.filter_upstream_chunk(Bytes::from(vec![b'x'; 1000]));
+                let template = crate::bandwidth::generated_download_plan(&body.continuation.extensions, 1000).unwrap();
+                if let Err(error) = result {
+                    body.handle_filter_error(error).await.unwrap();
+                } else {
+                    body.enqueue_filtered(result.unwrap());
+                }
+                crate::StreamingResponseBody::cancel(&mut body).await;
+                drop(body);
+                assert!(
+                    template.delay().is_zero(),
+                    "failed or abandoned processing must not spend allowance"
+                );
+            }
+        }
     }
 
     #[cfg(feature = "bandwidth")]

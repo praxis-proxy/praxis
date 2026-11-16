@@ -28,7 +28,7 @@ pub(crate) struct Schedule {
     quantum: u64,
     /// Short-held state lock, never retained while waiting or writing.
     inner: Mutex<ScheduleInner>,
-    /// Wakes writers when the active prefix is settled.
+    /// Wakes writers when in-flight allowance is settled.
     changed: watch::Sender<()>,
 }
 
@@ -44,8 +44,8 @@ struct ScheduleInner {
     generation: u64,
     /// Arrival time derived only from accepted writes.
     committed_tat: Option<i128>,
-    /// At most one prefix is handed to a writer at a time.
-    active: bool,
+    /// Allowance pinned by admitted writes until their accepted bytes are known.
+    claimed_ns: i128,
 }
 
 /// Prepared charge or owned reservation for one bounded prefix.
@@ -62,10 +62,10 @@ pub(crate) struct BandwidthGrant {
     created_at: i128,
     /// Generation against which the prefix was reserved.
     generation: u64,
-    /// Prepared charges do not occupy the schedule until split into a prefix.
+    /// Whether this grant contributes to the planned-arrival ledger.
     reserved: bool,
-    /// Whether this prefix is currently handed to a writer.
-    acquired: bool,
+    /// Original admitted cost, including any tail a partial write must release.
+    claimed_ns: i128,
     /// Deterministic clock for model tests using `reserve_at`.
     synthetic_now: Option<i128>,
 }
@@ -75,9 +75,11 @@ pub(super) enum Admission {
     /// Every applicable budget is ready.
     Ready,
     /// An absolute monotonic release time has not arrived.
-    At(Instant),
-    /// Another writer owns this budget's active prefix.
+    At(Instant, watch::Receiver<()>),
+    /// All burst allowance is held by writes whose accepted bytes are unknown.
     Busy(watch::Receiver<()>),
+    /// Another writer changed the largest prefix that can currently fit.
+    Resize,
     /// The requested release timestamp cannot be represented.
     Overflow,
 }
@@ -102,7 +104,7 @@ impl Schedule {
                 outstanding: 0,
                 generation: 0,
                 committed_tat: None,
-                active: false,
+                claimed_ns: 0,
             }),
             changed,
         })
@@ -139,7 +141,7 @@ impl Schedule {
             created_at: now,
             generation: 0,
             reserved: false,
-            acquired: false,
+            claimed_ns: 0,
             synthetic_now,
         }
     }
@@ -152,7 +154,7 @@ impl Schedule {
     /// Check freshness using the supplied monotonic clock.
     pub(crate) fn is_fresh_at(&self, now: i128) -> bool {
         let inner = self.lock();
-        !inner.active
+        inner.claimed_ns == 0
             && inner.outstanding == 0
             && (!inner.initialized || inner.tat <= now.saturating_sub(self.burst_ns))
     }
@@ -179,35 +181,57 @@ impl BandwidthGrant {
     pub(super) fn quantum(&self) -> u64 {
         let now = self.now_ns();
         let inner = self.schedule.lock();
-        let base = normalized_base(inner.tat, inner.initialized, now, self.schedule.burst_ns);
-        let credit = u128::try_from(now.saturating_sub(base)).unwrap_or_default();
+        let planned = normalized_base(inner.tat, inner.initialized, now, self.schedule.burst_ns);
+        let held = inner.claimed_ns.saturating_sub(self.claimed_ns);
+        let committed = normalized_base(
+            inner.committed_tat.unwrap_or(0),
+            inner.committed_tat.is_some(),
+            now,
+            self.schedule.burst_ns,
+        );
+        let credit =
+            u128::try_from(now.saturating_sub(planned.max(committed.saturating_add(held)))).unwrap_or_default();
+        let capacity = self.capacity_quantum(&inner);
         drop(inner);
         let available = credit
             .saturating_mul(u128::from(self.schedule.rate))
             .saturating_div(1_000_000_000);
         let refill = self.schedule.rate.div_ceil(100).max(1);
-        u64::try_from(available)
-            .unwrap_or(u64::MAX)
-            .max(refill)
-            .min(self.schedule.quantum)
+        u64::try_from(available).unwrap_or(u64::MAX).max(refill).min(capacity)
     }
 
-    /// Largest admissible charge, independent of allowance already reserved.
+    /// Largest progress quantum not pinned by another in-flight write.
     pub(super) fn max_prefix(&self) -> u64 {
-        self.schedule.quantum
+        self.capacity_quantum(&self.schedule.lock())
     }
 
-    /// Coalesce prepared charges from repeated body callbacks on one budget.
-    pub(super) fn merge(&mut self, mut other: Self) -> Result<(), Self> {
+    /// Bound a prefix by the unused burst, with one byte to wait on a full budget.
+    fn capacity_quantum(&self, inner: &ScheduleInner) -> u64 {
+        if self.schedule.burst_ns == 0 {
+            return self.schedule.quantum;
+        }
+        let held = inner.claimed_ns.saturating_sub(self.claimed_ns);
+        let free = u128::try_from(self.schedule.burst_ns.saturating_sub(held)).unwrap_or_default();
+        let bytes = free
+            .saturating_mul(u128::from(self.schedule.rate))
+            .saturating_div(1_000_000_000);
+        u64::try_from(bytes)
+            .unwrap_or(u64::MAX)
+            .min(self.schedule.quantum)
+            .max(1)
+    }
+
+    /// Coalesce matching charges, returning an unrelated charge unchanged.
+    pub(super) fn merge(&mut self, mut other: Self) -> Option<Self> {
         if !Arc::ptr_eq(&self.schedule, &other.schedule) {
-            return Err(other);
+            return Some(other);
         }
         self.refund();
         other.refund();
         self.bytes = self.bytes.saturating_add(other.bytes);
         self.cost_ns = bytes_to_ns(self.bytes, self.schedule.rate);
         self.created_at = self.created_at.min(other.created_at);
-        Ok(())
+        None
     }
 
     /// Split a prepared charge without adding any debt to the shared schedule.
@@ -219,39 +243,50 @@ impl BandwidthGrant {
         self.schedule.grant(taken, self.created_at, self.synthetic_now)
     }
 
-    /// Reserve a bounded prefix, leaving its unsent tail as a non-debiting plan.
-    pub(super) fn split_prefix(&mut self, bytes: u64) -> Self {
-        let mut prefix = self.split_plan(bytes);
-        prefix.reserve();
-        prefix
-    }
-
-    /// Try to acquire exclusive ownership of this prefix's write allowance.
+    /// Atomically claim this prefix while leaving other writers the unused burst.
     pub(super) fn try_acquire(&mut self) -> Admission {
+        if self.claimed_ns != 0 || self.cost_ns == 0 {
+            return Admission::Ready;
+        }
         let now = self.now_ns();
         let mut inner = self.schedule.lock();
-        let release = self.release_with(&inner, now);
-        if inner.active {
-            return Admission::Busy(self.schedule.changed.subscribe());
+        if let Some(wait) = self.capacity_wait(&inner) {
+            return wait;
         }
+        let release = self.release_with(&inner, now);
         if release > now {
             return self
                 .schedule
                 .epoch
                 .checked_add(delay_between(0, release))
-                .map_or(Admission::Overflow, Admission::At);
+                .map_or(Admission::Overflow, |release| {
+                    Admission::At(release, self.schedule.changed.subscribe())
+                });
         }
-        inner.active = true;
+        inner.claimed_ns = inner.claimed_ns.saturating_add(self.cost_ns);
         drop(inner);
-        self.acquired = true;
+        self.claimed_ns = self.cost_ns;
         Admission::Ready
     }
 
-    /// Release a claim before waiting on another budget, preventing lock-order stalls.
+    /// Full held allowance needs settlement; a partially held burst needs resizing.
+    fn capacity_wait(&self, inner: &ScheduleInner) -> Option<Admission> {
+        if inner.claimed_ns == 0 {
+            return None;
+        }
+        if inner.claimed_ns >= self.schedule.burst_ns {
+            return Some(Admission::Busy(self.schedule.changed.subscribe()));
+        }
+        (inner.claimed_ns.saturating_add(self.cost_ns) > self.schedule.burst_ns).then_some(Admission::Resize)
+    }
+
+    /// Release just this writer's claim before a wait on another budget.
     pub(super) fn unclaim(&mut self) {
-        if self.acquired {
-            self.schedule.lock().active = false;
-            self.acquired = false;
+        if self.claimed_ns != 0 {
+            let mut inner = self.schedule.lock();
+            inner.claimed_ns = inner.claimed_ns.saturating_sub(self.claimed_ns);
+            drop(inner);
+            self.claimed_ns = 0;
             self.schedule.changed.send_replace(());
         }
     }
@@ -268,11 +303,9 @@ impl BandwidthGrant {
         inner.committed_tat = Some(self.accepted_release(&inner, now));
         inner.outstanding = inner.outstanding.saturating_sub(1);
         finish_planning(&mut inner);
-        if self.acquired {
-            inner.active = false;
-        }
+        inner.claimed_ns = inner.claimed_ns.saturating_sub(self.claimed_ns);
         self.reserved = false;
-        self.acquired = false;
+        self.claimed_ns = 0;
         drop(inner);
         self.schedule.changed.send_replace(());
     }
@@ -307,7 +340,7 @@ impl BandwidthGrant {
     }
 
     /// Record this prefix in planned debt exactly once.
-    pub(super) fn reserve(&mut self) {
+    fn reserve(&mut self) {
         if self.reserved || self.cost_ns == 0 {
             return;
         }
@@ -341,11 +374,9 @@ impl BandwidthGrant {
             }
         }
         finish_planning(&mut inner);
-        if self.acquired {
-            inner.active = false;
-        }
+        inner.claimed_ns = inner.claimed_ns.saturating_sub(self.claimed_ns);
         self.reserved = false;
-        self.acquired = false;
+        self.claimed_ns = 0;
         drop(inner);
         self.schedule.changed.send_replace(());
     }
@@ -378,7 +409,7 @@ impl BandwidthGrant {
             )
             .saturating_add(self.cost_ns)
         };
-        planned.max(committed)
+        planned.max(committed.saturating_add(inner.claimed_ns.saturating_sub(self.claimed_ns)))
     }
 
     /// Clock selected by production or a deterministic model test.
@@ -436,6 +467,92 @@ fn bytes_to_ns(bytes: u64, rate: u64) -> i128 {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one deterministic model checks every accepted-byte interval across four outstanding writers"
+    )]
+    fn concurrent_admission_preserves_the_budget_across_late_partial_writes() {
+        let schedule = Schedule::new(10, 10);
+        let mut held: Vec<BandwidthGrant> = Vec::new();
+        let mut random = 17_u64;
+        let mut total = 0_u64;
+        let mut accepted = vec![(0_i128, 0_u64)];
+        for step in 0_i128..1000 {
+            let now = step.saturating_mul(50_000_000);
+            random = random.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            if random.rotate_left(7).is_multiple_of(3) && held.len() < 4 {
+                let mut grant = schedule.grant(random.rem_euclid(10).saturating_add(1), now, Some(now));
+                if matches!(grant.try_acquire(), Admission::Ready) {
+                    held.push(grant);
+                }
+            } else if !held.is_empty() {
+                let index = usize::try_from(random.rem_euclid(u64::try_from(held.len()).unwrap())).unwrap();
+                let mut grant = held.swap_remove(index);
+                grant.synthetic_now = Some(now);
+                let bytes = random.rotate_right(11).rem_euclid(grant.bytes.saturating_add(1));
+                let before = total;
+                total = total.saturating_add(bytes);
+                grant.commit_partial(bytes);
+                for (at, prior) in &accepted {
+                    let refill =
+                        u64::try_from(now.saturating_sub(*at).saturating_mul(10).saturating_div(1_000_000_000))
+                            .unwrap();
+                    assert!(
+                        total.saturating_sub(*prior) <= 10_u64.saturating_add(refill),
+                        "accepted writes exceeded a burst-plus-refill interval"
+                    );
+                }
+                if bytes != 0 {
+                    accepted.push((now, before));
+                }
+            }
+        }
+        assert!(accepted.len() > 20, "the trace must exercise repeated accepted writes");
+        drop(held);
+        assert_eq!(
+            schedule.lock().claimed_ns,
+            0,
+            "all unfinished writes refund their held allowance"
+        );
+    }
+
+    #[test]
+    fn pending_allowance_is_pinned_across_refill_until_the_late_write_commits() {
+        let schedule = Schedule::new(1000, 1000);
+        let mut late = schedule.grant(1, 0, Some(0));
+        assert!(matches!(late.try_acquire(), Admission::Ready));
+        let mut first = schedule.grant(999, 0, Some(0));
+        assert!(matches!(first.try_acquire(), Admission::Ready));
+        first.commit();
+        let mut too_large = schedule.grant(1000, 2_000_000_000, Some(2_000_000_000));
+        assert!(matches!(too_large.try_acquire(), Admission::Resize));
+        drop(too_large);
+        let mut later = schedule.grant(999, 2_000_000_000, Some(2_000_000_000));
+        assert!(matches!(later.try_acquire(), Admission::Ready));
+        later.commit();
+        late.synthetic_now = Some(2_000_000_000);
+        late.commit();
+        let mut next = schedule.grant(1, 2_000_000_000, Some(2_000_000_000));
+        assert!(
+            matches!(next.try_acquire(), Admission::At(..)),
+            "late and current writes share one burst"
+        );
+    }
+
+    #[test]
+    fn a_partial_commit_releases_the_entire_original_claim() {
+        let schedule = Schedule::new(1, 1000);
+        let mut first = schedule.grant(1000, 0, Some(0));
+        assert!(matches!(first.try_acquire(), Admission::Ready));
+        first.commit_partial(1);
+        let mut next = schedule.grant(999, 0, Some(0));
+        assert!(matches!(next.try_acquire(), Admission::Ready));
+        drop(next);
+        assert_eq!(schedule.lock().claimed_ns, 0);
+        assert_eq!(schedule.reserve_at(1000, 0).delay(), Duration::from_secs(1));
+    }
 
     #[test]
     fn cancelling_a_pre_refill_grant_does_not_create_a_second_burst() {
