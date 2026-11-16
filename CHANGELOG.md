@@ -19,6 +19,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Expose compact JSON sizing and capped serialization utilities in
+  `praxis_filter::json_size` for built-in and external filters.
+
 - Add `shutdown_drain_delay_secs` for readiness-first SIGTERM handoff. The
   process becomes unready, waits for the configured delay, then begins
   graceful connection shutdown; HTTP/1 responses during the drain advertise
