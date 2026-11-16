@@ -43,9 +43,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `FilterMetadata` instead of a `HashMap<String, String>`. Its `insert`
   enforces the key, value and entry limits and returns
   `Result<Option<String>, MetadataRejected>`, so writes through the field can
-  no longer bypass them; `get` returns `Option<&str>`, and there is no
-  `entry`, `get_mut` or `iter_mut`. Custom Rust filters that hold large or
-  growing state in `filter_metadata` should move it to `insert_filter_state`.
+  no longer bypass them. A rejection names the `MetadataLimit` it exceeded
+  and hands back the key and value (`MetadataRejected::into_entry`).
+  `get` returns `Option<&str>`, and there is no `entry`, `get_mut` or
+  `iter_mut`. Custom Rust filters that hold large or growing state in
+  `filter_metadata` should move it to `insert_filter_state`.
 - **Breaking:** `HttpFilterContext::get_metadata` and `set_metadata` are
   removed. Read with `ctx.filter_metadata.get(key)`. Write with
   `ctx.filter_metadata.insert(key, value)`, adding

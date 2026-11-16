@@ -164,7 +164,7 @@ pub use filtered_subrequest::{
 };
 pub use grpc_response::GrpcErrorMapping;
 pub use load_balancing::slow_start::{SlowStartGeneration, SlowStartRegistry};
-pub use metadata::{FilterMetadata, MetadataRejected};
+pub use metadata::{FilterMetadata, MetadataLimit, MetadataRejected};
 #[cfg(feature = "upstream-binding")]
 pub use pipeline::catalog::{ClusterApplicationCatalog, ClusterApplicationMetadata, ClusterMetadataDeclaration};
 pub use pipeline::{

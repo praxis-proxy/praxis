@@ -3,7 +3,7 @@
 
 //! Bounded per-request string metadata shared across filters and lifecycle phases.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -79,13 +79,14 @@ impl FilterMetadata {
     ///
     /// # Errors
     ///
-    /// Returns [`MetadataRejected`], leaving the metadata unchanged, if:
+    /// Returns [`MetadataRejected`], leaving the metadata unchanged and
+    /// handing back `key` and `value`, if:
     /// - `key` is empty or longer than 64 bytes
     /// - `value` is longer than 256 bytes
     /// - `key` is new and the metadata already holds 128 entries
     ///
     /// ```
-    /// use praxis_filter::{FilterMetadata, MetadataRejected};
+    /// use praxis_filter::{FilterMetadata, MetadataLimit};
     ///
     /// let mut metadata = FilterMetadata::default();
     /// assert_eq!(metadata.insert("request.task_id", "task-1"), Ok(None));
@@ -93,10 +94,10 @@ impl FilterMetadata {
     ///     metadata.insert("request.task_id", "task-2"),
     ///     Ok(Some("task-1".to_owned()))
     /// );
-    /// assert_eq!(
-    ///     metadata.insert("", "value"),
-    ///     Err(MetadataRejected::KeyLength { len: 0 })
-    /// );
+    ///
+    /// let rejected = metadata.insert("", "value").unwrap_err();
+    /// assert_eq!(rejected.limit(), MetadataLimit::KeyLength);
+    /// assert_eq!(rejected.into_entry(), (String::new(), "value".to_owned()));
     /// ```
     pub fn insert(
         &mut self,
@@ -105,20 +106,27 @@ impl FilterMetadata {
     ) -> Result<Option<String>, MetadataRejected> {
         let mut key = key.into();
         let mut value = value.into();
-        if key.is_empty() || key.len() > MAX_KEY_LEN {
-            return Err(MetadataRejected::KeyLength { len: key.len() });
-        }
-        if value.len() > MAX_VALUE_LEN {
-            return Err(MetadataRejected::ValueLength { len: value.len(), key });
-        }
-        if !self.entries.contains_key(&key) && self.entries.len() >= MAX_ENTRIES {
-            return Err(MetadataRejected::EntryLimit { key });
+        if let Some(limit) = self.exceeded_limit(&key, &value) {
+            return Err(MetadataRejected { key, value, limit });
         }
         // A moved-in String keeps its buffer: bound what is retained, not just
         // what is readable. No-op when the capacity is already within the limit.
         key.shrink_to(MAX_KEY_LEN);
         value.shrink_to(MAX_VALUE_LEN);
         Ok(self.entries.insert(key, value))
+    }
+
+    /// The limit that storing `value` under `key` would exceed, if any.
+    fn exceeded_limit(&self, key: &str, value: &str) -> Option<MetadataLimit> {
+        if key.is_empty() || key.len() > MAX_KEY_LEN {
+            Some(MetadataLimit::KeyLength)
+        } else if value.len() > MAX_VALUE_LEN {
+            Some(MetadataLimit::ValueLength)
+        } else if !self.entries.contains_key(key) && self.entries.len() >= MAX_ENTRIES {
+            Some(MetadataLimit::EntryCount)
+        } else {
+            None
+        }
     }
 
     /// Drop a write that [`insert`] rejected, logging a warning.
@@ -140,20 +148,21 @@ impl FilterMetadata {
     ///
     /// [`insert`]: Self::insert
     pub fn log_loss(rejected: MetadataRejected) -> Option<String> {
-        match rejected {
-            MetadataRejected::KeyLength { len } => tracing::warn!(
-                key_len = len,
+        let MetadataRejected { key, value, limit } = rejected;
+        match limit {
+            MetadataLimit::KeyLength => tracing::warn!(
+                key_len = key.len(),
                 limit = MAX_KEY_LEN,
                 "metadata key rejected (must be 1..=limit bytes)"
             ),
-            MetadataRejected::ValueLength { key, len } => tracing::warn!(
+            MetadataLimit::ValueLength => tracing::warn!(
                 key = %key,
-                value_len = len,
+                value_len = value.len(),
                 limit = MAX_VALUE_LEN,
                 "metadata value rejected (exceeds limit)"
             ),
             // A rejection for the entry limit means the metadata is full.
-            MetadataRejected::EntryLimit { key } => tracing::warn!(
+            MetadataLimit::EntryCount => tracing::warn!(
                 key = %key,
                 entries = MAX_ENTRIES,
                 "metadata entry rejected (max {} entries)",
@@ -215,32 +224,89 @@ impl FilterMetadata {
 // MetadataRejected
 // -----------------------------------------------------------------------------
 
-/// Why [`FilterMetadata::insert`] rejected a write.
-#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+/// A write [`FilterMetadata::insert`] rejected, with the key and value it was
+/// given, so a caller that moved them in can take them back.
+///
+/// Its `Display` and `Debug` output show the key and the lengths, never the
+/// value, which can be large or sensitive. They omit the key as well when the
+/// key itself was rejected.
+#[derive(Clone, Eq, PartialEq)]
+pub struct MetadataRejected {
+    /// The key passed to `insert`, as given.
+    key: String,
+    /// The value passed to `insert`, as given.
+    value: String,
+    /// The limit the write exceeded.
+    limit: MetadataLimit,
+}
+
+impl MetadataRejected {
+    /// The limit the write exceeded.
+    pub fn limit(&self) -> MetadataLimit {
+        self.limit
+    }
+
+    /// The key passed to `insert`.
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    /// The value passed to `insert`.
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
+    /// The `(key, value)` passed to `insert`, in the buffers they came in.
+    pub fn into_entry(self) -> (String, String) {
+        (self.key, self.value)
+    }
+}
+
+impl fmt::Display for MetadataRejected {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.limit {
+            MetadataLimit::KeyLength => write!(f, "metadata key must be 1-{MAX_KEY_LEN} bytes, got {}", self.key.len()),
+            MetadataLimit::ValueLength => write!(
+                f,
+                "metadata value for '{}' must not exceed {MAX_VALUE_LEN} bytes, got {}",
+                self.key,
+                self.value.len()
+            ),
+            MetadataLimit::EntryCount => write!(
+                f,
+                "metadata for '{}' rejected: already at {MAX_ENTRIES} entries",
+                self.key
+            ),
+        }
+    }
+}
+
+impl fmt::Debug for MetadataRejected {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug = f.debug_struct("MetadataRejected");
+        debug.field("limit", &self.limit);
+        if self.limit != MetadataLimit::KeyLength {
+            debug.field("key", &self.key);
+        }
+        debug
+            .field("key_len", &self.key.len())
+            .field("value_len", &self.value.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::error::Error for MetadataRejected {}
+
+/// The limit a [`MetadataRejected`] write exceeded.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 #[non_exhaustive]
-pub enum MetadataRejected {
+pub enum MetadataLimit {
     /// The key is empty or longer than 64 bytes.
-    #[error("metadata key must be 1-{limit} bytes, got {len}", limit = MAX_KEY_LEN)]
-    KeyLength {
-        /// Byte length of the rejected key.
-        len: usize,
-    },
-
+    KeyLength,
     /// The value is longer than 256 bytes.
-    #[error("metadata value for '{key}' must not exceed {limit} bytes, got {len}", limit = MAX_VALUE_LEN)]
-    ValueLength {
-        /// Key the value was written under.
-        key: String,
-        /// Byte length of the rejected value.
-        len: usize,
-    },
-
+    ValueLength,
     /// The key is new and the metadata already holds 128 entries.
-    #[error("metadata for '{key}' rejected: already at {limit} entries", limit = MAX_ENTRIES)]
-    EntryLimit {
-        /// Key that would have added an entry.
-        key: String,
-    },
+    EntryCount,
 }
 
 // -----------------------------------------------------------------------------
@@ -273,16 +339,13 @@ mod tests {
     #[test]
     fn insert_rejects_empty_and_overlong_keys() {
         let mut metadata = FilterMetadata::default();
-        assert_eq!(
-            metadata.insert("", "value"),
-            Err(MetadataRejected::KeyLength { len: 0 }),
-            "empty key should be rejected"
-        );
-        assert_eq!(
-            metadata.insert("k".repeat(65), "value"),
-            Err(MetadataRejected::KeyLength { len: 65 }),
-            "65-byte key should be rejected"
-        );
+        for key in [String::new(), "k".repeat(65)] {
+            let len = key.len();
+            let rejected = metadata
+                .insert(key, "value")
+                .expect_err("a key outside 1-64 bytes must be rejected");
+            assert_eq!(rejected.limit(), MetadataLimit::KeyLength, "{len}-byte key");
+        }
         assert!(metadata.is_empty(), "rejected writes should leave metadata unchanged");
     }
 
@@ -300,17 +363,35 @@ mod tests {
     }
 
     #[test]
-    fn insert_rejects_overlong_value_and_returns_its_key() {
+    fn insert_rejects_overlong_value() {
         let mut metadata = FilterMetadata::default();
-        assert_eq!(
-            metadata.insert("big", "v".repeat(257)),
-            Err(MetadataRejected::ValueLength {
-                key: "big".to_owned(),
-                len: 257
-            }),
-            "257-byte value should be rejected"
-        );
+        let rejected = metadata
+            .insert("big", "v".repeat(257))
+            .expect_err("a 257-byte value must be rejected");
+        assert_eq!(rejected.limit(), MetadataLimit::ValueLength);
+        assert_eq!(rejected.key(), "big");
+        assert_eq!(rejected.value(), "v".repeat(257));
         assert!(!metadata.contains_key("big"), "rejected value should not be stored");
+    }
+
+    #[test]
+    fn rejected_insert_hands_back_the_moved_buffers() {
+        let mut metadata = full_metadata();
+        for (key, value, limit) in [
+            ("k".repeat(65), "value".to_owned(), MetadataLimit::KeyLength),
+            ("big".to_owned(), "v".repeat(257), MetadataLimit::ValueLength),
+            ("overflow".to_owned(), "value".to_owned(), MetadataLimit::EntryCount),
+        ] {
+            let buffers = (key.as_ptr(), value.as_ptr());
+            let rejected = metadata.insert(key, value).expect_err("the write must be rejected");
+            assert_eq!(rejected.limit(), limit);
+            let (key, value) = rejected.into_entry();
+            assert_eq!(
+                (key.as_ptr(), value.as_ptr()),
+                buffers,
+                "{limit:?}: the caller gets its own buffers back, not copies"
+            );
+        }
     }
 
     #[test]
@@ -354,13 +435,10 @@ mod tests {
     #[test]
     fn insert_rejects_new_key_when_full_but_allows_overwrite() {
         let mut metadata = full_metadata();
-        assert_eq!(
-            metadata.insert("overflow", "value"),
-            Err(MetadataRejected::EntryLimit {
-                key: "overflow".to_owned()
-            }),
-            "129th key should be rejected"
-        );
+        let rejected = metadata
+            .insert("overflow", "value")
+            .expect_err("a 129th key must be rejected");
+        assert_eq!(rejected.limit(), MetadataLimit::EntryCount);
         assert_eq!(
             metadata.insert("key.0", "new"),
             Ok(Some("value".to_owned())),
@@ -404,26 +482,40 @@ mod tests {
         assert_eq!(values, ["1", "2"]);
     }
 
+    /// A rejection for each limit, each value made of `secret`.
+    fn rejections() -> [MetadataRejected; 3] {
+        let mut metadata = full_metadata();
+        [
+            ("k".repeat(65), "secret".to_owned()),
+            ("big".to_owned(), "secret".repeat(43)),
+            ("overflow".to_owned(), "secret".to_owned()),
+        ]
+        .map(|(key, value)| metadata.insert(key, value).expect_err("the write must be rejected"))
+    }
+
     #[test]
-    fn rejection_messages_name_the_limit() {
+    fn rejection_messages_name_the_limit_but_not_the_value() {
+        let messages = rejections().map(|rejected| rejected.to_string());
         assert_eq!(
-            MetadataRejected::KeyLength { len: 65 }.to_string(),
-            "metadata key must be 1-64 bytes, got 65"
+            messages,
+            [
+                "metadata key must be 1-64 bytes, got 65",
+                "metadata value for 'big' must not exceed 256 bytes, got 258",
+                "metadata for 'overflow' rejected: already at 128 entries",
+            ]
         );
+    }
+
+    #[test]
+    fn rejection_debug_shows_lengths_not_the_value() {
+        let debug = rejections().map(|rejected| format!("{rejected:?}"));
         assert_eq!(
-            MetadataRejected::ValueLength {
-                key: "big".to_owned(),
-                len: 257
-            }
-            .to_string(),
-            "metadata value for 'big' must not exceed 256 bytes, got 257"
-        );
-        assert_eq!(
-            MetadataRejected::EntryLimit {
-                key: "overflow".to_owned()
-            }
-            .to_string(),
-            "metadata for 'overflow' rejected: already at 128 entries"
+            debug,
+            [
+                "MetadataRejected { limit: KeyLength, key_len: 65, value_len: 6, .. }",
+                "MetadataRejected { limit: ValueLength, key: \"big\", key_len: 3, value_len: 258, .. }",
+                "MetadataRejected { limit: EntryCount, key: \"overflow\", key_len: 8, value_len: 6, .. }",
+            ]
         );
     }
 }
