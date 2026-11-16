@@ -102,6 +102,13 @@ pub(crate) async fn send_rejection_for(
     ctx: &mut crate::http::pingora::context::PingoraRequestCtx,
 ) {
     ctx.rejection_cleanup_pending = true;
+    if ctx
+        .lifecycle
+        .as_ref()
+        .is_some_and(|lifecycle| lifecycle.phase() == praxis_core::server::LifecyclePhase::Draining)
+    {
+        session.set_keepalive(None);
+    }
     // Path 1: gRPC filter already set grpc-status, just frame it.
     if rejection
         .headers
@@ -147,7 +154,6 @@ pub(in crate::http) fn grpc_error_message(rejection: &Rejection) -> &str {
 ///
 /// Disables downstream keep-alive by default so the connection closes after
 /// a short-circuit response. Complete responses may explicitly preserve it.
-/// The logging hook performs bounded upload cleanup after recording completion.
 ///
 /// ```ignore
 /// // Requires an active `pingora_proxy::Session` from a live request.

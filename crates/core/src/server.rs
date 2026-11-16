@@ -8,6 +8,8 @@ mod contract;
 /// The hyper backend's runtime: a tokio runtime, listeners and shutdown.
 #[cfg(feature = "hyper")]
 pub mod hyper;
+/// Shared process lifecycle state and transition contract.
+pub mod lifecycle;
 /// Pingora-specific server factory and runtime.
 #[cfg(feature = "pingora")]
 pub mod pingora;
@@ -19,6 +21,7 @@ mod unavailable;
 pub use contract::{ServerRuntime, ShutdownFuture};
 #[cfg(feature = "hyper")]
 pub use hyper::HyperRuntime;
+pub use lifecycle::{LifecycleError, LifecycleHandle, LifecyclePhase};
 #[cfg(feature = "pingora")]
 pub use pingora::{PingoraServerRuntime, build_http_server};
 pub use runtime::{RuntimeOptions, resolve_thread_count};
