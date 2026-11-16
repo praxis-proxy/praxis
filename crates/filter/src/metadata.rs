@@ -113,6 +113,48 @@ impl FilterMetadata {
         Ok(self.entries.insert(key, value))
     }
 
+    /// Drop a write that [`insert`] rejected, logging a warning.
+    ///
+    /// For writes that may be lost: pass it to [`Result::unwrap_or_else`] on
+    /// the result of [`insert`]. It returns `None`, as if the key had no
+    /// previous value.
+    ///
+    /// ```
+    /// use praxis_filter::FilterMetadata;
+    ///
+    /// let mut metadata = FilterMetadata::default();
+    /// let replaced = metadata
+    ///     .insert("llm.model", "x".repeat(257))
+    ///     .unwrap_or_else(FilterMetadata::log_loss);
+    /// assert_eq!(replaced, None);
+    /// assert!(metadata.is_empty());
+    /// ```
+    ///
+    /// [`insert`]: Self::insert
+    pub fn log_loss(rejected: MetadataRejected) -> Option<String> {
+        match rejected {
+            MetadataRejected::KeyLength { len } => tracing::warn!(
+                key_len = len,
+                limit = MAX_KEY_LEN,
+                "metadata key rejected (must be 1..=limit bytes)"
+            ),
+            MetadataRejected::ValueLength { key, len } => tracing::warn!(
+                key = %key,
+                value_len = len,
+                limit = MAX_VALUE_LEN,
+                "metadata value rejected (exceeds limit)"
+            ),
+            // A rejection for the entry limit means the metadata is full.
+            MetadataRejected::EntryLimit { key } => tracing::warn!(
+                key = %key,
+                entries = MAX_ENTRIES,
+                "metadata entry rejected (max {} entries)",
+                MAX_ENTRIES
+            ),
+        }
+        None
+    }
+
     /// Remove the entry for `key`, returning its value, or `None` if there
     /// was no entry.
     pub fn remove(&mut self, key: &str) -> Option<String> {
@@ -213,7 +255,9 @@ mod tests {
     fn full_metadata() -> FilterMetadata {
         let mut metadata = FilterMetadata::default();
         for i in 0..MAX_ENTRIES {
-            metadata.insert(format!("key.{i}"), "value").unwrap();
+            metadata
+                .insert(format!("key.{i}"), "value")
+                .expect("entry must fit in the filter's metadata");
         }
         metadata
     }
@@ -232,6 +276,19 @@ mod tests {
             "65-byte key should be rejected"
         );
         assert!(metadata.is_empty(), "rejected writes should leave metadata unchanged");
+    }
+
+    #[test]
+    fn insert_accepts_key_and_value_at_their_limits() {
+        let mut metadata = FilterMetadata::default();
+        let key = "k".repeat(64);
+        let value = "v".repeat(256);
+        assert_eq!(
+            metadata.insert(key.as_str(), value.as_str()),
+            Ok(None),
+            "64-byte key and 256-byte value should be accepted"
+        );
+        assert_eq!(metadata.get(&key), Some(value.as_str()));
     }
 
     #[test]
@@ -281,8 +338,12 @@ mod tests {
     #[test]
     fn iterators_yield_every_entry() {
         let mut metadata = FilterMetadata::default();
-        metadata.insert("a.key", "1").unwrap();
-        metadata.insert("b.key", "2").unwrap();
+        metadata
+            .insert("a.key", "1")
+            .expect("entry must fit in the filter's metadata");
+        metadata
+            .insert("b.key", "2")
+            .expect("entry must fit in the filter's metadata");
 
         let mut pairs: Vec<_> = metadata.iter().collect();
         pairs.sort_unstable();

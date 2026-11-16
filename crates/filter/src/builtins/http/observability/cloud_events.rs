@@ -625,7 +625,7 @@ impl CloudEventsFilter {
                 if !self.metadata_fields.iter().any(|field| field == name) {
                     return None;
                 }
-                ctx.get_metadata(name).map(str::to_owned)
+                ctx.filter_metadata.get(name).map(str::to_owned)
             },
             CloudEventsSource::RequestHeader(name) => {
                 if !self
@@ -1137,6 +1137,7 @@ fn event_time(ctx: &HttpFilterContext<'_>) -> String {
 #[cfg(test)]
 #[expect(
     clippy::assertions_on_result_states,
+    clippy::expect_used,
     clippy::indexing_slicing,
     clippy::single_element_loop,
     clippy::too_many_lines,
@@ -1410,7 +1411,9 @@ mod tests {
         request.headers.insert(USER_AGENT, "praxis-test".parse().unwrap());
         let mut ctx = crate::test_utils::make_filter_context(&request);
         ctx.cluster = Some("provider-a".into());
-        ctx.filter_metadata.insert("token.total", "42").unwrap();
+        ctx.filter_metadata
+            .insert("token.total", "42")
+            .expect("entry must fit in the filter's metadata");
 
         let event = filter.build_event(&ctx).unwrap();
         let object = event.as_object().unwrap();
@@ -1484,7 +1487,7 @@ mod tests {
         optional_ctx
             .filter_metadata
             .insert("token.total", "not-an-integer")
-            .unwrap();
+            .expect("entry must fit in the filter's metadata");
         let event = optional_filter.build_event(&optional_ctx).unwrap();
         assert_eq!(event["data"], json!({}));
 
@@ -1493,7 +1496,7 @@ mod tests {
         required_ctx
             .filter_metadata
             .insert("token.total", "not-an-integer")
-            .unwrap();
+            .expect("entry must fit in the filter's metadata");
         assert!(required_filter.build_event(&required_ctx).is_none());
     }
 

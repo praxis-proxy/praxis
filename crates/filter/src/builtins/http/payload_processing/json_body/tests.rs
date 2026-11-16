@@ -276,7 +276,9 @@ async fn metadata_value_is_injected_as_json_string() {
     );
     let req = crate::test_utils::make_request(http::Method::POST, "/");
     let mut ctx = crate::test_utils::make_filter_context(&req);
-    ctx.set_metadata("json_rpc.method", "eth_blockNumber");
+    ctx.filter_metadata
+        .insert("json_rpc.method", "eth_blockNumber")
+        .expect("entry must fit in the filter's metadata");
     let mut body = Some(Bytes::from_static(br#"{"jsonrpc":"2.0"}"#));
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
     assert!(matches!(action, FilterAction::BodyDone));
@@ -680,7 +682,7 @@ async fn extract_only_trailing_junk_does_not_promote_metadata() {
     let mut body = Some(Bytes::from_static(br#"{"model":"old","x":1} not-json"#));
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
     assert!(matches!(action, FilterAction::Continue));
-    assert!(ctx.get_metadata("original.model").is_none());
+    assert!(ctx.filter_metadata.get("original.model").is_none());
 }
 
 #[tokio::test]
@@ -717,7 +719,7 @@ async fn extract_only_trailing_junk_on_invalid_continue() {
     let mut body = Some(Bytes::from_static(br#"{"model":"old"} garbage"#));
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
     assert!(matches!(action, FilterAction::Continue));
-    assert!(ctx.get_metadata("original.model").is_none());
+    assert!(ctx.filter_metadata.get("original.model").is_none());
 }
 
 #[tokio::test]
@@ -738,7 +740,7 @@ async fn extract_only_trailing_junk_on_invalid_reject() {
         matches!(action, FilterAction::Reject(r) if r.status == 400),
         "trailing junk with on_invalid reject"
     );
-    assert!(ctx.get_metadata("original.model").is_none());
+    assert!(ctx.filter_metadata.get("original.model").is_none());
 }
 
 #[tokio::test]
@@ -813,7 +815,7 @@ async fn extract_string_to_metadata() {
     let mut body = Some(Bytes::from_static(br#"{"model":"old","n":1}"#));
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
     assert!(matches!(action, FilterAction::BodyDone));
-    assert_eq!(ctx.get_metadata("original.model"), Some("old"));
+    assert_eq!(ctx.filter_metadata.get("original.model"), Some("old"));
     assert_eq!(body.as_ref().unwrap().as_ref(), br#"{"model":"old","n":1}"#);
 }
 
@@ -858,7 +860,7 @@ async fn nested_extract_walks_parent() {
         ctx.get_structured_metadata("ext", "user"),
         Some(&json!({"id": 1, "n": 2}))
     );
-    assert_eq!(ctx.get_metadata("user.id"), Some("1"));
+    assert_eq!(ctx.filter_metadata.get("user.id"), Some("1"));
 }
 
 #[tokio::test]
@@ -875,7 +877,7 @@ async fn extract_missing_pointer_skips() {
     let mut body = Some(Bytes::from_static(br#"{"a":1}"#));
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
     assert!(matches!(action, FilterAction::BodyDone));
-    assert!(ctx.get_metadata("gone").is_none(), "missing pointer skips");
+    assert!(ctx.filter_metadata.get("gone").is_none(), "missing pointer skips");
 }
 
 #[tokio::test]
@@ -892,7 +894,7 @@ async fn extract_only_incomplete_before_eos_continues() {
     let mut body = Some(Bytes::from_static(br#"{"model":"#));
     let action = filter.on_request_body(&mut ctx, &mut body, false).await.unwrap();
     assert!(matches!(action, FilterAction::Continue));
-    assert!(ctx.get_metadata("original.model").is_none());
+    assert!(ctx.filter_metadata.get("original.model").is_none());
 }
 
 #[tokio::test]
@@ -909,7 +911,7 @@ async fn extract_only_complete_before_eos_continues() {
     let mut body = Some(Bytes::from_static(br#"{"model":"old"}"#));
     let action = filter.on_request_body(&mut ctx, &mut body, false).await.unwrap();
     assert!(matches!(action, FilterAction::Continue));
-    assert!(ctx.get_metadata("original.model").is_none());
+    assert!(ctx.filter_metadata.get("original.model").is_none());
 }
 
 #[tokio::test]
@@ -926,7 +928,7 @@ async fn extract_only_promotes_at_eos() {
     let mut body = Some(Bytes::from_static(br#"{"model":"old"}"#));
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
     assert!(matches!(action, FilterAction::BodyDone));
-    assert_eq!(ctx.get_metadata("original.model"), Some("old"));
+    assert_eq!(ctx.filter_metadata.get("original.model"), Some("old"));
 }
 
 #[tokio::test]
@@ -969,7 +971,7 @@ async fn extract_oversized_metadata_is_skipped() {
     let mut body = Some(Bytes::from(payload));
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
     assert!(matches!(action, FilterAction::BodyDone));
-    assert!(ctx.get_metadata("big").is_none(), "256-byte metadata cap");
+    assert!(ctx.filter_metadata.get("big").is_none(), "256-byte metadata cap");
 }
 
 #[tokio::test]
@@ -989,7 +991,7 @@ async fn metadata_add_skipped_when_extract_late_in_wire_order() {
     let mut body = Some(Bytes::from_static(br#"{"meta":{},"model":"old"}"#));
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
     assert!(matches!(action, FilterAction::BodyDone));
-    assert_eq!(ctx.get_metadata("original.model"), Some("old"));
+    assert_eq!(ctx.filter_metadata.get("original.model"), Some("old"));
     let got = serde_json::from_slice::<serde_json::Value>(body.as_ref().unwrap()).unwrap();
     assert_eq!(got, json!({"meta": {}, "model": "old"}));
 }
@@ -1014,7 +1016,7 @@ async fn same_key_extract_before_replace() {
     let mut body = Some(Bytes::from_static(br#"{"model":"old"}"#));
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
     assert!(matches!(action, FilterAction::BodyDone));
-    assert_eq!(ctx.get_metadata("original.model"), Some("old"));
+    assert_eq!(ctx.filter_metadata.get("original.model"), Some("old"));
     let got = serde_json::from_slice::<serde_json::Value>(body.as_ref().unwrap()).unwrap();
     assert_eq!(got, json!({"model": "forced-model", "original_model": "old"}));
 }
@@ -1030,7 +1032,9 @@ async fn external_metadata_still_works() {
     );
     let req = crate::test_utils::make_request(http::Method::POST, "/");
     let mut ctx = crate::test_utils::make_filter_context(&req);
-    ctx.set_metadata("tenant.id".to_owned(), "acme".to_owned());
+    ctx.filter_metadata
+        .insert("tenant.id".to_owned(), "acme".to_owned())
+        .expect("entry must fit in the filter's metadata");
     let mut body = Some(Bytes::from_static(br#"{"n":1}"#));
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
     assert!(matches!(action, FilterAction::BodyDone));
@@ -1074,7 +1078,7 @@ async fn extract_duplicate_keys_keeps_last() {
     let mut body = Some(Bytes::from_static(br#"{"a":1,"a":2}"#));
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
     assert!(matches!(action, FilterAction::BodyDone));
-    assert_eq!(ctx.get_metadata("a"), Some("2"), "extract last duplicate");
+    assert_eq!(ctx.filter_metadata.get("a"), Some("2"), "extract last duplicate");
     assert_eq!(body.as_ref().unwrap().as_ref(), br#"{"a":1,"a":2}"#);
 }
 
@@ -1435,17 +1439,19 @@ async fn invalid_utf8_obeys_request_and_response_failure_policies() {
             "on_invalid: {mode}\nrequest_remove:\n  - /model\nresponse_remove:\n  - /model\n"
         ));
         let mut ctx = crate::test_utils::make_filter_context(&req);
-        ctx.set_metadata("trusted".to_owned(), "keep".to_owned());
+        ctx.filter_metadata
+            .insert("trusted".to_owned(), "keep".to_owned())
+            .expect("entry must fit in the filter's metadata");
         let mut request = Some(original.clone());
         let action = filter.on_request_body(&mut ctx, &mut request, true).await;
         assert_invalid_utf8_policy(mode, action);
         assert_eq!(request.as_ref(), Some(&original));
-        assert_eq!(ctx.get_metadata("trusted"), Some("keep"));
+        assert_eq!(ctx.filter_metadata.get("trusted"), Some("keep"));
 
         let mut response = Some(original.clone());
         let action = filter.on_response_body(&mut ctx, &mut response, true);
         assert_invalid_utf8_policy(mode, action);
         assert_eq!(response.as_ref(), Some(&original));
-        assert_eq!(ctx.get_metadata("trusted"), Some("keep"));
+        assert_eq!(ctx.filter_metadata.get("trusted"), Some("keep"));
     }
 }

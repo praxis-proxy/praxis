@@ -508,7 +508,9 @@ mod tests {
         let pipeline = FilterPipeline::build(&mut [], &registry).unwrap();
         let mut ctx = PingoraRequestCtx::default();
         ctx.response_phase_done = false;
-        ctx.filter_metadata.insert("json_rpc.method", "service/invoke").unwrap();
+        ctx.filter_metadata
+            .insert("json_rpc.method", "service/invoke")
+            .expect("entry must fit in the filter's metadata");
         ctx.request_snapshot = Some(praxis_filter::Request {
             method: http::Method::POST,
             uri: "/api".parse().unwrap(),
@@ -1044,7 +1046,9 @@ mod tests {
         let filter_state = HashMap::from([(0_usize, state_val)]);
 
         let mut filter_metadata = FilterMetadata::default();
-        filter_metadata.insert("key", "val").unwrap();
+        filter_metadata
+            .insert("key", "val")
+            .expect("entry must fit in the filter's metadata");
 
         let output = body_util::BodyFilterOutput {
             cluster: Some(Arc::from("test-cluster")),

@@ -1812,7 +1812,7 @@ fn resolve_field<'a>(
                 .and_then(|headers| first_header_value(headers, name))
                 .unwrap_or("-"),
         ),
-        FieldToken::Metadata(key) => Cow::Borrowed(ctx.get_metadata(key).unwrap_or("-")),
+        FieldToken::Metadata(key) => Cow::Borrowed(ctx.filter_metadata.get(key).unwrap_or("-")),
     }
 }
 

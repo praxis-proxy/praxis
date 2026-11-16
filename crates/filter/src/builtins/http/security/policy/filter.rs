@@ -64,7 +64,7 @@ use super::{
     transport::PolicyHttpTransport,
 };
 use crate::{
-    AuthenticatedIdentity, FilterAction, FilterError, Rejection,
+    AuthenticatedIdentity, FilterAction, FilterError, FilterMetadata, Rejection,
     body::{BodyAccess, BodyMode},
     factory::parse_filter_config,
     filter::{HttpFilter, HttpFilterContext},
@@ -1736,9 +1736,13 @@ impl PolicyFilter {
         }
 
         // Metadata exposes the model downstream without trusting a client header.
-        ctx.set_metadata("llm.model", model.clone());
+        ctx.filter_metadata
+            .insert("llm.model", model.clone())
+            .unwrap_or_else(FilterMetadata::log_loss);
         if streaming {
-            ctx.set_metadata("llm.stream", "true");
+            ctx.filter_metadata
+                .insert("llm.stream", "true")
+                .unwrap_or_else(FilterMetadata::log_loss);
         }
 
         tracing::trace!(target: "policy.filter", model = %model, "inference allow");
@@ -2728,7 +2732,7 @@ impl HttpFilter for PolicyFilter {
         }
 
         // MCP routes use classifier metadata; inference routes use the body model.
-        let Some(method) = ctx.get_metadata("mcp.method").map(str::to_owned) else {
+        let Some(method) = ctx.filter_metadata.get("mcp.method").map(str::to_owned) else {
             if self.llm_routes
                 && let Some(rejection) = self.reject_oversized_inference_body(body.as_ref())
             {
@@ -2833,7 +2837,7 @@ impl HttpFilter for PolicyFilter {
             );
             return self.complete_gated_admission(ctx).await;
         };
-        let Some(entity_name) = ctx.get_metadata("mcp.name").map(str::to_owned) else {
+        let Some(entity_name) = ctx.filter_metadata.get("mcp.name").map(str::to_owned) else {
             tracing::error!(
                 target: "policy.filter",
                 protocol_method = %method,
@@ -3027,13 +3031,13 @@ impl HttpFilter for PolicyFilter {
         // phase and praxis preserves `filter_metadata` across phases,
         // so we can route the post-phase hook without re-parsing the
         // body.
-        let Some(method) = ctx.get_metadata("mcp.method").map(str::to_owned) else {
+        let Some(method) = ctx.filter_metadata.get("mcp.method").map(str::to_owned) else {
             return Ok(FilterAction::Continue);
         };
         let Some((entity_type, hook_name)) = entity_for_protocol_method_post(&method) else {
             return Ok(FilterAction::Continue);
         };
-        let Some(entity_name) = ctx.get_metadata("mcp.name").map(str::to_owned) else {
+        let Some(entity_name) = ctx.filter_metadata.get("mcp.name").map(str::to_owned) else {
             return Ok(FilterAction::Continue);
         };
 

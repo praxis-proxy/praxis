@@ -204,7 +204,9 @@ mod tests {
         ctx.request_snapshot = Some(make_request_snapshot());
 
         // Pre-populate filter_metadata
-        ctx.filter_metadata.insert("before", "test").unwrap();
+        ctx.filter_metadata
+            .insert("before", "test")
+            .expect("entry must fit in the filter's metadata");
 
         let mut trailers = http::HeaderMap::new();
         let result = execute(&pipeline, &mut trailers, &mut ctx);
@@ -305,7 +307,9 @@ mod tests {
         let pipeline = make_test_pipeline();
         let mut ctx = make_test_context();
         ctx.request_snapshot = Some(make_request_snapshot());
-        ctx.filter_metadata.insert("test", "value").unwrap();
+        ctx.filter_metadata
+            .insert("test", "value")
+            .expect("entry must fit in the filter's metadata");
 
         let mut trailers1 = http::HeaderMap::new();
         trailers1.insert("test", "first".parse().unwrap());

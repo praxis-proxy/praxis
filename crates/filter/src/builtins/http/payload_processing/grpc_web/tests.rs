@@ -90,7 +90,7 @@ async fn a_grpc_web_request_is_rewritten_to_native_grpc() {
         "gRPC requires te: trailers, and Praxis is the upstream hop's client"
     );
     assert_eq!(
-        ctx.get_metadata("grpc_web.encoding"),
+        ctx.filter_metadata.get("grpc_web.encoding"),
         Some("grpc-web+proto"),
         "the variant should be promoted to metadata"
     );
@@ -107,7 +107,7 @@ async fn a_non_grpc_web_request_is_untouched() {
         "a JSON request should not be rewritten"
     );
     assert!(
-        ctx.get_metadata("grpc_web.encoding").is_none(),
+        ctx.filter_metadata.get("grpc_web.encoding").is_none(),
         "and should leave no metadata behind"
     );
 }

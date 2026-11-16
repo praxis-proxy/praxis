@@ -996,17 +996,21 @@ mod tests {
         };
 
         let mut ctx = default_ctx();
-        ctx.filter_metadata.insert("rpc.method", "echo").unwrap();
-        ctx.filter_metadata.insert("rpc.status", "ok").unwrap();
+        ctx.filter_metadata
+            .insert("rpc.method", "echo")
+            .expect("entry must fit in the filter's metadata");
+        ctx.filter_metadata
+            .insert("rpc.status", "ok")
+            .expect("entry must fit in the filter's metadata");
 
         let fctx = ctx.build_filter_context(&pipeline, &request, None);
         assert_eq!(
-            fctx.get_metadata("rpc.method"),
+            fctx.filter_metadata.get("rpc.method"),
             Some("echo"),
             "metadata written before build should survive into filter context"
         );
         assert_eq!(
-            fctx.get_metadata("rpc.status"),
+            fctx.filter_metadata.get("rpc.status"),
             Some("ok"),
             "multiple metadata keys should round-trip"
         );
@@ -1024,8 +1028,12 @@ mod tests {
 
         let mut ctx = default_ctx();
         let mut fctx = ctx.build_filter_context(&pipeline, &request, None);
-        fctx.set_metadata("trace.id", "abc-123");
-        fctx.set_metadata("trace.span", "42");
+        fctx.filter_metadata
+            .insert("trace.id", "abc-123")
+            .expect("entry must fit in the filter's metadata");
+        fctx.filter_metadata
+            .insert("trace.span", "42")
+            .expect("entry must fit in the filter's metadata");
 
         ctx.filter_metadata = fctx.filter_metadata;
         assert_eq!(

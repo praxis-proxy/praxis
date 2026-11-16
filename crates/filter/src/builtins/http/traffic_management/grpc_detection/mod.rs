@@ -19,7 +19,7 @@ use praxis_core::grpc::GrpcKind;
 use tracing::trace;
 
 use crate::{
-    EmptyFilterConfig, FilterAction, FilterError,
+    EmptyFilterConfig, FilterAction, FilterError, FilterMetadata,
     filter::{HttpFilter, HttpFilterContext},
     parse_filter_config,
 };
@@ -75,7 +75,9 @@ impl HttpFilter for GrpcDetectionFilter {
         }
 
         let kind_str = kind.as_str();
-        ctx.set_metadata("grpc.kind", kind_str);
+        ctx.filter_metadata
+            .insert("grpc.kind", kind_str)
+            .unwrap_or_else(FilterMetadata::log_loss);
 
         let results = ctx.filter_results.entry("grpc_detection").or_default();
         results.set("kind", kind_str)?;

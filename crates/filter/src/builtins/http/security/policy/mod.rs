@@ -350,7 +350,13 @@ mod state_tests;
 
 #[cfg(test)]
 #[cfg(feature = "policy-builtins")]
-#[expect(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing, reason = "tests")]
+#[expect(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    reason = "tests"
+)]
 mod rate_limit_tests;
 
 #[cfg(test)]
