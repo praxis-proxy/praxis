@@ -39,6 +39,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Keep transformed bandwidth charges as unreserved plans until each bounded
+  portion is admitted, preventing oversized shared debt when another writer
+  reserves concurrently.
+
 - Pace strongly shrinking bodies without oversized admission stalls, isolate
   nested-body bandwidth attachments, and check completion output limits before
   pacing. Completion output within an available burst survives a step timeout.
