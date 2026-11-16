@@ -160,7 +160,13 @@ fn build_reloadable_listener_tls(
     });
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    praxis_tls::watcher::CertWatcher::spawn(result.cert_handle, pair, verifier_reload, shutdown_rx);
+    praxis_tls::watcher::CertWatcher::spawn(
+        result.cert_handle,
+        pair,
+        verifier_reload,
+        shutdown_rx,
+        result.startup_hashes,
+    );
 
     Ok((result.config, Some(shutdown_tx)))
 }
