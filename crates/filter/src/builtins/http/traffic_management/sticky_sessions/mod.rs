@@ -381,7 +381,7 @@ impl HttpFilter for StickySessionsFilter {
         }
 
         ctx.filter_metadata
-            .insert(META_SESSION_KEY, &session_key)
+            .insert(META_SESSION_KEY, session_key)
             .unwrap_or_else(FilterMetadata::log_loss);
 
         Ok(FilterAction::Continue)

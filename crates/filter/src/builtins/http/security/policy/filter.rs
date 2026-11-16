@@ -1735,17 +1735,17 @@ impl PolicyFilter {
             ctx.request_headers_to_remove.push(http::header::ACCEPT_ENCODING);
         }
 
+        tracing::trace!(target: "policy.filter", model = %model, "inference allow");
+
         // Metadata exposes the model downstream without trusting a client header.
         ctx.filter_metadata
-            .insert("llm.model", model.clone())
+            .insert("llm.model", model)
             .unwrap_or_else(FilterMetadata::log_loss);
         if streaming {
             ctx.filter_metadata
                 .insert("llm.stream", "true")
                 .unwrap_or_else(FilterMetadata::log_loss);
         }
-
-        tracing::trace!(target: "policy.filter", model = %model, "inference allow");
         Self::mark_admission_complete(ctx);
         Ok(FilterAction::BodyDone)
     }
