@@ -62,6 +62,31 @@ jobs:
       - name: Lint
         run: make lint
 
+      - name: Cache lint-extra tools
+        id: cache-lint-extra
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/bin/typos
+            ~/.cargo/bin/taplo
+            ~/go/bin/actionlint
+          key: lint-extra-${{ runner.os }}-typos1.51.1-taplo0.10.0-actionlint1.7.12
+
+      - name: Install lint-extra tools
+        env:
+          TYPOS_VERSION: "1.51.1"
+          TAPLO_VERSION: "0.10.0"
+          ACTIONLINT_VERSION: "v1.7.12"
+        run: |
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/go/bin:$PATH"
+          command -v typos > /dev/null || cargo install typos-cli --locked --version "$TYPOS_VERSION"
+          command -v taplo > /dev/null || cargo install taplo-cli --locked --version "$TAPLO_VERSION"
+          command -v actionlint > /dev/null || go install "github.com/rhysd/actionlint/cmd/actionlint@$ACTIONLINT_VERSION"
+
+      - name: Lint extra (typos, taplo, shellcheck, actionlint)
+        run: make lint-extra
+
       - name: Lint the FIPS build
         run: make lint-fips
 

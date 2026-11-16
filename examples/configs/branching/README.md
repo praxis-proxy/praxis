@@ -23,6 +23,6 @@ Branch chains enable conditional pipeline execution based on filter results, all
 
 ## Related Documentation
 
-- [Branch Chain Configuration](../../../docs/architecture/branch-chains.md)
-- [Filter Results](../../../docs/filters/results.md)
-- [Pipeline Execution](../../../docs/architecture/pipeline.md)
+- [Branch Chain Configuration](../../../docs/filters/branch-chains.md)
+- [Pipeline Concepts](../../../docs/architecture/pipeline-concepts.md)
+- [Filter Reference](../../../docs/filters/reference.md)
