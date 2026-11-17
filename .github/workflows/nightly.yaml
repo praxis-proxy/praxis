@@ -224,13 +224,13 @@ jobs:
   # Nightly container image (published to GHCR)
   #
   # Publishes a rolling `nightly` tag plus a dated `nightly-YYYYMMDD` tag and a
-  # commit-sha tag, but only once the functional test suites are green, and
+  # commit-sha tag, but only once lint and the functional tests are green, and
   # the same three tags with a `-fips` suffix for the FIPS image. This
   # publishes the container images only; crates are never published from here.
   # ----------------------------------------------------------------------------
 
   container:
-    needs: [test-unit, test-integration, test-conformance]
+    needs: [lint, test-unit, test-integration, test-conformance]
     runs-on: ubuntu-24.04
     # Two images; the FIPS one is a from-scratch LTO release build on UBI 9.
     timeout-minutes: 60

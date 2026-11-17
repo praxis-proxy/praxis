@@ -70,6 +70,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Nightly images now require lint and functional-test success before publication.
 - Concurrent new-key KV writes and compiled-regex cache admissions now stay
   within their capacity limits.
 - Unreadable `grpc-timeout` headers now follow the malformed-header policy;
