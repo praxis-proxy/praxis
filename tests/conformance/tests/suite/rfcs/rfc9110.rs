@@ -13,10 +13,13 @@ use praxis_test_utils::{
     start_header_echo_backend, start_slow_backend, wait_for_http2,
 };
 
-use super::test_utils::{
-    h2c_get, start_304_backend, start_custom_response_header_backend, start_etag_backend, start_garbage_backend,
-    start_hop_by_hop_backend, start_partial_header_backend, start_range_backend, start_redirect_backend,
-    timeout_filter_yaml,
+use super::{
+    expect_continue::{staged_upload, start_upload_backend},
+    test_utils::{
+        h2c_get, start_304_backend, start_custom_response_header_backend, start_etag_backend, start_garbage_backend,
+        start_hop_by_hop_backend, start_partial_header_backend, start_range_backend, start_redirect_backend,
+        timeout_filter_yaml,
+    },
 };
 
 // -----------------------------------------------------------------------------
@@ -995,37 +998,26 @@ fn rfc9110_te_header_stripped_from_upstream_request() {
 /// [RFC 9110 Section 15.2]: https://datatracker.ietf.org/doc/html/rfc9110#section-15.2
 #[test]
 fn rfc9110_100_continue_allows_body_upload() {
-    let backend_port = start_backend("upload-ok");
+    let path = "/expect-upload-rfc9110";
+    let backend = start_upload_backend(path, false);
     let proxy_port = free_port();
-    let yaml = simple_proxy_yaml(proxy_port, backend_port);
+    let yaml = simple_proxy_yaml(proxy_port, backend.port());
     let config = Config::from_yaml(&yaml).unwrap();
     let proxy = start_proxy(&config);
-
-    let body_data = "test-payload-data";
-    let raw = http_send(
-        proxy.addr(),
-        &format!(
-            "POST / HTTP/1.1\r\n\
-             Host: localhost\r\n\
-             Expect: 100-continue\r\n\
-             Content-Length: {}\r\n\
-             Connection: close\r\n\
-             \r\n\
-             {body_data}",
-            body_data.len()
-        ),
+    let payload = b"test-payload-data";
+    let (status, body, interim) = staged_upload(proxy.addr(), path, payload, &[4, 3, 10], true);
+    assert_eq!(status, 200);
+    assert_eq!(body, "upload-ok");
+    assert_eq!(backend.finish(), payload);
+    #[cfg(feature = "pingora")]
+    assert!(
+        interim
+            .iter()
+            .any(|head| head.to_ascii_lowercase().contains("x-upstream-interim: yes")),
+        "Pingora must relay upstream 100"
     );
-    let status = parse_status(&raw);
-    let body = parse_body(&raw);
-
-    assert_eq!(
-        status, 200,
-        "POST with Expect: 100-continue must complete successfully (got {status})"
-    );
-    assert_eq!(
-        body, "upload-ok",
-        "response body from backend must be forwarded after 100-continue negotiation"
-    );
+    #[cfg(not(feature = "pingora"))]
+    drop(interim);
 }
 
 // -----------------------------------------------------------------------------
