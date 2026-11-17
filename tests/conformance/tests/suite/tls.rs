@@ -13,12 +13,13 @@
 //! [RFC 9110 Section 4.3.4]: https://datatracker.ietf.org/doc/html/rfc9110#section-4.3.4
 //! [RFC 9525 Section 6.4]: https://datatracker.ietf.org/doc/html/rfc9525#section-6.4
 
-use std::sync::Arc;
+use std::sync::{Arc, atomic::Ordering};
 
 use praxis_core::config::Config;
 use praxis_test_utils::{
-    TestCertificates, free_port, http_get, https_get, start_backend, start_proxy, start_tls_backend, start_tls_proxy,
-    start_tls_proxy_no_wait, tls_connection_rejected, wait_for_https,
+    TestCertificates, TlsProbeOutcome, free_port, http_get, https_get, start_backend, start_proxy,
+    start_request_counting_backend, start_tls_backend, start_tls_proxy, start_tls_proxy_no_wait, tls_negative_probe,
+    wait_for_https,
 };
 
 // -----------------------------------------------------------------------------
@@ -146,25 +147,49 @@ fn rfc8446_alpn_http11_tls_handshake_accepted() {
 #[test]
 fn rfc8446_invalid_client_cert_rejected_with_mtls() {
     let server_certs = TestCertificates::generate();
-    let other_ca_certs = TestCertificates::generate();
-    let wrong_client_cert = other_ca_certs.generate_client_cert();
-    let wrong_client_config = server_certs.client_config_with_cert(&wrong_client_cert);
     let valid_client_cert = server_certs.generate_client_cert();
     let valid_client_config = server_certs.client_config_with_cert(&valid_client_cert);
 
-    let backend_port = start_backend("should-not-reach");
+    let (backend, hits) = start_request_counting_backend("mtls-ok");
     let proxy_port = free_port();
-    let yaml = mtls_proxy_yaml(proxy_port, backend_port, &server_certs);
+    let yaml = mtls_proxy_yaml(proxy_port, backend.port(), &server_certs);
     let config = Config::from_yaml(&yaml).unwrap();
     let proxy = start_tls_proxy_no_wait(&config);
     wait_for_https(proxy.addr(), &valid_client_config);
-
-    let rejected = tls_connection_rejected(
-        proxy.addr(),
-        b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n",
-        &wrong_client_config,
+    let (status, body) = https_get(proxy.addr(), "/", &valid_client_config);
+    assert_eq!(
+        (status, body.as_str()),
+        (200, "mtls-ok"),
+        "trusted client reaches backend"
     );
-    assert!(rejected, "client cert signed by wrong CA must be rejected in mTLS mode");
+    let accepted_hits = hits.load(Ordering::SeqCst);
+    assert!(accepted_hits > 0, "trusted client must reach backend");
+
+    for (issuer, expected_alert) in [
+        (TestCertificates::generate(), rustls::AlertDescription::DecryptError),
+        (
+            TestCertificates::generate_for_san("other.invalid"),
+            rustls::AlertDescription::UnknownCA,
+        ),
+    ] {
+        let client_cert = issuer.generate_client_cert();
+        let client_config = server_certs.client_config_with_cert(&client_cert);
+        let outcome = tls_negative_probe(
+            proxy.addr(),
+            "localhost",
+            b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            &client_config,
+        );
+        assert!(
+            matches!(&outcome, TlsProbeOutcome::PeerAlert(alert) if *alert == expected_alert),
+            "untrusted client certificate must receive {expected_alert:?} before application data: {outcome:?}"
+        );
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            accepted_hits,
+            "untrusted client certificate must not reach backend"
+        );
+    }
 }
 
 // -----------------------------------------------------------------------------

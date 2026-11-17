@@ -10,8 +10,8 @@ use praxis_core::config::Config;
 use praxis_test_utils::{
     TestCertificates, free_port, http_get, https_get, registry_with, start_backend_with_shutdown, start_full_proxy,
     start_mtls_backend, start_proxy, start_tcp_echo_backend, start_tls_backend, start_tls_proxy,
-    start_tls_proxy_no_wait, start_tls_proxy_no_wait_with_registry, tls_connection_rejected, tls_send_recv,
-    wait_for_https, wait_for_tls,
+    start_tls_proxy_no_wait, start_tls_proxy_no_wait_with_registry, tls_negative_probe, tls_send_recv, wait_for_https,
+    wait_for_tls,
 };
 
 // -----------------------------------------------------------------------------
@@ -982,10 +982,10 @@ listeners:
     let addr = format!("127.0.0.1:{proxy_port}");
     wait_for_tls(&addr, &mtls_config);
 
-    let failed = tls_connection_rejected(&addr, b"should not echo", &no_cert_config);
+    let outcome = tls_negative_probe(&addr, "localhost", b"should not echo", &no_cert_config);
     assert!(
-        failed,
-        "TCP mTLS require without client cert should reject the connection"
+        outcome.is_client_auth_alert(),
+        "TCP mTLS require without client cert must send a peer authentication alert: {outcome:?}"
     );
 }
 
