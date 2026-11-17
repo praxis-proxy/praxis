@@ -1071,7 +1071,7 @@ allow_destinations:
         assert_eq!(status_of(&response), 400, "{response}");
     }
 
-    /// A test filter that refuses CONNECTs to `allowed.invalid`, `2001:db8::1`,
+    /// A test filter that refuses `CONNECT` requests to `allowed.invalid`, `2001:db8::1`,
     /// and `93.184.216.34`, matching the host filters see the way a
     /// `policy` rule does.
     struct HostGate;
