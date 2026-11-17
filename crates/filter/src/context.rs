@@ -392,9 +392,11 @@ pub struct HttpFilterContext<'a> {
     /// Filter result map: `filter_name` -> result entries.
     ///
     /// Filters write string key-value pairs here during
-    /// `on_request` or `on_response`. The pipeline executor
-    /// reads these to evaluate branch conditions. Cleared
-    /// after branch evaluation at each filter.
+    /// request or response hooks. The pipeline executor reads these to
+    /// evaluate branch conditions and clears them after each host's branch
+    /// evaluation. Head and pre-read body results are staged by filter
+    /// instance and restored only for that instance's request hook, while
+    /// branch conditions continue to use the public filter type key.
     pub filter_results: HashMap<&'static str, FilterResultSet>,
 
     /// Typed per-filter state that persists across all lifecycle

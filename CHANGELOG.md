@@ -101,6 +101,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Security
 
+- Keep pre-request results bound to their filter instance so a later
+  classifier cannot suppress an earlier instance's branch-gated security
+  checks.
 - LLM policies now apply HTTP authorization, delegation and request assertions
   to accepted unclassified requests without a model when
   `llm.require_model: false`. Adding a body to a discovery request no longer

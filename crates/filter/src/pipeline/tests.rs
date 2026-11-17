@@ -5439,6 +5439,7 @@ impl HttpFilter for StreamBufferBodyDoneFilter {
 /// pipeline literal, mirroring what [`FilterPipeline::build`] does.
 fn with_body_indices(mut pipeline: FilterPipeline) -> FilterPipeline {
     let (request, response) = super::body::body_filter_indices(&pipeline.filters);
+    pipeline.request_head_filter_indices = super::body::request_head_filter_indices(&pipeline.filters);
     pipeline.request_body_filter_indices = request;
     pipeline.response_body_filter_indices = response;
     pipeline.selected_upstream_request_body_filter_indices =
@@ -8843,6 +8844,436 @@ async fn a_pre_read_result_for_a_skipped_filter_is_dropped() {
         ctx.filter_results.is_empty(),
         "results for a filter that never ran must not leak past the request phase"
     );
+}
+
+/// Same-type producer with optional head/body participation for staging tests.
+struct StagedProbe {
+    role: &'static str,
+    head_class: Option<&'static str>,
+    head: bool,
+    body: bool,
+    visits: Arc<AtomicUsize>,
+}
+
+/// Configure one deterministic pre-request result producer.
+fn staged_probe(
+    role: &'static str,
+    class: Option<&'static str>,
+    head: bool,
+    body: bool,
+    visits: Arc<AtomicUsize>,
+) -> StagedProbe {
+    StagedProbe {
+        role,
+        head_class: class,
+        head,
+        body,
+        visits,
+    }
+}
+
+/// Apply one body chunk's test publication or replacement.
+fn publish_staged_probe_body(
+    role: &str,
+    ctx: &mut crate::HttpFilterContext<'_>,
+    body: Option<&[u8]>,
+) -> Result<(), FilterError> {
+    match (role, body) {
+        ("first", Some(bytes)) if bytes == b"alpha" => {
+            ctx.filter_results
+                .entry("staged_probe")
+                .or_default()
+                .set("class", "first-old")?;
+        },
+        ("first", Some(bytes)) if bytes == b"beta" => {
+            ctx.filter_results.remove("staged_probe");
+            ctx.filter_results
+                .entry("staged_probe")
+                .or_default()
+                .set("class", "first-new")?;
+        },
+        ("second", Some(bytes)) if bytes == b"alpha" => {
+            ctx.filter_results
+                .entry("staged_probe")
+                .or_default()
+                .set("class", "second")?;
+        },
+        _ => {},
+    }
+    Ok(())
+}
+
+#[async_trait]
+impl HttpFilter for StagedProbe {
+    fn name(&self) -> &'static str {
+        "staged_probe"
+    }
+
+    fn runs_request_head(&self) -> bool {
+        self.head
+    }
+
+    async fn on_request_head(&self, ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        if let Some(class) = self.head_class {
+            ctx.filter_results.entry(self.name()).or_default().set("class", class)?;
+        }
+        Ok(FilterAction::Continue)
+    }
+
+    fn request_body_access(&self) -> BodyAccess {
+        if self.body {
+            BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
+        } else {
+            BodyAccess::None
+        }
+    }
+
+    fn request_body_mode(&self) -> BodyMode {
+        BodyMode::StreamBuffer { max_bytes: Some(64) }
+    }
+
+    async fn on_request_body(
+        &self,
+        ctx: &mut crate::HttpFilterContext<'_>,
+        body: &mut Option<Bytes>,
+        _end_of_stream: bool,
+    ) -> Result<FilterAction, FilterError> {
+        publish_staged_probe_body(self.role, ctx, body.as_deref())?;
+        Ok(FilterAction::Continue)
+    }
+
+    async fn on_request(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        self.visits.fetch_add(1, Ordering::SeqCst);
+        Ok(FilterAction::Continue)
+    }
+}
+
+/// Build one probe with a unique pipeline identity.
+fn staged_probe_pf(id: usize, probe: StagedProbe) -> PipelineFilter {
+    PipelineFilter::new(id, AnyFilter::Http(Box::new(probe)), vec![], vec![])
+}
+
+/// Add a branch that counts when this host sees its own staged class.
+fn add_staged_branch(pf: &mut PipelineFilter, class: &str, counter: Arc<AtomicUsize>, rejoin: RejoinTarget) {
+    pf.branches.push(ResolvedBranch {
+        name: Arc::from(format!("staged_{}", pf.filter_id)),
+        condition: Some(ResolvedBranchCondition {
+            filter_name: Arc::from("staged_probe"),
+            key: Arc::from("class"),
+            matcher: praxis_core::config::ResultMatch::Exact(class.to_owned()),
+        }),
+        filters: vec![PipelineFilter::new(
+            100 + pf.filter_id,
+            AnyFilter::Http(Box::new(CountingFilter { counter })),
+            vec![],
+            vec![],
+        )],
+        max_iterations: matches!(rejoin, RejoinTarget::ReEnter(_)).then_some(1),
+        rejoin,
+    });
+}
+
+/// Build a head producer with a branch that recognizes `expected`.
+fn staged_head_host(
+    id: usize,
+    class: Option<&'static str>,
+    expected: &str,
+    counter: Arc<AtomicUsize>,
+) -> PipelineFilter {
+    let probe = staged_probe("head", class, true, false, Arc::new(AtomicUsize::new(0)));
+    let mut pf = staged_probe_pf(id, probe);
+    add_staged_branch(&mut pf, expected, counter, RejoinTarget::Next);
+    pf
+}
+
+/// Require the staging fixture to continue to its next hook.
+fn assert_staged_continue(action: &FilterAction) {
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "staging fixture must continue"
+    );
+}
+
+/// Run both phases of a hand-built head-producer pipeline.
+async fn run_staged_head_pipeline(pipeline: &FilterPipeline, path: &str) -> Result<(), FilterError> {
+    let req = crate::test_utils::make_request(Method::GET, path);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    assert_staged_continue(&pipeline.execute_http_request_head(&mut ctx).await?);
+    assert_staged_continue(&pipeline.execute_http_request(&mut ctx).await?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn head_classifier_results_are_isolated_per_instance() -> Result<(), FilterError> {
+    for (first_class, first_fires) in [(Some("untrusted"), 1), (None, 0)] {
+        let first = Arc::new(AtomicUsize::new(0));
+        let second = Arc::new(AtomicUsize::new(0));
+        let pipeline = test_pipeline(
+            BodyCapabilities::default(),
+            vec![
+                staged_head_host(0, first_class, "untrusted", Arc::clone(&first)),
+                staged_head_host(1, Some("trusted"), "trusted", Arc::clone(&second)),
+            ],
+        );
+        run_staged_head_pipeline(&pipeline, "/private").await?;
+        assert_eq!(
+            first.load(Ordering::SeqCst),
+            first_fires,
+            "first host must see only its result"
+        );
+        assert_eq!(second.load(Ordering::SeqCst), 1, "second host must see its own result");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn staged_pre_read_results_do_not_cross_mixed_eligibility() -> Result<(), FilterError> {
+    let first = Arc::new(AtomicUsize::new(0));
+    let second = Arc::new(AtomicUsize::new(0));
+    let probe = staged_probe("unmarked", None, false, false, Arc::new(AtomicUsize::new(0)));
+    let mut unmarked = staged_probe_pf(0, probe);
+    add_staged_branch(&mut unmarked, "trusted", Arc::clone(&first), RejoinTarget::Next);
+    let marked = staged_head_host(1, Some("trusted"), "trusted", Arc::clone(&second));
+    let pipeline = test_pipeline(BodyCapabilities::default(), vec![unmarked, marked]);
+    run_staged_head_pipeline(&pipeline, "/private").await?;
+    assert_eq!(
+        first.load(Ordering::SeqCst),
+        0,
+        "unmarked same-type host must not borrow staged class"
+    );
+    assert_eq!(second.load(Ordering::SeqCst), 1, "marked host retains its class");
+    Ok(())
+}
+
+#[tokio::test]
+async fn staged_pre_read_results_are_consumed_once() -> Result<(), FilterError> {
+    let visits = Arc::new(AtomicUsize::new(0));
+    let branch = Arc::new(AtomicUsize::new(0));
+    let mut host = staged_probe_pf(0, staged_probe("head", Some("loop"), true, false, Arc::clone(&visits)));
+    add_staged_branch(&mut host, "loop", Arc::clone(&branch), RejoinTarget::ReEnter(0));
+    let pipeline = test_pipeline(BodyCapabilities::default(), vec![host]);
+    run_staged_head_pipeline(&pipeline, "/").await?;
+    assert_eq!(visits.load(Ordering::SeqCst), 2, "host re-enters once");
+    assert_eq!(branch.load(Ordering::SeqCst), 1, "staged class must not replay");
+    Ok(())
+}
+
+/// Build a body producer whose own class drives its branch.
+fn staged_body_host(id: usize, role: &'static str, class: &str, counter: Arc<AtomicUsize>) -> PipelineFilter {
+    let probe = staged_probe(role, None, false, true, Arc::new(AtomicUsize::new(0)));
+    let mut host = staged_probe_pf(id, probe);
+    add_staged_branch(&mut host, class, counter, RejoinTarget::Next);
+    host
+}
+
+/// Feed repeated chunks and EOF through the untracked pre-read path.
+async fn run_staged_body_chunks(
+    pipeline: &FilterPipeline,
+    ctx: &mut crate::HttpFilterContext<'_>,
+) -> Result<(), FilterError> {
+    for chunk in ["alpha", "beta"] {
+        assert_staged_continue(
+            &pipeline
+                .execute_http_request_body(ctx, &mut Some(Bytes::from(chunk)), false)
+                .await?,
+        );
+    }
+    assert_staged_continue(&pipeline.execute_http_request_body(ctx, &mut None, true).await?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn staged_pre_read_results_preserve_each_body_producer() -> Result<(), FilterError> {
+    let first = Arc::new(AtomicUsize::new(0));
+    let second = Arc::new(AtomicUsize::new(0));
+    let hosts = vec![
+        staged_body_host(0, "first", "first-new", Arc::clone(&first)),
+        staged_body_host(1, "second", "second", Arc::clone(&second)),
+    ];
+    let pipeline = test_pipeline(BodyCapabilities::default(), hosts);
+    let req = crate::test_utils::make_request(Method::POST, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    run_staged_body_chunks(&pipeline, &mut ctx).await?;
+    assert_staged_continue(&pipeline.execute_http_request(&mut ctx).await?);
+    assert_eq!(
+        first.load(Ordering::SeqCst),
+        1,
+        "first replacement survives later chunks"
+    );
+    assert_eq!(
+        second.load(Ordering::SeqCst),
+        1,
+        "second no-publication pass retains own class"
+    );
+    Ok(())
+}
+
+/// Head producer that uses filter-owned state and may fail after publication.
+struct StatefulStagedProbe {
+    fail: bool,
+    state_seen: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl HttpFilter for StatefulStagedProbe {
+    fn name(&self) -> &'static str {
+        "staged_probe"
+    }
+
+    fn runs_request_head(&self) -> bool {
+        true
+    }
+
+    async fn on_request_head(&self, ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        ctx.insert_filter_state(7_u32);
+        ctx.filter_results
+            .entry(self.name())
+            .or_default()
+            .set("class", "partial")?;
+        if self.fail {
+            Err("head failed after writing".into())
+        } else {
+            Ok(FilterAction::Continue)
+        }
+    }
+
+    async fn on_request(&self, ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        self.state_seen
+            .store(ctx.get_filter_state::<u32>() == Some(&7), Ordering::SeqCst);
+        Ok(FilterAction::Continue)
+    }
+}
+
+#[tokio::test]
+async fn staged_pre_read_results_keep_state_and_fail_open_writes() -> Result<(), FilterError> {
+    let state_seen = Arc::new(AtomicBool::new(false));
+    let branch = Arc::new(AtomicUsize::new(0));
+    let mut host = PipelineFilter::new(
+        0,
+        AnyFilter::Http(Box::new(StatefulStagedProbe {
+            fail: true,
+            state_seen: Arc::clone(&state_seen),
+        })),
+        vec![],
+        vec![],
+    );
+    host.failure_mode = FailureMode::Open;
+    add_staged_branch(&mut host, "partial", Arc::clone(&branch), RejoinTarget::Next);
+    let pipeline = test_pipeline(BodyCapabilities::default(), vec![host]);
+    run_staged_head_pipeline(&pipeline, "/").await?;
+    assert!(
+        state_seen.load(Ordering::SeqCst),
+        "framework staging must preserve filter-owned state"
+    );
+    assert_eq!(
+        branch.load(Ordering::SeqCst),
+        1,
+        "fail-open partial result remains owned by producer"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn staged_pre_read_results_closed_error_stops_request() {
+    let mut host = PipelineFilter::new(
+        0,
+        AnyFilter::Http(Box::new(StatefulStagedProbe {
+            fail: true,
+            state_seen: Arc::new(AtomicBool::new(false)),
+        })),
+        vec![],
+        vec![],
+    );
+    host.failure_mode = FailureMode::Closed;
+    let pipeline = test_pipeline(BodyCapabilities::default(), vec![host]);
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    assert!(
+        pipeline.execute_http_request_head(&mut ctx).await.is_err(),
+        "closed head error must stop dispatch"
+    );
+}
+
+#[tokio::test]
+async fn staged_pre_read_results_discard_request_skipped_owner() -> Result<(), FilterError> {
+    let first = Arc::new(AtomicUsize::new(0));
+    let second = Arc::new(AtomicUsize::new(0));
+    let mut first_host = staged_head_host(0, Some("untrusted"), "untrusted", Arc::clone(&first));
+    first_host.conditions = vec![when_path("/private")];
+    let second_host = staged_head_host(1, Some("trusted"), "trusted", Arc::clone(&second));
+    let pipeline = test_pipeline(BodyCapabilities::default(), vec![first_host, second_host]);
+    let head_req = crate::test_utils::make_request(Method::GET, "/private");
+    let later_req = crate::test_utils::make_request(Method::GET, "/public");
+    let mut ctx = crate::test_utils::make_filter_context(&head_req);
+    assert_staged_continue(&pipeline.execute_http_request_head(&mut ctx).await?);
+    ctx.request = &later_req;
+    assert_staged_continue(&pipeline.execute_http_request(&mut ctx).await?);
+    assert_eq!(first.load(Ordering::SeqCst), 0, "skipped host cannot fire its branch");
+    assert_eq!(
+        second.load(Ordering::SeqCst),
+        1,
+        "later host retains its own staged result"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn skipped_fail_open_head_result_cannot_feed_another_instance() -> Result<(), FilterError> {
+    let first_seen = Arc::new(AtomicBool::new(false));
+    let first_branch = Arc::new(AtomicUsize::new(0));
+    let second_branch = Arc::new(AtomicUsize::new(0));
+    let mut first = PipelineFilter::new(
+        0,
+        AnyFilter::Http(Box::new(StatefulStagedProbe {
+            fail: true,
+            state_seen: Arc::clone(&first_seen),
+        })),
+        vec![when_path("/private")],
+        vec![],
+    );
+    first.failure_mode = FailureMode::Open;
+    add_staged_branch(&mut first, "partial", Arc::clone(&first_branch), RejoinTarget::Next);
+    let second = staged_head_host(1, Some("trusted"), "trusted", Arc::clone(&second_branch));
+    let pipeline = test_pipeline(BodyCapabilities::default(), vec![first, second]);
+    let head_req = crate::test_utils::make_request(Method::GET, "/private");
+    let later_req = crate::test_utils::make_request(Method::GET, "/public");
+    let mut ctx = crate::test_utils::make_filter_context(&head_req);
+    assert_staged_continue(&pipeline.execute_http_request_head(&mut ctx).await?);
+    ctx.request = &later_req;
+    assert_staged_continue(&pipeline.execute_http_request(&mut ctx).await?);
+    assert_eq!(first_branch.load(Ordering::SeqCst), 0);
+    assert!(
+        !first_seen.load(Ordering::SeqCst),
+        "skipped producer cannot run its request hook"
+    );
+    assert_eq!(
+        second_branch.load(Ordering::SeqCst),
+        1,
+        "eligible peer keeps its own result"
+    );
+    assert!(
+        ctx.filter_results.is_empty(),
+        "no staged result may leak past its owner"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn staged_pre_read_results_head_skip_does_not_borrow() -> Result<(), FilterError> {
+    let first = Arc::new(AtomicUsize::new(0));
+    let second = Arc::new(AtomicUsize::new(0));
+    let mut first_host = staged_head_host(0, Some("untrusted"), "trusted", Arc::clone(&first));
+    first_host.conditions = vec![when_path("/other")];
+    let second_host = staged_head_host(1, Some("trusted"), "trusted", Arc::clone(&second));
+    let pipeline = test_pipeline(BodyCapabilities::default(), vec![first_host, second_host]);
+    run_staged_head_pipeline(&pipeline, "/private").await?;
+    assert_eq!(
+        first.load(Ordering::SeqCst),
+        0,
+        "skipped head owner cannot borrow later class"
+    );
+    assert_eq!(second.load(Ordering::SeqCst), 1, "executed head owner still branches");
+    Ok(())
 }
 
 #[tokio::test]
