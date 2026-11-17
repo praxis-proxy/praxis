@@ -110,7 +110,15 @@
 //! See `examples/configs/security/policy-llm.yaml`.
 //!
 //! With `body_access: read_write`, `cmf.llm_output` evaluates non-streaming
-//! JSON responses. Encoded responses fail closed; SSE responses pass through.
+//! JSON-object responses. For final successful body-bearing responses declaring
+//! an application JSON media type, nonempty malformed or non-object content
+//! is withheld; unsupported encodings are rejected before the final headers
+//! are committed. A provider can omit or relabel the media type, so this is
+//! a declared-format contract rather than proof of every output format.
+//! Empty/bodyless, non-JSON, provider-error and SSE responses keep their
+//! existing behavior. Output text projection covers Chat and legacy choices,
+//! Chat function arguments, Responses message text and function arguments,
+//! and Anthropic top-level content; it does not inspect arbitrary JSON fields.
 //! A host filter may also provide [`PolicyResponseContext`] after observing a
 //! response; in that case `cmf.llm_output` evaluates its trusted `custom.*`
 //! values at end of stream without buffering or exposing response content, and

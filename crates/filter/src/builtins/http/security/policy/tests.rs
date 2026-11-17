@@ -6344,6 +6344,52 @@ async fn head_response_preserves_metadata_only_behavior() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn responses_output_text_reaches_completion_policy() {
+    let (_dir, path) = write_llm_output_rule(
+        r#"result == 'cleanSENTINEL' | result == '{\"query\":\"SENTINEL\"}': deny('withheld', 'output_withheld')"#,
+    );
+    let filter = build_read_write_filter(path);
+    for output in [
+        json!([
+            {"type":"message","content":[{"type":"output_text","text":"clean"}]},
+            {"type":"message","content":[{"type":"output_text","text":"SENTINEL"}]}
+        ]),
+        json!([
+            {"type":"message","content":[{"type":"output_image","text":"ignored"}]},
+            {"type":"function_call","name":"lookup","arguments":"{\"query\":\"SENTINEL\"}"}
+        ]),
+    ] {
+        let upstream = json!({"id":"resp_1","output":output,"metadata":{"benign":true}}).to_string();
+        assert_json_completion_withheld(&filter, upstream.as_bytes()).await;
+    }
+    let clean = json!({"output":[{"type":"message","content":[{"type":"output_image","text":"ignored"}]}]}).to_string();
+    assert_json_completion_unchanged(&filter, clean.as_bytes()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn chat_tool_arguments_reach_completion_policy() {
+    let (_dir, path) =
+        write_llm_output_rule("result == 'cleanSENTINEL' | result == 'SENTINEL': deny('withheld', 'output_withheld')");
+    let filter = build_read_write_filter(path);
+    for body in [
+        json!({"choices":[
+            {"message":{"content":"clean"}},
+            {"message":{"tool_calls":[{"function":{"name":"lookup","arguments":"SENTINEL"}}]}}
+        ]}),
+        json!({"choices":[{"message":{"function_call":{"name":"lookup","arguments":"SENTINEL"}}}]}),
+        json!({"choices":[{"text":"SENTINEL"}]}),
+        json!({"content":[{"type":"text","text":"SENTINEL"}]}),
+    ] {
+        let upstream = body.to_string();
+        assert_json_completion_withheld(&filter, upstream.as_bytes()).await;
+    }
+    let clean =
+        json!({"choices":[{"message":{"content":null,"tool_calls":[{"function":{"name":"f","arguments":"{}"}}]}}]})
+            .to_string();
+    assert_json_completion_unchanged(&filter, clean.as_bytes()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_content_encoded_completion_fails_closed() {
     let (_dir, path) = write_llm_post_config();
     let filter = build_read_write_filter(path);

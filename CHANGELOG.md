@@ -108,6 +108,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Security
 
+- Inference output policy now inspects recognized Responses text and Chat and
+  Responses function-call arguments.
 - Inference output policy now withholds nonempty malformed declared JSON
   completions instead of forwarding uninspected content.
 - Inference output policy rejects unsupported encoded declared JSON completions
