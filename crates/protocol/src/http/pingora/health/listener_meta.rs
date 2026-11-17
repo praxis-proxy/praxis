@@ -27,6 +27,9 @@ use serde::Serialize;
 pub struct ListenerMeta {
     /// Listener name.
     pub name: String,
+    /// Whether this still-bound listener appears in the latest config.
+    #[serde(skip_serializing)]
+    pub configured_in_current_generation: bool,
     /// Bind address.
     pub address: String,
     /// Protocol kind (`http` / `tcp`).
@@ -51,6 +54,7 @@ pub fn listener_meta_from_config(config: &Config) -> HashMap<String, ListenerMet
                 listener.name.clone(),
                 ListenerMeta {
                     name: listener.name.clone(),
+                    configured_in_current_generation: true,
                     address: listener.address.clone(),
                     protocol: listener.protocol,
                     tls: listener.tls.is_some(),
