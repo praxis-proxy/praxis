@@ -240,6 +240,7 @@ pub(crate) mod test_utils {
             extra_request_headers: Vec::new(),
             request_headers_to_remove: Vec::new(),
             request_headers_to_set: Vec::new(),
+            request_header_mutations: Vec::new(),
             filter_metadata: crate::FilterMetadata::default(),
             prior_pre_read_mutations: Vec::new(),
             pre_read_mutations: Vec::new(),

@@ -38,6 +38,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **Breaking:** HttpFilterContext now carries request_header_mutations for ordered header operations; custom constructors must initialize the field.
 - **Breaking:** BodyReadError includes TimedOut; exhaustive matches in custom management request implementations must handle it.
 - **Breaking:** SessionStoreRegistry replaces cluster-only get/insert access with explicit candidate generation binding and publication.
 - Reuse owned bytes for nonfinal gRPC-Web response chunks.
@@ -80,6 +81,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Preserve every headers.request_add field value in upstream requests, including duplicates and opaque existing values.
 - Clarify that the MaxBodyGuard extension example checks declared Content-Length and point to cumulative request body limits.
 - Describe the retry-policy example as capped connection/reset retries with backoff, without an unconfigured token-bucket budget.
 - Keep Hyper upstream response read deadlines active while a streaming request upload makes progress.

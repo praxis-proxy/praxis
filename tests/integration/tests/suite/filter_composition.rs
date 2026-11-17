@@ -15,6 +15,70 @@ use praxis_test_utils::{
 // -----------------------------------------------------------------------------
 
 #[test]
+fn request_add_duplicate_values_reach_upstream() {
+    let backend = start_header_echo_backend();
+    let yaml = format!(
+        r#"
+listeners:
+  - name: default
+    address: "127.0.0.1:{}"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: request_id
+      - filter: headers
+        request_set:
+          - {{name: X-Reverse, value: first}}
+        request_add:
+          - {{name: X-Fresh, value: one}}
+          - {{name: X-Fresh, value: two}}
+          - {{name: Cookie, value: b=2}}
+          - {{name: X-Order, value: first}}
+      - filter: headers
+        request_set:
+          - {{name: X-Order, value: last}}
+        request_add:
+          - {{name: X-Reverse, value: second}}
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints: ["127.0.0.1:{}"]
+insecure_options:
+  allow_private_endpoints: true
+"#,
+        free_port(),
+        backend.port(),
+    );
+    let proxy = start_proxy(&Config::from_yaml(&yaml).unwrap());
+    let raw = http_send(
+        proxy.addr(),
+        "GET / HTTP/1.1\r\nHost: localhost\r\nCookie: a=1\r\nX-Request-Id: client-id\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(parse_status(&raw), 200);
+    let body = parse_body(&raw).to_ascii_lowercase();
+    let values = |name: &str| -> Vec<&str> {
+        body.lines()
+            .filter_map(|line| line.strip_prefix(name).and_then(|value| value.strip_prefix(':')))
+            .map(str::trim)
+            .collect()
+    };
+    assert_eq!(values("x-fresh"), ["one", "two"], "{body}");
+    assert_eq!(values("cookie"), ["a=1", "b=2"], "{body}");
+    assert_eq!(values("x-order"), ["last"], "{body}");
+    assert_eq!(values("x-reverse"), ["first", "second"], "{body}");
+    assert_eq!(
+        values("x-request-id"),
+        ["client-id"],
+        "generic request ID must remain singular: {body}"
+    );
+}
+
+#[test]
 fn multiple_request_filters_all_execute_in_order() {
     let backend_guard = start_header_echo_backend();
     let backend_port = backend_guard.port();

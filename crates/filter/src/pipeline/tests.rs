@@ -11,6 +11,8 @@ use std::{
     },
 };
 
+#[cfg(feature = "upstream-binding")]
+use ::http::header::HeaderName;
 use ::http::{HeaderMap, Method, StatusCode};
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -22,6 +24,8 @@ use super::{
     branch::{RejoinTarget, ResolvedBranch, ResolvedBranchCondition},
     filter::PipelineFilter,
 };
+#[cfg(feature = "upstream-binding")]
+use crate::PendingHeaderResult;
 use crate::{
     FilterAction, FilterEntry, FilterError, FilterFactory, FilterRegistry, SecurityClass, StreamingResponseBody,
     StreamingTerminalResponse,
@@ -300,9 +304,10 @@ async fn built_binding_router_resolves_metadata_from_pipeline_catalog() {
         Some("openai"),
         "the built router must resolve the provider from the pipeline catalog"
     );
-    assert!(
-        ctx.request_headers_to_set.iter().any(|(name, _)| name == "x-bound"),
-        "the bound_upstream condition must match the catalog-resolved provider"
+    assert_eq!(
+        ctx.pending_header_value(&HeaderName::from_static("x-bound")),
+        Ok(PendingHeaderResult::Value("true".to_owned())),
+        "the bound_upstream condition must queue the catalog-matched header value"
     );
 }
 
@@ -532,12 +537,10 @@ async fn unmatched_conditional_router_publishes_no_binding_or_route_metrics() {
     drop(pipeline.execute_http_request(&mut routed_ctx).await.unwrap());
     let action = pipeline.execute_http_request(&mut ctx).await.unwrap();
 
-    assert!(
-        routed_ctx
-            .request_headers_to_set
-            .iter()
-            .any(|(name, _)| name == "x-routed"),
-        "a routed request binds the openai cluster and runs the bound-gated filter"
+    assert_eq!(
+        routed_ctx.pending_header_value(&HeaderName::from_static("x-routed")),
+        Ok(PendingHeaderResult::Value("true".to_owned())),
+        "a routed request binds the openai cluster and queues the bound-gated header value"
     );
     assert!(
         matches!(action, FilterAction::Continue),
@@ -552,9 +555,10 @@ async fn unmatched_conditional_router_publishes_no_binding_or_route_metrics() {
         ctx.metrics_route.is_none(),
         "a skipped router must not label the request with a route"
     );
-    assert!(
-        ctx.request_headers_to_set.is_empty(),
-        "the bound-gated filter must not run for an unbound request"
+    assert_eq!(
+        ctx.pending_header_value(&HeaderName::from_static("x-routed")),
+        Ok(PendingHeaderResult::Absent),
+        "the bound-gated filter must not queue its header for an unbound request"
     );
 }
 

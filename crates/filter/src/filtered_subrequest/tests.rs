@@ -517,6 +517,47 @@ fn request_header_mutations_remove_set_and_add() {
 }
 
 #[test]
+fn ordered_request_headers_replay_into_filtered_subrequest() {
+    let mut request = crate::test_utils::make_request(http::Method::GET, "/");
+    request
+        .headers
+        .append("cookie", http::HeaderValue::from_bytes(b"\x80opaque").unwrap());
+    let mut ctx = crate::test_utils::make_filter_context(&request);
+    ctx.request_header_mutations = vec![
+        crate::TrustedHeaderMutation::Add("cookie".parse().unwrap(), "a=1".to_owned()),
+        crate::TrustedHeaderMutation::Add("x-fresh".parse().unwrap(), "one".to_owned()),
+        crate::TrustedHeaderMutation::Add("x-fresh".parse().unwrap(), "two".to_owned()),
+        crate::TrustedHeaderMutation::Set("x-fresh".parse().unwrap(), "final".parse().unwrap()),
+    ];
+    let mut headers = request.headers.clone();
+    super::sanitize::apply_request_header_mutations(&mut headers, &ctx);
+    assert_eq!(
+        headers
+            .get_all("cookie")
+            .iter()
+            .map(http::HeaderValue::as_bytes)
+            .collect::<Vec<_>>(),
+        [b"\x80opaque".as_slice(), b"a=1".as_slice()]
+    );
+    assert_eq!(
+        headers
+            .get_all("x-fresh")
+            .iter()
+            .map(http::HeaderValue::as_bytes)
+            .collect::<Vec<_>>(),
+        [b"final".as_slice()]
+    );
+
+    let mut folded = request.headers.clone();
+    super::sanitize::fold_pending_into(&mut folded, &mut ctx);
+    assert_eq!(folded, headers);
+    assert!(
+        ctx.request_header_mutations.is_empty(),
+        "folding clears this request's log"
+    );
+}
+
+#[test]
 fn pre_read_mutations_apply_remove_set_and_add() {
     let req = crate::test_utils::make_request(http::Method::GET, "/");
     let mut ctx = crate::test_utils::make_filter_context(&req);

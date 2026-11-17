@@ -30,10 +30,9 @@ pub(super) fn apply_pre_read_mutations(
 
 /// Apply the request pipeline's pending header mutations to a header map.
 ///
-/// Applied in remove -> set -> add order, matching both the order the
-/// caller applies them to the Pingora session and the order documented
-/// on [`HttpFilterContext::pending_header_value`]: a remove clears any
-/// prior value, a set establishes a new one, and adds follow.
+/// Applies generic removals and sets, then the headers filter's ordered
+/// remove/set/add log, then generic extras with their replacement semantics.
+/// The Pingora session follows this same order.
 ///
 /// `extra` uses replace semantics here because that is what the session
 /// receives (`insert_header`). This differs from the pre-read body phase,
@@ -43,12 +42,11 @@ pub(super) fn apply_pre_read_mutations(
 /// header and would duplicate it under append semantics, while pre-read
 /// body filters accumulate. Do not "unify" the two without auditing both
 /// sets of callers.
-///
-/// [`HttpFilterContext::pending_header_value`]: praxis_filter::HttpFilterContext::pending_header_value
 pub(super) fn apply_pending_header_mutations(
     headers: &mut http::HeaderMap,
     to_remove: &[http::header::HeaderName],
     to_set: &[(http::header::HeaderName, http::header::HeaderValue)],
+    ordered: &[TrustedHeaderMutation],
     extra: &[(Cow<'static, str>, String)],
 ) {
     for name in to_remove {
@@ -57,6 +55,7 @@ pub(super) fn apply_pending_header_mutations(
     for (name, value) in to_set {
         let _replaced = headers.insert(name.clone(), value.clone());
     }
+    apply_pre_read_mutations_to_headers(headers, ordered);
     for (name, value) in extra {
         match (
             http::header::HeaderName::from_bytes(name.as_bytes()),
@@ -75,6 +74,32 @@ pub(super) fn apply_pending_header_mutations(
             },
         }
     }
+}
+
+/// Replay an ordered trusted mutation sequence on a header map.
+fn apply_pre_read_mutations_to_headers(headers: &mut http::HeaderMap, mutations: &[TrustedHeaderMutation]) {
+    for mutation in mutations {
+        match mutation {
+            TrustedHeaderMutation::Remove(name) => {
+                headers.remove(name);
+            },
+            TrustedHeaderMutation::Set(name, value) => {
+                headers.insert(name.clone(), value.clone());
+            },
+            TrustedHeaderMutation::Add(name, value) => match http::header::HeaderValue::from_str(value) {
+                Ok(value) => {
+                    headers.append(name.clone(), value);
+                },
+                Err(error) => warn!(header = %name, %error, "skipping invalid trusted add mutation"),
+            },
+        }
+    }
+}
+
+/// Replay ordered request-phase mutations on the Pingora session.
+#[cfg(feature = "pingora")]
+pub(super) fn apply_request_mutations_to_session(session: &mut Session, mutations: &[TrustedHeaderMutation]) {
+    apply_pre_read_mutations_to_session(session, mutations);
 }
 
 /// Apply pre-read mutations to the Praxis [`Request`] struct.
@@ -153,6 +178,23 @@ mod tests {
         }
     }
 
+    /// Collect every field value without folding opaque bytes.
+    fn header_values<'a>(headers: &'a HeaderMap, name: &str) -> Vec<&'a [u8]> {
+        headers.get_all(name).iter().map(http::HeaderValue::as_bytes).collect()
+    }
+
+    /// Exercise fresh duplicates, Cookie append, and remove/set/add order.
+    fn ordered_adds() -> [TrustedHeaderMutation; 6] {
+        [
+            TrustedHeaderMutation::Add("x-fresh".parse().unwrap(), "one".to_owned()),
+            TrustedHeaderMutation::Add("x-fresh".parse().unwrap(), "two".to_owned()),
+            TrustedHeaderMutation::Add("cookie".parse().unwrap(), "b=2".to_owned()),
+            TrustedHeaderMutation::Remove("x-mode".parse().unwrap()),
+            TrustedHeaderMutation::Set("x-mode".parse().unwrap(), "set".parse().unwrap()),
+            TrustedHeaderMutation::Add("x-mode".parse().unwrap(), "added".to_owned()),
+        ]
+    }
+
     #[test]
     fn pending_mutations_apply_removes_sets_and_adds() {
         let mut headers = HeaderMap::new();
@@ -163,6 +205,7 @@ mod tests {
             &mut headers,
             &["x-drop".parse().unwrap()],
             &[("x-set".parse().unwrap(), "set-value".parse().unwrap())],
+            &[],
             &[(Cow::Borrowed("x-extra"), "extra-value".to_owned())],
         );
 
@@ -182,6 +225,7 @@ mod tests {
             &["x-both".parse().unwrap()],
             &[("x-both".parse().unwrap(), "replacement".parse().unwrap())],
             &[],
+            &[],
         );
 
         assert_eq!(
@@ -200,6 +244,7 @@ mod tests {
             &mut headers,
             &[],
             &[],
+            &[],
             &[(Cow::Borrowed("x-request-id"), "client-supplied".to_owned())],
         );
 
@@ -211,11 +256,41 @@ mod tests {
     }
 
     #[test]
+    fn request_add_preserves_all_values_upstream_semantics() {
+        let mut headers = HeaderMap::new();
+        headers.append("cookie", http::HeaderValue::from_static("a=1"));
+        headers.append("cookie", http::HeaderValue::from_bytes(b"\x80opaque").unwrap());
+        let ordered = ordered_adds();
+        apply_pending_header_mutations(&mut headers, &[], &[], &ordered, &[]);
+        assert_eq!(
+            header_values(&headers, "x-fresh"),
+            [b"one".as_slice(), b"two".as_slice()]
+        );
+        assert_eq!(
+            header_values(&headers, "cookie"),
+            [b"a=1".as_slice(), b"\x80opaque".as_slice(), b"b=2".as_slice()]
+        );
+        assert_eq!(
+            header_values(&headers, "x-mode"),
+            [b"set".as_slice(), b"added".as_slice()]
+        );
+
+        let following = [TrustedHeaderMutation::Set(
+            "x-fresh".parse().unwrap(),
+            "last".parse().unwrap(),
+        )];
+        apply_pending_header_mutations(&mut headers, &[], &[], &following, &[]);
+        assert_eq!(headers.get_all("x-fresh").iter().count(), 1);
+        assert_eq!(headers.get("x-fresh").unwrap(), "last");
+    }
+
+    #[test]
     fn pending_mutations_skip_invalid_promoted_headers() {
         let mut headers = HeaderMap::new();
 
         apply_pending_header_mutations(
             &mut headers,
+            &[],
             &[],
             &[],
             &[

@@ -897,6 +897,7 @@ mod tests {
             extra_headers: Vec::new(),
             headers_to_remove: Vec::new(),
             headers_to_set: Vec::new(),
+            header_mutations: Vec::new(),
         }
     }
 
