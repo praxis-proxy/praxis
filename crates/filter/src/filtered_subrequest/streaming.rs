@@ -143,19 +143,17 @@ impl CompletionOutput {
             .fold(0, usize::saturating_add)
     }
 
-    /// Size of the next logical chunk before bandwidth splits it into prefixes.
-    pub(crate) fn next_chunk_len(&self) -> usize {
-        self.chunks.front().map_or(0, |chunk| chunk.body.len())
-    }
-
     /// Return one admitted prefix, refunding all unreturned output on abandonment.
-    pub(crate) async fn next_chunk(&mut self) -> Result<Option<Bytes>, FilterError> {
+    pub(crate) async fn next_chunk(
+        &mut self,
+        check: impl Fn(usize) -> Result<(), FilterError>,
+    ) -> Result<Option<Bytes>, FilterError> {
         if self.releasing {
             self.chunks.clear();
             self.releasing = false;
             return Err("filtered_subrequest: output release was cancelled".into());
         }
-        release_output(&mut self.chunks, &mut self.releasing, self.deadline).await
+        release_output(&mut self.chunks, &mut self.releasing, self.deadline, check).await
     }
 }
 
@@ -164,9 +162,11 @@ async fn release_output(
     chunks: &mut VecDeque<PendingOutput>,
     releasing: &mut bool,
     deadline: Instant,
+    check: impl Fn(usize) -> Result<(), FilterError>,
 ) -> Result<Option<Bytes>, FilterError> {
     let mut pending = std::mem::take(chunks);
     while let Some(mut output) = pending.pop_front() {
+        check(output.body.len())?;
         *releasing = true;
         let result = output.next_prefix(deadline).await;
         *releasing = false;
@@ -180,6 +180,16 @@ async fn release_output(
         }
     }
     Ok(None)
+}
+
+/// Check the logical output before it can spend a prefix's allowance.
+fn check_response_limit(remaining_limit: Option<(usize, usize)>, bytes: usize) -> Result<(), FilterError> {
+    if let Some((remaining, limit)) = remaining_limit
+        && bytes > remaining
+    {
+        return Err(Box::new(CalloutResponseTooLarge { limit }));
+    }
+    Ok(())
 }
 
 /// Completion is checked by either the callout or the IRR transition owner.
@@ -399,24 +409,21 @@ impl FilteredStreamingBody {
 
     /// Admit the complete logical output before a wait can consume its allowance.
     fn check_output_limit(&mut self, bytes: usize) -> Result<(), FilterError> {
-        if let Some((_, limit)) = self.remaining_limit.filter(|(remaining, _)| bytes > *remaining) {
-            crate::cancel_download_pace(&mut self.continuation.extensions);
-            return Err(Box::new(CalloutResponseTooLarge { limit }));
-        }
-        Ok(())
+        check_response_limit(self.remaining_limit, bytes)
+            .inspect_err(|_| crate::cancel_download_pace(&mut self.continuation.extensions))
     }
 
     /// Admit the complete logical chunk before spending any of its allowance.
     async fn release_pending(&mut self) -> Result<Option<Bytes>, FilterError> {
-        if let Some(output) = self.pending_chunks.front() {
-            self.check_output_limit(output.body.len())?;
-        }
+        let remaining_limit = self.remaining_limit;
         release_output(
             &mut self.pending_chunks,
             &mut self.release_in_progress,
             self.continuation.step_deadline,
+            |bytes| check_response_limit(remaining_limit, bytes),
         )
         .await
+        .inspect_err(|_| crate::cancel_download_pace(&mut self.continuation.extensions))
     }
 
     /// Preserve completion charges until the caller selects and releases output.
@@ -801,19 +808,17 @@ impl CalloutStreamingBody {
         if let Some(chunk) = self.pending.pop_front() {
             return self.checked(chunk);
         }
-        if self.pending_completion.as_ref().is_some_and(|completion| {
-            completion.next_chunk_len() > self.max_response_bytes.saturating_sub(self.emitted_bytes)
-        }) {
-            self.pending_completion = None;
-            self.finished = true;
-            return Err(Box::new(CalloutResponseTooLarge {
-                limit: self.max_response_bytes,
-            }));
-        }
+        let limit = (
+            self.max_response_bytes.saturating_sub(self.emitted_bytes),
+            self.max_response_bytes,
+        );
         if let Some(completion) = self.pending_completion.as_mut() {
-            let result = completion.next_chunk().await;
+            let result = completion
+                .next_chunk(|bytes| check_response_limit(Some(limit), bytes))
+                .await;
             if result.is_err() {
                 self.finished = true;
+                self.pending_completion = None;
             }
             if let Some(chunk) = result? {
                 return self.checked(chunk);
@@ -905,9 +910,9 @@ pub(crate) mod tests {
     use http::HeaderMap;
     use praxis_core::subrequest::{StreamLimits, SubRequest, SubRequestClient, SubRequestError};
 
-    #[cfg(feature = "bandwidth")]
-    use super::OutputLimitScope;
     use super::{CalloutResponseTooLarge, CalloutStreamingBody, FilteredStreamingBody, std_instant_to_tokio};
+    #[cfg(feature = "bandwidth")]
+    use super::{CompletionOutput, OutputLimitScope, PendingOutput};
 
     #[cfg(feature = "bandwidth")]
     #[tokio::test]
@@ -1041,6 +1046,95 @@ pub(crate) mod tests {
     struct ConsumeResponse {
         empty: bool,
         fail: bool,
+    }
+
+    #[cfg(feature = "bandwidth")]
+    fn empty_emission_body(
+        burst: u64,
+        emitted: bool,
+        completion: bool,
+    ) -> (CalloutStreamingBody, Arc<crate::bandwidth::Schedule>) {
+        let (mut inner, schedule) =
+            paced_output(1, burst, if emitted { 100 } else { 0 }, if emitted { 0 } else { 100 });
+        inner
+            .pending_chunks
+            .push_front(PendingOutput::generated(Bytes::new(), &inner.continuation.extensions));
+        if completion {
+            inner.deferred_completion_output = Some(CompletionOutput {
+                chunks: std::mem::take(&mut inner.pending_chunks),
+                deadline: inner.continuation.step_deadline,
+                releasing: false,
+            });
+            inner.finished = true;
+        }
+        (CalloutStreamingBody::new(inner, 10), schedule)
+    }
+
+    #[cfg(feature = "bandwidth")]
+    async fn assert_empty_emission_is_bounded(completion: bool) {
+        for burst in [0, 10, 100] {
+            for emitted in [false, true] {
+                let (mut body, schedule) = empty_emission_body(burst, emitted, completion);
+                let result = tokio::time::timeout(
+                    Duration::from_millis(50),
+                    crate::StreamingResponseBody::next_chunk(&mut body),
+                )
+                .await;
+                let error = result
+                    .expect("size rejection must precede pacing after an empty emission")
+                    .unwrap_err();
+                assert_eq!(error.downcast_ref::<CalloutResponseTooLarge>().unwrap().limit, 10);
+                assert_eq!(body.emitted_bytes, 0);
+                assert!(!body.inner.as_ref().is_some_and(|inner| inner.release_in_progress));
+                crate::StreamingResponseBody::cancel(&mut body).await;
+                drop(body);
+                if burst != 0 {
+                    assert!(
+                        schedule.prepare(burst).delay().is_zero(),
+                        "an oversized logical output must not spend the burst"
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "bandwidth")]
+    #[tokio::test]
+    async fn empty_emission_cannot_hide_oversized_active_output() {
+        assert_empty_emission_is_bounded(false).await;
+    }
+
+    #[cfg(feature = "bandwidth")]
+    #[tokio::test]
+    async fn empty_emission_cannot_hide_oversized_completion_output() {
+        assert_empty_emission_is_bounded(true).await;
+    }
+
+    #[cfg(feature = "bandwidth")]
+    #[tokio::test]
+    async fn empty_emission_checks_preserve_consumed_input_accounting() {
+        for empty in [false, true] {
+            let mut body = consuming_body(empty, false);
+            let callback = body.filter_upstream_chunk(Bytes::from(vec![b'x'; 1000])).unwrap();
+            let template = crate::bandwidth::generated_download_plan(&body.continuation.extensions, 1000).unwrap();
+            body.enqueue_filtered(callback);
+            body.pending_chunks.push_back(PendingOutput::generated(
+                Bytes::from(vec![b'e'; 100]),
+                &body.continuation.extensions,
+            ));
+            body.remaining_limit = Some((10, 10));
+            let result = tokio::time::timeout(Duration::from_millis(50), body.release_pending()).await;
+            let error = result
+                .expect("the later oversized chunk must be rejected without pacing it")
+                .unwrap_err();
+            assert_eq!(error.downcast_ref::<CalloutResponseTooLarge>().unwrap().limit, 10);
+            let delay = template.delay();
+            assert!(
+                delay > Duration::from_secs(900) && delay <= Duration::from_secs(1000),
+                "charge exactly the consumed input, excluding the rejected output"
+            );
+            drop(body);
+        }
     }
 
     #[cfg(feature = "bandwidth")]
@@ -1259,7 +1353,7 @@ pub(crate) mod tests {
             .release_completion(Some(Bytes::from_static(b"end")))
             .unwrap()
             .unwrap();
-        completion.next_chunk().await.unwrap_err();
+        completion.next_chunk(|_| Ok(())).await.unwrap_err();
         assert!(!completion.releasing);
         assert!(!body.release_in_progress);
     }
