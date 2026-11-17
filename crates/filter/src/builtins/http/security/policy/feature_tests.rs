@@ -218,6 +218,33 @@ fn rate_limits_are_found_at_every_layer() {
     );
 }
 
+#[test]
+fn blank_environments_are_rejected_before_reading_the_policy_document() {
+    for label in ["", " ", "\t\r\n", "\u{2003}"] {
+        let mut cfg = filter_config("/nonexistent/policy.yaml".to_owned());
+        cfg.environment = Some(label.to_owned());
+        let error = PolicyFilter::new(cfg, None)
+            .err()
+            .expect("blank environment must fail at startup");
+        assert!(
+            error
+                .to_string()
+                .contains("environment must contain a non-whitespace character"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn nonblank_environments_load() {
+    let (_dir, path) = write_policy(EMPTY_POLICY);
+    for label in ["production", " staging "] {
+        let mut cfg = filter_config(path.clone());
+        cfg.environment = Some(label.to_owned());
+        PolicyFilter::new(cfg, None).expect("a nonblank deployment label loads");
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
@@ -248,6 +275,7 @@ fn write_api_key_policy() -> (TempDir, String) {
 /// The filter config pointing at `config_path`, with test-friendly defaults.
 pub(super) fn filter_config(config_path: String) -> PolicyFilterConfig {
     PolicyFilterConfig {
+        environment: None,
         config_path,
         allow_private_idp: false,
         trusted_private_endpoints: vec![],

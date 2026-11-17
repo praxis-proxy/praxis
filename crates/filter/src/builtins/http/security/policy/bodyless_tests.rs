@@ -389,6 +389,7 @@ async fn a_fallback_without_a_model_enforces_http_admission() {
 #[test]
 fn identity_only_fallbacks_beside_http_rules_warn_at_startup() {
     let base = PolicyFilterConfig {
+        environment: None,
         config_path: String::new(),
         allow_private_idp: false,
         trusted_private_endpoints: vec![],
@@ -499,6 +500,7 @@ fn policy(kind: &'static str, rest: &str) -> (TempDir, String, Resolutions) {
 fn filter_with(path: String, llm: LlmOptions) -> PolicyFilter {
     PolicyFilter::new(
         PolicyFilterConfig {
+            environment: None,
             config_path: path,
             allow_private_idp: false,
             trusted_private_endpoints: vec![],

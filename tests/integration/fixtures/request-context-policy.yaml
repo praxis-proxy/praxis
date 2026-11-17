@@ -1,0 +1,30 @@
+# Policy for security/policy-request-context.yaml. Replace the test JWT key in deployment.
+engine_settings:
+  dispatch: policy
+
+plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks: [identity.resolve]
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: https://idp.example.com
+          audiences: [praxis-policy-example]
+          algorithms: [HS256]
+          decoding_key:
+            kind: secret
+            secret: REPLACE-WITH-A-PROPERLY-RANDOM-SHARED-SECRET-DO-NOT-COMMIT
+      claim_mapper: standard
+
+global:
+  authentication: [jwt-user]
+  authorization:
+    pre_invocation:
+      - "require(authenticated)"
+      - "require(request.environment == 'production')"
+      - "require(exists(request.request_id), exists(request.trace_id), exists(request.timestamp))"
+    post_invocation:
+      - "require(request.environment == 'production')"
+      - "require(exists(request.request_id), exists(request.trace_id), exists(request.timestamp))"
