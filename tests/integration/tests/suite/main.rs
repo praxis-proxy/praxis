@@ -89,6 +89,8 @@ mod path_rewrite;
 mod payload_processing;
 mod payload_transport;
 mod per_listener_pipeline;
+#[cfg(any(feature = "pingora", feature = "hyper"))]
+mod pingora_response_trailers;
 mod pipelines_admin;
 #[cfg(feature = "policy-builtins")]
 mod policy_boundary;

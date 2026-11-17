@@ -22,9 +22,9 @@ use praxis_filter::{
     HttpFilterContext, Rejection,
 };
 use praxis_test_utils::{
-    Backend, GrpcBackend, H1Completion, H1Response, PayloadResponseFraming, PayloadSpec, free_port, http_get,
-    http_send, parse_body, parse_header, parse_status, read_h1_response, start_full_proxy_with_registry,
-    start_grpc_backend, start_payload_response_backend, wait_for_tcp,
+    Backend, H1Completion, H1Response, PayloadResponseFraming, PayloadSpec, free_port, http_get, http_send, parse_body,
+    parse_header, parse_status, read_h1_response, start_full_proxy_with_registry, start_payload_response_backend,
+    wait_for_tcp,
 };
 
 // ---------------------------------------------------------------------------
@@ -120,7 +120,12 @@ impl HttpFilter for ErrorResponseBodyFilter {
 }
 
 /// Response-body filter that fails only on the synthetic end-of-stream hook.
-struct ErrorAtResponseEofFilter;
+struct ErrorAtResponseEofFilter {
+    /// Records that the final callback was reached.
+    eof_seen: Arc<AtomicBool>,
+    /// Whether the final body callback fails or continues as a control.
+    error_at_eof: bool,
+}
 
 #[async_trait::async_trait]
 impl HttpFilter for ErrorAtResponseEofFilter {
@@ -147,10 +152,12 @@ impl HttpFilter for ErrorAtResponseEofFilter {
         end_of_stream: bool,
     ) -> Result<FilterAction, FilterError> {
         if end_of_stream {
-            Err("test_error_at_response_eof: synthetic EOF failed".to_owned().into())
-        } else {
-            Ok(FilterAction::Continue)
+            self.eof_seen.store(true, Ordering::SeqCst);
+            if self.error_at_eof {
+                return Err("test_error_at_response_eof: synthetic EOF failed".to_owned().into());
+            }
         }
+        Ok(FilterAction::Continue)
     }
 }
 
@@ -228,7 +235,12 @@ fn registry_with_eos(reject_at_eos: bool, eos_seen: Arc<AtomicBool>) -> FilterRe
     .unwrap();
     reg.register(
         "test_error_at_response_eof",
-        FilterFactory::Http(Arc::new(|_| Ok(Box::new(ErrorAtResponseEofFilter)))),
+        FilterFactory::Http(Arc::new(|_| {
+            Ok(Box::new(ErrorAtResponseEofFilter {
+                eof_seen: Arc::new(AtomicBool::new(false)),
+                error_at_eof: true,
+            }))
+        })),
     )
     .unwrap();
     reg.register(
@@ -445,31 +457,200 @@ fn response_body_filter_error_does_not_deliver_body() {
 
 #[test]
 fn synthetic_eof_filter_error_aborts_h2_trailer_delivery() {
-    let backend = start_grpc_backend(GrpcBackend::ok().body(b"\x00\x00\x00\x00\x02hi".as_slice()));
+    let prefix = Bytes::from_static(b"\x00\x00\x00\x00\x02hi");
+    for error_at_eof in [false, true] {
+        let (response, body, eof_seen) = observe_synthetic_response_eof(error_at_eof, &prefix);
+        assert!(eof_seen, "the synthetic EOF hook must run: {response:?}");
+        assert_eq!(response.status, Some(200), "the client observed the head before EOF");
+        assert_eq!(body, prefix, "accepted bytes must survive the final hook");
+        if error_at_eof {
+            assert_eq!(response.completion, None, "failed EOF must not complete: {response:?}");
+            assert!(
+                response.abort.as_ref().is_some_and(|(kind, _)| matches!(
+                    kind,
+                    ErrorKind::UnexpectedEof | ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted
+                )),
+                "EOF failure must produce a peer abort, not a read deadline: {response:?}"
+            );
+        } else {
+            assert_eq!(response.completion, Some(H1Completion::Chunked), "{response:?}");
+            assert_eq!(response.abort, None, "successful EOF must complete: {response:?}");
+        }
+    }
+}
+
+/// Release upstream trailers only after the H1 client observes every accepted byte.
+fn observe_synthetic_response_eof(error_at_eof: bool, prefix: &Bytes) -> (H1Response, Vec<u8>, bool) {
+    let backend = PausedH2EofBackend::start(prefix.clone());
     let proxy_port = free_port();
-    let config = Config::from_yaml(&h2_proxy_yaml(proxy_port, backend.port(), "test_error_at_response_eof"))
+    let config = Config::from_yaml(&h2_proxy_yaml(proxy_port, backend.port, "test_error_at_response_eof"))
         .expect("HTTP/2 proxy config should parse");
-    let reg = registry();
-    let _proxy = start_full_proxy_with_registry(&config, &reg);
-
-    let raw = http_send(
-        &format!("127.0.0.1:{proxy_port}"),
-        "POST /pkg.Svc/Method HTTP/1.1\r\n\
-         Host: localhost\r\n\
-         Content-Type: application/grpc\r\n\
-         Content-Length: 0\r\n\
-         Connection: close\r\n\r\n",
-    );
-
-    assert_eq!(
-        parse_status(&raw),
-        200,
-        "the upstream status is committed before EOF: {raw}"
+    let eof_seen = Arc::new(AtomicBool::new(false));
+    let filter_eof_seen = Arc::clone(&eof_seen);
+    let mut reg = FilterRegistry::with_builtins();
+    reg.register(
+        "test_error_at_response_eof",
+        FilterFactory::Http(Arc::new(move |_| {
+            Ok(Box::new(ErrorAtResponseEofFilter {
+                eof_seen: Arc::clone(&filter_eof_seen),
+                error_at_eof,
+            }))
+        })),
+    )
+    .expect("register EOF probe");
+    let proxy = start_full_proxy_with_registry(&config, &reg);
+    wait_for_tcp(proxy.addr());
+    let mut stream = std::net::TcpStream::connect(proxy.addr()).expect("connect synthetic EOF client");
+    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    stream.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+    stream
+        .write_all(
+            b"POST /pkg.Svc/Method HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/grpc\r\n\
+              Content-Length: 0\r\nConnection: close\r\n\r\n",
+        )
+        .expect("send synthetic EOF request");
+    let mut body = Vec::new();
+    let mut observed = false;
+    let response = read_h1_response(
+        &mut BufReader::new(stream),
+        false,
+        u64::try_from(prefix.len()).unwrap(),
+        |part| {
+            body.extend_from_slice(part);
+            if !observed && body.as_slice() == prefix.as_ref() {
+                observed = true;
+                backend.release.notify_one();
+            }
+            Ok(())
+        },
     );
     assert!(
-        !raw.to_ascii_lowercase().contains("grpc-status:"),
-        "a synthetic EOF failure must abort before forwarding HTTP/2 trailers: {raw}"
+        observed,
+        "the client must observe the exact prefix before trailer release: {response:?}"
     );
+    (response, body, eof_seen.load(Ordering::SeqCst))
+}
+
+/// Own the H2 backend runtime and a client-observation gate for its trailers.
+struct PausedH2EofBackend {
+    /// Bound backend port.
+    port: u16,
+    /// Permit sent only after the client observes the expected response prefix.
+    release: Arc<tokio::sync::Notify>,
+    /// Stop the accept loop and all connection tasks during cleanup.
+    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    /// Backend thread joined before its guard is released.
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl PausedH2EofBackend {
+    /// Bind before returning, and keep every async task inside the owned runtime.
+    fn start(prefix: Bytes) -> Self {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind paused H2 backend");
+        let port = listener.local_addr().unwrap().port();
+        listener.set_nonblocking(true).unwrap();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let server_release = Arc::clone(&release);
+        let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel();
+        let worker = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("paused H2 backend runtime");
+            runtime.block_on(run_paused_h2_backend(listener, prefix, server_release, shutdown_rx));
+        });
+        Self {
+            port,
+            release,
+            shutdown: Some(shutdown),
+            worker: Some(worker),
+        }
+    }
+}
+
+impl Drop for PausedH2EofBackend {
+    fn drop(&mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _sent = shutdown.send(());
+        }
+        if let Some(worker) = self.worker.take() {
+            let joined = worker.join();
+            if !std::thread::panicking() {
+                joined.expect("paused H2 backend thread");
+            }
+        }
+    }
+}
+
+/// Accept connections while retaining cancellation ownership of their tasks.
+async fn run_paused_h2_backend(
+    listener: std::net::TcpListener,
+    prefix: Bytes,
+    release: Arc<tokio::sync::Notify>,
+    mut shutdown: tokio::sync::oneshot::Receiver<()>,
+) {
+    let listener = tokio::net::TcpListener::from_std(listener).expect("adopt H2 listener");
+    let mut connections = tokio::task::JoinSet::new();
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => break,
+            accepted = listener.accept() => {
+                let (stream, _) = accepted.expect("accept H2 connection");
+                connections.spawn(serve_paused_h2_connection(stream, prefix.clone(), Arc::clone(&release)));
+            },
+            Some(joined) = connections.join_next(), if !connections.is_empty() => {
+                joined.expect("paused H2 connection task");
+            },
+        }
+    }
+    connections.shutdown().await;
+}
+
+/// Drive H2 I/O while the response waits for the client's observation permit.
+async fn serve_paused_h2_connection(stream: tokio::net::TcpStream, prefix: Bytes, release: Arc<tokio::sync::Notify>) {
+    let Ok(mut connection) = h2::server::handshake(stream).await else {
+        return;
+    };
+    let Some(Ok((request, respond))) = connection.accept().await else {
+        return;
+    };
+    let drive = async {
+        if let Some(Ok(_)) = connection.accept().await {
+            panic!("unexpected second request to the paused H2 backend");
+        }
+    };
+    tokio::pin!(drive);
+    tokio::select! {
+        () = serve_paused_h2_response(request, respond, prefix, release) => drive.await,
+        () = &mut drive => {},
+    }
+}
+
+/// Emit trailers only after exact downstream prefix observation, with a bounded wait.
+async fn serve_paused_h2_response(
+    request: http::Request<h2::RecvStream>,
+    mut respond: h2::server::SendResponse<Bytes>,
+    prefix: Bytes,
+    release: Arc<tokio::sync::Notify>,
+) {
+    let mut request_body = request.into_body();
+    while let Some(chunk) = request_body.data().await {
+        let chunk = chunk.expect("read H2 request body");
+        request_body.flow_control().release_capacity(chunk.len()).unwrap();
+    }
+    let response = http::Response::builder()
+        .status(200)
+        .header("content-type", "application/grpc")
+        .body(())
+        .unwrap();
+    let mut send = respond.send_response(response, false).expect("send H2 response head");
+    send.send_data(prefix, false).expect("send accepted H2 prefix");
+    tokio::time::timeout(Duration::from_secs(5), release.notified())
+        .await
+        .expect("client must observe prefix before trailers");
+    let mut trailers = http::HeaderMap::new();
+    trailers.insert("grpc-status", http::HeaderValue::from_static("0"));
+    send.send_trailers(trailers).expect("release H2 response trailers");
 }
 
 #[test]

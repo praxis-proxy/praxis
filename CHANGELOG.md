@@ -87,6 +87,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Preserve final body-filter bytes with forwarded trailers on Hyper; abort Pingora delivery when both outputs cannot be represented or EOF filtering fails, while retaining ordinary trailers and deliberate conversion.
 - Keep requests streaming when any repeated Accept field contains text/event-stream.
 - Correct the multi-listener body example description to match its field extraction and routing behavior.
 - Clarify request ID handling, rewrite scope, and routing order in the logging and transformation examples.

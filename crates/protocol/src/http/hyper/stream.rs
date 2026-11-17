@@ -115,13 +115,13 @@ impl Relaying {
         }
     }
 
-    /// The upstream body ended after its last chunk: run the trailer hooks,
-    /// then the end-of-stream body filters, and end the client's body.
+    /// The upstream body ended: finish body and trailer filtering, then end
+    /// the client's body with both output channels intact.
     ///
-    /// The trailer hooks come first, as on Pingora, so a filter that turns
-    /// trailers into body bytes (gRPC-Web) has done so when the end of the
-    /// body reaches it. Synthetic EOF dispatch in that hook marks the body
-    /// complete, so it is not run a second time below.
+    /// The shared trailer path dispatches synthetic EOF before trailer
+    /// filters (including gRPC-Web), retaining its output and marking the
+    /// body complete. The check below runs EOF only when that path did not,
+    /// so final bytes are neither discarded nor produced twice.
     async fn deliver_end(&mut self) -> Ended {
         let (produced, trailers) = match self.take_trailers() {
             Ok(value) => value,
@@ -281,8 +281,8 @@ impl Relaying {
         }
     }
 
-    /// The upstream's trailers after the upstream trailer hook, and the body
-    /// bytes a trailer filter turned them into instead, if it did.
+    /// Retain final body bytes alongside forwarded trailers, or replace the
+    /// trailers when a filter deliberately converts them into body bytes.
     fn take_trailers(&mut self) -> Result<(Option<Bytes>, Option<http::HeaderMap>), String> {
         let Some(mut trailers) = self.session.take_trailers() else {
             return Ok((None, None));
@@ -295,8 +295,8 @@ impl Relaying {
         let produced = response_trailer_filter::execute(&self.flight.pipeline, &mut trailers, &mut self.flight.ctx)?;
         strip_reserved_internal_header_map(&mut trailers);
         match produced {
-            Some(body) => Ok((Some(body), None)),
-            None => Ok((None, Some(trailers))),
+            response_trailer_filter::TrailerOutcome::Forward(body) => Ok((body, Some(trailers))),
+            response_trailer_filter::TrailerOutcome::Convert(body) => Ok((Some(body), None)),
         }
     }
 }
@@ -432,11 +432,11 @@ mod tests {
 
     use super::*;
     use crate::http::hyper::{
-        body::ProxyBody,
+        body::{BodyAborted, ProxyBody},
         downstream::DownstreamBody,
         test_utils::{
-            Script, Upstream, answered, client_request, empty_pipeline, queue_unread_body, scripted_pipeline,
-            session_to, streaming_upload,
+            Script, TrailerHook, Upstream, answered, client_request, empty_pipeline, queue_unread_body,
+            scripted_pipeline, session_to, streaming_upload,
         },
     };
 
@@ -808,32 +808,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn synthetic_eof_outputs_preserve_both_channels_and_conversion_order() {
+        for (mode, expected_body, expected_events) in [
+            (EofTrailerMode::NoHook, "oktail", ["eof"].as_slice()),
+            (EofTrailerMode::Forward, "oktail", ["eof", "trailers"].as_slice()),
+            (
+                EofTrailerMode::Convert,
+                "oktailconverted",
+                ["eof", "trailers"].as_slice(),
+            ),
+            (EofTrailerMode::Fail, "oktail", ["eof", "trailers"].as_slice()),
+        ] {
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let collected = collect_trailer_response(eof_trailer_script(mode, &events))
+                .await
+                .expect("valid EOF output must complete even with a soft trailer error");
+            assert_eof_outputs(mode, collected, expected_body);
+            assert_eq!(
+                events.lock().unwrap().as_slice(),
+                expected_events,
+                "{mode:?}: synthetic EOF runs exactly once before the trailer hook"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn synthetic_eof_error_aborts_client_stream() {
-        let (_upstream, connector, session) =
-            answered(b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n2\r\nok\r\n0\r\nx-checksum: 9\r\n\r\n")
-                .await;
-        let pipeline = scripted_pipeline(Script {
-            response_body: Some((
-                BodyMode::Stream,
-                Arc::new(|_body, end_of_stream| {
-                    if end_of_stream {
-                        return Err("synthetic EOF failed".into());
-                    }
-                    Ok(FilterAction::Continue)
-                }),
-            )),
-            response_trailers: Some(Arc::new(|_trailers| Ok(None))),
-            ..Script::default()
-        });
-        let (relaying, body) = relaying(connector, pipeline, session, Start::Fresh, true).await;
-
-        let relayed = tokio::spawn(relaying.run());
-        let collected = tokio::time::timeout(Duration::from_secs(5), body.collect())
-            .await
-            .expect("the relay finishes");
-        relayed.await.unwrap();
-
-        assert!(collected.is_err(), "synthetic EOF failures abort the client stream");
+        for reject in [false, true] {
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let collected = collect_trailer_response(failing_eof_script(reject, &events)).await;
+            assert!(
+                collected.is_err(),
+                "synthetic EOF errors and rejections abort the client stream"
+            );
+            assert_eq!(
+                events.lock().unwrap().as_slice(),
+                ["eof"],
+                "failed EOF runs once and prevents the trailer hook"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1052,6 +1065,115 @@ mod tests {
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
+
+    /// Trailer outcomes paired with an EOF body-producing filter.
+    #[derive(Clone, Copy, Debug)]
+    enum EofTrailerMode {
+        /// No trailer hook: EOF must still precede forwarded trailers.
+        NoHook,
+        /// Leave upstream trailers intact.
+        Forward,
+        /// Deliberately replace trailers with a final body suffix.
+        Convert,
+        /// Mutate the trailer map, then fail open.
+        Fail,
+    }
+
+    /// Compare both output channels, including the complete restored trailer map.
+    fn assert_eof_outputs(mode: EofTrailerMode, collected: http_body_util::Collected<Bytes>, expected_body: &str) {
+        let mut expected_trailers = HeaderMap::new();
+        expected_trailers.insert("x-checksum", HeaderValue::from_static("9"));
+        assert_eq!(
+            collected.trailers(),
+            (!matches!(mode, EofTrailerMode::Convert)).then_some(&expected_trailers),
+            "{mode:?}: only deliberate conversion removes trailers; errors restore the entire original map"
+        );
+        assert_eq!(
+            collected.to_bytes(),
+            expected_body,
+            "{mode:?}: preserve every byte in order"
+        );
+    }
+
+    /// Produce a tail at EOF and record both callback order and invocation count.
+    fn eof_trailer_script(mode: EofTrailerMode, events: &Arc<Mutex<Vec<&'static str>>>) -> Script {
+        let body_events = Arc::clone(events);
+        Script {
+            response_body: Some((
+                BodyMode::Stream,
+                Arc::new(move |body, end_of_stream| {
+                    if end_of_stream {
+                        body_events.lock().unwrap().push("eof");
+                        *body = Some(Bytes::from_static(b"tail"));
+                    }
+                    Ok(FilterAction::Continue)
+                }),
+            )),
+            response_trailers: eof_trailer_hook(mode, events),
+            ..Script::default()
+        }
+    }
+
+    /// Exercise each representable shared outcome, including restoration after mutation.
+    fn eof_trailer_hook(mode: EofTrailerMode, events: &Arc<Mutex<Vec<&'static str>>>) -> Option<TrailerHook> {
+        if matches!(mode, EofTrailerMode::NoHook) {
+            return None;
+        }
+        let events = Arc::clone(events);
+        Some(Arc::new(move |trailers| {
+            events.lock().unwrap().push("trailers");
+            match mode {
+                EofTrailerMode::NoHook | EofTrailerMode::Forward => Ok(None),
+                EofTrailerMode::Convert => Ok(Some(Bytes::from_static(b"converted"))),
+                EofTrailerMode::Fail => {
+                    trailers.clear();
+                    trailers.insert("x-partial", HeaderValue::from_static("leak"));
+                    Err("trailer filter failed after mutation".into())
+                },
+            }
+        }))
+    }
+
+    /// Observe EOF errors and rejection without allowing the trailer hook to run.
+    fn failing_eof_script(reject: bool, events: &Arc<Mutex<Vec<&'static str>>>) -> Script {
+        let body_events = Arc::clone(events);
+        let trailer_events = Arc::clone(events);
+        Script {
+            response_body: Some((
+                BodyMode::Stream,
+                Arc::new(move |_body, end_of_stream| {
+                    if end_of_stream {
+                        body_events.lock().unwrap().push("eof");
+                        return if reject {
+                            Ok(FilterAction::Reject(praxis_filter::Rejection::status(451)))
+                        } else {
+                            Err("synthetic EOF failed".into())
+                        };
+                    }
+                    Ok(FilterAction::Continue)
+                }),
+            )),
+            response_trailers: Some(Arc::new(move |_trailers| {
+                trailer_events.lock().unwrap().push("trailers");
+                Ok(None)
+            })),
+            ..Script::default()
+        }
+    }
+
+    /// Drive a real chunked upstream through the relay and retain body and trailer outcomes.
+    async fn collect_trailer_response(script: Script) -> Result<http_body_util::Collected<Bytes>, BodyAborted> {
+        let (_upstream, connector, session) =
+            answered(b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n2\r\nok\r\n0\r\nx-checksum: 9\r\n\r\n")
+                .await;
+        let (relaying, body) = relaying(connector, scripted_pipeline(script), session, Start::Fresh, true).await;
+        let relayed = tokio::spawn(relaying.run());
+        let collected = tokio::time::timeout(Duration::from_secs(5), body.collect())
+            .await
+            .expect("the relay finishes");
+        relayed.await.unwrap();
+        collected
+    }
 
     /// A relay of `session`'s body through `pipeline` from `start`, and the
     /// client's body it feeds; the request had no body when `settled`, else
