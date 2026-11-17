@@ -70,6 +70,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- `cargo xtask benchmark flamegraph` stops and reaps owned child processes on
+  profiling failure or cancellation.
 - Show possible request-head and response hooks in pipeline introspection.
 - Nightly images now require lint and functional-test success before publication.
 - Concurrent new-key KV writes and compiled-regex cache admissions now stay
