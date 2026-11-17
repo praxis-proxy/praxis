@@ -14,7 +14,10 @@ use std::{
     time::Duration,
 };
 
-use rcgen::{CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, KeyUsagePurpose, SanType};
+use rcgen::{
+    CertificateParams, DnType, DnValue, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, KeyUsagePurpose, SanType,
+    string::BmpString,
+};
 use rustls::{ClientConfig, pki_types::pem::PemObject as _};
 use tempfile::TempDir;
 use tokio::net::TcpStream as AsyncTcpStream;
@@ -310,6 +313,21 @@ impl TestCertificates {
     ///
     /// Panics if certificate generation or file I/O fails.
     pub fn generate_client_cert_with_org(&self, org: &str) -> ClientCert {
+        self.generate_client_cert_with_org_value(DnValue::Utf8String(org.to_owned()))
+    }
+
+    /// Generate a CA-signed client certificate whose O uses `BMPString` encoding.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `org` cannot be BMP encoded or certificate generation fails.
+    pub fn generate_client_cert_with_bmp_org(&self, org: &str) -> ClientCert {
+        let bmp = BmpString::try_from(org).expect("BMP organization");
+        self.generate_client_cert_with_org_value(DnValue::BmpString(bmp))
+    }
+
+    /// Sign and persist a client certificate carrying the supplied O value.
+    fn generate_client_cert_with_org_value(&self, org: DnValue) -> ClientCert {
         let issuer = Issuer::from_params(&self.ca_params, &self.ca_key);
         let client_key = KeyPair::generate().expect("client key generation");
         let mut client_params = CertificateParams::new(vec!["localhost".to_owned()]).expect("client cert params");

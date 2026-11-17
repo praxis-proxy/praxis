@@ -78,6 +78,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Configure required client-certificate TLS in the peer identity trust example
+  and verify certificate digest and organization matching end to end.
+- Propagate verified mTLS client identity through Hyper, enabling certificate
+  digest, organization, and serial matching on HTTP/1.1 and HTTP/2.
 - Reject inline Basic Auth usernames containing a colon during configuration
   loading.
 - Apply CORS requested-header policy to every preflight field line, including

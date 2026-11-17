@@ -35,14 +35,6 @@ compression::gzip_overrides_and_disablement_apply_before_negotiation_on_both_pat
 compression::high_shared_level_round_trips_a_chunked_upstream_body
 compression::high_shared_levels_round_trip_gzip_for_upstream_and_static_responses
 
-# mTLS peer identity: the client certificate's digest, organization and
-# serial are not extracted on hyper.
-tls::peer_identity_has_organization_when_cert_has_org
-tls::peer_identity_has_serial_number_for_mtls_connection
-tls::peer_identity_set_for_mtls_connection
-tls::peer_identity_survives_stream_buffer_pre_read_regression
-tls::peer_identity_trust_allows_matching_org
-
 # hyper's HTTP/1 parser: pipelining is served, a chunk size of u64::MAX is
 # accepted, and an over-long request target gets 414 rather than 400.
 connection_lifecycle::http11_pipelining_drops_overread_without_mixing_responses

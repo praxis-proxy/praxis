@@ -664,6 +664,7 @@ mod tests {
         let facts = ConnectionFacts {
             peer: "127.0.0.1:40000".parse().unwrap(),
             tls: false,
+            peer_identity: None,
         };
 
         let phase = run_request_phase(&mut flight, &facts, parts, &mut body).await;
