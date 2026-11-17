@@ -191,7 +191,7 @@ async fn execute_http_request_head_skips_hook_when_conditions_unmet() {
         "a met-condition head hook continues"
     );
     assert_eq!(
-        matched_ctx.get_metadata("head_classifier.class"),
+        matched_ctx.filter_metadata.get("head_classifier.class"),
         Some("api"),
         "a request meeting the head filter's conditions is classified"
     );
@@ -205,7 +205,7 @@ async fn execute_http_request_head_skips_hook_when_conditions_unmet() {
         "a skipped head hook continues"
     );
     assert!(
-        skipped_ctx.get_metadata("head_classifier.class").is_none(),
+        skipped_ctx.filter_metadata.get("head_classifier.class").is_none(),
         "a request failing the head filter's conditions skips the hook"
     );
 }

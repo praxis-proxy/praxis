@@ -89,19 +89,19 @@ impl RewriteSession {
         }
     }
 
-    /// Write scratch captures into the op store.
-    fn flush_to_store(&self, store: &mut dyn JsonOpStore) {
-        for (key, text) in &self.scratch_metadata {
-            store.set_metadata(key.clone(), text.clone());
+    /// Move scratch captures into the op store.
+    fn flush_to_store(self, store: &mut dyn JsonOpStore) {
+        for (key, text) in self.scratch_metadata {
+            store.set_metadata(key, text);
         }
         for ((namespace, key), bytes) in &self.capture_structured {
             if let Ok(value) = serde_json::from_slice(bytes) {
                 store.set_structured(namespace, key, value);
             }
         }
-        for (name, text) in &self.capture_headers {
-            if is_safe_header_promotion(text, name) {
-                store.push_request_header(name.clone(), text.clone());
+        for (name, text) in self.capture_headers {
+            if is_safe_header_promotion(&text, &name) {
+                store.push_request_header(name, text);
             }
         }
     }
@@ -161,7 +161,7 @@ pub(super) fn rewrite_document(
         if i != input.len() {
             return Err(JsonError::InvalidJson);
         }
-        return Ok(finish_document(&session, store, emit.then(|| root.to_vec())));
+        return Ok(finish_document(session, store, emit.then(|| root.to_vec())));
     }
 
     let mut out = emit.then(|| Vec::with_capacity(rewrite_output_capacity(input.len(), op_set.growth_hint)));
@@ -172,12 +172,12 @@ pub(super) fn rewrite_document(
         return Err(JsonError::InvalidJson);
     }
 
-    Ok(finish_document(&session, store, out))
+    Ok(finish_document(session, store, out))
 }
 
 /// Flush captures and wrap the optional output buffer.
 fn finish_document(
-    session: &RewriteSession,
+    session: RewriteSession,
     store: Option<&mut dyn JsonOpStore>,
     output: Option<Vec<u8>>,
 ) -> RewriteOutcome {
