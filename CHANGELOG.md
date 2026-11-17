@@ -38,6 +38,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **Breaking:** BodyReadError includes TimedOut; exhaustive matches in custom management request implementations must handle it.
 - **Breaking:** SessionStoreRegistry replaces cluster-only get/insert access with explicit candidate generation binding and publication.
 - Reuse owned bytes for nonfinal gRPC-Web response chunks.
 - **Breaking:** Pingora helpers `apply_cached_tls`, `ca_from_cached`,
@@ -171,6 +172,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Security
 
+- Bound total request-body read time for enabled Hyper admin PUT routes and return 408 without applying partial KV or log-level updates.
 - Count pending TCP TLS handshakes against global and listener-group connection
   limits.
 - Policy content scanners now receive secondary MCP tool text alongside
