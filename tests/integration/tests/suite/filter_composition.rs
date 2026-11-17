@@ -457,7 +457,7 @@ impl HttpFilter for FirstRequestFilter {
     }
 }
 
-/// A filter that adds `X-Second: true` during the request phase.
+/// A filter whose header proves the first request filter already ran.
 struct SecondRequestFilter;
 
 #[async_trait::async_trait]
@@ -467,8 +467,14 @@ impl HttpFilter for SecondRequestFilter {
     }
 
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        ctx.extra_request_headers
-            .push((std::borrow::Cow::Borrowed("X-Second"), "true".to_owned()));
+        if ctx
+            .extra_request_headers
+            .iter()
+            .any(|(name, value)| name.eq_ignore_ascii_case("X-First") && value == "true")
+        {
+            ctx.extra_request_headers
+                .push((std::borrow::Cow::Borrowed("X-Second"), "true".to_owned()));
+        }
         Ok(FilterAction::Continue)
     }
 }
