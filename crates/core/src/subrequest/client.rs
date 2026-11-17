@@ -697,14 +697,15 @@ impl<C: Connector> SubRequestClient<C> {
     /// by `max_response_bytes`), and returns a [`SubResponse`].
     ///
     /// Transport-level headers (hop-by-hop, `Connection`-nominated)
-    /// and reserved internal headers (`x-praxis-*`, `x-ext-*`) are
-    /// stripped from both request and response.
+    /// and reserved internal headers (`x-praxis-*`,
+    /// `x-ext-protocol-*`, `x-ext-agent-*`) are stripped from both
+    /// request and response.
     ///
     /// `framework_headers` are injected **after** all sanitisation
-    /// passes. The [`FrameworkHeaders`] type validates at insertion
-    /// time that no transport-level or reserved internal header
-    /// (`x-praxis-*`, `x-ext-*`) can be added, so callers cannot
-    /// reintroduce sanitised headers.
+    /// passes. [`FrameworkHeaders::insert`] rejects transport-level
+    /// names and the reserved prefixes above. The dedicated
+    /// [`FrameworkHeaders::set_depth`] method injects the trusted
+    /// `x-praxis-iterative-depth` header.
     ///
     /// # Errors
     ///

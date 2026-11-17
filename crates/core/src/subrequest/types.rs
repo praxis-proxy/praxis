@@ -6,9 +6,9 @@
 //! Defines [`SubRequest`] and [`SubResponse`] for buffered exchanges,
 //! [`StreamingSubResponse`] for streaming responses, and
 //! [`SubRequestError`] for execution failures. Reserved headers
-//! (`x-praxis-*`, `x-ext-*`) are automatically stripped from
-//! outbound requests; use [`FrameworkHeaders`] to inject metadata
-//! that survives sanitization.
+//! (`x-praxis-*`, `x-ext-protocol-*`, `x-ext-agent-*`) are
+//! automatically stripped from outbound requests; use
+//! [`FrameworkHeaders`] to inject metadata that survives sanitization.
 
 use std::time::Duration;
 
@@ -31,8 +31,9 @@ pub struct SubRequest {
 
     /// Request headers.
     ///
-    /// Reserved headers (`x-praxis-*`, `x-ext-*`) are stripped by the
-    /// executor before dispatch. Use [`FrameworkHeaders`] on
+    /// Reserved headers (`x-praxis-*`, `x-ext-protocol-*`,
+    /// `x-ext-agent-*`) are stripped by the executor before dispatch.
+    /// Use [`FrameworkHeaders`] on
     /// [`super::SubRequestClient::execute`] to inject metadata that must
     /// survive sanitisation.
     pub headers: HeaderMap,
@@ -68,9 +69,9 @@ pub const DEPTH_HEADER: &str = "x-praxis-iterative-depth";
 ///
 /// This typed struct replaces an open `HeaderMap` so that the executor
 /// controls exactly which headers survive reserved-header stripping.
-/// Each field maps to a specific header name chosen by the caller;
-/// the executor validates that the name is neither transport-level
-/// nor reserved before injection.
+/// [`FrameworkHeaders::insert`] rejects transport-level and reserved
+/// names; [`FrameworkHeaders::set_depth`] injects the trusted reserved
+/// depth header.
 #[derive(Clone, Debug, Default)]
 pub struct FrameworkHeaders {
     /// Validated (name, value) pairs to inject.
@@ -90,7 +91,8 @@ impl FrameworkHeaders {
     }
 
     /// Insert a header, returning `Err` if the name is transport-level
-    /// or uses a reserved prefix (`x-praxis-*`, `x-ext-*`).
+    /// or uses a reserved prefix (`x-praxis-*`, `x-ext-protocol-*`,
+    /// `x-ext-agent-*`).
     ///
     /// # Errors
     ///
