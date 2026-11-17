@@ -103,13 +103,13 @@ impl HyperTcp {
             pipelines,
         };
 
-        let mut cert_watcher_shutdowns = Vec::new();
+        let mut cert_watcher_shutdowns = crate::cert_watcher_shutdowns::RegistrationWatchers::default();
         let ordered: BTreeMap<_, _> = grouped.into_iter().collect();
         for (group_key, listeners) in &ordered {
-            group.register(runtime, group_key, listeners, &mut cert_watcher_shutdowns)?;
+            group.register(runtime, group_key, listeners, cert_watcher_shutdowns.senders_mut())?;
         }
 
-        Ok(cert_watcher_shutdowns)
+        Ok(cert_watcher_shutdowns.finish())
     }
 }
 

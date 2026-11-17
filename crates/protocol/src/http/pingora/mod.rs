@@ -90,7 +90,7 @@ impl Protocol for PingoraHttp {
             return Ok(Vec::new());
         }
 
-        let mut cert_watcher_shutdowns = Vec::new();
+        let mut cert_watcher_shutdowns = crate::cert_watcher_shutdowns::RegistrationWatchers::default();
         let lifecycle = server.lifecycle();
         for listener in &http_listeners {
             let pipeline = pipelines.get(&listener.name).map(Arc::clone).ok_or_else(|| {
@@ -101,12 +101,12 @@ impl Protocol for PingoraHttp {
                 server.server_mut(),
                 listener,
                 pipeline,
-                &mut cert_watcher_shutdowns,
+                cert_watcher_shutdowns.senders_mut(),
                 lifecycle.clone(),
             )?;
         }
 
-        Ok(cert_watcher_shutdowns)
+        Ok(cert_watcher_shutdowns.finish())
     }
 }
 

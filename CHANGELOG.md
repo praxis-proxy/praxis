@@ -70,6 +70,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Stop certificate watchers started by earlier listeners when HTTP or TCP
+  listener registration fails.
 - Preserve unmodified MCP request and response bodies, and emit inference
   mutation warnings only when policy reports a payload change.
 - `cargo xtask fips verify-image --pinned-in` binds the verified image reference

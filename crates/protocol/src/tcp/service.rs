@@ -3,7 +3,7 @@
 
 //! TCP protocol service construction and registration.
 
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use arc_swap::ArcSwap;
 use pingora_core::services::listening::Service;
@@ -43,18 +43,20 @@ impl Protocol for PingoraTcp {
             FilterPipeline::build(&mut [], &FilterRegistry::with_builtins()).expect("empty pipeline is valid"),
         ));
 
-        let mut cert_watcher_shutdowns = Vec::new();
-        for (group_key, listeners) in grouped {
+        let mut cert_watcher_shutdowns = crate::cert_watcher_shutdowns::RegistrationWatchers::default();
+        let ordered: BTreeMap<_, _> = grouped.into_iter().collect();
+        for (group_key, listeners) in ordered {
             let mut service = build_tcp_service(&group_key, &listeners, pipelines, &fallback_pipeline, config);
-            cert_watcher_shutdowns.extend(tls::register_tcp_listeners(
+            tls::register_tcp_listeners(
                 &mut service,
                 &listeners,
                 group_key.0.as_deref(),
-            )?);
+                cert_watcher_shutdowns.senders_mut(),
+            )?;
             server.server_mut().add_service(service);
         }
 
-        Ok(cert_watcher_shutdowns)
+        Ok(cert_watcher_shutdowns.finish())
     }
 }
 
