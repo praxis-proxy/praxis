@@ -25,7 +25,7 @@ use std::{
     io::Write as _,
     net::IpAddr,
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Child, Command, Output, Stdio},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -180,10 +180,8 @@ impl HttpProbePod {
             "-c".to_owned(),
             command,
         ];
-        match kubectl(&self.cluster, args) {
-            Ok(_) => Ok(ProbeOutcome::Reachable),
-            Err(error) => Ok(classify_probe_error(&error)),
-        }
+        let output = kubectl_probe_output(&self.cluster, args)?;
+        probe_result(&output)
     }
 }
 
@@ -1257,13 +1255,27 @@ enum ProbeOutcome {
     Inconclusive,
 }
 
-/// Classifies a wget probe failure by its text.
-///
-/// A pod answer is any failure that is neither a transport error nor a
-/// kubectl/API failure; wget reports the listener's HTTP status (for example a
-/// 404) without those markers, which proves the listener answered.
-fn classify_probe_error(error: &str) -> ProbeOutcome {
-    let error = error.to_ascii_lowercase();
+/// Returns positive probe evidence or a bounded failure detail for the wait.
+fn probe_result(output: &Output) -> Result<ProbeOutcome, String> {
+    let outcome = classify_probe_output(output);
+    if outcome == ProbeOutcome::Reachable {
+        return Ok(outcome);
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = stdout.chars().take(256).collect::<String>();
+    let stderr = stderr.chars().take(256).collect::<String>();
+    Err(format!(
+        "listener probe {outcome:?} (exit {:?}): stdout: {stdout}; stderr: {stderr}",
+        output.status.code()
+    ))
+}
+
+/// Classifies the full exec result, including wget's redirected diagnostics.
+fn classify_probe_output(output: &Output) -> ProbeOutcome {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let error = format!("{stdout}\n{stderr}").to_ascii_lowercase();
     let transport = [
         "connection refused",
         "can't connect",
@@ -1274,7 +1286,7 @@ fn classify_probe_error(error: &str) -> ProbeOutcome {
         "exit code 124",
         "exit code 143",
     ];
-    if transport.iter().any(|marker| error.contains(marker)) {
+    if matches!(output.status.code(), Some(124 | 143)) || transport.iter().any(|marker| error.contains(marker)) {
         return ProbeOutcome::Unreachable;
     }
     let api = [
@@ -1286,10 +1298,27 @@ fn classify_probe_error(error: &str) -> ProbeOutcome {
         "the server could not find",
         "timeout: not found",
     ];
-    if api.iter().any(|marker| error.contains(marker)) {
+    if api.iter().any(|marker| error.contains(marker)) || output.status.code() == Some(127) {
         return ProbeOutcome::Inconclusive;
     }
-    ProbeOutcome::Reachable
+    if output.status.success() || stdout.lines().any(is_http_status_line) {
+        ProbeOutcome::Reachable
+    } else {
+        ProbeOutcome::Inconclusive
+    }
+}
+
+/// Recognizes an actual HTTP response status line in wget's header output.
+fn is_http_status_line(line: &str) -> bool {
+    let mut fields = line.split_whitespace();
+    let version = fields.next();
+    let status = fields.next();
+    matches!(version, Some("HTTP/1.0" | "HTTP/1.1" | "HTTP/2" | "HTTP/3"))
+        && status.is_some_and(|code| {
+            code.len() == 3
+                && code.bytes().all(|digit| digit.is_ascii_digit())
+                && code.parse::<u16>().is_ok_and(|value| (100..=599).contains(&value))
+        })
 }
 
 /// Waits until the operator has applied the requested data-plane image.
@@ -1856,6 +1885,26 @@ where
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+/// Runs a listener probe while retaining both output streams and exit status.
+fn kubectl_probe_output<I, S>(cluster: &str, args: I) -> Result<Output, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let args = args.into_iter().collect::<Vec<_>>();
+    let mut command = Command::new("kubectl");
+    command
+        .arg("--context")
+        .arg(format!("kind-{cluster}"))
+        .arg("--namespace")
+        .arg("praxis");
+    command.arg("--request-timeout").arg(request_timeout(&args));
+    for arg in args {
+        command.arg(arg.as_ref());
+    }
+    command.output().map_err(|error| format!("run kubectl probe: {error}"))
+}
+
 /// Runs `kubectl` with standard input and returns stdout.
 fn kubectl_stdin<I, S>(cluster: &str, args: I, input: &str) -> Result<String, String>
 where
@@ -2166,36 +2215,99 @@ mod tests {
     #[test]
     fn listener_probe_classifies_answers_and_transport_failures() {
         assert_eq!(
-            classify_probe_error("kubectl failed: 404 page not found"),
+            classify_probe_output(&probe_output(
+                1,
+                "  HTTP/1.1 404 Not Found\n",
+                "command terminated with exit code 1"
+            )),
             ProbeOutcome::Reachable
         );
         assert_eq!(
-            classify_probe_error("kubectl failed: dial tcp 10.244.1.5:8081: connect: connection refused"),
+            classify_probe_output(&probe_output(
+                1,
+                "connect: connection refused",
+                "command terminated with exit code 1"
+            )),
             ProbeOutcome::Unreachable
         );
         assert_eq!(
-            classify_probe_error("kubectl failed: context deadline exceeded"),
+            classify_probe_output(&probe_output(1, "context deadline exceeded", "")),
             ProbeOutcome::Unreachable
         );
         assert_eq!(
-            classify_probe_error("command terminated with exit code 124"),
+            classify_probe_output(&probe_output(124, "", "command terminated with exit code 124")),
             ProbeOutcome::Unreachable,
             "the exec cap must not look like a listener answer"
         );
         assert_eq!(
-            classify_probe_error("kubectl failed: Error from server (Forbidden)"),
+            classify_probe_output(&probe_output(1, "", "Error from server (Forbidden)")),
             ProbeOutcome::Inconclusive
         );
         assert_eq!(
-            classify_probe_error("sh: timeout: not found"),
+            classify_probe_output(&probe_output(127, "sh: timeout: not found", "")),
             ProbeOutcome::Inconclusive,
             "a missing exec cap is a probe environment failure"
         );
         assert_eq!(
-            classify_probe_error("error: exec plugin: invalid apiVersion"),
+            classify_probe_output(&probe_output(1, "", "error: exec plugin: invalid apiVersion")),
             ProbeOutcome::Inconclusive
         );
-        assert_eq!(classify_probe_error(""), ProbeOutcome::Reachable);
+        assert_eq!(
+            classify_probe_output(&probe_output(1, "", "")),
+            ProbeOutcome::Inconclusive
+        );
+    }
+
+    #[test]
+    fn listener_probe_requires_positive_http_evidence() {
+        for (output, expected) in [
+            (probe_output(0, "", ""), ProbeOutcome::Reachable),
+            (
+                probe_output(1, "  HTTP/1.1 404 Not Found\n", "command terminated with exit code 1"),
+                ProbeOutcome::Reachable,
+            ),
+            (
+                probe_output(1, "404 page not found", "command terminated with exit code 1"),
+                ProbeOutcome::Inconclusive,
+            ),
+            (
+                probe_output(1, "connect: connection refused", "command terminated with exit code 1"),
+                ProbeOutcome::Unreachable,
+            ),
+            (
+                probe_output(127, "sh: wget: not found", "command terminated with exit code 127"),
+                ProbeOutcome::Inconclusive,
+            ),
+            (probe_output(1, "", ""), ProbeOutcome::Inconclusive),
+            (probe_output(124, "HTTP/1.1 200 OK", ""), ProbeOutcome::Unreachable),
+            (probe_output(143, "HTTP/1.1 200 OK", ""), ProbeOutcome::Unreachable),
+            (
+                probe_output(1, "HTTP/1.1 200 OK", "Error from server (Forbidden)"),
+                ProbeOutcome::Inconclusive,
+            ),
+        ] {
+            assert_eq!(classify_probe_output(&output), expected, "probe output: {output:?}");
+        }
+    }
+
+    #[test]
+    fn listener_probe_preserves_failed_exec_output() {
+        let output = probe_output(
+            1,
+            "wget: can't connect to remote host (127.0.0.1): Connection refused\n",
+            "command terminated with exit code 1",
+        );
+        assert_eq!(
+            classify_probe_output(&output),
+            ProbeOutcome::Unreachable,
+            "the failed exec's redirected stdout must be inspected with its generic stderr"
+        );
+        let error = probe_result(&output).unwrap_err();
+        assert!(
+            error.contains("Connection refused"),
+            "redirected stdout must survive: {error}"
+        );
+        assert!(error.contains("exit code 1"), "kubectl stderr must survive: {error}");
     }
 
     #[test]
@@ -2568,5 +2680,22 @@ mod tests {
                 .unwrap_err()
                 .contains("deadline")
         );
+    }
+
+    // -----------------------------------------------------------------------------
+    // Test Utilities
+    // -----------------------------------------------------------------------------
+
+    fn probe_output(code: i32, stdout: &str, stderr: &str) -> Output {
+        let status = Command::new("sh")
+            .arg("-c")
+            .arg(format!("exit {code}"))
+            .status()
+            .unwrap();
+        Output {
+            status,
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.as_bytes().to_vec(),
+        }
     }
 }
