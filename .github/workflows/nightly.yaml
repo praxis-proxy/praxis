@@ -40,9 +40,9 @@ jobs:
         # setup-rust-lint's rust-cache also restores ~/.cargo/bin, so the binary
         # may already be present. Install only when it is absent; otherwise
         # `cargo install` aborts with "binary already exists".
-        # Pinned to 0.9.1: 0.10.x uses `Path::is_empty`, which is unstable on
+        # Pinned to 0.9.2: 0.10.x uses `Path::is_empty`, which is unstable on
         # the 1.96.0 toolchain pinned in rust-toolchain.toml.
-        run: command -v cargo-machete > /dev/null || cargo install cargo-machete --version 0.9.1 --locked
+        run: command -v cargo-machete > /dev/null || cargo install cargo-machete --version 0.9.2 --locked
 
       - name: Lint
         run: make lint

@@ -50,16 +50,16 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cargo/bin/cargo-machete
-          key: cargo-machete-0.9.1-${{ runner.os }}
+          key: cargo-machete-0.9.2-${{ runner.os }}
 
       - name: Install cargo-machete
         # The shared Swatinem/rust-cache in setup-rust-lint also restores
         # ~/.cargo/bin, so cargo-machete may already be present even when this
         # step's own cache key misses. Install only when it is actually absent;
         # otherwise `cargo install` aborts with "binary already exists".
-        # Pinned to 0.9.1: 0.10.x uses `Path::is_empty`, which is unstable on
+        # Pinned to 0.9.2: 0.10.x uses `Path::is_empty`, which is unstable on
         # the 1.96.0 toolchain pinned in rust-toolchain.toml.
-        run: command -v cargo-machete > /dev/null || cargo install cargo-machete --version 0.9.1 --locked
+        run: command -v cargo-machete > /dev/null || cargo install cargo-machete --version 0.9.2 --locked
 
       - name: Lint
         run: make lint
