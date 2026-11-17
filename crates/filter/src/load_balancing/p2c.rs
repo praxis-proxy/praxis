@@ -25,7 +25,8 @@ use super::{
 // -----------------------------------------------------------------------------
 
 /// Sample two random endpoints and pick the one with fewer in-flight
-/// requests. O(1) per selection with near-optimal load distribution.
+/// requests. Candidate filtering and weighted sampling scan the eligible
+/// endpoints; comparing the two sampled load counters is constant-time.
 ///
 /// Weight-awareness is achieved through cumulative weight buckets:
 /// higher-weight endpoints occupy more of the random sampling space.

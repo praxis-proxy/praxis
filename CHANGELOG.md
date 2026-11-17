@@ -78,6 +78,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Clarify endpoint weight behavior and P2C selection costs in load-balancing
+  guidance.
 - Use reserved metadata in the body-based tenant routing example so client
   tenant headers cannot override missing or extracted body fields.
 - Correct payload documentation for transfer limits, buffering limits, and
