@@ -3,6 +3,8 @@
 
 //! Proxy startup and configuration test utilities for integration tests.
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     collections::HashMap,
     ffi::OsStr,
@@ -535,6 +537,8 @@ pub struct ProxyGuard {
     addr: String,
     /// Handle to the spawned server thread, joined on drop.
     handle: Option<JoinHandle<()>>,
+    /// Separate health runtime, when any cluster has active probes.
+    health: Option<HealthRuntime>,
     /// Fires the shutdown signal on drop.
     notify: Arc<Notify>,
 }
@@ -554,28 +558,51 @@ impl fmt::Display for ProxyGuard {
 
 impl Drop for ProxyGuard {
     fn drop(&mut self) {
+        if let Some(health) = self.health.as_ref() {
+            health.shutdown.cancel();
+        }
         self.notify.notify_one();
         if let Some(handle) = self.handle.take() {
-            let start = Instant::now();
-            while !handle.is_finished() {
-                if start.elapsed() >= JOIN_TIMEOUT {
-                    tracing::warn!(
-                        addr = %self.addr,
-                        timeout_secs = JOIN_TIMEOUT.as_secs(),
-                        "server thread did not exit within timeout",
-                    );
-                    return;
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            let _ = handle.join();
+            join_bounded(handle, &self.addr, "server");
+        }
+        if let Some(health) = self.health.take() {
+            join_bounded(health.handle, &self.addr, "health");
         }
     }
 }
 
+/// A cancellable health-check runtime separate from the proxy runtime.
+struct HealthRuntime {
+    /// Stops active health probes and the health runtime.
+    shutdown: CancellationToken,
+    /// Health runtime thread.
+    handle: JoinHandle<()>,
+    /// Allows the fixture regression to observe completed shutdown.
+    #[cfg(test)]
+    finished: Arc<AtomicBool>,
+}
+
+/// Wait at most the fixture shutdown budget for one runtime thread.
+fn join_bounded(handle: JoinHandle<()>, addr: &str, runtime: &str) {
+    let start = Instant::now();
+    while !handle.is_finished() {
+        if start.elapsed() >= JOIN_TIMEOUT {
+            tracing::warn!(
+                addr,
+                runtime,
+                timeout_secs = JOIN_TIMEOUT.as_secs(),
+                "fixture thread did not exit"
+            );
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let _ = handle.join();
+}
+
 /// Run `runtime` on its own thread until `notify` fires, then join on drop
 /// through the returned guard.
-fn spawn_runtime(addr: String, runtime: Runtime) -> ProxyGuard {
+fn spawn_runtime(addr: String, runtime: Runtime, health: Option<HealthRuntime>) -> ProxyGuard {
     let notify = Arc::new(Notify::new());
     let watch_notify = Arc::clone(&notify);
 
@@ -586,6 +613,7 @@ fn spawn_runtime(addr: String, runtime: Runtime) -> ProxyGuard {
     ProxyGuard {
         addr,
         handle: Some(handle),
+        health,
         notify,
     }
 }
@@ -646,7 +674,7 @@ fn spawn_proxy_server(config: &Config, registry: &FilterRegistry) -> ProxyGuard 
         .address
         .clone();
     let runtime = build_light_runtime(config, registry);
-    spawn_runtime(addr, runtime)
+    spawn_runtime(addr, runtime, None)
 }
 
 // -----------------------------------------------------------------------------
@@ -682,7 +710,7 @@ pub fn start_proxy_with_registry(config: &Config, registry: &FilterRegistry) -> 
 
 /// Build a backend [`Runtime`] with HTTP and TCP protocols
 /// and spawn background health check probes.
-fn build_full_server(config: &Config) -> Runtime {
+fn build_full_server(config: &Config) -> (Runtime, Option<HealthRuntime>) {
     let registry = praxis::build_full_registry();
     build_full_server_with_registry(config, &registry, KvStoreRegistry::new())
 }
@@ -691,7 +719,11 @@ fn build_full_server(config: &Config) -> Runtime {
 /// registry and KV store registry, HTTP and TCP protocols, and
 /// background health probes.
 #[expect(clippy::too_many_lines, reason = "test utility wiring")]
-fn build_full_server_with_registry(config: &Config, registry: &FilterRegistry, kv_stores: KvStoreRegistry) -> Runtime {
+fn build_full_server_with_registry(
+    config: &Config,
+    registry: &FilterRegistry,
+    kv_stores: KvStoreRegistry,
+) -> (Runtime, Option<HealthRuntime>) {
     // Every full-proxy start builds a `SubRequestConnector`, which constructs a
     // rustls `ClientConfig`. Hooking the certificate fixtures is not enough: a test
     // that starts a proxy without TLS reaches rustls with no provider installed.
@@ -778,29 +810,41 @@ fn build_full_server_with_registry(config: &Config, registry: &FilterRegistry, k
         admin::add_prometheus_upkeep(&mut runtime, recorder);
     }
 
-    spawn_test_health_checks(config, &health_registry);
-
-    runtime
+    let health = spawn_test_health_checks(config, &health_registry);
+    (runtime, health)
 }
 
 /// Spawn background health check tasks for tests.
-fn spawn_test_health_checks(config: &Config, registry: &HealthRegistry) {
+fn spawn_test_health_checks(config: &Config, registry: &HealthRegistry) -> Option<HealthRuntime> {
     if registry.is_empty() {
-        return;
+        return None;
     }
     let clusters = config.clusters.clone();
     let registry = Arc::clone(registry);
     let shutdown = CancellationToken::new();
-    std::thread::spawn(move || {
+    let thread_shutdown = shutdown.clone();
+    #[cfg(test)]
+    let finished = Arc::new(AtomicBool::new(false));
+    #[cfg(test)]
+    let thread_finished = Arc::clone(&finished);
+    let handle = std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("health check runtime");
         rt.block_on(async {
-            health::runner::spawn_health_checks(&clusters, &registry, &shutdown);
-            shutdown.cancelled().await;
+            health::runner::spawn_health_checks(&clusters, &registry, &thread_shutdown);
+            thread_shutdown.cancelled().await;
         });
+        #[cfg(test)]
+        thread_finished.store(true, Ordering::Release);
     });
+    Some(HealthRuntime {
+        shutdown,
+        handle,
+        #[cfg(test)]
+        finished,
+    })
 }
 
 /// Start a full proxy server (HTTP + TCP protocols) in a
@@ -855,14 +899,14 @@ pub fn start_full_proxy_with_kv_stores(config: &Config, kv_stores: &KvStoreRegis
 }
 
 /// Spawn a fully configured proxy runtime in a background thread.
-fn start_full_proxy_runtime(config: &Config, runtime: Runtime) -> ProxyGuard {
+fn start_full_proxy_runtime(config: &Config, server: (Runtime, Option<HealthRuntime>)) -> ProxyGuard {
     let addr = config
         .listeners
         .first()
         .expect("config must have at least one listener")
         .address
         .clone();
-    spawn_runtime(addr, runtime)
+    spawn_runtime(addr, server.0, server.1)
 }
 
 // -----------------------------------------------------------------------------
@@ -1133,6 +1177,7 @@ pub fn registry_with(name: &str, make: fn() -> Box<dyn HttpFilter>) -> FilterReg
 mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt as _;
+    use std::{net::TcpListener, sync::mpsc::RecvTimeoutError};
 
     use super::*;
 
@@ -1476,6 +1521,90 @@ insecure_options:
             String::from_utf8_lossy(&output.stderr)
         );
         assert_eq!(std::fs::read(sentinel).expect("child completion sentinel"), b"returned");
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "two fixture lifetimes and probe completion assertions"
+    )]
+    fn health_probes_stop_with_proxy_guard() {
+        for _ in 0..2 {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("health listener");
+            listener.set_nonblocking(true).expect("nonblocking listener");
+            let health_addr = listener.local_addr().expect("health address");
+            let (sender, receiver) = mpsc::channel();
+            let stop = Arc::new(AtomicBool::new(false));
+            let thread_stop = Arc::clone(&stop);
+            let endpoint = std::thread::spawn(move || {
+                while !thread_stop.load(Ordering::Acquire) {
+                    match listener.accept() {
+                        Ok((stream, _)) => {
+                            sender.send(()).expect("report health probe");
+                            drop(stream);
+                        },
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(5));
+                        },
+                        Err(error) => panic!("health accept: {error}"),
+                    }
+                }
+            });
+            let proxy_port = crate::net::free_port();
+            let yaml = format!(
+                r#"
+listeners:
+  - name: default
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains: [main]
+clusters:
+  - name: backend
+    endpoints: ["{health_addr}"]
+    health_check:
+      type: tcp
+      interval_ms: 100
+      timeout_ms: 50
+      healthy_threshold: 1
+      unhealthy_threshold: 1
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints: ["{health_addr}"]
+insecure_options:
+  allow_private_endpoints: true
+  allow_private_health_checks: true
+"#
+            );
+            let config = Config::from_yaml(&yaml).expect("health fixture config");
+            let guard = start_full_proxy(&config);
+            let finished = Arc::clone(&guard.health.as_ref().expect("health runtime").finished);
+            receiver
+                .recv_timeout(Duration::from_secs(2))
+                .expect("first health probe");
+            drop(guard);
+            assert!(finished.load(Ordering::Acquire), "guard drop must join health runtime");
+            while receiver.try_recv().is_ok() {}
+            assert_eq!(
+                receiver.recv_timeout(Duration::from_millis(350)),
+                Err(RecvTimeoutError::Timeout),
+                "cancelled health runtime must stop probing"
+            );
+            stop.store(true, Ordering::Release);
+            endpoint.join().expect("health endpoint");
+        }
+        let empty = Config::from_yaml(&simple_proxy_yaml(crate::net::free_port(), 1)).expect("plain config");
+        let registry = build_health_registry(&empty.clusters);
+        assert!(
+            spawn_test_health_checks(&empty, &registry).is_none(),
+            "no health checks spawn no health thread"
+        );
     }
 
     /// The Policy selections the harness supports, by profile name.
