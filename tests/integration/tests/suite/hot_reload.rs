@@ -307,24 +307,41 @@ fn reload_mid_flight_old_request_completes_with_old_pipeline() {
 
 #[test]
 fn reload_resets_rate_limit_bucket() {
-    let backend = start_backend_with_shutdown("ok");
+    let backend = start_backend_with_shutdown("before-reload");
+    let reloaded_backend = start_backend_with_shutdown("after-reload");
     let proxy_port = free_port();
 
-    let yaml = rate_limit_yaml(proxy_port, backend.port(), 5);
+    let yaml = rate_limit_yaml(proxy_port, backend.port(), 0.001, 5);
     let proxy = start_reloadable_proxy(&yaml);
 
     for i in 0..4 {
-        let (s, _) = http_get(proxy.addr(), "/", None);
+        let (s, body) = http_get(proxy.addr(), "/", None);
         assert_eq!(s, 200, "request {i} should be within burst");
+        assert_eq!(body, "before-reload", "initial burst must use the original backend");
     }
 
     let (s_limited, _) = http_get(proxy.addr(), "/", None);
     assert_eq!(s_limited, 429, "should be rate limited after burst exhausted");
 
-    proxy.write_config(&rate_limit_yaml(proxy_port, backend.port(), 5));
+    proxy.write_config(&rate_limit_yaml(proxy_port, reloaded_backend.port(), 0.001, 5));
 
-    let (s_after, _) = get_eventually(proxy.addr(), "/", |s, _| s == 200);
+    let (s_after, body_after) = get_eventually(proxy.addr(), "/", |s, body| s == 200 && body == "after-reload");
     assert_eq!(s_after, 200, "after reload, rate limit bucket should be fresh");
+    assert_eq!(
+        body_after, "after-reload",
+        "fresh token must come from the reloaded pipeline"
+    );
+
+    for i in 0..4 {
+        let (status, body) = http_get(proxy.addr(), "/", None);
+        assert_eq!(status, 200, "fresh bucket must have four remaining tokens: request {i}");
+        assert_eq!(body, "after-reload", "remaining burst must use the reloaded backend");
+    }
+    let (s_limited_after, _) = http_get(proxy.addr(), "/", None);
+    assert_eq!(
+        s_limited_after, 429,
+        "fresh bucket must still enforce its five-token burst"
+    );
 }
 
 #[test]
@@ -875,7 +892,7 @@ filter_chains:
     )
 }
 
-fn rate_limit_yaml(proxy_port: u16, backend_port: u16, burst: u32) -> String {
+fn rate_limit_yaml(proxy_port: u16, backend_port: u16, rate: f64, burst: u32) -> String {
     format!(
         r#"
 listeners:
@@ -887,7 +904,7 @@ filter_chains:
     filters:
       - filter: rate_limit
         scope: local
-        rate: 1
+        rate: {rate}
         burst: {burst}
         mode: global
       - filter: router
