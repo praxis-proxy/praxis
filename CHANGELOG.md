@@ -70,6 +70,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Concurrent new-key KV writes and compiled-regex cache admissions now stay
+  within their capacity limits.
 - Unreadable `grpc-timeout` headers now follow the malformed-header policy;
   `on_invalid: ignore` still uses the configured fallback.
 - **Breaking:** Reject branch `on_result.key` values over 64 bytes, matching
