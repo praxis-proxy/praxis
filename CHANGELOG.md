@@ -81,6 +81,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Record the final response after informational headers, including a fallback access record when a later stream aborts.
 - Preserve every headers.request_add field value in upstream requests, including duplicates and opaque existing values.
 - Clarify that the MaxBodyGuard extension example checks declared Content-Length and point to cumulative request body limits.
 - Describe the retry-policy example as capped connection/reset retries with backoff, without an unconfigured token-bucket budget.

@@ -5,19 +5,133 @@
 
 use std::{
     collections::HashMap,
-    io::{Read as _, Write as _},
+    io::{BufReader, Read as _, Write as _},
     net::TcpStream,
     time::{Duration, Instant},
 };
 
 use praxis_test_utils::{
     PraxisProcess, ProcessLogCursor, free_port, http_get, http_send, parse_body, parse_header, parse_status,
-    start_backend_with_shutdown, start_full_proxy, start_proxy, start_tcp_tagged_backend, wait_for_tcp,
+    read_h1_response, read_http_request, spawn_raw_http_backend, start_backend_with_shutdown, start_full_proxy,
+    start_proxy, start_tcp_tagged_backend, wait_for_tcp,
 };
 
 // -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
+
+#[test]
+fn access_log_early_hints_then_aborted_final_response() {
+    for abort in [false, true] {
+        let (release, received_prefix) = std::sync::mpsc::channel();
+        let (backend_port, backend_thread) = spawn_raw_http_backend(move |mut stream| {
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            read_http_request(&mut stream);
+            stream
+                .write_all(b"HTTP/1.1 103 Early Hints\r\nLink: </style.css>; rel=preload\r\n\r\n")
+                .unwrap();
+            if abort {
+                stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nshort\r\n",
+                    )
+                    .unwrap();
+                received_prefix
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("client received prefix before abort");
+            } else {
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                    .unwrap();
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("early-hints.ndjson");
+        let mut config = super::load_example_config(
+            "observability/access-logging.yaml",
+            free_port(),
+            HashMap::from([("127.0.0.1:3000", backend_port)]),
+        );
+        for chain in &mut config.filter_chains {
+            for entry in &mut chain.filters {
+                if entry.filter_type == "access_log" {
+                    entry
+                        .config
+                        .as_mapping_mut()
+                        .unwrap()
+                        .insert("sample_rate".into(), 1.0.into());
+                    entry.config.as_mapping_mut().unwrap().insert(
+                        "sink".into(),
+                        serde_yaml::from_str(&format!("type: file\npath: {}", log_path.display())).unwrap(),
+                    );
+                }
+            }
+        }
+        let proxy = start_full_proxy(&config);
+        wait_for_tcp(proxy.addr());
+        let mut socket = TcpStream::connect(proxy.addr()).unwrap();
+        socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        socket
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        let mut body = Vec::new();
+        let response = read_h1_response(&mut BufReader::new(socket), false, 64, |chunk| {
+            body.extend_from_slice(chunk);
+            if abort && body.len() == 5 {
+                release.send(()).expect("release upstream after receiving prefix");
+            }
+            Ok(())
+        });
+        #[cfg(feature = "pingora")]
+        assert_eq!(response.interim_statuses, [103], "{response:?}");
+        #[cfg(feature = "hyper")]
+        assert!(
+            response.interim_statuses.is_empty(),
+            "Hyper does not relay interim heads: {response:?}"
+        );
+        assert_eq!(response.status, Some(200), "{response:?}");
+        if abort {
+            assert!(
+                response
+                    .headers
+                    .iter()
+                    .any(|(name, value)| name == "transfer-encoding" && value == "chunked"),
+                "{response:?}"
+            );
+            assert_eq!(response.completion, None, "{response:?}");
+            assert!(
+                response.abort.as_ref().is_some_and(|(kind, _)| matches!(
+                    kind,
+                    std::io::ErrorKind::UnexpectedEof
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted
+                )),
+                "peer must abort rather than time out: {response:?}"
+            );
+            assert_eq!(body, b"short");
+        } else {
+            assert_eq!(
+                response.completion,
+                Some(praxis_test_utils::H1Completion::ContentLength)
+            );
+            assert_eq!(body, b"ok");
+        }
+        backend_thread.join().unwrap();
+        let contents = (0..50)
+            .find_map(|_| {
+                let contents = std::fs::read_to_string(&log_path).unwrap_or_default();
+                if contents.lines().count() == 1 {
+                    Some(contents)
+                } else {
+                    std::thread::sleep(Duration::from_millis(20));
+                    None
+                }
+            })
+            .expect("one final access record");
+        let record: serde_json::Value = serde_json::from_str(contents.lines().next().unwrap()).unwrap();
+        assert_eq!(record["status"], "200", "103 must not consume the record");
+    }
+}
 
 #[test]
 fn access_logging() {
