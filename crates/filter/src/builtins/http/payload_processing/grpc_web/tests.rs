@@ -448,6 +448,108 @@ async fn a_non_grpc_response_is_not_translated() -> Result<(), Box<dyn std::erro
     Ok(())
 }
 
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "media-type matrix includes native and trailers-only controls"
+)]
+async fn grpc_web_non_native_grpc_prefix_responses_pass_through() {
+    for request_type in ["application/grpc-web", "application/grpc-web-text"] {
+        let translated_type = if request_type.ends_with("-text") {
+            "application/grpc-web-text+proto"
+        } else {
+            "application/grpc-web+proto"
+        };
+        for upstream_type in ["application/grpc-web", "application/grpc-web-text", "application/grpcx"] {
+            let req = grpc_web_request(request_type);
+            let mut ctx = pipeline_context(&req);
+            let filter = filter("");
+            drop(filter.on_request(&mut ctx).await.unwrap());
+            let mut response = crate::test_utils::make_response();
+            let _previous = response
+                .headers
+                .insert(http::header::CONTENT_TYPE, upstream_type.parse().unwrap());
+            let _previous = response
+                .headers
+                .insert(http::header::CONTENT_LENGTH, http::HeaderValue::from_static("3"));
+            ctx.response_header = Some(&mut response);
+            drop(filter.on_response(&mut ctx).await.unwrap());
+            ctx.response_header = None;
+            let mut body = Some(Bytes::from_static(b"raw"));
+            drop(filter.on_response_body(&mut ctx, &mut body, true).unwrap());
+            assert_eq!(
+                body.as_deref(),
+                Some(b"raw".as_slice()),
+                "{request_type} / {upstream_type}"
+            );
+            drop(ctx);
+            assert_eq!(response.headers.get(http::header::CONTENT_TYPE).unwrap(), upstream_type);
+            assert_eq!(response.headers.get(http::header::CONTENT_LENGTH).unwrap(), "3");
+        }
+
+        for upstream_type in [
+            "application/grpc",
+            "application/grpc+proto; charset=utf-8",
+            "ApPlIcAtIoN/GrPc",
+        ] {
+            let req = grpc_web_request(request_type);
+            let mut ctx = pipeline_context(&req);
+            let filter = filter("");
+            drop(filter.on_request(&mut ctx).await.unwrap());
+            let mut response = crate::test_utils::make_response();
+            let _previous = response
+                .headers
+                .insert(http::header::CONTENT_TYPE, upstream_type.parse().unwrap());
+            let _previous = response
+                .headers
+                .insert(http::header::CONTENT_LENGTH, http::HeaderValue::from_static("5"));
+            ctx.response_header = Some(&mut response);
+            drop(filter.on_response(&mut ctx).await.unwrap());
+            ctx.response_header = None;
+            let mut body = Some(Bytes::from_static(b"\0\0\0\0\0"));
+            drop(filter.on_response_body(&mut ctx, &mut body, true).unwrap());
+            let wire = body.unwrap();
+            let decoded = if request_type.ends_with("-text") {
+                base64::engine::general_purpose::STANDARD.decode(wire).unwrap()
+            } else {
+                wire.to_vec()
+            };
+            assert!(decoded.starts_with(b"\0\0\0\0\0"), "{request_type} / {upstream_type}");
+            assert!(String::from_utf8_lossy(&decoded).contains("grpc-status: 2"));
+            drop(ctx);
+            assert_eq!(
+                response.headers.get(http::header::CONTENT_TYPE).unwrap(),
+                translated_type
+            );
+            assert!(!response.headers.contains_key(http::header::CONTENT_LENGTH));
+        }
+    }
+
+    let req = grpc_web_request("application/grpc-web-text");
+    let mut ctx = pipeline_context(&req);
+    let filter = filter("");
+    drop(filter.on_request(&mut ctx).await.unwrap());
+    let mut response = crate::test_utils::make_response();
+    let _previous = response.headers.insert(
+        http::header::CONTENT_TYPE,
+        http::HeaderValue::from_static("application/grpcx"),
+    );
+    let _previous = response
+        .headers
+        .insert("grpc-status", http::HeaderValue::from_static("0"));
+    ctx.response_header = Some(&mut response);
+    drop(filter.on_response(&mut ctx).await.unwrap());
+    ctx.response_header = None;
+    let mut body = Some(Bytes::from_static(b"abc"));
+    drop(filter.on_response_body(&mut ctx, &mut body, true).unwrap());
+    assert_eq!(body.as_deref(), Some(b"YWJj".as_slice()));
+    drop(ctx);
+    assert_eq!(
+        response.headers.get(http::header::CONTENT_TYPE).unwrap(),
+        "application/grpc-web-text+proto"
+    );
+}
+
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------

@@ -18,7 +18,7 @@ mod tests;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use praxis_core::grpc::{GrpcStatusCode, GrpcWebKind};
+use praxis_core::grpc::{GrpcKind, GrpcStatusCode, GrpcWebKind};
 use serde::Deserialize;
 use tracing::{debug, trace};
 
@@ -449,7 +449,7 @@ fn synthesize_missing_status(trailers: &mut http::HeaderMap) {
 // -----------------------------------------------------------------------------
 
 /// Returns `true` if the upstream response is native gRPC
-/// (`Content-Type: application/grpc...`).
+/// (`Content-Type: application/grpc` or `application/grpc+codec`).
 ///
 /// Non-gRPC responses (such as an HTML error page from an intermediary)
 /// are passed through untranslated.
@@ -458,5 +458,5 @@ fn upstream_is_grpc(ctx: &HttpFilterContext<'_>) -> bool {
         .as_ref()
         .and_then(|response| response.headers.get(http::header::CONTENT_TYPE))
         .and_then(|value| value.to_str().ok())
-        .is_some_and(|ct| ct.to_ascii_lowercase().starts_with("application/grpc"))
+        .is_some_and(|content_type| GrpcKind::from_content_type(content_type).is_grpc())
 }
