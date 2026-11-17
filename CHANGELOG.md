@@ -74,6 +74,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Validate complete initial HTTP/2 SETTINGS frames before reporting a healthy
+  upstream.
 - Apply TCP maximum durations across setup and forwarding, including Hyper
   TLS setup. Pingora's initial TLS handshake retains its separate timeout.
 - Stop certificate watchers started by earlier listeners when HTTP or TCP
