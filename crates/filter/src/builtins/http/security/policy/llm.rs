@@ -379,6 +379,10 @@ fn push_input_parts_text(parts: &mut Vec<ContentPart>, value: &serde_json::Value
 /// `context`, and `source` fields that are not named `text` or `content`,
 /// and `search_result` blocks carry a `title` and a `source` string.
 fn push_object_text(parts: &mut Vec<ContentPart>, item: &serde_json::Value, depth: u8) {
+    if item.get("type").and_then(serde_json::Value::as_str) == Some("search_result") {
+        push_search_result_text(parts, item, depth);
+        return;
+    }
     if let Some(text) = item.get("text") {
         push_text_at(parts, text, depth);
     }
@@ -393,12 +397,22 @@ fn push_object_text(parts: &mut Vec<ContentPart>, item: &serde_json::Value, dept
     }
     match item.get("type").and_then(serde_json::Value::as_str) {
         Some("document") => push_document_source_text(parts, item.get("source"), depth),
-        Some("search_result") => {
-            if let Some(source) = item.get("source").filter(|source| source.is_string()) {
-                push_text_at(parts, source, depth);
-            }
-        },
         Some(_) | None => {},
+    }
+}
+
+/// Project an Anthropic `search_result` block in its wire order: the `source`
+/// string, then `title`, then `content`, so order-sensitive policies see the
+/// fields as the model receives them.
+fn push_search_result_text(parts: &mut Vec<ContentPart>, item: &serde_json::Value, depth: u8) {
+    if let Some(source) = item.get("source").filter(|source| source.is_string()) {
+        push_text_at(parts, source, depth);
+    }
+    if let Some(title) = item.get("title") {
+        push_text_at(parts, title, depth);
+    }
+    if let Some(content) = item.get("content") {
+        push_text_at(parts, content, depth);
     }
 }
 
@@ -1321,8 +1335,22 @@ mod tests {
         );
         assert_eq!(
             texts(&parsed.content()),
-            vec!["result body", "result title", "https://example.com/doc"],
-            "search_result content, title, and source must reach the scanner",
+            vec!["https://example.com/doc", "result title", "result body"],
+            "search_result source, title, and content must reach the scanner in wire order",
+        );
+    }
+
+    #[test]
+    fn anthropic_search_result_keeps_wire_order_whatever_the_key_order() {
+        let parsed = request(
+            r#"{"model":"claude","messages":[{"role":"user","content":[
+                {"type":"search_result","content":[{"type":"text","text":"result body"}],
+                 "title":"result title","source":"https://example.com/doc"}]}]}"#,
+        );
+        assert_eq!(
+            texts(&parsed.content()),
+            vec!["https://example.com/doc", "result title", "result body"],
+            "search_result fields must be projected source, title, content",
         );
     }
 
