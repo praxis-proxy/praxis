@@ -1179,5 +1179,5 @@ help: ## list targets
 		/^[a-zA-Z0-9_-]+:[^=]*## / { printf "  %-24s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
 .PHONY: test-rollout
-test-rollout: ## KIND rollout acceptance (requires Docker or Podman with a Docker-compatible CLI shim, KIND, kubectl and ../operator)
+test-rollout: ## KIND rollout acceptance (temporarily disabled; pending migration to gateway-controller)
 	CONTAINER_ENGINE="$(CONTAINER_ENGINE)" cargo xtask rollout $(ROLLOUT_ARGS)

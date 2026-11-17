@@ -34,12 +34,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - Experimental CloudEvents `on: request_complete` publishes one best-effort
   event when a request ends, including aborted responses and early failures.
-- `cargo xtask rollout` and `make test-rollout` exercise Kubernetes pod
-  loss, rollouts, config reloads, TLS rotation, node drain, and upstream
-  failure under continuous HTTP/1.1, HTTP/2, and HTTPS traffic.
+- Add a Kubernetes rollout acceptance harness covering pod loss,
+  rollouts, config reloads, TLS rotation, node drain, and upstream failure
+  under continuous HTTP/1.1, HTTP/2, and HTTPS traffic.
 
 ### Changed
 
+- Temporarily disable KIND rollout acceptance in CI and local commands
+  because the cluster exhausts the shared inotify instance budget, pending
+  migration to [gateway-controller](https://github.com/praxis-proxy/gateway-controller).
 - CloudEvents `on: response_complete` publishes only after a final bodyless
   response or response-body end-of-stream; use `request_complete` to observe
   terminal failures and aborted streams.
