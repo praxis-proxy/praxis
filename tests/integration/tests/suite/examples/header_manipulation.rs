@@ -69,6 +69,56 @@ fn header_response_remove_strips_upstream_header() {
 }
 
 #[test]
+fn header_manipulation_adds_reach_both_sides() {
+    let (backend_port, backend_thread) = spawn_raw_http_backend(|mut stream| {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        while !request.windows(4).any(|part| part == b"\r\n\r\n") {
+            let count = stream.read(&mut buffer).expect("read request headers");
+            assert_ne!(count, 0);
+            request.extend_from_slice(&buffer[..count]);
+        }
+        let body = String::from_utf8_lossy(&request);
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nX-Request-Served-By: backend\r\nConnection: close\r\n\r\n{body}",
+            body.len(),
+        );
+        stream.write_all(response.as_bytes()).expect("write response");
+    });
+    let config = super::load_example_config(
+        "transformation/header-manipulation.yaml",
+        free_port(),
+        HashMap::from([("127.0.0.1:3000", backend_port)]),
+    );
+    let proxy = start_full_proxy(&config);
+    wait_for_tcp(proxy.addr());
+    let raw = http_send(
+        proxy.addr(),
+        "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(praxis_test_utils::parse_status(&raw), 200, "{raw}");
+    let body = parse_body(&raw).to_ascii_lowercase();
+    assert!(body.contains("x-forwarded-by: praxis"), "request add missing: {body}");
+    assert!(
+        body.contains("x-request-source: gateway"),
+        "request add missing: {body}"
+    );
+    let values: Vec<_> = raw
+        .split("\r\n")
+        .filter_map(|line| {
+            line.to_ascii_lowercase()
+                .strip_prefix("x-request-served-by:")
+                .map(str::to_owned)
+        })
+        .collect();
+    assert_eq!(
+        values.iter().map(|value| value.trim()).collect::<Vec<_>>(),
+        ["backend", "praxis-gateway"]
+    );
+    backend_thread.join().expect("backend completed");
+}
+
+#[test]
 fn header_request_mutations_replay_across_filter_instances_on_wire() {
     let (backend_port, backend_thread) = spawn_raw_http_backend(|mut stream| {
         let mut request = Vec::new();
