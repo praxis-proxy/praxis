@@ -11,12 +11,22 @@ use std::{
     io::{BufRead as _, Read as _, Write as _},
     sync::atomic::Ordering,
 };
+#[cfg(target_os = "linux")]
+use std::{
+    path::Path as FixturePath,
+    process::Command,
+    time::{Duration as FixtureDuration, Instant},
+};
 
 #[cfg(feature = "hyper")]
 use openssl::{hash::MessageDigest, x509::X509};
 use praxis_core::config::Config;
+#[cfg(target_os = "linux")]
+use praxis_core::config::LogOutput;
 #[cfg(feature = "hyper")]
 use praxis_filter::{FilterFactory, FilterRegistry};
+#[cfg(target_os = "linux")]
+use praxis_protocol::tls_setup::take_test_watcher_handles;
 #[cfg(feature = "hyper")]
 use praxis_test_utils::start_request_counting_backend;
 use praxis_test_utils::{
@@ -26,9 +36,407 @@ use praxis_test_utils::{
     wait_for_tls,
 };
 
+/// Marks the isolated process running the TLS fixture watcher regression.
+#[cfg(target_os = "linux")]
+const TLS_FIXTURE_WATCHER_CHILD: &str = "PRAXIS_TLS_FIXTURE_WATCHER_CHILD";
+
 // -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
+
+/// Build a static-response config with the requested HTTPS listeners.
+#[cfg(target_os = "linux")]
+fn fixture_tls_yaml(listeners: &[(u16, &TestCertificates, bool)]) -> String {
+    let listeners = listeners
+        .iter()
+        .map(|(port, certs, hot_reload)| {
+            format!(
+                "  - name: secure-{port}\n    address: 127.0.0.1:{port}\n    filter_chains: [main]\n    tls:\n      certificates:\n        - cert_path: {}\n          key_path: {}\n      hot_reload: {hot_reload}\n",
+                certs.cert_path.display(),
+                certs.key_path.display()
+            )
+        })
+        .collect::<String>();
+    format!(
+        "listeners:\n{listeners}filter_chains:\n  - name: main\n    filters:\n      - filter: static_response\n        status: 200\n        body: fixture-ok\ninsecure_options:\n  allow_root: true\n"
+    )
+}
+
+/// Build a fixture that owns one HTTP and one TCP certificate watcher.
+#[cfg(target_os = "linux")]
+fn fixture_mixed_tls_yaml(
+    http_port: u16,
+    http_certs: &TestCertificates,
+    tcp_port: u16,
+    tcp_certs: &TestCertificates,
+    echo_port: u16,
+) -> String {
+    format!(
+        "insecure_options:\n  allow_private_upstreams: true\nlisteners:\n  - name: secure-http\n    address: 127.0.0.1:{http_port}\n    filter_chains: [main]\n    tls:\n      certificates:\n        - cert_path: {}\n          key_path: {}\n      hot_reload: true\n  - name: secure-tcp\n    address: 127.0.0.1:{tcp_port}\n    protocol: tcp\n    upstream: 127.0.0.1:{echo_port}\n    tls:\n      certificates:\n        - cert_path: {}\n          key_path: {}\n      hot_reload: true\nfilter_chains:\n  - name: main\n    filters:\n      - filter: static_response\n        status: 200\n        body: fixture-ok\n",
+        http_certs.cert_path.display(),
+        http_certs.key_path.display(),
+        tcp_certs.cert_path.display(),
+        tcp_certs.key_path.display()
+    )
+}
+
+/// Count only inotify's anonymous-inode descriptors in this process.
+#[cfg(target_os = "linux")]
+fn fixture_inotify_count() -> usize {
+    std::fs::read_dir("/proc/self/fd")
+        .expect("list process descriptors")
+        .map(|entry| entry.expect("read process descriptor entry"))
+        .filter_map(|entry| match std::fs::read_link(entry.path()) {
+            Ok(target) => Some(target),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => panic!("read process descriptor target: {error}"),
+        })
+        .filter(|target| {
+            target == FixturePath::new("anon_inode:inotify") || target == FixturePath::new("anon_inode:[inotify]")
+        })
+        .count()
+}
+
+/// Observe asynchronous watcher startup or shutdown within five seconds.
+#[cfg(target_os = "linux")]
+fn wait_for_fixture_inotify(expected: usize) {
+    let deadline = Instant::now() + FixtureDuration::from_secs(5);
+    loop {
+        let actual = fixture_inotify_count();
+        if actual == expected {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "expected {expected} inotify instances, found {actual}"
+        );
+        std::thread::sleep(FixtureDuration::from_millis(10));
+    }
+}
+
+/// Join every watcher spawned by one fixture before checking native cleanup.
+#[cfg(target_os = "linux")]
+fn assert_fixture_watchers_stopped(expected: usize, baseline: usize) {
+    let handles = take_test_watcher_handles();
+    assert_eq!(
+        handles.len(),
+        expected,
+        "fixture must spawn the expected watcher threads"
+    );
+    let deadline = Instant::now() + FixtureDuration::from_secs(5);
+    while !handles.iter().all(std::thread::JoinHandle::is_finished) {
+        assert!(
+            Instant::now() < deadline,
+            "fixture left a certificate watcher thread running"
+        );
+        std::thread::sleep(FixtureDuration::from_millis(10));
+    }
+    for handle in handles {
+        handle.join().expect("certificate watcher thread finished cleanly");
+    }
+    wait_for_fixture_inotify(baseline);
+}
+
+/// Replace one watched certificate and its matching key in place.
+#[cfg(target_os = "linux")]
+fn rotate_fixture_certificate(original: &TestCertificates, replacement: &TestCertificates) {
+    assert_ne!(
+        original.server_cert_der, replacement.server_cert_der,
+        "rotation fixture must supply a distinct certificate"
+    );
+    std::fs::copy(&replacement.key_path, &original.key_path).expect("replace TLS key");
+    std::fs::copy(&replacement.cert_path, &original.cert_path).expect("replace TLS certificate");
+}
+
+/// Wait for a new HTTPS identity, then prove the exact certificate and response.
+#[cfg(target_os = "linux")]
+fn wait_for_fixture_https_identity(addr: &str, certs: &TestCertificates) {
+    let deadline = Instant::now() + FixtureDuration::from_secs(8);
+    loop {
+        if let Ok(response) = praxis_test_utils::https_get_attempt(addr, "/", &certs.client_config()) {
+            assert_eq!(response, (200, "fixture-ok".to_owned()), "rotated TLS response");
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "watcher did not serve the expected certificate at {addr}"
+        );
+        std::thread::sleep(FixtureDuration::from_millis(25));
+    }
+    assert_eq!(
+        get_peer_cert_der(addr, &certs.client_config(), "localhost"),
+        certs.server_cert_der,
+        "fresh handshake must present the exact expected certificate at {addr}"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn tls_fixture_watchers_stop_after_each_guard() {
+    if std::env::var_os(TLS_FIXTURE_WATCHER_CHILD).is_none() {
+        let output = Command::new(std::env::current_exe().expect("test executable"))
+            .args(["--exact", "tls::tls_fixture_watchers_stop_after_each_guard"])
+            .env(TLS_FIXTURE_WATCHER_CHILD, "1")
+            .output()
+            .expect("run isolated TLS fixture test");
+        assert!(
+            output.status.success(),
+            "isolated fixture failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout)
+                .contains("test tls::tls_fixture_watchers_stop_after_each_guard ... ok"),
+            "isolated child must run the exact regression test: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        return;
+    }
+
+    let baseline = fixture_inotify_count();
+    for _ in 0..2 {
+        let original = TestCertificates::generate();
+        let port = free_port();
+        let config = Config::from_yaml(&fixture_tls_yaml(&[(port, &original, true)])).expect("TLS fixture config");
+        let proxy = start_tls_proxy(&config, &original.client_config());
+        wait_for_fixture_inotify(baseline + 1);
+        assert_eq!(
+            https_get(proxy.addr(), "/", &original.client_config()),
+            (200, "fixture-ok".to_owned()),
+            "live watcher must preserve verified HTTPS"
+        );
+
+        let rotated = TestCertificates::generate();
+        assert_ne!(
+            original.server_cert_der, rotated.server_cert_der,
+            "rotation must change certificate identity"
+        );
+        std::fs::copy(&rotated.key_path, &original.key_path).expect("replace TLS key");
+        std::fs::copy(&rotated.cert_path, &original.cert_path).expect("replace TLS certificate");
+        let rotated_client = rotated.client_config();
+        let deadline = Instant::now() + FixtureDuration::from_secs(8);
+        loop {
+            if let Ok(response) = praxis_test_utils::https_get_attempt(proxy.addr(), "/", &rotated_client) {
+                assert_eq!(response, (200, "fixture-ok".to_owned()), "rotated TLS response");
+                break;
+            }
+            assert!(Instant::now() < deadline, "watcher did not serve rotated certificate");
+            std::thread::sleep(FixtureDuration::from_millis(25));
+        }
+        assert!(
+            praxis_test_utils::https_get_attempt(proxy.addr(), "/", &original.client_config()).is_err(),
+            "original CA must not verify the rotated certificate"
+        );
+        drop(proxy);
+        assert_fixture_watchers_stopped(1, baseline);
+    }
+
+    let original = TestCertificates::generate();
+    let port = free_port();
+    let config = Config::from_yaml(&fixture_tls_yaml(&[(port, &original, true)]))
+        .expect("invalid-then-repaired TLS fixture config");
+    let log_dir = tempfile::TempDir::new().expect("certificate reload log directory");
+    let log_path = log_dir.path().join("certificate-reload.log");
+    let mut log_config = config.clone();
+    log_config.runtime.logging.output = LogOutput::File;
+    log_config.runtime.logging.file_path = Some(log_path.to_string_lossy().into_owned());
+    log_config.runtime.logging.non_blocking = false;
+    log_config
+        .runtime
+        .log_overrides
+        .insert("praxis_tls::watcher".to_owned(), "warn".to_owned());
+    let _tracing_guard =
+        praxis_core::logging::init_tracing(&log_config).expect("capture watcher warnings in the isolated child");
+    let proxy = start_tls_proxy(&config, &original.client_config());
+    wait_for_fixture_inotify(baseline + 1);
+    std::fs::write(&original.cert_path, b"not a certificate").expect("corrupt watched certificate");
+    std::fs::write(&original.key_path, b"not a key").expect("corrupt watched key");
+    let deadline = Instant::now() + FixtureDuration::from_secs(15);
+    loop {
+        let logged = std::fs::read_to_string(&log_path).expect("read watcher log");
+        if logged.contains("TLS certificate reload failed, keeping previous certificate")
+            && logged.contains(original.cert_path.to_str().expect("certificate path"))
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "watcher never attempted the invalid certificate reload: {logged}"
+        );
+        std::thread::sleep(FixtureDuration::from_millis(25));
+    }
+    assert_eq!(
+        get_peer_cert_der(proxy.addr(), &original.client_config(), "localhost"),
+        original.server_cert_der,
+        "invalid rotation must retain the last good certificate"
+    );
+    assert_eq!(
+        https_get(proxy.addr(), "/", &original.client_config()),
+        (200, "fixture-ok".to_owned()),
+        "invalid rotation must leave the listener serving"
+    );
+    let repaired = TestCertificates::generate();
+    rotate_fixture_certificate(&original, &repaired);
+    wait_for_fixture_https_identity(proxy.addr(), &repaired);
+    assert!(
+        praxis_test_utils::https_get_attempt(proxy.addr(), "/", &original.client_config()).is_err(),
+        "the original CA must not verify the repaired certificate"
+    );
+    drop(proxy);
+    assert_fixture_watchers_stopped(1, baseline);
+
+    let first = TestCertificates::generate();
+    let second = TestCertificates::generate();
+    let first_port = free_port();
+    let second_port = free_port();
+    let config = Config::from_yaml(&fixture_tls_yaml(&[
+        (first_port, &first, true),
+        (second_port, &second, true),
+    ]))
+    .expect("multi-listener TLS config");
+    let proxy = start_full_proxy(&config);
+    for (port, certs) in [(first_port, &first), (second_port, &second)] {
+        let addr = format!("127.0.0.1:{port}");
+        wait_for_https(&addr, &certs.client_config());
+        assert_eq!(
+            https_get(&addr, "/", &certs.client_config()),
+            (200, "fixture-ok".to_owned()),
+            "each listener must serve verified HTTPS"
+        );
+    }
+    wait_for_fixture_inotify(baseline + 2);
+    let first_addr = format!("127.0.0.1:{first_port}");
+    let second_addr = format!("127.0.0.1:{second_port}");
+    let first_rotated = TestCertificates::generate();
+    rotate_fixture_certificate(&first, &first_rotated);
+    wait_for_fixture_https_identity(&first_addr, &first_rotated);
+    assert_eq!(
+        get_peer_cert_der(&second_addr, &second.client_config(), "localhost"),
+        second.server_cert_der,
+        "rotating the first watcher must not change the second listener"
+    );
+    assert_eq!(https_get(&second_addr, "/", &second.client_config()).1, "fixture-ok");
+    let second_rotated = TestCertificates::generate();
+    rotate_fixture_certificate(&second, &second_rotated);
+    wait_for_fixture_https_identity(&second_addr, &second_rotated);
+    assert_eq!(
+        get_peer_cert_der(&first_addr, &first_rotated.client_config(), "localhost"),
+        first_rotated.server_cert_der,
+        "rotating the second watcher must not revert the first listener"
+    );
+    drop(proxy);
+    assert_fixture_watchers_stopped(2, baseline);
+
+    let http_certs = TestCertificates::generate();
+    let tcp_certs = TestCertificates::generate();
+    let http_port = free_port();
+    let tcp_port = free_port();
+    let echo_port = start_tcp_echo_backend();
+    let mixed_yaml = fixture_mixed_tls_yaml(http_port, &http_certs, tcp_port, &tcp_certs, echo_port);
+    let config = Config::from_yaml(&mixed_yaml).expect("mixed HTTP and TCP config");
+    let proxy = start_full_proxy(&config);
+    let http_addr = format!("127.0.0.1:{http_port}");
+    let tcp_addr = format!("127.0.0.1:{tcp_port}");
+    wait_for_https(&http_addr, &http_certs.client_config());
+    wait_for_tls(&tcp_addr, &tcp_certs.raw_tls_client_config());
+    wait_for_fixture_inotify(baseline + 2);
+    assert_eq!(
+        https_get(&http_addr, "/", &http_certs.client_config()),
+        (200, "fixture-ok".to_owned()),
+        "HTTP watcher must serve verified HTTPS"
+    );
+    assert_eq!(
+        tls_send_recv(&tcp_addr, b"fixture-tcp", &tcp_certs.raw_tls_client_config()),
+        b"fixture-tcp",
+        "TCP watcher must preserve TLS forwarding"
+    );
+    let tcp_rotated = TestCertificates::generate();
+    rotate_fixture_certificate(&tcp_certs, &tcp_rotated);
+    wait_for_tls(&tcp_addr, &tcp_rotated.raw_tls_client_config());
+    assert_eq!(
+        get_peer_cert_der(&tcp_addr, &tcp_rotated.raw_tls_client_config(), "localhost"),
+        tcp_rotated.server_cert_der,
+        "TCP watcher must install its new certificate"
+    );
+    assert_eq!(
+        tls_send_recv(&tcp_addr, b"rotated-tcp", &tcp_rotated.raw_tls_client_config()),
+        b"rotated-tcp",
+        "rotated TCP listener must still forward bytes"
+    );
+    assert_eq!(
+        get_peer_cert_der(&http_addr, &http_certs.client_config(), "localhost"),
+        http_certs.server_cert_der,
+        "TCP rotation must leave the HTTP watcher unchanged"
+    );
+    let http_rotated = TestCertificates::generate();
+    rotate_fixture_certificate(&http_certs, &http_rotated);
+    wait_for_fixture_https_identity(&http_addr, &http_rotated);
+    assert_eq!(
+        get_peer_cert_der(&tcp_addr, &tcp_rotated.raw_tls_client_config(), "localhost"),
+        tcp_rotated.server_cert_der,
+        "HTTP rotation must leave the TCP watcher unchanged"
+    );
+    drop(proxy);
+    assert_fixture_watchers_stopped(2, baseline);
+
+    let invalid_tcp = TestCertificates::generate();
+    let invalid_yaml = fixture_mixed_tls_yaml(free_port(), &http_certs, free_port(), &invalid_tcp, echo_port);
+    let invalid_config = Config::from_yaml(&invalid_yaml).expect("config with initially valid certificates");
+    std::fs::remove_file(&invalid_tcp.key_path).expect("invalidate TCP key before registration");
+    let outcome = std::panic::catch_unwind(|| start_full_proxy(&invalid_config));
+    let Err(failure) = outcome else {
+        panic!("TCP registration must fail after HTTP registration");
+    };
+    let message = failure
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| failure.downcast_ref::<&str>().copied())
+        .expect("registration panic text");
+    assert!(
+        message.contains("TCP protocol registration should succeed"),
+        "failure must occur after successful HTTP registration: {message}"
+    );
+    assert_fixture_watchers_stopped(1, baseline);
+
+    let static_certs = TestCertificates::generate();
+    let static_port = free_port();
+    let config =
+        Config::from_yaml(&fixture_tls_yaml(&[(static_port, &static_certs, false)])).expect("static TLS config");
+    let proxy = start_tls_proxy(&config, &static_certs.client_config());
+    assert_eq!(fixture_inotify_count(), baseline, "static TLS must not start a watcher");
+    drop(proxy);
+    assert_fixture_watchers_stopped(0, baseline);
+
+    let plain_port = free_port();
+    let plain_yaml = format!(
+        "listeners:\n  - name: plain\n    address: 127.0.0.1:{plain_port}\n    filter_chains: [main]\nfilter_chains:\n  - name: main\n    filters:\n      - filter: static_response\n        status: 200\n        body: fixture-ok\ninsecure_options:\n  allow_root: true\n"
+    );
+    let plain_config = Config::from_yaml(&plain_yaml).expect("plain HTTP config");
+    let proxy = start_proxy(&plain_config);
+    assert_eq!(fixture_inotify_count(), baseline, "plain HTTP must not start a watcher");
+    drop(proxy);
+    assert_fixture_watchers_stopped(0, baseline);
+
+    let panic_certs = TestCertificates::generate();
+    let panic_port = free_port();
+    let panic_config =
+        Config::from_yaml(&fixture_tls_yaml(&[(panic_port, &panic_certs, true)])).expect("panic fixture config");
+    let outcome = std::panic::catch_unwind(|| {
+        let _proxy = start_tls_proxy_no_wait(&panic_config);
+        wait_for_fixture_inotify(baseline + 1);
+        panic!("exercise fixture guard drop during unwinding");
+    });
+    assert!(outcome.is_err(), "fixture body must unwind");
+    assert_fixture_watchers_stopped(1, baseline);
+
+    let immediate_certs = TestCertificates::generate();
+    let immediate_port = free_port();
+    let immediate_config = Config::from_yaml(&fixture_tls_yaml(&[(immediate_port, &immediate_certs, true)]))
+        .expect("immediate-drop fixture config");
+    drop(start_tls_proxy_no_wait(&immediate_config));
+    assert_fixture_watchers_stopped(1, baseline);
+}
 
 #[test]
 fn listener_tls_termination_end_to_end() {

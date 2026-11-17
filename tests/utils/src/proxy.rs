@@ -28,7 +28,7 @@ use praxis_core::{
 };
 use praxis_filter::{FilterFactory, FilterPipeline, FilterRegistry, HttpFilter};
 use praxis_protocol::{
-    ListenerPipelines, Protocol as _,
+    CertWatcherShutdowns, ListenerPipelines, Protocol as _,
     backend::{Http, Tcp, admin},
     http::health,
 };
@@ -539,6 +539,8 @@ pub struct ProxyGuard {
     handle: Option<JoinHandle<()>>,
     /// Separate health runtime, when any cluster has active probes.
     health: Option<HealthRuntime>,
+    /// Stops certificate reload watchers started by this fixture.
+    cert_watchers: FixtureCertWatchers,
     /// Fires the shutdown signal on drop.
     notify: Arc<Notify>,
 }
@@ -558,6 +560,7 @@ impl fmt::Display for ProxyGuard {
 
 impl Drop for ProxyGuard {
     fn drop(&mut self) {
+        self.cert_watchers.shutdown();
         if let Some(health) = self.health.as_ref() {
             health.shutdown.cancel();
         }
@@ -568,6 +571,33 @@ impl Drop for ProxyGuard {
         if let Some(health) = self.health.take() {
             join_bounded(health.handle, &self.addr, "health");
         }
+    }
+}
+
+/// Owns certificate reload watchers across fixture construction and teardown.
+#[derive(Default)]
+struct FixtureCertWatchers {
+    /// Shutdown handles returned by each protocol registration.
+    shutdowns: Vec<CertWatcherShutdowns>,
+}
+
+impl FixtureCertWatchers {
+    /// Retain one protocol's watcher handles until fixture teardown.
+    fn push(&mut self, shutdowns: CertWatcherShutdowns) {
+        self.shutdowns.push(shutdowns);
+    }
+
+    /// Signal all watchers, including during partial construction or unwinding.
+    fn shutdown(&mut self) {
+        for shutdowns in self.shutdowns.drain(..) {
+            shutdowns.shutdown();
+        }
+    }
+}
+
+impl Drop for FixtureCertWatchers {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 
@@ -602,7 +632,12 @@ fn join_bounded(handle: JoinHandle<()>, addr: &str, runtime: &str) {
 
 /// Run `runtime` on its own thread until `notify` fires, then join on drop
 /// through the returned guard.
-fn spawn_runtime(addr: String, runtime: Runtime, health: Option<HealthRuntime>) -> ProxyGuard {
+fn spawn_runtime(
+    addr: String,
+    runtime: Runtime,
+    health: Option<HealthRuntime>,
+    cert_watchers: FixtureCertWatchers,
+) -> ProxyGuard {
     let notify = Arc::new(Notify::new());
     let watch_notify = Arc::clone(&notify);
 
@@ -614,6 +649,7 @@ fn spawn_runtime(addr: String, runtime: Runtime, health: Option<HealthRuntime>) 
         addr,
         handle: Some(handle),
         health,
+        cert_watchers,
         notify,
     }
 }
@@ -630,7 +666,7 @@ fn capped_config(config: &Config) -> Config {
 /// Build a backend runtime with every HTTP listener's pipeline resolved from
 /// `registry`, plus the optional admin and metrics endpoints, and nothing else
 /// (no sub-request client, no health probes).
-fn build_light_runtime(config: &Config, registry: &FilterRegistry) -> Runtime {
+fn build_light_runtime(config: &Config, registry: &FilterRegistry) -> (Runtime, FixtureCertWatchers) {
     // Registering a listener builds the backend's upstream connector, which
     // constructs a rustls `ClientConfig` even for a listener that serves plain HTTP.
     crate::net::tls::ensure_crypto_provider();
@@ -647,11 +683,11 @@ fn build_light_runtime(config: &Config, registry: &FilterRegistry) -> Runtime {
         })
         .collect();
     let pipelines = ListenerPipelines::new(pipelines);
-    // Dropping the senders does not stop the cert watchers; they run for the
-    // life of the test process.
-    let _cert_shutdowns = Box::new(Http)
+    let mut cert_watchers = FixtureCertWatchers::default();
+    let shutdowns = Box::new(Http)
         .register(&mut runtime, config, &pipelines)
         .expect("HTTP protocol registration should succeed in test");
+    cert_watchers.push(CertWatcherShutdowns::new(shutdowns));
 
     if let Some(admin_addr) = &config.admin.address {
         admin::add_admin_api(&mut runtime, admin_addr, admin::AdminEndpointOptions::default());
@@ -661,7 +697,7 @@ fn build_light_runtime(config: &Config, registry: &FilterRegistry) -> Runtime {
         admin::add_health_endpoint(&mut runtime, metrics_addr, None, config.admin.verbose);
     }
 
-    runtime
+    (runtime, cert_watchers)
 }
 
 /// Build a [`ProxyGuard`] by spawning a backend runtime that
@@ -673,8 +709,8 @@ fn spawn_proxy_server(config: &Config, registry: &FilterRegistry) -> ProxyGuard 
         .expect("config must have at least one listener")
         .address
         .clone();
-    let runtime = build_light_runtime(config, registry);
-    spawn_runtime(addr, runtime, None)
+    let (runtime, cert_watchers) = build_light_runtime(config, registry);
+    spawn_runtime(addr, runtime, None, cert_watchers)
 }
 
 // -----------------------------------------------------------------------------
@@ -710,7 +746,7 @@ pub fn start_proxy_with_registry(config: &Config, registry: &FilterRegistry) -> 
 
 /// Build a backend [`Runtime`] with HTTP and TCP protocols
 /// and spawn background health check probes.
-fn build_full_server(config: &Config) -> (Runtime, Option<HealthRuntime>) {
+fn build_full_server(config: &Config) -> (Runtime, Option<HealthRuntime>, FixtureCertWatchers) {
     let registry = praxis::build_full_registry();
     build_full_server_with_registry(config, &registry, KvStoreRegistry::new())
 }
@@ -723,7 +759,7 @@ fn build_full_server_with_registry(
     config: &Config,
     registry: &FilterRegistry,
     kv_stores: KvStoreRegistry,
-) -> (Runtime, Option<HealthRuntime>) {
+) -> (Runtime, Option<HealthRuntime>, FixtureCertWatchers) {
     // Every full-proxy start builds a `SubRequestConnector`, which constructs a
     // rustls `ClientConfig`. Hooking the certificate fixtures is not enough: a test
     // that starts a proxy without TLS reaches rustls with no provider installed.
@@ -760,17 +796,20 @@ fn build_full_server_with_registry(
     let cluster_meta = health::new_cluster_meta_store(health::cluster_meta_from_config(config));
 
     let mut runtime = Runtime::from_config(&capped_config(config));
+    let mut cert_watchers = FixtureCertWatchers::default();
 
     if config.listeners.iter().any(|l| l.protocol == ProtocolKind::Http) {
-        let _ = Box::new(Http)
+        let shutdowns = Box::new(Http)
             .register(&mut runtime, config, &pipelines)
             .expect("HTTP protocol registration should succeed in test");
+        cert_watchers.push(CertWatcherShutdowns::new(shutdowns));
     }
 
     if config.listeners.iter().any(|l| l.protocol == ProtocolKind::Tcp) {
-        let _ = Box::new(Tcp)
+        let shutdowns = Box::new(Tcp)
             .register(&mut runtime, config, &pipelines)
             .expect("TCP protocol registration should succeed in test");
+        cert_watchers.push(CertWatcherShutdowns::new(shutdowns));
     }
 
     let recorder = (config.admin.address.is_some() || config.admin.metrics_address.is_some())
@@ -811,7 +850,7 @@ fn build_full_server_with_registry(
     }
 
     let health = spawn_test_health_checks(config, &health_registry);
-    (runtime, health)
+    (runtime, health, cert_watchers)
 }
 
 /// Spawn background health check tasks for tests.
@@ -899,14 +938,17 @@ pub fn start_full_proxy_with_kv_stores(config: &Config, kv_stores: &KvStoreRegis
 }
 
 /// Spawn a fully configured proxy runtime in a background thread.
-fn start_full_proxy_runtime(config: &Config, server: (Runtime, Option<HealthRuntime>)) -> ProxyGuard {
+fn start_full_proxy_runtime(
+    config: &Config,
+    server: (Runtime, Option<HealthRuntime>, FixtureCertWatchers),
+) -> ProxyGuard {
     let addr = config
         .listeners
         .first()
         .expect("config must have at least one listener")
         .address
         .clone();
-    spawn_runtime(addr, server.0, server.1)
+    spawn_runtime(addr, server.0, server.1, server.2)
 }
 
 // -----------------------------------------------------------------------------
