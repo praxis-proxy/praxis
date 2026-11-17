@@ -73,6 +73,7 @@ fn build_config(args: &Args) -> Config {
         listeners: vec![echo_listener(&args.address)],
         metrics: MetricsConfig::default(),
         runtime: RuntimeConfig::default(),
+        shutdown_drain_delay_secs: 0,
         shutdown_timeout_secs: 30,
         telemetry: TelemetryConfig::default(),
     }

@@ -713,6 +713,7 @@ filter_chains:
   - name: main
     filters:
       - filter: rate_limit
+        scope: local
         rate: 1
         burst: {burst}
         mode: global

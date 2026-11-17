@@ -10,8 +10,9 @@ use std::{
 
 use praxis_core::config::Config;
 use praxis_test_utils::{
-    TestCertificates, example_config_path, free_port, http_get, http_send, https_get, parse_header, patch_yaml,
-    start_backend_with_shutdown, start_full_proxy, start_proxy, start_reloadable_proxy, wait_for_https,
+    PraxisProcess, TestCertificates, allow_loopback_endpoints, example_config_path, free_port, http_get, http_send,
+    https_get, parse_header, parse_status, patch_yaml, start_backend_with_shutdown, start_proxy,
+    start_reloadable_proxy, wait_for_https,
 };
 
 // -----------------------------------------------------------------------------
@@ -131,6 +132,7 @@ runtime:
   work_stealing: true
 
 shutdown_timeout_secs: 30
+shutdown_drain_delay_secs: 2
 insecure_options:
   allow_private_endpoints: true
 "#
@@ -161,6 +163,10 @@ insecure_options:
 }
 
 #[test]
+#[cfg_attr(
+    coverage,
+    ignore = "spawns the praxis binary; deadlocks on exit under llvm-cov instrumentation"
+)]
 fn production_gateway_example_serves_https_and_http() {
     let certs = TestCertificates::generate();
     // The api and web clusters each list distinct endpoints; give every one
@@ -175,6 +181,8 @@ fn production_gateway_example_serves_https_and_http() {
     let web_2 = start_backend_with_shutdown("web-backend");
     let https_port = free_port();
     let http_port = free_port();
+    let admin_port = free_port();
+    let metrics_port = free_port();
 
     let path = example_config_path("operations/production-gateway.yaml");
     let yaml = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
@@ -184,6 +192,8 @@ fn production_gateway_example_serves_https_and_http() {
         &HashMap::from([
             ("127.0.0.1:443", https_port),
             ("127.0.0.1:80", http_port),
+            ("127.0.0.1:9901", admin_port),
+            ("127.0.0.1:9902", metrics_port),
             ("10.0.1.10:8080", api_1.port()),
             ("10.0.1.11:8080", api_2.port()),
             ("10.0.1.12:8080", api_3.port()),
@@ -193,10 +203,9 @@ fn production_gateway_example_serves_https_and_http() {
     )
     .replace("/etc/praxis/tls/cert.pem", &certs.cert_path.display().to_string())
     .replace("/etc/praxis/tls/key.pem", &certs.key_path.display().to_string());
-    let patched = praxis_test_utils::allow_loopback_endpoints(&patched);
-    let config = Config::from_yaml(&patched).expect("production-gateway example should parse");
-
-    let _proxy = start_full_proxy(&config);
+    let patched = allow_loopback_endpoints(&patched);
+    let metrics = format!("127.0.0.1:{metrics_port}");
+    let mut proxy = PraxisProcess::spawn(&patched, &metrics);
     let client_cfg = certs.client_config();
     wait_for_https(&format!("127.0.0.1:{https_port}"), &client_cfg);
 
@@ -224,6 +233,94 @@ fn production_gateway_example_serves_https_and_http() {
         Some("nosniff".to_owned()),
         "the security chain should set X-Content-Type-Options"
     );
+
+    proxy.signal("TERM");
+    wait_for_admin(&metrics, 503, "the production gateway must report the draining phase");
+
+    let raw = http_send(
+        &format!("127.0.0.1:{http_port}"),
+        "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n",
+    );
+    assert_eq!(
+        parse_status(&raw),
+        200,
+        "the listener must keep accepting during the drain delay: {raw}"
+    );
+    assert_eq!(
+        parse_header(&raw, "connection").as_deref(),
+        Some("close"),
+        "a draining HTTP/1 response must close the connection: {raw}"
+    );
+
+    let status = proxy.wait_for_exit(Duration::from_secs(30));
+    assert!(
+        status.is_some_and(|status| status.success()),
+        "the production gateway must exit cleanly after the drain delay"
+    );
+}
+
+#[test]
+#[cfg_attr(
+    coverage,
+    ignore = "spawns the praxis binary; deadlocks on exit under llvm-cov instrumentation"
+)]
+fn drain_handoff_example_reports_draining_and_exits_cleanly() {
+    let proxy_port = free_port();
+    let admin_port = free_port();
+    let metrics_port = free_port();
+
+    let path = example_config_path("operations/drain-handoff.yaml");
+    let yaml = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+    let yaml = allow_loopback_endpoints(&patch_yaml(
+        &yaml,
+        proxy_port,
+        &HashMap::from([("127.0.0.1:9901", admin_port), ("127.0.0.1:9902", metrics_port)]),
+    ));
+    let admin = format!("127.0.0.1:{metrics_port}");
+    let proxy_addr = format!("127.0.0.1:{proxy_port}");
+    let mut proxy = PraxisProcess::spawn(&yaml, &admin);
+
+    assert_eq!(
+        http_get(&admin, "/ready", None).0,
+        200,
+        "the example must report ready before SIGTERM"
+    );
+
+    proxy.signal("TERM");
+    wait_for_admin(&admin, 503, "the example must report the draining phase");
+
+    let raw = http_send(
+        &proxy_addr,
+        "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n",
+    );
+    assert_eq!(
+        parse_status(&raw),
+        200,
+        "the listener must keep accepting during the drain delay: {raw}"
+    );
+    assert_eq!(
+        parse_header(&raw, "connection").as_deref(),
+        Some("close"),
+        "a draining HTTP/1 response must close the connection: {raw}"
+    );
+
+    let status = proxy.wait_for_exit(Duration::from_secs(30));
+    assert!(
+        status.is_some_and(|status| status.success()),
+        "the example must exit cleanly after the drain delay"
+    );
+}
+
+/// Poll `admin`'s `/ready` until it reports `expected`.
+fn wait_for_admin(admin: &str, expected: u16, context: &str) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if http_get(admin, "/ready", None).0 == expected {
+            return;
+        }
+        assert!(Instant::now() < deadline, "{context}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 #[test]

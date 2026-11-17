@@ -7,7 +7,25 @@ and security. AI Gateway docs live in
 
 ## Getting started
 
-- [Quickstart](quickstart.md)
+Choose a path by the result you need:
+
+- **Run an HTTP proxy:** [Quickstart](quickstart.md) builds Praxis and forwards
+  a request to a local backend.
+- **Configure an HTTP or TCP deployment:** start with
+  [configuration](operating/configuration.md), then review
+  [security hardening](operating/security-hardening.md) and
+  [TLS](operating/tls.md) before deploying.
+- **Proxy model APIs or agent protocols:** use the
+  [Praxis AI quickstart][ai-quickstart].
+- **Contribute to Praxis:** [contributor setup](developing/getting-started.md)
+  covers the repository toolchain, builds, tests, and linting.
+- **Build a custom HTTP filter:** follow the
+  [HTTP filter tutorial](filters/http-filter-tutorial.md).
+
+[ai-quickstart]: https://github.com/praxis-proxy/ai/blob/main/docs/quickstart.md
+
+For capabilities and configurations:
+
 - [Features](features.md)
 - [Example configs](../examples/README.md)
 

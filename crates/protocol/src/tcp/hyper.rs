@@ -24,12 +24,15 @@ use arc_swap::ArcSwap;
 use praxis_core::{
     ProxyError,
     config::{Config, Listener},
-    server::{HyperRuntime, hyper::ShutdownWatch},
+    server::{
+        HyperRuntime,
+        hyper::{Readiness, ShutdownWatch},
+    },
 };
 use praxis_filter::{FilterPipeline, FilterRegistry};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
-    net::{TcpSocket, TcpStream},
+    net::{TcpListener, TcpSocket, TcpStream},
     sync::watch,
     task::{JoinError, JoinSet},
 };
@@ -202,7 +205,9 @@ impl GroupContext<'_> {
             self.config,
         ));
         let name = proxy::tcp_service_name(upstream.as_deref(), cluster.as_deref());
-        runtime.add_required_service(&name, move |shutdown| serve_group(proxy, sockets, shutdown));
+        runtime.add_required_service(&name, move |shutdown, ready| {
+            serve_group(proxy, sockets, shutdown, ready)
+        });
         Ok(())
     }
 }
@@ -263,10 +268,28 @@ impl BoundListener {
 
 /// Accept on every socket of a group until `shutdown` flips, then wait for
 /// the group's connections to finish.
-async fn serve_group(proxy: Arc<PingoraTcpProxy>, sockets: Vec<BoundListener>, shutdown: ShutdownWatch) {
-    let accept_loops = sockets
-        .into_iter()
-        .map(|bound| accept_until_shutdown(Arc::clone(&proxy), bound, shutdown.clone()));
+async fn serve_group(
+    proxy: Arc<PingoraTcpProxy>,
+    sockets: Vec<BoundListener>,
+    shutdown: ShutdownWatch,
+    ready: Readiness,
+) {
+    let mut listeners = Vec::with_capacity(sockets.len());
+    for bound in sockets {
+        let BoundListener { address, socket, tls } = bound;
+        let listener = match socket.listen(LISTEN_BACKLOG) {
+            Ok(listener) => listener,
+            Err(err) => {
+                error!(address = %address, error = %err, "TCP listener could not listen; it will not accept");
+                return;
+            },
+        };
+        listeners.push((address, listener, tls));
+    }
+    ready.ready();
+    let accept_loops = listeners.into_iter().map(|(address, listener, tls)| {
+        accept_until_shutdown(Arc::clone(&proxy), address, listener, tls, shutdown.clone())
+    });
     if let Err(err) = futures::future::try_join_all(accept_loops).await {
         error!(error = %err, "TCP listener group failed");
     }
@@ -280,17 +303,11 @@ async fn serve_group(proxy: Arc<PingoraTcpProxy>, sockets: Vec<BoundListener>, s
 /// and logs.
 async fn accept_until_shutdown(
     proxy: Arc<PingoraTcpProxy>,
-    bound: BoundListener,
+    address: String,
+    listener: TcpListener,
+    tls: Option<TlsAcceptor>,
     mut shutdown: ShutdownWatch,
 ) -> io::Result<()> {
-    let BoundListener { address, socket, tls } = bound;
-    let listener = match socket.listen(LISTEN_BACKLOG) {
-        Ok(listener) => listener,
-        Err(err) => {
-            error!(address = %address, error = %err, "TCP listener could not listen; it will not accept");
-            return Err(err);
-        },
-    };
     let mut connections = JoinSet::new();
 
     loop {
