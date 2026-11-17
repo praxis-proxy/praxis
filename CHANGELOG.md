@@ -108,6 +108,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Security
 
+- Inference output policy now withholds nonempty malformed declared JSON
+  completions instead of forwarding uninspected content.
+- Inference output policy rejects unsupported encoded declared JSON completions
+  before committing upstream response headers.
+- Early Hints can no longer release a later JSON completion before policy
+  inspection.
 - Reject Terminal branches that can select an upstream endpoint while
   bypassing later security filters.
 - Keep pre-request results bound to their filter instance so a later

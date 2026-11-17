@@ -90,6 +90,8 @@ mod payload_processing;
 mod payload_transport;
 mod per_listener_pipeline;
 mod pipelines_admin;
+#[cfg(feature = "policy-builtins")]
+mod policy_boundary;
 mod process_logging;
 mod prometheus_metrics;
 mod rate_limit;
