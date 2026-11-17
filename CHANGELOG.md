@@ -70,6 +70,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Unreadable `grpc-timeout` headers now follow the malformed-header policy;
+  `on_invalid: ignore` still uses the configured fallback.
 - **Breaking:** Reject branch `on_result.key` values over 64 bytes, matching
   the limit enforced when filters insert results.
 - The `policy` filter's entity-less response fallback now stamps configured
