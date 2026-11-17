@@ -3122,7 +3122,7 @@ fn build_response_content_for_method_prefers_structured_content() {
         "corr-1",
         &super::json_rpc::ParsedEnvelope::parse(&body),
     );
-    assert_eq!(parts.len(), 1);
+    assert_eq!(parts.len(), 2);
     match &parts[0] {
         ContentPart::ToolResult { content } => {
             assert!(content.is_error);
@@ -3130,6 +3130,7 @@ fn build_response_content_for_method_prefers_structured_content() {
         },
         other => panic!("expected ToolResult; got {other:?}"),
     }
+    assert!(matches!(&parts[1], ContentPart::Text { text } if text == "ignored"));
 }
 
 #[test]
@@ -3771,6 +3772,71 @@ impl HookHandler<CmfHook> for StubPlugin {
         _ctx: &mut PluginContext,
     ) -> PluginResult<MessagePayload> {
         PluginResult::allow()
+    }
+}
+
+/// Host scanner that examines both selected tool data and parallel CMF text.
+struct WholeMessageScanner {
+    cfg: PluginConfig,
+    observed: Arc<Mutex<Vec<String>>>,
+}
+
+impl Plugin for WholeMessageScanner {
+    fn config(&self) -> &PluginConfig {
+        &self.cfg
+    }
+}
+
+impl HookHandler<CmfHook> for WholeMessageScanner {
+    async fn handle(
+        &self,
+        payload: &MessagePayload,
+        _extensions: &Extensions,
+        _ctx: &mut PluginContext,
+    ) -> PluginResult<MessagePayload> {
+        use ppe::praxis_policy_core::cmf::ContentPart;
+
+        let observed = payload
+            .message
+            .content
+            .iter()
+            .filter_map(|part| match part {
+                ContentPart::ToolResult { content } => Some(content.content.to_string()),
+                ContentPart::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.observed
+            .lock()
+            .expect("scanner observations")
+            .push(observed.clone());
+        if observed.contains("SENTINEL") {
+            return PluginResult::deny(ppe::praxis_policy_core::error::PluginViolation::new(
+                "tool.text_withheld",
+                "tool output contains a forbidden marker",
+            ));
+        }
+        PluginResult::allow()
+    }
+}
+
+/// Factory for the whole-message tool response scanner.
+struct WholeMessageScannerFactory {
+    observed: Arc<Mutex<Vec<String>>>,
+}
+
+impl PluginFactory for WholeMessageScannerFactory {
+    fn create(&self, config: &PluginConfig) -> Result<PluginInstance, Box<PluginError>> {
+        let plugin = Arc::new(WholeMessageScanner {
+            cfg: config.clone(),
+            observed: Arc::clone(&self.observed),
+        });
+        let adapter: Arc<dyn AnyHookHandler> = Arc::new(TypedHandlerAdapter::<CmfHook, _>::new(Arc::clone(&plugin)));
+        Ok(PluginInstance {
+            plugin,
+            handlers: vec![("cmf.tool_post_invoke", adapter)],
+        })
     }
 }
 
@@ -7751,15 +7817,26 @@ fn write_tool_post_only_config() -> (TempDir, String) {
     )
 }
 
-/// Write an `echo` tool route with only a `result:` field pipeline.
-fn write_tool_result_pipeline_config() -> (TempDir, String) {
-    write_entity_config_with_routes(
-        r#"routes:
-  - tool: echo
-    result:
-      ssn: "str | mask(2)"
-"#,
-    )
+/// Write a tool response route invoking a registered whole-message scanner.
+fn write_tool_scanner_config() -> (TempDir, String, Arc<Mutex<Vec<String>>>) {
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let factory_observed = Arc::clone(&observed);
+    register_policy_plugin_factory(
+        "test/whole-message-scanner",
+        Arc::new(move || {
+            Box::new(WholeMessageScannerFactory {
+                observed: Arc::clone(&factory_observed),
+            })
+        }),
+    );
+    let (dir, path) = write_entity_config_with_routes(
+        "routes:\n  - tool: echo\n    authorization:\n      post_invocation:\n        - \"run(whole-message-scanner)\"\n",
+    );
+    let original = std::fs::read_to_string(&path).expect("read tool policy");
+    let declaration = "  - name: whole-message-scanner\n    kind: test/whole-message-scanner\n    hooks:\n      - cmf.tool_post_invoke\n    mode: sequential\n    on_error: fail\n";
+    std::fs::write(&path, original.replace("global:\n", &format!("{declaration}global:\n")))
+        .expect("write scanner policy");
+    (dir, path, observed)
 }
 
 /// Write an LLM route whose hook plugin modifies the CMF payload twice.
@@ -7864,6 +7941,15 @@ async fn assert_masked_tool_request_rewrites(filter: &PolicyFilter) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn dual_representation_tool_text_reaches_post_policy() {
+    let (_dir, path, observed) = write_tool_scanner_config();
+    let filter = build_read_write_filter(path);
+    assert_scanner_denies_all_representations(&filter).await;
+    assert_scanner_preserves_clean_and_error(&filter).await;
+    assert_scanner_observed_each_text_source(&observed);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn mcp_result_mutation_rewrites_and_growth_fails_closed() {
     let (_mask_dir, mask_path) = write_tool_result_pipeline_config();
     assert_masked_tool_result_rewrites(&build_read_write_filter(mask_path)).await;
@@ -7914,6 +8000,58 @@ async fn assert_growing_tool_result_fails_closed(filter: &PolicyFilter) {
         "a rewrite that grows past the committed length fails closed"
     );
     assert!(parsed.get("result").is_none(), "upstream result is withheld");
+}
+
+/// A scanner denial removes forbidden text from either representation.
+async fn assert_scanner_denies_all_representations(filter: &PolicyFilter) {
+    let pad = "padding".repeat(64);
+    for result in [
+        json!({"structuredContent":{"text":"clean"},"content":[
+            {"type":"text","text":pad},{"type":"text","text":"SENTINEL"}]}),
+        json!({"structuredContent":{"text":"SENTINEL"},"content":[{"type":"text","text":pad}]}),
+        json!({"content":[{"type":"text","text":"SENTINEL"},{"type":"text","text":pad}]}),
+    ] {
+        let upstream = json!({"jsonrpc":"2.0","id":1,"result":result}).to_string();
+        let served = scan_tool_response(filter, upstream.as_bytes()).await;
+        assert!(
+            !served.windows(8).any(|part| part == b"SENTINEL"),
+            "scanner denial must hide text"
+        );
+        assert!(served.len() == upstream.len(), "committed length is preserved");
+    }
+}
+
+/// Clean dual representations and valid JSON-RPC errors retain original bytes.
+async fn assert_scanner_preserves_clean_and_error(filter: &PolicyFilter) {
+    let clean = json!({"jsonrpc":"2.0","id":1,"result":{
+        "structuredContent":{"ssn":"clean"},
+        "content":[{"type":"text","text":"clean summary"},
+                   {"type":"image","data":"opaque-binary"},
+                   {"type":"resource_link","uri":"file:///safe"}]
+    }})
+    .to_string();
+    let served = scan_tool_response(filter, clean.as_bytes()).await;
+    assert_eq!(
+        served.as_ref(),
+        clean.as_bytes(),
+        "clean dual representation keeps every block"
+    );
+    let error = br#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"upstream"}}"#;
+    let served = scan_tool_response(filter, error).await;
+    assert_eq!(served.as_ref(), error, "valid JSON-RPC errors pass unchanged");
+}
+
+/// The host scanner receives structured and secondary text once per success.
+fn assert_scanner_observed_each_text_source(observed: &Arc<Mutex<Vec<String>>>) {
+    let observed = observed.lock().expect("scanner observations");
+    assert_eq!(observed.len(), 4, "the error response does not invoke the scanner");
+    assert!(
+        observed[0].contains("SENTINEL"),
+        "secondary text reached the whole-message scanner"
+    );
+    assert!(observed[1].contains("SENTINEL"), "structured data reached the scanner");
+    assert!(observed[2].contains("SENTINEL"), "fallback text reached the scanner");
+    drop(observed);
 }
 
 /// Write an `echo` tool route with only a `result:` field pipeline.

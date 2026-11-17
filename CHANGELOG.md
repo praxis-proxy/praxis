@@ -110,6 +110,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Security
 
+- Policy content scanners now receive secondary MCP tool text alongside
+  structured results.
 - Inference output policy now inspects recognized Responses text and Chat and
   Responses function-call arguments.
 - Inference output policy now withholds nonempty malformed declared JSON
