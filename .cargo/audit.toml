@@ -12,4 +12,10 @@ ignore = [
     # cel 0.12 through limitador in the Policy rate limiter. Drop once cel
     # moves off it.
     "RUSTSEC-2024-0436",
+    # chrono 0.4.45: unmaintained, used directly and required by Pingora and
+    # the policy engine. Drop once these users migrate to maintained time crates.
+    "RUSTSEC-2026-0543",
+    # chrono-tz 0.10.4: unmaintained, pulled in by CEL and Regorus in
+    # praxis-policy-builtins. Drop once those dependencies migrate.
+    "RUSTSEC-2026-0555",
 ]
