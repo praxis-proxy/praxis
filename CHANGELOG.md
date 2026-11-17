@@ -70,6 +70,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- `cargo xtask sync-example-readme --fix` rejects an unreadable README or
+  missing `## Configs` marker before writing.
 - `cargo xtask benchmark flamegraph` stops and reaps owned child processes on
   profiling failure or cancellation.
 - Show possible request-head and response hooks in pipeline introspection.
