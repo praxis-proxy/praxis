@@ -113,7 +113,8 @@ fn session_store_falls_back_to_filter_registry_without_pipeline_stores() {
     let mut configs = HashMap::new();
     configs.insert(Arc::<str>::from("cluster-a"), Arc::clone(&cfg));
     let filter = StickySessionsFilter {
-        stores: Arc::new(StickySessionsFilter::build_stores(&configs)),
+        stores: Arc::new(SessionStoreRegistry::new()),
+        bound_stores: configs.keys().map(|name| (Arc::clone(name), OnceLock::new())).collect(),
         configs,
     };
 
@@ -691,7 +692,8 @@ fn registry_preserves_store_across_reload_when_config_unchanged() {
     let first = registry.get_or_create("backend", 100, Duration::from_secs(3600), config::EvictionPolicy::Lru);
     first.put("sess1", Arc::from("10.0.0.1:80"));
 
-    let second = registry.get_or_create("backend", 100, Duration::from_secs(3600), config::EvictionPolicy::Lru);
+    let candidate = registry.candidate();
+    let second = candidate.get_or_create("backend", 100, Duration::from_secs(3600), config::EvictionPolicy::Lru);
     assert!(
         Arc::ptr_eq(&first, &second),
         "unchanged config must reuse the existing store"
@@ -702,9 +704,169 @@ fn registry_preserves_store_across_reload_when_config_unchanged() {
         "session bindings must survive a reload"
     );
 
-    let third = registry.get_or_create("backend", 100, Duration::from_secs(60), config::EvictionPolicy::Lru);
+    registry.publish(&candidate);
+    let changed_candidate = registry.candidate();
+    let third = changed_candidate.get_or_create("backend", 100, Duration::from_secs(60), config::EvictionPolicy::Lru);
     assert!(!Arc::ptr_eq(&first, &third), "changed config must replace the store");
     assert!(third.get("sess1").is_none(), "replaced store starts empty");
+}
+
+#[test]
+fn unchanged_reload_retains_binding_without_old_guards() {
+    let live = SessionStoreRegistry::new();
+    let old = live.get_or_create("backend", 100, Duration::from_secs(3600), config::EvictionPolicy::Lru);
+    old.put("session", Arc::from("10.0.0.1:80"));
+    drop(old);
+
+    let candidate = live.candidate();
+    let bound = candidate.get_or_create("backend", 100, Duration::from_secs(3600), config::EvictionPolicy::Lru);
+    live.publish(&candidate);
+    drop(bound);
+    drop(candidate);
+
+    let next = live.candidate();
+    let retained = next.get_or_create("backend", 100, Duration::from_secs(3600), config::EvictionPolicy::Lru);
+    assert_eq!(
+        retained.get("session").as_deref(),
+        Some("10.0.0.1:80"),
+        "zero-overlap reload must retain binding"
+    );
+}
+
+#[test]
+fn old_response_cannot_replace_reloaded_store() {
+    for (max_entries, ttl, eviction) in [
+        (101, Duration::from_secs(3600), config::EvictionPolicy::Lru),
+        (100, Duration::from_secs(1800), config::EvictionPolicy::Lru),
+        (100, Duration::from_secs(3600), config::EvictionPolicy::Ttl),
+    ] {
+        let live = SessionStoreRegistry::new();
+        let old = live.get_or_create("backend", 100, Duration::from_secs(3600), config::EvictionPolicy::Lru);
+        let candidate = live.candidate();
+        let new = candidate.get_or_create("backend", max_entries, ttl, eviction);
+        new.put("new-session", Arc::from("10.0.0.2:80"));
+        live.publish(&candidate);
+
+        old.put("old-response", Arc::from("10.0.0.1:80"));
+        let next = live.candidate().get_or_create("backend", max_entries, ttl, eviction);
+        assert!(!Arc::ptr_eq(&old, &new), "changed bounds must own a different store");
+        assert!(Arc::ptr_eq(&new, &next), "an old response must not republish its store");
+        assert_eq!(next.get("new-session").as_deref(), Some("10.0.0.2:80"));
+        assert!(
+            next.get("old-response").is_none(),
+            "old response cannot contaminate new bounds"
+        );
+    }
+}
+
+#[test]
+fn failed_reload_retains_session_store() {
+    let live = SessionStoreRegistry::new();
+    let original = live.get_or_create("backend", 100, Duration::from_secs(3600), config::EvictionPolicy::Lru);
+    original.put("session", Arc::from("10.0.0.1:80"));
+    let failed_candidate = live.candidate();
+    let _replacement =
+        failed_candidate.get_or_create("backend", 101, Duration::from_secs(3600), config::EvictionPolicy::Lru);
+    drop(failed_candidate);
+
+    let next = live
+        .candidate()
+        .get_or_create("backend", 100, Duration::from_secs(3600), config::EvictionPolicy::Lru);
+    assert!(
+        Arc::ptr_eq(&original, &next),
+        "an uncommitted candidate cannot mutate live stores"
+    );
+    assert_eq!(next.get("session").as_deref(), Some("10.0.0.1:80"));
+}
+
+#[test]
+fn retired_generation_metadata_is_pruned() {
+    let live = SessionStoreRegistry::new();
+    let retained = live.get_or_create("backend", 100, Duration::from_secs(3600), config::EvictionPolicy::Lru);
+    let retired = live.get_or_create("backend", 101, Duration::from_secs(3600), config::EvictionPolicy::Lru);
+    let retired_weak = Arc::downgrade(&retired);
+    drop(retired);
+
+    let candidate = live.candidate();
+    let rebound = candidate.get_or_create("backend", 100, Duration::from_secs(3600), config::EvictionPolicy::Lru);
+    live.publish(&candidate);
+    drop(candidate);
+
+    assert!(
+        Arc::ptr_eq(&retained, &rebound),
+        "the active store must survive publication"
+    );
+    assert!(
+        retired_weak.upgrade().is_none(),
+        "retired store and its key must leave both registries"
+    );
+}
+
+#[test]
+fn retained_listener_store_survives_removed_generation() {
+    let live = SessionStoreRegistry::new();
+    let old_listener = live.candidate();
+    let old_store = old_listener.get_or_create("retained", 100, Duration::from_secs(3600), config::EvictionPolicy::Lru);
+    old_store.put("session", Arc::from("10.0.0.1:80"));
+    live.publish(&old_listener);
+
+    let removed = live.candidate();
+    removed.retain_used_from(&old_listener);
+    live.publish(&removed);
+    drop(removed);
+
+    let restored = live.candidate();
+    let restored_store =
+        restored.get_or_create("retained", 100, Duration::from_secs(3600), config::EvictionPolicy::Lru);
+    assert!(Arc::ptr_eq(&old_store, &restored_store));
+    assert_eq!(restored_store.get("session").as_deref(), Some("10.0.0.1:80"));
+}
+
+#[test]
+fn conflicting_listener_sticky_bounds_do_not_flap() {
+    let live = SessionStoreRegistry::new();
+    let first = live.get_or_create("backend", 100, Duration::from_secs(3600), config::EvictionPolicy::Lru);
+    let second = live.get_or_create("backend", 200, Duration::from_secs(3600), config::EvictionPolicy::Lru);
+    first.put("first", Arc::from("10.0.0.1:80"));
+    second.put("second", Arc::from("10.0.0.2:80"));
+
+    for _ in 0..4 {
+        let left = live.get_or_create("backend", 100, Duration::from_secs(3600), config::EvictionPolicy::Lru);
+        let right = live.get_or_create("backend", 200, Duration::from_secs(3600), config::EvictionPolicy::Lru);
+        assert!(Arc::ptr_eq(&left, &first));
+        assert!(Arc::ptr_eq(&right, &second));
+        assert_eq!(left.get("first").as_deref(), Some("10.0.0.1:80"));
+        assert_eq!(right.get("second").as_deref(), Some("10.0.0.2:80"));
+    }
+}
+
+#[test]
+fn first_use_shares_one_session_store() {
+    use std::sync::Barrier;
+
+    let registry = Arc::new(SessionStoreRegistry::new());
+    let gate = Arc::new(Barrier::new(3));
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..2)
+            .map(|index| {
+                let registry = Arc::clone(&registry);
+                let gate = Arc::clone(&gate);
+                scope.spawn(move || {
+                    gate.wait();
+                    let store =
+                        registry.get_or_create("backend", 100, Duration::from_secs(3600), config::EvictionPolicy::Lru);
+                    store.put(&format!("session-{index}"), Arc::from("10.0.0.1:80"));
+                    store
+                })
+            })
+            .collect();
+        gate.wait();
+        let stores: Vec<_> = handles.into_iter().map(|handle| handle.join().unwrap()).collect();
+        let first = stores.first().unwrap();
+        let second = stores.get(1).unwrap();
+        assert!(Arc::ptr_eq(first, second), "concurrent first use must share one Arc");
+        assert_eq!(first.len(), 2, "both concurrently inserted sessions must survive");
+    });
 }
 
 #[test]
@@ -724,6 +886,7 @@ fn find_request_cookie_checks_all_cookie_headers() {
         "cookie lookup must consider every Cookie header"
     );
 }
+
 /// Select streaming without changing affinity processing.
 struct StickyStreamingSelector;
 

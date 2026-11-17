@@ -5,7 +5,6 @@
 //!
 //! Every HTTP filter implements this trait.
 
-#[cfg(any(feature = "upstream-binding", feature = "slow-start"))]
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -69,6 +68,12 @@ pub type FilterContext<'a> = HttpFilterContext<'a>;
 pub trait HttpFilter: Send + Sync {
     /// Unique name identifying this filter type (e.g. `"router"`, `"rate_limit"`).
     fn name(&self) -> &'static str;
+
+    /// Bind state shared by identical sticky-session configurations in this
+    /// candidate pipeline generation. Called during pipeline construction,
+    /// before a server publishes a successful reload.
+    #[doc(hidden)]
+    fn bind_session_stores(&self, _registry: &Arc<crate::SessionStoreRegistry>) {}
 
     /// Attach this filter's slow-start tables when the pipeline is installed.
     ///

@@ -27,6 +27,13 @@ pub enum AnyFilter {
 }
 
 impl AnyFilter {
+    /// Bind a built-in HTTP filter to a candidate session-store generation.
+    pub(crate) fn bind_session_stores(&self, registry: &std::sync::Arc<crate::SessionStoreRegistry>) {
+        if let Self::Http(filter) = self {
+            filter.bind_session_stores(registry);
+        }
+    }
+
     /// The filter's name.
     pub fn name(&self) -> &'static str {
         match self {

@@ -311,6 +311,92 @@ insecure_options:
     assert_eq!(second_hits.load(Ordering::SeqCst), 2, "real forwarding must bind B");
 }
 
+/// Header-mode fixture with a visible reload marker and deterministic
+/// round-robin order, so a missing binding routes to the second backend.
+fn header_reload_yaml(proxy_port: u16, first_port: u16, second_port: u16, marker: &str) -> String {
+    format!(
+        r#"
+listeners:
+  - name: default
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/session"
+            cluster: backend
+      - filter: sticky_sessions
+        clusters:
+          - name: backend
+            type: header
+            header_name: X-Session-Id
+            ttl_secs: 3600
+            max_entries: 1000
+            storage: local
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            load_balancer_strategy: round_robin
+            endpoints: ["127.0.0.1:{first_port}", "127.0.0.1:{second_port}"]
+      - filter: headers
+        response_set:
+          - name: X-Reload-Marker
+            value: "{marker}"
+insecure_options:
+  allow_private_endpoints: true
+"#
+    )
+}
+
+#[test]
+fn unchanged_reload_retains_header_binding_without_old_request() {
+    let first = start_backend_with_shutdown("reload-first");
+    let second = start_backend_with_shutdown("reload-second");
+    let proxy_port = free_port();
+    let initial = header_reload_yaml(proxy_port, first.port(), second.port(), "v1");
+    let reloaded = header_reload_yaml(proxy_port, first.port(), second.port(), "v2");
+    let proxy = praxis_test_utils::start_reloadable_proxy(&initial);
+    let pinned_request =
+        "GET /session HTTP/1.1\r\nHost: localhost\r\nX-Session-Id: retained\r\nConnection: close\r\n\r\n";
+    let unbound_request = "GET /session HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+
+    let original = http_send(proxy.addr(), pinned_request);
+    assert_eq!(
+        parse_body(&original),
+        "reload-first",
+        "fixture must first bind the first endpoint"
+    );
+    let probe = proxy.reload_until(
+        &reloaded,
+        || http_send(proxy.addr(), unbound_request),
+        |raw| {
+            parse_header_all(raw, "x-reload-marker")
+                .iter()
+                .any(|value| value == "v2")
+        },
+    );
+    assert!(
+        parse_header_all(&probe, "x-reload-marker")
+            .iter()
+            .any(|value| value == "v2"),
+        "new pipeline must serve the probe"
+    );
+    assert_eq!(
+        parse_body(&probe),
+        "reload-first",
+        "new round robin starts on the first endpoint"
+    );
+
+    let retained = http_send(proxy.addr(), pinned_request);
+    assert_eq!(
+        parse_body(&retained),
+        "reload-first",
+        "zero-overlap reload must retain the preexisting binding"
+    );
+}
+
 /// Minimal backend that tags responses with `body` and sets a session cookie,
 /// as an application server with server-side sessions would.
 fn start_cookie_setting_backend(body: &'static str, session_id: &'static str) -> u16 {

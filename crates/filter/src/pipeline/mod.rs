@@ -642,6 +642,7 @@ impl FilterPipeline {
     /// Set the shared [`crate::SessionStoreRegistry`] for this pipeline.
     pub fn set_session_stores(&mut self, stores: Arc<crate::SessionStoreRegistry>) {
         self.visit_nested_pipelines(&mut |pipeline| pipeline.set_session_stores(Arc::clone(&stores)));
+        for_each_pipeline_filter(&self.filters, &mut |filter| filter.filter.bind_session_stores(&stores));
         self.session_stores = Some(stores);
     }
 

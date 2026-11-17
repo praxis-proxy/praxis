@@ -38,6 +38,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **Breaking:** SessionStoreRegistry replaces cluster-only get/insert access with explicit candidate generation binding and publication.
 - Reuse owned bytes for nonfinal gRPC-Web response chunks.
 - **Breaking:** Pingora helpers `apply_cached_tls`, `ca_from_cached`,
   `client_cert_from_cached`, and `http_peer` now return `Result`; embedding
@@ -78,6 +79,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Preserve sticky-session bindings across reloads and conflicting listener bounds while retiring stores no longer used by serving pipelines.
 - Create header affinity only for the selected endpoint with forwarding evidence, including nested and hedged requests; failed dials and local responses cannot establish a binding.
 - Settle nested circuit-breaker tokens on filtered subrequest timeout or cancellation without changing neutral half-open recovery policy.
 - Correct guardrails example commands and documentation to describe request
