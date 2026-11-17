@@ -25,6 +25,7 @@ permissions: {}
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_MACHETE_VERSION: "0.9.2"
   V: ${{ inputs.debug && '1' || '' }}
 
 jobs:
@@ -50,14 +51,14 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cargo/bin/cargo-machete
-          key: cargo-machete-${{ runner.os }}
+          key: cargo-machete-${{ runner.os }}-${{ env.CARGO_MACHETE_VERSION }}
 
       - name: Install cargo-machete
-        # The shared Swatinem/rust-cache in setup-rust-lint also restores
-        # ~/.cargo/bin, so cargo-machete may already be present even when this
-        # step's own cache key misses. Install only when it is actually absent;
-        # otherwise `cargo install` aborts with "binary already exists".
-        run: command -v cargo-machete > /dev/null || cargo install cargo-machete --locked
+        # The shared Rust cache may restore a different tool version.
+        run: |
+          if ! cargo-machete --version 2>/dev/null | grep -Fxq "${CARGO_MACHETE_VERSION}"; then
+            cargo install cargo-machete --version "=${CARGO_MACHETE_VERSION}" --locked --force
+          fi
 
       - name: Lint
         run: make lint
