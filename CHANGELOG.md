@@ -78,6 +78,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Document session-affinity remapping when endpoint membership changes.
 - Clarify endpoint weight behavior and P2C selection costs in load-balancing
   guidance.
 - Use reserved metadata in the body-based tenant routing example so client
