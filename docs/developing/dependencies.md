@@ -56,7 +56,24 @@ gates both unmaintained and unsound advisories:
   unmaintained): a compile-time macro dependency of
   `cel` 0.12, pulled in by `limitador` for the Policy
   rate limiter.
+- [RUSTSEC-2026-0543] (`chrono` 0.4.45, unmaintained):
+  used directly for timestamps and transitively by
+  Policy, the Pingora fork, and benchmark tooling.
+- [RUSTSEC-2026-0555] (`chrono-tz` 0.10.4, unmaintained):
+  transitive through Policy's CEL and OPA engines
+  (`cel` and `regorus`).
 
+The chrono advisories cover every version and have no
+patched release. These exceptions accept the maintenance
+risk while preserving the existing features; they do not
+resolve it. Migrate direct chrono users to a maintained
+crate such as `jiff` or `time`, and remove the exceptions
+when the transitive dependencies have migrated too.
+Only these advisory IDs are excepted; vulnerability and
+unsoundness checks remain enabled.
+
+[RUSTSEC-2026-0543]: https://rustsec.org/advisories/RUSTSEC-2026-0543
+[RUSTSEC-2026-0555]: https://rustsec.org/advisories/RUSTSEC-2026-0555
 [RustSec advisory database]: https://rustsec.org/
 [deny.toml]: ../../deny.toml
 [.cargo/audit.toml]: ../../.cargo/audit.toml
