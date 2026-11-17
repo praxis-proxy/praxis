@@ -106,7 +106,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | [json-body.yaml](configs/payload-processing/json-body.yaml) | Rewrites a JSON request body with JSON Pointer extract, replace, add, and remove, and the response body with remove and extract |
 | [json-rpc.yaml](configs/payload-processing/json-rpc.yaml) | Extracts JSON-RPC 2.0 envelope metadata from request bodies and promotes method, id, and kind to request headers |
 | [multi-field-extraction.yaml](configs/payload-processing/multi-field-extraction.yaml) | A single json_body_field filter extracts multiple top-level JSON fields into separate request headers in one pass |
-| [multi-listener-body-pipeline.yaml](configs/payload-processing/multi-listener-body-pipeline.yaml) | Three listeners, each with a different body processing strategy |
+| [multi-listener-body-pipeline.yaml](configs/payload-processing/multi-listener-body-pipeline.yaml) | Three listeners with different field extraction and routing behavior |
 | [stream-buffer.yaml](configs/payload-processing/stream-buffer.yaml) | json_body_field inspects request body chunks as they arrive and defers upstream forwarding until the field is extracted (or end-of-stream) |
 
 ### Pipeline

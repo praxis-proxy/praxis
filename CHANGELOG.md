@@ -87,6 +87,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Correct the multi-listener body example description to match its field extraction and routing behavior.
 - Clarify request ID handling, rewrite scope, and routing order in the logging and transformation examples.
 - Record the final response after informational headers, including a fallback access record when a later stream aborts.
 - Preserve every headers.request_add field value in upstream requests, including duplicates and opaque existing values.
