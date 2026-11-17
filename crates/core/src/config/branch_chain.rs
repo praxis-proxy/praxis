@@ -25,6 +25,10 @@ use serde::Deserialize;
 
 use super::chain_ref::ChainRef;
 
+/// Maximum length of a filter result key in bytes, shared by branch validation
+/// and result insertion.
+pub const MAX_RESULT_KEY_LEN: usize = 64;
+
 // -----------------------------------------------------------------------------
 // BranchChainConfig
 // -----------------------------------------------------------------------------

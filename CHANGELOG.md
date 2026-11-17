@@ -70,6 +70,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **Breaking:** Reject branch `on_result.key` values over 64 bytes, matching
+  the limit enforced when filters insert results.
 - The `policy` filter's entity-less response fallback now stamps configured
   `context_meta` and `context_headers`, so response-phase rules see the same
   operator context as the request path when no request-phase identity was
