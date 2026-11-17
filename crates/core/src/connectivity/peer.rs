@@ -997,10 +997,15 @@ fn alpn_for(version: UpstreamHttpVersion) -> ALPN {
 /// path pays only an [`Arc`] clone instead of re-parsing certificate
 /// DER on every request.
 ///
+/// # Errors
+///
+/// Returns an error if client identity material cannot be converted safely
+/// for Pingora.
+///
 /// [`HttpPeer`]: pingora_core::upstreams::peer::HttpPeer
 /// [`CachedClusterTls`]: praxis_tls::CachedClusterTls
 #[cfg(feature = "pingora")]
-pub fn apply_cached_tls(peer: &mut HttpPeer, tls: &praxis_tls::CachedClusterTls, address: &str) {
+pub fn apply_cached_tls(peer: &mut HttpPeer, tls: &praxis_tls::CachedClusterTls, address: &str) -> Result<(), String> {
     if !tls.verify() {
         tracing::debug!(upstream = %address, "upstream TLS verification disabled for this peer");
         peer.options.verify_cert = false;
@@ -1014,11 +1019,15 @@ pub fn apply_cached_tls(peer: &mut HttpPeer, tls: &praxis_tls::CachedClusterTls,
         peer.options.ca = Some(Arc::clone(converted));
     }
 
-    if let Some(client) = tls.client_cert()
-        && let Some(converted) = client.converted_or_init(|| Arc::new(client_cert_from_cached(client)))
-    {
+    if let Some(client) = tls.client_cert() {
+        let converted = client
+            .converted_or_init(|| client_cert_from_cached(client).map(Arc::new))
+            .ok_or("cached client certificate conversion has an incompatible type")?
+            .as_ref()
+            .map_err(Clone::clone)?;
         peer.client_cert_key = Some(Arc::clone(converted));
     }
+    Ok(())
 }
 
 /// Convert cached CA DER bytes into [`WrappedX509`] values.
@@ -1039,10 +1048,29 @@ pub fn ca_from_cached(cached: &praxis_tls::CachedCaCerts) -> Vec<pingora_core::u
 
 /// Convert cached client cert/key DER bytes into a [`CertKey`].
 ///
+/// # Errors
+///
+/// Returns an error for an empty or malformed certificate chain or a private
+/// key encoding the Pingora connector cannot parse.
+///
 /// [`CertKey`]: pingora_core::utils::tls::CertKey
 #[cfg(feature = "pingora")]
-pub fn client_cert_from_cached(cached: &praxis_tls::CachedClientCert) -> pingora_core::utils::tls::CertKey {
-    pingora_core::utils::tls::CertKey::new(cached.cert_der().to_vec(), cached.key_der().to_vec())
+pub fn client_cert_from_cached(
+    cached: &praxis_tls::CachedClientCert,
+) -> Result<pingora_core::utils::tls::CertKey, String> {
+    if cached.cert_der().first().is_none_or(Vec::is_empty) {
+        return Err("client certificate chain requires a nonempty leaf".to_owned());
+    }
+    for (index, der) in cached.cert_der().iter().enumerate() {
+        pingora_core::utils::tls::WrappedX509::parse(der.clone())
+            .map_err(|error| format!("invalid client certificate chain member {index}: {error}"))?;
+    }
+    pingora_core::tls::PrivateKeyDer::try_from(cached.key_der())
+        .map_err(|error| format!("invalid client private key: {error}"))?;
+    Ok(pingora_core::utils::tls::CertKey::new(
+        cached.cert_der().to_vec(),
+        cached.key_der().to_vec(),
+    ))
 }
 
 // -----------------------------------------------------------------------------
@@ -1581,6 +1609,37 @@ mod tests {
         assert_eq!(
             converted_a, converted_b,
             "the CA conversion must be memoized, not rebuilt per request"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "pingora")]
+    fn raw_client_identity_conversion_rejects_invalid_chain_and_key() {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert = rcgen::CertificateParams::new(vec!["localhost".to_owned()])
+            .unwrap()
+            .self_signed(&key)
+            .unwrap();
+        let leaf = cert.der().to_vec();
+        let key_der = key.serialize_der();
+        let valid = praxis_tls::CachedClientCert::new(vec![leaf.clone()], key_der.clone().into());
+        assert!(
+            client_cert_from_cached(&valid).is_ok(),
+            "valid raw identity must convert"
+        );
+
+        for chain in [Vec::new(), vec![Vec::new()], vec![leaf.clone(), vec![1, 2, 3]]] {
+            let cached = praxis_tls::CachedClientCert::new(chain, key_der.clone().into());
+            assert!(
+                client_cert_from_cached(&cached).is_err(),
+                "an empty or malformed raw chain must return an error before CertKey::new"
+            );
+        }
+
+        let bad_key = praxis_tls::CachedClientCert::new(vec![leaf], vec![1, 2, 3].into());
+        assert!(
+            client_cert_from_cached(&bad_key).is_err(),
+            "raw key bytes rejected by Pingora's key conversion must return an error"
         );
     }
 

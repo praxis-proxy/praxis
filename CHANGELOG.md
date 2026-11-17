@@ -74,6 +74,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Reject malformed upstream mTLS client certificate chains and invalid raw
+  keys before Pingora peer construction can abort the proxy.
 - Expose divergent routed endpoint declarations alongside the endpoint-health
   view in `/api/stats`.
 - Validate complete initial HTTP/2 SETTINGS frames before reporting a healthy

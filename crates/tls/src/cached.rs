@@ -158,7 +158,10 @@ impl fmt::Debug for CachedPrivateKeyDer {
     }
 }
 
-/// DER-encoded client certificate and private key loaded at config time.
+/// Cached DER-encoded client certificate chain and private key bytes.
+///
+/// File-loaded identities are validated at config time. Raw bytes passed to
+/// [`Self::new`] remain unchecked until an adapter converts them.
 ///
 /// The private key is wrapped in [`Zeroizing`] so it is cleared
 /// from memory when the struct is dropped.
@@ -199,7 +202,10 @@ impl fmt::Debug for CachedClientCert {
 }
 
 impl CachedClientCert {
-    /// Wrap pre-parsed DER certificate chain and private key.
+    /// Store DER certificate chain and private key bytes without validating them.
+    ///
+    /// [`Self::from_pem_files`] validates file inputs early. Adapters must use
+    /// fallible conversion for values created directly with this constructor.
     pub fn new(cert_der: Vec<Vec<u8>>, key_der: Zeroizing<Vec<u8>>) -> Self {
         Self {
             cert_der,
@@ -252,9 +258,15 @@ impl CachedClientCert {
             server_names: Vec::new(),
         };
         let (certs, key) = crate::setup::loader::load_cert_and_key(&pair)?;
-        let cert_der = certs.iter().map(|cert| cert.to_vec()).collect();
+        let cert_der: Vec<Vec<u8>> = certs.iter().map(|cert| cert.to_vec()).collect();
         let key_der = Zeroizing::new(key.secret_der().to_vec());
         crate::setup::loader::certify(certs, key, &pair)?;
+        for (index, der) in cert_der.iter().enumerate() {
+            validate_x509_der(der).map_err(|error| TlsError::FileLoadError {
+                path: cert_path.to_owned(),
+                detail: format!("invalid certificate chain member {index}: {error}"),
+            })?;
+        }
         tracing::info!(cert_path, "cached client certificate");
         Ok(Self::new(cert_der, key_der))
     }
@@ -357,6 +369,13 @@ impl CachedClusterTls {
 // -----------------------------------------------------------------------------
 // Utilities
 // -----------------------------------------------------------------------------
+
+/// Check syntax with the same parser as Pingora, without imposing leaf policy on roots.
+fn validate_x509_der(der: &[u8]) -> Result<(), String> {
+    x509_parser::parse_x509_certificate(der)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
 
 /// Read a PEM certificate file, parse its certificates, and validate
 /// that at least one is present.
@@ -533,6 +552,105 @@ mod tests {
                 .expect("valid cert+key PEM should parse");
         assert!(!cached.cert_der().is_empty(), "should parse at least one cert");
         assert!(!cached.key_der().is_empty(), "key DER should not be empty");
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one fixture checks leaf, intermediate, malformed DER, and key mismatch"
+    )]
+    fn client_chain_rejects_malformed_member_and_preserves_valid_chains() {
+        crate::provider::install();
+        let (leaf_pem, intermediate_pem, key_pem) = intermediate_chain();
+        let dir = tempfile::TempDir::new().unwrap();
+        let cert_path = dir.path().join("client.pem");
+        let key_path = dir.path().join("client-key.pem");
+        std::fs::write(&key_path, key_pem).unwrap();
+
+        for (chain, count) in [(leaf_pem.clone(), 1), (format!("{leaf_pem}{intermediate_pem}"), 2)] {
+            std::fs::write(&cert_path, chain).unwrap();
+            let cached =
+                CachedClientCert::from_pem_files(cert_path.to_str().unwrap(), key_path.to_str().unwrap()).unwrap();
+            assert_eq!(
+                cached.cert_der().len(),
+                count,
+                "valid leaf and intermediate must survive"
+            );
+        }
+
+        std::fs::write(&cert_path, format!("{leaf_pem}{}", malformed_cert_pem())).unwrap();
+        let error =
+            CachedClientCert::from_pem_files(cert_path.to_str().unwrap(), key_path.to_str().unwrap()).unwrap_err();
+        assert!(
+            matches!(&error, TlsError::FileLoadError { path, detail } if path == cert_path.to_str().unwrap() && detail.contains("member 1")),
+            "malformed trailing DER must fail early with path and index: {error}"
+        );
+
+        std::fs::write(&cert_path, malformed_cert_pem()).unwrap();
+        assert!(
+            CachedClientCert::from_pem_files(cert_path.to_str().unwrap(), key_path.to_str().unwrap()).is_err(),
+            "malformed leaf must still fail"
+        );
+
+        std::fs::write(&cert_path, leaf_pem).unwrap();
+        let other_key = gen_test_certs();
+        let mismatch =
+            CachedClientCert::from_pem_files(cert_path.to_str().unwrap(), other_key.key_path.to_str().unwrap())
+                .unwrap_err();
+        assert!(
+            mismatch.to_string().contains("do not match"),
+            "a mismatched key must keep its specific diagnostic: {mismatch}"
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "prove the full chain authenticates with its included v1 root"
+    )]
+    fn client_chain_preserves_included_v1_trust_anchor() {
+        crate::provider::install();
+        let root_key = rcgen::KeyPair::generate().unwrap();
+        let root_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        let template = root_params.self_signed(&root_key).unwrap();
+        let root = v1_root(&template, &root_key);
+        let root_der = rustls::pki_types::CertificateDer::from(root.to_der().unwrap());
+        assert_eq!(root.version(), 0, "the fixture must be an X.509 v1 root");
+        assert!(
+            rustls::server::ParsedCertificate::try_from(&root_der).is_err(),
+            "end-entity parsing must reject the otherwise usable root fixture"
+        );
+        let issuer = rcgen::Issuer::from_params(&root_params, &root_key);
+        let key = rcgen::KeyPair::generate().unwrap();
+        let leaf = rcgen::CertificateParams::new(vec!["client.example".to_owned()])
+            .unwrap()
+            .signed_by(&key, &issuer)
+            .unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let cert_path = dir.path().join("client.pem");
+        let key_path = dir.path().join("client-key.pem");
+        std::fs::write(
+            &cert_path,
+            format!("{}{}", leaf.pem(), certificate_pem(root_der.as_ref())),
+        )
+        .unwrap();
+        std::fs::write(&key_path, key.serialize_pem()).unwrap();
+        let cached = CachedClientCert::from_pem_files(cert_path.to_str().unwrap(), key_path.to_str().unwrap())
+            .expect("a valid client chain may include its v1 trust anchor");
+        assert_eq!(cached.cert_der().len(), 2, "the full chain must be preserved");
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(root_der).unwrap();
+        let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(roots))
+            .build()
+            .unwrap();
+        let chain = cached
+            .cert_der()
+            .iter()
+            .map(|der| rustls::pki_types::CertificateDer::from(der.as_slice()))
+            .collect::<Vec<_>>();
+        verifier
+            .verify_client_cert(&chain[0], &chain[1..], rustls::pki_types::UnixTime::now())
+            .expect("the unchanged client chain must authenticate against its v1 trust anchor");
     }
 
     #[test]
@@ -742,5 +860,53 @@ mod tests {
             Arc::ptr_eq(cached.ca().unwrap(), cloned.ca().unwrap()),
             "cloned CachedClusterTls should share CA Arc"
         );
+    }
+
+    /// Encode non-X.509 bytes as a well-formed certificate PEM block.
+    fn malformed_cert_pem() -> String {
+        "-----BEGIN CERTIFICATE-----\nbm90LXg1MDk=\n-----END CERTIFICATE-----\n".to_owned()
+    }
+
+    /// PEM-encode mutated fixture bytes without reparsing or repairing them.
+    fn certificate_pem(der: &[u8]) -> String {
+        format!(
+            "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
+            openssl::base64::encode_block(der)
+        )
+    }
+
+    /// Preserve the issuer name and key while creating a genuine extension-free v1 root.
+    fn v1_root(template: &rcgen::Certificate, key: &rcgen::KeyPair) -> openssl::x509::X509 {
+        let template = openssl::x509::X509::from_der(template.der()).unwrap();
+        let key = openssl::pkey::PKey::private_key_from_der(&key.serialize_der()).unwrap();
+        let mut root = openssl::x509::X509::builder().unwrap();
+        root.set_version(0).unwrap();
+        root.set_serial_number(template.serial_number()).unwrap();
+        root.set_subject_name(template.subject_name()).unwrap();
+        root.set_issuer_name(template.subject_name()).unwrap();
+        root.set_pubkey(&key).unwrap();
+        root.set_not_before(template.not_before()).unwrap();
+        root.set_not_after(template.not_after()).unwrap();
+        root.sign(&key, openssl::hash::MessageDigest::sha256()).unwrap();
+        root.build()
+    }
+
+    /// Generate a client leaf signed by a real intermediate CA.
+    fn intermediate_chain() -> (String, String, String) {
+        let root_key = rcgen::KeyPair::generate().unwrap();
+        let mut root_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        root_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let root_issuer = rcgen::Issuer::from_params(&root_params, &root_key);
+
+        let intermediate_key = rcgen::KeyPair::generate().unwrap();
+        let mut intermediate_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        intermediate_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let intermediate = intermediate_params.signed_by(&intermediate_key, &root_issuer).unwrap();
+        let intermediate_issuer = rcgen::Issuer::from_params(&intermediate_params, &intermediate_key);
+
+        let leaf_key = rcgen::KeyPair::generate().unwrap();
+        let leaf_params = rcgen::CertificateParams::new(vec!["localhost".to_owned()]).unwrap();
+        let leaf = leaf_params.signed_by(&leaf_key, &intermediate_issuer).unwrap();
+        (leaf.pem(), intermediate.pem(), leaf_key.serialize_pem())
     }
 }
