@@ -3774,6 +3774,49 @@ impl HookHandler<CmfHook> for StubPlugin {
     }
 }
 
+/// Host plugin that accepts a real CMF payload mutation on either LLM hook.
+struct InferencePayloadMutator {
+    cfg: PluginConfig,
+}
+
+impl Plugin for InferencePayloadMutator {
+    fn config(&self) -> &PluginConfig {
+        &self.cfg
+    }
+}
+
+impl HookHandler<CmfHook> for InferencePayloadMutator {
+    async fn handle(
+        &self,
+        payload: &MessagePayload,
+        _extensions: &Extensions,
+        _ctx: &mut PluginContext,
+    ) -> PluginResult<MessagePayload> {
+        let mut updated = payload.clone();
+        updated
+            .message
+            .content
+            .push(ppe::praxis_policy_core::cmf::ContentPart::Text {
+                text: "accepted test mutation".to_owned(),
+            });
+        PluginResult::modify_payload(updated)
+    }
+}
+
+/// Factory serving the same mutation on input and output hooks.
+struct InferencePayloadMutatorFactory;
+
+impl PluginFactory for InferencePayloadMutatorFactory {
+    fn create(&self, config: &PluginConfig) -> Result<PluginInstance, Box<PluginError>> {
+        let plugin = Arc::new(InferencePayloadMutator { cfg: config.clone() });
+        let adapter: Arc<dyn AnyHookHandler> = Arc::new(TypedHandlerAdapter::<CmfHook, _>::new(Arc::clone(&plugin)));
+        Ok(PluginInstance {
+            plugin,
+            handlers: vec![("cmf.llm_input", Arc::clone(&adapter)), ("cmf.llm_output", adapter)],
+        })
+    }
+}
+
 /// Counts how many times it built a plugin, so a test can tell one construction
 /// from two. Deliberately accepts any config, including one a bundled factory
 /// would reject — that difference is what the override test keys on.
@@ -6002,6 +6045,52 @@ async fn a_field_mutator_leaves_an_inference_response_untouched() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn allowed_inference_without_mutation_does_not_warn() {
+    let (_dir, path) = write_llm_post_only_config();
+    let filter = build_read_write_filter(path);
+    let body = inference_round_trip(
+        &filter,
+        r#"{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}"#,
+        WITHIN_BUDGET_RESPONSE,
+        "application/json",
+    )
+    .await;
+    assert_eq!(
+        body,
+        bytes::Bytes::from_static(WITHIN_BUDGET_RESPONSE.as_bytes()),
+        "clean response is unchanged"
+    );
+    assert_eq!(
+        filter.mutation_warning_flags(),
+        (false, false),
+        "no CMF payload changed"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn accepted_inference_payload_mutation_sets_both_warning_flags() {
+    let (_dir, path) = write_inference_payload_mutator_config();
+    let filter = build_read_write_filter(path);
+    let body = inference_round_trip(
+        &filter,
+        r#"{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}"#,
+        WITHIN_BUDGET_RESPONSE,
+        "application/json",
+    )
+    .await;
+    assert_eq!(
+        body,
+        bytes::Bytes::from_static(WITHIN_BUDGET_RESPONSE.as_bytes()),
+        "unsupported rewrite keeps wire bytes"
+    );
+    assert_eq!(
+        filter.mutation_warning_flags(),
+        (true, true),
+        "both CMF mutations were accepted"
+    );
+}
+
 #[test]
 fn a_post_only_inference_policy_is_active() {
     let (_dir, path) = write_llm_post_only_config();
@@ -7673,6 +7762,171 @@ fn write_tool_result_pipeline_config() -> (TempDir, String) {
     )
 }
 
+/// Write an LLM route whose hook plugin modifies the CMF payload twice.
+fn write_inference_payload_mutator_config() -> (TempDir, String) {
+    register_policy_plugin_factory(
+        "test/inference-payload-mutator",
+        Arc::new(|| Box::new(InferencePayloadMutatorFactory)),
+    );
+    let (dir, path) = write_entity_config_with_routes(
+        "routes:\n  - llm: \"*\"\n    authorization:\n      pre_invocation:\n        - \"run(inference-payload-mutator)\"\n      post_invocation:\n        - \"run(inference-payload-mutator)\"\n",
+    );
+    let original = std::fs::read_to_string(&path).expect("read LLM policy");
+    let declaration = "  - name: inference-payload-mutator\n    kind: test/inference-payload-mutator\n    hooks:\n      - cmf.llm_input\n      - cmf.llm_output\n    mode: sequential\n    on_error: fail\n";
+    std::fs::write(&path, original.replace("global:\n", &format!("{declaration}global:\n")))
+        .expect("write LLM mutator policy");
+    (dir, path)
+}
+
+/// Admit a classified tool request and evaluate its response body.
+async fn scan_tool_response(filter: &PolicyFilter, upstream: &[u8]) -> bytes::Bytes {
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
+    let mut request = Some(bytes::Bytes::from_static(
+        br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#,
+    ));
+    let action = filter
+        .on_request_body(&mut ctx, &mut request, true)
+        .await
+        .expect("tool admission");
+    assert!(matches!(action, FilterAction::BodyDone), "tool request was admitted");
+    let mut body = Some(bytes::Bytes::copy_from_slice(upstream));
+    let action = filter
+        .on_response_body(&mut ctx, &mut body, true)
+        .expect("tool response policy");
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "tool response policy completed"
+    );
+    body.expect("response body")
+}
+
+/// Admit a classified tool request and return the bytes sent upstream.
+async fn forward_tool_request(filter: &PolicyFilter, upstream: &[u8]) -> bytes::Bytes {
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
+    let mut body = Some(bytes::Bytes::copy_from_slice(upstream));
+    let action = filter
+        .on_request_body(&mut ctx, &mut body, true)
+        .await
+        .expect("tool admission");
+    assert!(matches!(action, FilterAction::BodyDone), "tool request was admitted");
+    body.expect("forwarded request body")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mcp_request_rewrite_requires_payload_mutation() {
+    let (_allow_dir, allow_path) = write_entity_config_with_routes(
+        "routes:\n  - tool: echo\n    authorization:\n      pre_invocation:\n        - \"require(authenticated)\"\n",
+    );
+    let original = br#"{ "jsonrpc" : "2.0", "id": 1, "method":"tools/call", "trace":"keep",
+      "params": { "name":"echo", "arguments": {"note":"clean"}, "extra":"keep" } }"#;
+    let forwarded = forward_tool_request(&build_read_write_filter(allow_path), original).await;
+    assert_eq!(
+        forwarded.as_ref(),
+        original,
+        "allowed request keeps whitespace and unknown fields"
+    );
+
+    let (_mask_dir, mask_path) =
+        write_entity_config_with_routes("routes:\n  - tool: echo\n    args:\n      ssn: \"str | mask(2)\"\n");
+    assert_masked_tool_request_rewrites(&build_read_write_filter(mask_path)).await;
+}
+
+/// A field mutation still updates the forwarded arguments and keeps siblings.
+async fn assert_masked_tool_request_rewrites(filter: &PolicyFilter) {
+    let original = br#"{ "jsonrpc":"2.0", "id":1, "method":"tools/call", "trace":"keep",
+      "params":{"name":"echo","arguments":{"ssn":"123-45-6789","note":"clean"}} }"#;
+    let forwarded = forward_tool_request(filter, original).await;
+    let parsed: serde_json::Value = serde_json::from_slice(&forwarded).expect("rewritten tool request");
+    assert_ne!(
+        parsed["params"]["arguments"]["ssn"], "123-45-6789",
+        "mask changed the secret"
+    );
+    assert_eq!(parsed["params"]["arguments"]["note"], "clean", "unrelated args survive");
+    assert_eq!(parsed["trace"], "keep", "unknown top-level fields survive");
+    assert!(
+        !forwarded.windows(11).any(|part| part == b"123-45-6789"),
+        "secret is absent upstream"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mcp_result_mutation_rewrites_and_growth_fails_closed() {
+    let (_mask_dir, mask_path) = write_tool_result_pipeline_config();
+    assert_masked_tool_result_rewrites(&build_read_write_filter(mask_path)).await;
+    let (_redact_dir, redact_path) =
+        write_entity_config_with_routes("routes:\n  - tool: echo\n    result:\n      secret: \"str | redact\"\n");
+    assert_growing_tool_result_fails_closed(&build_read_write_filter(redact_path)).await;
+}
+
+/// A real result mutation is returned at the committed response length.
+async fn assert_masked_tool_result_rewrites(filter: &PolicyFilter) {
+    let upstream = json!({"jsonrpc":"2.0","id":1,"result":{"structuredContent":{
+        "ssn":"123-45-6789","note":"unchanged","padding":"x".repeat(512)
+    }}})
+    .to_string();
+    let served = scan_tool_response(filter, upstream.as_bytes()).await;
+    let parsed: serde_json::Value = serde_json::from_slice(&served).expect("rewritten JSON-RPC response");
+    assert_eq!(served.len(), upstream.len(), "committed length is preserved");
+    assert_masked_tool_result_value(&parsed, &served);
+}
+
+/// The selected structured result changed while its sibling data survived.
+fn assert_masked_tool_result_value(parsed: &serde_json::Value, served: &[u8]) {
+    assert_ne!(
+        parsed["result"]["structuredContent"]["ssn"], "123-45-6789",
+        "mask changed the secret"
+    );
+    assert_eq!(
+        parsed["result"]["structuredContent"]["note"], "unchanged",
+        "unrelated result survives"
+    );
+    assert!(
+        !served.windows(11).any(|part| part == b"123-45-6789"),
+        "secret is absent downstream"
+    );
+}
+
+/// A growing result mutation emits a fitted error, never partial output.
+async fn assert_growing_tool_result_fails_closed(filter: &PolicyFilter) {
+    let upstream = json!({"jsonrpc":"2.0","id":1,"result":{"structuredContent":{
+        "secret":"s","padding":"x".repeat(512)
+    }}})
+    .to_string();
+    let served = scan_tool_response(filter, upstream.as_bytes()).await;
+    let parsed: serde_json::Value = serde_json::from_slice(&served).expect("fitted JSON-RPC error");
+    assert_eq!(served.len(), upstream.len(), "committed length is preserved");
+    assert_eq!(
+        parsed["error"]["data"]["violation"], "gateway.response_rewrite_overflow",
+        "a rewrite that grows past the committed length fails closed"
+    );
+    assert!(parsed.get("result").is_none(), "upstream result is withheld");
+}
+
+/// Write an `echo` tool route with only a `result:` field pipeline.
+fn write_tool_result_pipeline_config() -> (TempDir, String) {
+    write_entity_config_with_routes(
+        r#"routes:
+  - tool: echo
+    result:
+      ssn: "str | mask(2)"
+"#,
+    )
+}
+
 /// A tool result long enough to hold a replacement deny envelope.
 const ROOMY_MCP_RESPONSE: &str = r#"{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"ok, and long enough that a replacement error envelope fits inside the committed content length without being trimmed"}]}}"#;
 
@@ -8231,7 +8485,7 @@ async fn malformed_classified_tool_response_returns_filter_error_without_partial
 )]
 async fn uninspectable_tool_response_is_error_but_empty_results_and_valid_errors_pass() {
     // An admitting post hook isolates envelope validation from result rewriting.
-    // The masking fixture intentionally canonicalizes content arrays and can grow them.
+    // With no mutator, even an empty or mixed content array keeps its wire bytes.
     let (_dir, path) = write_entity_config_with_routes(
         r#"routes:
   - tool: echo
@@ -8280,24 +8534,25 @@ async fn uninspectable_tool_response_is_error_but_empty_results_and_valid_errors
         serde_json::json!({"jsonrpc":"2.0","id":1,"result":null}),
         serde_json::json!({"jsonrpc":"2.0","id":1,"result":{}}),
         serde_json::json!({"jsonrpc":"2.0","id":1,"result":{"content":[]}}),
+        serde_json::json!({"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"answer":42},"content":[
+            {"type":"text","text":"clean summary"},
+            {"type":"image","data":"opaque-binary"},
+            {"type":"resource_link","uri":"file:///safe"}
+        ]}}),
     ] {
-        // Response hooks canonicalize a content array even without a mutator.
-        // Supply room for that existing representation and preserve its length.
-        let mut original = serde_json::to_vec(&value).unwrap();
-        original.resize(512, b' ');
-        let mut body = Some(bytes::Bytes::from(original));
-        assert!(matches!(
-            filter.on_response_body(&mut ctx, &mut body, true).unwrap(),
-            FilterAction::Continue
-        ));
-        assert_eq!(body.as_ref().unwrap().len(), 512);
-        let actual: serde_json::Value = serde_json::from_slice(body.as_deref().unwrap()).unwrap();
-        let expected = if value.pointer("/result/content").is_some() {
-            serde_json::json!({"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"null"}]}})
-        } else {
-            value
-        };
-        assert_eq!(actual, expected);
+        for padded in [false, true] {
+            let mut original = serde_json::to_vec(&value).unwrap();
+            if padded {
+                original.resize(512, b' ');
+            }
+            let original = bytes::Bytes::from(original);
+            let mut body = Some(original.clone());
+            assert!(matches!(
+                filter.on_response_body(&mut ctx, &mut body, true).unwrap(),
+                FilterAction::Continue
+            ));
+            assert_eq!(body, Some(original));
+        }
     }
     let mut empty = Some(bytes::Bytes::new());
     assert!(matches!(

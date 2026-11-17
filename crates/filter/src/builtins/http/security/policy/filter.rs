@@ -860,6 +860,15 @@ impl PolicyFilter {
         (self.llm_routes, self.llm_post)
     }
 
+    /// Return the emitted request and response mutation-warning flags for tests.
+    #[cfg(all(test, feature = "policy-builtins"))]
+    pub(super) fn mutation_warning_flags(&self) -> (bool, bool) {
+        (
+            self.llm_request_mutator_warned.load(Ordering::Relaxed),
+            self.llm_response_mutator_warned.load(Ordering::Relaxed),
+        )
+    }
+
     /// Warn about inference configurations that can skip policy evaluation.
     fn warn_on_inference_gaps(
         policy_config: &ppe::praxis_policy_core::config::PolicyConfig,
@@ -1739,7 +1748,7 @@ impl PolicyFilter {
         // CMF cannot losslessly rebuild multi-part inference bodies, so keep
         // the original instead of applying a partial mutation.
         if matches!(self.cfg.body_access, BodyAccessMode::ReadWrite)
-            && cmf_result.modified_payload.is_some()
+            && cmf_result.payload_modified
             && !self.llm_request_mutator_warned.swap(true, Ordering::Relaxed)
         {
             tracing::warn!(
@@ -1935,7 +1944,7 @@ impl PolicyFilter {
         }
 
         // Keep the original because CMF cannot rebuild multi-choice responses.
-        if cmf_result.modified_payload.is_some() && !self.llm_response_mutator_warned.swap(true, Ordering::Relaxed) {
+        if cmf_result.payload_modified && !self.llm_response_mutator_warned.swap(true, Ordering::Relaxed) {
             tracing::warn!(
                 target: "policy.filter",
                 model = %model,
@@ -2996,6 +3005,7 @@ impl HttpFilter for PolicyFilter {
         // mutated `MessagePayload` back into the JSON-RPC body so the
         // upstream service receives the rewritten args.
         if matches!(self.cfg.body_access, BodyAccessMode::ReadWrite)
+            && cmf_result.payload_modified
             && let Some(mp) = cmf_result.modified_payload.as_ref()
             && let Some(updated) = mp.as_any().downcast_ref::<MessagePayload>()
         {
@@ -3196,7 +3206,10 @@ impl HttpFilter for PolicyFilter {
             return Ok(FilterAction::Continue);
         }
 
-        if let Some(mp) = cmf_result.modified_payload.as_ref()
+        // PPE carries the original payload in every allowed result. Only an
+        // accepted plugin mutation warrants replacing the JSON-RPC body.
+        if cmf_result.payload_modified
+            && let Some(mp) = cmf_result.modified_payload.as_ref()
             && let Some(updated) = mp.as_any().downcast_ref::<MessagePayload>()
         {
             // Capture the id before the rewrite consumes the parsed DOM

@@ -70,6 +70,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Preserve unmodified MCP request and response bodies, and emit inference
+  mutation warnings only when policy reports a payload change.
 - `cargo xtask fips verify-image --pinned-in` binds the verified image reference
   to the Containerfile's supported base stage and named digest argument.
 - `cargo xtask sync-example-readme --fix` rejects an unreadable README or
