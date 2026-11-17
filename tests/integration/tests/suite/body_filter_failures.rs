@@ -5,7 +5,15 @@
 //! rejections, filter errors, and stream-buffer ceilings on proxied
 //! responses.
 
-use std::sync::Arc;
+use std::{
+    io::{BufReader, ErrorKind, Write as _},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
+    time::Duration,
+};
 
 use bytes::Bytes;
 use praxis_core::config::Config;
@@ -14,8 +22,9 @@ use praxis_filter::{
     HttpFilterContext, Rejection,
 };
 use praxis_test_utils::{
-    Backend, GrpcBackend, free_port, http_get, http_send, parse_body, parse_header, parse_status,
-    start_full_proxy_with_registry, start_grpc_backend,
+    Backend, GrpcBackend, H1Completion, H1Response, PayloadResponseFraming, PayloadSpec, free_port, http_get,
+    http_send, parse_body, parse_header, parse_status, read_h1_response, start_full_proxy_with_registry,
+    start_grpc_backend, start_payload_response_backend, wait_for_tcp,
 };
 
 // ---------------------------------------------------------------------------
@@ -23,7 +32,10 @@ use praxis_test_utils::{
 // ---------------------------------------------------------------------------
 
 /// Response-body filter that rejects once the full body has streamed.
-struct RejectResponseBodyFilter;
+struct RejectResponseBodyFilter {
+    reject_at_eos: bool,
+    eos_seen: Arc<AtomicBool>,
+}
 
 #[async_trait::async_trait]
 impl HttpFilter for RejectResponseBodyFilter {
@@ -46,7 +58,12 @@ impl HttpFilter for RejectResponseBodyFilter {
         end_of_stream: bool,
     ) -> Result<FilterAction, FilterError> {
         if end_of_stream {
-            Ok(FilterAction::Reject(Rejection::status(451)))
+            self.eos_seen.store(true, Ordering::SeqCst);
+            if self.reject_at_eos {
+                Ok(FilterAction::Reject(Rejection::status(451)))
+            } else {
+                Ok(FilterAction::Continue)
+            }
         } else {
             Ok(FilterAction::Continue)
         }
@@ -188,10 +205,20 @@ impl HttpFilter for ErrorRequestBodyFilter {
 
 /// Registry with builtins plus the failing body filters.
 fn registry() -> FilterRegistry {
+    registry_with_eos(true, Arc::new(AtomicBool::new(false)))
+}
+
+/// Registry with a selectable EOS outcome and observable hook invocation.
+fn registry_with_eos(reject_at_eos: bool, eos_seen: Arc<AtomicBool>) -> FilterRegistry {
     let mut reg = FilterRegistry::with_builtins();
     reg.register(
         "test_reject_response_body",
-        FilterFactory::Http(Arc::new(|_| Ok(Box::new(RejectResponseBodyFilter)))),
+        FilterFactory::Http(Arc::new(move |_| {
+            Ok(Box::new(RejectResponseBodyFilter {
+                reject_at_eos,
+                eos_seen: Arc::clone(&eos_seen),
+            }))
+        })),
     )
     .unwrap();
     reg.register(
@@ -293,18 +320,85 @@ filter_chains:
 // ---------------------------------------------------------------------------
 
 #[test]
-fn response_body_rejection_does_not_deliver_body() {
-    let backend_port = Backend::fixed("sensitive-response-content").start();
-    let proxy_port = free_port();
-    let config = Config::from_yaml(&proxy_yaml(proxy_port, backend_port, "test_reject_response_body")).unwrap();
-    let reg = registry();
-    let _proxy = start_full_proxy_with_registry(&config, &reg);
+fn response_body_eos_rejection_aborts_stream() {
+    let spec = PayloadSpec::binary(16_384, 17);
+    let expected = spec.chunk(0, 16_384);
+    let (continued, continued_body, continued_eos) = observe_response_body_eos(false, spec.clone());
+    assert!(continued_eos, "control EOS hook must run");
+    assert_eq!(continued.status, Some(200), "{continued:?}");
+    assert_eq!(continued_body, expected, "control must deliver the exact payload");
+    assert_eq!(continued.body_bytes, spec.len(), "{continued:?}");
+    assert_eq!(continued.completion, Some(H1Completion::Chunked), "{continued:?}");
+    assert_eq!(continued.abort, None, "{continued:?}");
 
-    let (_status, body) = http_get(&format!("127.0.0.1:{proxy_port}"), "/", None);
-    assert!(
-        !body.contains("sensitive-response-content"),
-        "a rejected response body must not reach the client: {body:?}"
+    let (rejected, rejected_body, rejected_eos) = observe_response_body_eos(true, spec);
+    assert!(rejected_eos, "rejection EOS hook must run");
+    assert_eq!(
+        rejected.status,
+        Some(200),
+        "status must already be committed: {rejected:?}"
     );
+    assert_eq!(rejected_body, expected, "accepted Stream bytes must remain observable");
+    assert_eq!(rejected.body_bytes, 16_384, "{rejected:?}");
+    assert_eq!(
+        rejected.completion, None,
+        "rejected stream must not complete: {rejected:?}"
+    );
+    assert!(
+        rejected.abort.as_ref().is_some_and(|(kind, _)| matches!(
+            kind,
+            ErrorKind::UnexpectedEof | ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted
+        )),
+        "rejected stream must end at the peer, not at a deadline: {rejected:?}"
+    );
+}
+
+/// Gate the upstream terminator on complete client observation of its content.
+fn observe_response_body_eos(reject_at_eos: bool, spec: PayloadSpec) -> (H1Response, Vec<u8>, bool) {
+    let mut source = start_payload_response_backend(spec.clone(), PayloadResponseFraming::Chunked, Some(spec.len()));
+    let proxy_port = free_port();
+    let config = Config::from_yaml(&proxy_yaml(proxy_port, source.port, "test_reject_response_body")).unwrap();
+    let eos_seen = Arc::new(AtomicBool::new(false));
+    let reg = registry_with_eos(reject_at_eos, Arc::clone(&eos_seen));
+    let _proxy = start_full_proxy_with_registry(&config, &reg);
+    let address = format!("127.0.0.1:{proxy_port}");
+    wait_for_tcp(&address);
+    let (observed_tx, observed_rx) = mpsc::channel();
+    let client = std::thread::spawn(move || {
+        let mut stream = std::net::TcpStream::connect(address).expect("connect EOS client");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("set read deadline");
+        stream
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .expect("set write deadline");
+        stream
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .expect("send EOS request");
+        let mut body = Vec::new();
+        let mut acknowledged = false;
+        let response = read_h1_response(&mut BufReader::new(stream), false, spec.len(), |part| {
+            body.extend_from_slice(part);
+            if body.len() == 16_384 && !acknowledged {
+                acknowledged = true;
+                observed_tx.send(()).expect("acknowledge client-observed payload");
+            }
+            Ok(())
+        });
+        (response, body)
+    });
+    let paused = source.prefix_written.recv_timeout(Duration::from_secs(5));
+    let observed = observed_rx.recv_timeout(Duration::from_secs(5));
+    source.resume();
+    let (response, body) = client.join().expect("EOS client thread");
+    source.join();
+    assert_eq!(
+        paused.expect("source pause before terminating chunk"),
+        16_384,
+        "the backend must pause after sending the complete accepted prefix"
+    );
+    observed.expect("client must observe accepted content before EOS release");
+    (response, body, eos_seen.load(Ordering::SeqCst))
 }
 
 #[test]
@@ -389,16 +483,14 @@ fn response_over_stream_buffer_ceiling_is_not_delivered() {
 
     use std::io::{BufReader, Write as _};
     let address = format!("127.0.0.1:{proxy_port}");
-    praxis_test_utils::wait_for_tcp(&address);
+    wait_for_tcp(&address);
     let mut stream = std::net::TcpStream::connect(&address).unwrap();
-    stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
-        .unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     stream
         .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
         .unwrap();
     let mut body = Vec::new();
-    let result = praxis_test_utils::read_h1_response(&mut BufReader::new(stream), false, 4096, |part| {
+    let result = read_h1_response(&mut BufReader::new(stream), false, 4096, |part| {
         body.extend_from_slice(part);
         Ok(())
     });
@@ -415,17 +507,15 @@ fn head_rejection_sends_no_body() {
 
     use std::io::{BufReader, Read as _, Write as _};
     let address = format!("127.0.0.1:{proxy_port}");
-    praxis_test_utils::wait_for_tcp(&address);
+    wait_for_tcp(&address);
     let mut stream = std::net::TcpStream::connect(&address).unwrap();
-    stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
-        .unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     stream
         .write_all(b"HEAD / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
         .unwrap();
     let mut reader = BufReader::new(stream);
     let mut body = Vec::new();
-    let response = praxis_test_utils::read_h1_response(&mut reader, true, 4096, |part| {
+    let response = read_h1_response(&mut reader, true, 4096, |part| {
         body.extend_from_slice(part);
         Ok(())
     });
@@ -436,7 +526,7 @@ fn head_rejection_sends_no_body() {
     );
     assert_eq!(
         response.completion,
-        Some(praxis_test_utils::H1Completion::Headers),
+        Some(H1Completion::Headers),
         "a HEAD response completes at its header terminator, whatever Content-Length it \
          advertises: {response:?}"
     );
