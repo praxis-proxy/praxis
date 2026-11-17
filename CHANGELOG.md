@@ -78,6 +78,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Use reserved metadata in the body-based tenant routing example so client
+  tenant headers cannot override missing or extracted body fields.
 - Correct payload documentation for transfer limits, buffering limits, and
   reserved metadata headers.
 - Pass through non-native gRPC response media types in the gRPC-Web filter.

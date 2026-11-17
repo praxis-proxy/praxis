@@ -269,6 +269,53 @@ fn field_extraction_access_control_unknown_tenant_to_default() {
 }
 
 #[test]
+fn field_extraction_example_body_routing_ignores_client_tenant_headers() {
+    let acme_guard = start_backend_with_shutdown("acme-backend");
+    let acme_second_guard = start_backend_with_shutdown("acme-backend");
+    let globex_guard = start_backend_with_shutdown("globex-backend");
+    let default_guard = start_backend_with_shutdown("default-backend");
+    let config = load_example_config(
+        "payload-processing/field-extraction-access-control.yaml",
+        free_port(),
+        HashMap::from([
+            ("10.0.1.1:8080", acme_guard.port()),
+            ("10.0.1.2:8080", acme_second_guard.port()),
+            ("10.0.2.1:8080", globex_guard.port()),
+            ("10.0.3.1:8080", default_guard.port()),
+        ]),
+    );
+    let proxy = start_proxy(&config);
+    let send = |body: &str, extra_headers: &str| {
+        let request = format!(
+            "POST /api/data HTTP/1.1\r\n\
+             Host: localhost\r\n\
+             Content-Type: application/json\r\n\
+             {extra_headers}Content-Length: {}\r\n\
+             Connection: close\r\n\r\n\
+             {body}",
+            body.len()
+        );
+        http_send(proxy.addr(), &request)
+    };
+
+    for (body, extra_headers, backend) in [
+        ("{}", "X-Tenant-Id: acme\r\n", "default-backend"),
+        ("{bad", "X-Tenant-Id: acme\r\n", "default-backend"),
+        (r#"{"tenant_id":"globex"}"#, "X-Tenant-Id: acme\r\n", "globex-backend"),
+        (r#"{"tenant_id":"acme"}"#, "", "acme-backend"),
+        (r#"{"tenant_id":"globex"}"#, "", "globex-backend"),
+        (r#"{"tenant_id":"unknown"}"#, "", "default-backend"),
+    ] {
+        let response = send(body, extra_headers);
+        assert_eq!(parse_status(&response), 200, "body: {body}");
+        assert_eq!(parse_body(&response), backend, "body: {body}");
+    }
+
+    let spoofed = send("{}", "X-Praxis-Tenant-Id: acme\r\n");
+    assert_eq!(parse_status(&spoofed), 400, "reserved client header must be rejected");
+}
+
+#[test]
 fn body_size_limit_allows_small_body() {
     let backend_port_guard = start_backend_with_shutdown("ok");
     let backend_port = backend_port_guard.port();

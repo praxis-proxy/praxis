@@ -1,14 +1,13 @@
-# Field Extraction for Tenant Access Control
+# Field Extraction for Tenant Routing
 #
 # Extracts the "tenant_id" field from the JSON request body
-# and promotes it to an X-Tenant-Id header. The router then
-# matches on this header to enforce tenant isolation by
-# directing each tenant's requests to dedicated backend
-# clusters.
+# and promotes it to a client-unspoofable X-Praxis-Tenant-Id
+# header. The router directs recognized body tenant values to
+# their configured backend clusters.
 #
-# Unknown or missing tenants fall through to a default
-# cluster (which could be a rejection endpoint in
-# production).
+# Unknown or missing tenants fall through to a default cluster.
+# Tenant isolation requires separate authorization that binds
+# the selected tenant to an authenticated identity.
 #
 # Usage:
 #   cargo run -p praxis-proxy -- -c examples/configs/payload-processing/field-extraction-access-control.yaml
@@ -33,7 +32,7 @@ filter_chains:
     filters:
       - filter: json_body_field
         field: tenant_id
-        header: X-Tenant-Id
+        header: X-Praxis-Tenant-Id
 
   - name: routing
     filters:
@@ -41,11 +40,11 @@ filter_chains:
         routes:
           - path_prefix: "/"
             headers:
-              x-tenant-id: "acme"
+              x-praxis-tenant-id: "acme"
             cluster: acme
           - path_prefix: "/"
             headers:
-              x-tenant-id: "globex"
+              x-praxis-tenant-id: "globex"
             cluster: globex
           - path_prefix: "/"
             cluster: default

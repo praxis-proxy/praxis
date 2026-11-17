@@ -100,7 +100,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | [body-size-limit-with-extraction.yaml](configs/payload-processing/body-size-limit-with-extraction.yaml) | Combines body_limits.max_buffer_bytes with json_body_field to enforce a buffering cap while still performing body-based routing |
 | [compression.yaml](configs/payload-processing/compression.yaml) | Enables transparent response compression using Pingora's built-in compression module |
 | [conditional-field-extraction.yaml](configs/payload-processing/conditional-field-extraction.yaml) | Uses the condition system to apply json_body_field only on specific request paths |
-| [field-extraction-access-control.yaml](configs/payload-processing/field-extraction-access-control.yaml) | Extracts the "tenant_id" field from the JSON request body and promotes it to an X-Tenant-Id header |
+| [field-extraction-access-control.yaml](configs/payload-processing/field-extraction-access-control.yaml) | Extracts the "tenant_id" field from the JSON request body and promotes it to a client-unspoofable X-Praxis-Tenant-Id header |
 | [grpc-web.yaml](configs/payload-processing/grpc-web.yaml) | Lets a browser call a gRPC backend |
 | [json-body.yaml](configs/payload-processing/json-body.yaml) | Rewrites a JSON request body with JSON Pointer extract, replace, add, and remove, and the response body with remove and extract |
 | [json-rpc.yaml](configs/payload-processing/json-rpc.yaml) | Extracts JSON-RPC 2.0 envelope metadata from request bodies and promotes method, id, and kind to request headers |
