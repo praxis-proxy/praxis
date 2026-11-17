@@ -350,38 +350,38 @@ impl HttpFilter for GrpcWebFilter {
         body: &mut Option<Bytes>,
         end_of_stream: bool,
     ) -> Result<FilterAction, FilterError> {
-        let on_missing = self.on_missing_trailers;
         let trailers_pending = ctx.extensions.get::<ResponseTrailersPending>().is_some();
         let Some(state) = ctx.get_filter_state_mut::<GrpcWebState>() else {
             return Ok(FilterAction::Continue);
         };
 
-        let mut out = Vec::new();
-        if let Some(chunk) = body.as_ref() {
+        let mut out = body.take().map_or_else(Bytes::new, |chunk| {
             if state.kind.is_text() {
-                out.extend_from_slice(&state.encoder.push(chunk));
+                state.encoder.push(&chunk)
             } else {
-                out.extend_from_slice(chunk);
+                chunk
             }
-        }
+        });
 
         if end_of_stream && !trailers_pending {
-            let needs_status = !state.status_delivered && on_missing == MissingTrailers::Synthesize;
+            let mut appended = out.to_vec();
+            let needs_status = !state.status_delivered && self.on_missing_trailers == MissingTrailers::Synthesize;
             if needs_status {
                 state.status_delivered = true;
                 let frame = encode_trailer_frame(&synthesized_trailers());
                 if state.kind.is_text() {
-                    out.extend_from_slice(&state.encoder.push(&frame));
+                    appended.extend_from_slice(&state.encoder.push(&frame));
                 } else {
-                    out.extend_from_slice(&frame);
+                    appended.extend_from_slice(&frame);
                 }
             }
             if state.kind.is_text() {
-                out.extend_from_slice(&state.encoder.finish());
+                appended.extend_from_slice(&state.encoder.finish());
             }
+            out = Bytes::from(appended);
         }
 
-        *body = (!out.is_empty()).then(|| Bytes::from(out));
+        *body = (!out.is_empty()).then_some(out);
         Ok(FilterAction::Continue)
     }
 

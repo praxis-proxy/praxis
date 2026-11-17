@@ -38,6 +38,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- Reuse owned bytes for nonfinal gRPC-Web response chunks.
 - **Breaking:** Pingora helpers `apply_cached_tls`, `ca_from_cached`,
   `client_cert_from_cached`, and `http_peer` now return `Result`; embedding
   callers must handle invalid material.

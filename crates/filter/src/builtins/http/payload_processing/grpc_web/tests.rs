@@ -8,7 +8,7 @@ use bytes::Bytes;
 
 use super::{GrpcWebFilter, frame::encode_trailer_frame};
 use crate::{
-    FilterAction,
+    FilterAction, ResponseTrailersPending,
     filter::{HttpFilter, HttpFilterContext},
     test_utils::{make_filter_context, make_request},
 };
@@ -548,6 +548,55 @@ async fn grpc_web_non_native_grpc_prefix_responses_pass_through() {
         response.headers.get(http::header::CONTENT_TYPE).unwrap(),
         "application/grpc-web-text+proto"
     );
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "chunk boundary matrix checks both finalization paths"
+)]
+async fn grpc_web_nonfinal_body_preserves_encoding_and_finalization() {
+    for request_type in ["application/grpc-web", "application/grpc-web-text"] {
+        for chunk_len in 0..=5 {
+            for real_trailers in [false, true] {
+                let req = grpc_web_request(request_type);
+                let mut ctx = pipeline_context(&req);
+                let filter = filter("");
+                drop(filter.on_request(&mut ctx).await.unwrap());
+                if real_trailers {
+                    ctx.extensions.insert(ResponseTrailersPending);
+                }
+                let chunk = b"hello".get(..chunk_len).unwrap();
+                let mut body = Some(Bytes::copy_from_slice(chunk));
+                drop(filter.on_response_body(&mut ctx, &mut body, false).unwrap());
+                if chunk_len == 0 || request_type.ends_with("-text") && chunk_len < 3 {
+                    assert!(body.is_none(), "empty nonfinal output should be None");
+                }
+                let mut wire = body.unwrap_or_default().to_vec();
+                let mut final_body = None;
+                drop(filter.on_response_body(&mut ctx, &mut final_body, true).unwrap());
+                wire.extend_from_slice(final_body.as_deref().unwrap_or_default());
+                let mut trailers = http::HeaderMap::new();
+                if real_trailers {
+                    let _previous = trailers.insert("grpc-status", http::HeaderValue::from_static("0"));
+                    wire.extend_from_slice(&filter.on_response_trailers(&mut ctx, &mut trailers).unwrap().unwrap());
+                }
+                let decoded = if request_type.ends_with("-text") {
+                    base64::engine::general_purpose::STANDARD.decode(&wire).unwrap()
+                } else {
+                    wire
+                };
+                let expected_frame = if real_trailers {
+                    encode_trailer_frame(&trailers)
+                } else {
+                    encode_trailer_frame(&super::synthesized_trailers())
+                };
+                let mut expected = chunk.to_vec();
+                expected.extend_from_slice(&expected_frame);
+                assert_eq!(decoded, expected, "{request_type}, {chunk_len}, real={real_trailers}");
+            }
+        }
+    }
 }
 
 // -----------------------------------------------------------------------------
