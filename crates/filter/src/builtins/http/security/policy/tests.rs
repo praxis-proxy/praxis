@@ -1182,6 +1182,127 @@ async fn context_headers_pending_mutation_flows_into_apl() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// entity-less response fallback — stamp_operator_context
+// ---------------------------------------------------------------------------
+
+/// Identity-only policy (authentication plus a response half, no request
+/// authorization and no entity route). The response half is run with no
+/// admitted identity in filter state, so `response_extensions` takes the
+/// entity-less fallback. The post rules read `meta.tags`,
+/// `meta.properties.region`, and `agent.agent_id`. Dropping
+/// `stamp_operator_context` from that fallback makes the allow case deny
+/// with `tags_missing`.
+#[expect(clippy::too_many_lines, reason = "test fixture: the YAML literal is the bulk")]
+fn write_entity_less_response_config() -> (TempDir, String) {
+    let dir = TempDir::new().expect("create tempdir");
+    let cfg_path = dir.path().join("cpex.yaml");
+    let yaml = format!(
+        r#"plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "{TEST_ISSUER}"
+          audiences: ["{TEST_AUDIENCE}"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "{TEST_SECRET}"
+          leeway_seconds: 60
+      claim_mapper: standard
+global:
+  authentication:
+    - jwt-user
+  authorization:
+    post_invocation:
+      - "!(meta.tags contains 'regulated'): deny('operator tags missing on the response half', 'tags_missing')"
+      - "!(meta.properties.region == 'us-east-1'): deny('operator region missing on the response half', 'region_missing')"
+      - "!(agent.agent_id == 'planner-v2'): deny('mapped header missing on the response half', 'agent_id_missing')"
+"#
+    );
+    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
+    (dir, cfg_path.to_str().expect("utf8 path").to_owned())
+}
+
+fn regulated_context() -> ContextMetaConfig {
+    ContextMetaConfig {
+        tags: vec!["regulated".to_owned()],
+        properties: HashMap::from([("region".to_owned(), "us-east-1".to_owned())]),
+        ..Default::default()
+    }
+}
+
+fn agent_id_header() -> HashMap<ContextField, String> {
+    HashMap::from([(ContextField::AgentAgentId, "x-ext-agent-id".to_owned())])
+}
+
+/// Admit through the identity gate, clear the identity `admitted_identity`
+/// reads, then run the response half on the entity-less fallback.
+async fn respond_without_stashed_identity(filter: &PolicyFilter) -> FilterAction {
+    let mut req = request_for_alice();
+    req.headers
+        .insert("x-ext-agent-id", HeaderValue::from_static("planner-v2"));
+    let mut ctx = make_filter_context(&req);
+    let admitted = filter.on_request(&mut ctx).await.expect("request phase ran");
+    assert!(
+        matches!(admitted, FilterAction::Continue),
+        "the identity gate must admit alice; got {admitted:?}",
+    );
+    super::request_state::state_mut(&mut ctx).identity = None;
+    assert!(
+        super::request_state::state(&ctx).is_none_or(|state| state.identity.is_none()),
+        "the response half must see no admitted identity",
+    );
+    let mut response = crate::test_utils::make_response();
+    ctx.response_header = Some(&mut response);
+    filter.on_response(&mut ctx).await.expect("response phase ran")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn entity_less_response_keeps_operator_context() {
+    let (_dir, path) = write_entity_less_response_config();
+    let filter = build_filter_with_context(path, agent_id_header(), regulated_context());
+    assert_eq!(
+        filter.derived_shape(),
+        (false, false),
+        "a post-only global policy is identity-only; the response half must use the entity-less fallback",
+    );
+
+    let action = respond_without_stashed_identity(&filter).await;
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "stamped tags, region, and agent.agent_id must satisfy the response rules; got {action:?}",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn entity_less_response_denies_without_regulated_tag() {
+    let (_dir, path) = write_entity_less_response_config();
+    let filter = build_filter_with_context(
+        path,
+        agent_id_header(),
+        ContextMetaConfig {
+            properties: HashMap::from([("region".to_owned(), "us-east-1".to_owned())]),
+            ..Default::default()
+        },
+    );
+
+    let action = respond_without_stashed_identity(&filter).await;
+    let FilterAction::Reject(rejection) = action else {
+        panic!("without the regulated tag the response rule must deny; got {action:?}");
+    };
+    assert!(
+        has_header(&rejection, "x-policy-violation", "tags_missing"),
+        "the deny must report tags_missing; got {:?}",
+        rejection.headers,
+    );
+}
+
 /// Write a policy document selecting the Valkey-backed session store via a
 /// flat `global.session_store` block. The `valkey` factory connects
 /// lazily (the pool dials on first request), so this config loads
