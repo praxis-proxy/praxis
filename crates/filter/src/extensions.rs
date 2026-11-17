@@ -45,6 +45,16 @@ pub struct ClientResponseHeadersCommitted;
 #[derive(Clone, Copy, Debug)]
 pub struct ResponseTrailersPending;
 
+/// Endpoint whose connected upstream exchange reached request forwarding.
+///
+/// Published by an HTTP adapter after a successful connection and request-head
+/// preparation. A failed dial or a local rejection before forwarding leaves
+/// it absent. A subsequent read failure remains ambiguous: the backend may
+/// already have processed the request. The endpoint identity prevents a later
+/// failed retry from claiming a session after an earlier attempt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpstreamForwardedEndpoint(pub Arc<str>);
+
 // -----------------------------------------------------------------------------
 // AuthenticatedIdentity
 // -----------------------------------------------------------------------------

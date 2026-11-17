@@ -227,6 +227,14 @@ async fn exchange(
     let h2 = session.negotiated_version() == Version::HTTP_2;
     let head = forward::request_head(&flight.ctx, h2).map_err(UploadEnd::Upstream)?;
     session.send_request_head(head).await.map_err(UploadEnd::upstream)?;
+    if let Some(upstream) = flight.ctx.upstream_for_retry.as_ref() {
+        flight
+            .ctx
+            .extensions
+            .insert(praxis_filter::UpstreamForwardedEndpoint(std::sync::Arc::clone(
+                &upstream.address,
+            )));
+    }
     Box::pin(super::exchange::send_until_head(upload, flight, session, timeouts)).await
 }
 

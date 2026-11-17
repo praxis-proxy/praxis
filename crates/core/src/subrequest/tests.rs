@@ -3218,3 +3218,155 @@ async fn streaming_body_drop_without_cancel_records_metrics() {
         "drop should record termination metrics"
     );
 }
+
+#[tokio::test]
+async fn forwarding_progress_tracks_success_read_failure_and_cancellation() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    for streaming in [false, true] {
+        for ending in 0..3 {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let received = Arc::new(tokio::sync::Notify::new());
+            let receipt = Arc::clone(&received);
+            let backend = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut head = Vec::new();
+                while !head.ends_with(b"\r\n\r\n") {
+                    head.push(socket.read_u8().await.unwrap());
+                }
+                receipt.notify_one();
+                match ending {
+                    0 => socket
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                        .await
+                        .unwrap(),
+                    1 => {},
+                    _ => std::future::pending::<()>().await,
+                }
+            });
+            let client = super::SubRequestClient::new(test_connector(4, None));
+            let progress = RequestProgress::default();
+            let observed = progress.clone();
+            let worker = tokio::spawn(async move {
+                let peer = peer_for(address);
+                let request = get_request("/");
+                if streaming {
+                    Box::pin(client.send_streaming_with_progress(
+                        &peer,
+                        &request,
+                        Duration::from_secs(5),
+                        StreamLimits {
+                            idle_timeout: Duration::from_secs(5),
+                            max_stream_duration: None,
+                            max_total_bytes: Some(1024),
+                        },
+                        None,
+                        Some(&observed),
+                    ))
+                    .await
+                    .map(|_| ())
+                } else {
+                    Box::pin(client.execute_with_progress(
+                        &peer,
+                        &request,
+                        1024,
+                        Duration::from_secs(5),
+                        None,
+                        &observed,
+                    ))
+                    .await
+                    .map(|_| ())
+                }
+            });
+            tokio::time::timeout(Duration::from_secs(2), received.notified())
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while !progress.forwarded() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert!(
+                progress.forwarded(),
+                "actual backend receipt must have a forwarding witness"
+            );
+            if ending == 2 {
+                worker.abort();
+                assert!(worker.await.unwrap_err().is_cancelled());
+                backend.abort();
+            } else {
+                let result = worker.await.unwrap();
+                assert_eq!(
+                    result.is_ok(),
+                    ending == 0,
+                    "response outcome must match backend behavior: {result:?}"
+                );
+                backend.await.unwrap();
+            }
+            assert!(
+                progress.forwarded(),
+                "read failure or cancellation cannot erase forwarding evidence"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn forwarding_progress_stays_false_before_contact() {
+    for streaming in [false, true] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let peer = peer_for(listener.local_addr().unwrap());
+        drop(listener);
+        let connector = test_connector(4, Some(1));
+        let client = super::SubRequestClient::new(connector.clone());
+        let request = get_request("/");
+        for admission_blocked in [false, true] {
+            let permit = if admission_blocked {
+                connector.acquire_permit().await
+            } else {
+                None
+            };
+            let progress = RequestProgress::default();
+            let result = if streaming {
+                Box::pin(client.send_streaming_with_progress(
+                    &peer,
+                    &request,
+                    Duration::from_millis(50),
+                    StreamLimits {
+                        idle_timeout: Duration::from_secs(5),
+                        max_stream_duration: None,
+                        max_total_bytes: Some(1024),
+                    },
+                    None,
+                    Some(&progress),
+                ))
+                .await
+                .map(|_| ())
+            } else {
+                Box::pin(client.execute_with_progress(
+                    &peer,
+                    &request,
+                    1024,
+                    Duration::from_millis(50),
+                    None,
+                    &progress,
+                ))
+                .await
+                .map(|_| ())
+            };
+            match result {
+                Err(SubRequestError::AdmissionTimeout { .. }) if admission_blocked => {},
+                Err(SubRequestError::Connect(_)) if !admission_blocked => {},
+                other => panic!("wrong pre-contact outcome: {other:?}"),
+            }
+            assert!(
+                !progress.forwarded(),
+                "a blocked admission or failed dial cannot establish affinity"
+            );
+            drop(permit);
+        }
+    }
+}

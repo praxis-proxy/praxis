@@ -152,6 +152,7 @@ pub use error_response::{
 };
 pub use extensions::{
     AuthenticatedIdentity, ClientResponseHeadersCommitted, RequestExtensions, ResponseTrailersPending,
+    UpstreamForwardedEndpoint,
 };
 pub use factory::{
     EmptyFilterConfig, FilterFactory, HttpFilterFactory, TcpFilterFactory, http_builtin, parse_filter_config,

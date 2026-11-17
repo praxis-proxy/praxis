@@ -152,9 +152,7 @@ pub(super) async fn dispatch(
         end_lease(ctx);
         return Err(upstream_failure(miss));
     }
-    if let HedgeDelivery::Ready { address, .. } = &delivery {
-        note_winner(ctx, address);
-    }
+    note_delivery_winner(ctx, &delivery);
     end_lease(ctx);
     let terminal = terminal_for(session, pipeline, delivery);
     Box::pin(super::terminal_responses::run_terminal_response(
@@ -739,9 +737,18 @@ fn prefix_base_path(uri: http::Uri, base: &str) -> Result<http::Uri> {
 // Response
 // -----------------------------------------------------------------------------
 
+/// Record only a ready hedge winner as a forwarded endpoint.
+fn note_delivery_winner<T>(ctx: &mut PingoraRequestCtx, delivery: &HedgeDelivery<T>) {
+    if let HedgeDelivery::Ready { address, .. } = delivery {
+        note_winner(ctx, address);
+    }
+}
+
 /// Point passive health at the endpoint that won.
 fn note_winner(ctx: &mut PingoraRequestCtx, address: &Arc<str>) {
     ctx.upstream_contacted = true;
+    ctx.extensions
+        .insert(praxis_filter::UpstreamForwardedEndpoint(Arc::clone(address)));
     ctx.selected_endpoint_index = Some(endpoint_index(ctx, address.as_ref()));
     if let Some(reselector) = &ctx.endpoint_reselector {
         ctx.upstream = Some(reselector.build_upstream(Arc::clone(address)));
@@ -865,6 +872,48 @@ fn client_status(status: Option<u16>) -> u16 {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, reason = "tests")]
 mod tests {
     use super::*;
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "compare authentic winner and failed race affinity evidence"
+    )]
+    fn successful_hedge_marks_only_winning_endpoint_for_stickiness() {
+        let mut ctx = PingoraRequestCtx::default();
+        let winner: Arc<str> = Arc::from("10.0.0.2:80");
+        note_delivery_winner(
+            &mut ctx,
+            &HedgeDelivery::Ready {
+                address: Arc::clone(&winner),
+                response: (),
+            },
+        );
+        assert_eq!(
+            ctx.extensions
+                .get::<praxis_filter::UpstreamForwardedEndpoint>()
+                .map(|marker| &marker.0),
+            Some(&winner),
+            "a real hedge winner must be eligible for header affinity"
+        );
+        drop(ctx);
+
+        let mut failed = PingoraRequestCtx::default();
+        note_delivery_winner(
+            &mut failed,
+            &HedgeDelivery::<()>::Failed {
+                status: Some(502),
+                response: None,
+            },
+        );
+        assert!(
+            failed
+                .extensions
+                .get::<praxis_filter::UpstreamForwardedEndpoint>()
+                .is_none(),
+            "a failed race cannot establish a header binding"
+        );
+        drop(failed);
+    }
 
     #[test]
     fn preparation_rejection_reaches_the_final_error_handler() {

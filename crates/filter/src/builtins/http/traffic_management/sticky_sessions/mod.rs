@@ -351,6 +351,13 @@ impl StickySessionsFilter {
         let Some(session_key) = ctx.filter_metadata.get(META_SESSION_KEY) else {
             return;
         };
+        let forwarded_to_endpoint = ctx
+            .extensions
+            .get::<crate::UpstreamForwardedEndpoint>()
+            .is_some_and(|forwarded| forwarded.0 == *endpoint);
+        if !ctx.upstream_reached || !forwarded_to_endpoint {
+            return;
+        }
         store.put(session_key, Arc::clone(endpoint));
     }
 }

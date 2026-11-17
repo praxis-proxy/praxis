@@ -10,7 +10,13 @@
 //! automatically stripped from outbound requests; use
 //! [`FrameworkHeaders`] to inject metadata that survives sanitization.
 
-use std::time::Duration;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use bytes::Bytes;
 use http::HeaderMap;
@@ -19,6 +25,28 @@ use tokio::sync::OwnedSemaphorePermit;
 
 use super::internals::SubRequestConnector;
 use crate::{backend, egress::Connector};
+
+/// Per-exchange evidence that a connected transport accepted the request head.
+///
+/// Create a fresh witness for each attempt. Clones observe the same attempt,
+/// including after its future is cancelled. A true value does not prove that
+/// the backend processed the request; it preserves that possibility after a
+/// response read fails. Admission, validation and failed dials leave it false.
+#[derive(Clone, Debug, Default)]
+pub struct RequestProgress(Arc<AtomicBool>);
+
+impl RequestProgress {
+    /// Whether this attempt successfully sent its request head.
+    #[must_use]
+    pub fn forwarded(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+
+    /// Publish forwarding only after the transport's head write succeeds.
+    pub(super) fn mark_forwarded(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
 
 /// An outbound HTTP request for a sub-request exchange.
 #[derive(Clone, Debug)]

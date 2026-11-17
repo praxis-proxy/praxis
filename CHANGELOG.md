@@ -78,6 +78,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Create header affinity only for the selected endpoint with forwarding evidence, including nested and hedged requests; failed dials and local responses cannot establish a binding.
 - Settle nested circuit-breaker tokens on filtered subrequest timeout or cancellation without changing neutral half-open recovery policy.
 - Correct guardrails example commands and documentation to describe request
   inspection and 403 responses.

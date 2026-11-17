@@ -534,6 +534,10 @@ impl ProxyHttp for PingoraHttpHandler {
         via::append_request_via(upstream_request, client_ver);
         #[cfg(feature = "otel")]
         inject_upstream_trace_context(upstream_request, &ctx.upstream_client_span)?;
+        if let Some(upstream) = ctx.upstream_for_retry.as_ref() {
+            ctx.extensions
+                .insert(praxis_filter::UpstreamForwardedEndpoint(Arc::clone(&upstream.address)));
+        }
         Ok(())
     }
 

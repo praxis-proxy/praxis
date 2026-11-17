@@ -64,7 +64,7 @@ use bytes::Bytes;
 use http::HeaderMap;
 use praxis_core::{
     connectivity::Upstream,
-    subrequest::{FrameworkHeaders, StreamLimits, SubRequestError},
+    subrequest::{FrameworkHeaders, RequestProgress, StreamLimits, SubRequestError},
 };
 use tracing::{Instrument as _, warn};
 
@@ -235,24 +235,31 @@ pub(super) struct PeerPreparationGate {
 
 /// Parent transport signals suspended while a child sub-request executes.
 #[derive(Default)]
-struct ParentTransportOutcomes(Vec<Option<NestedTransportOutcome>>);
+struct ParentTransportOutcomes(Vec<(Option<NestedTransportOutcome>, Option<crate::UpstreamForwardedEndpoint>)>);
 
 /// Keep child cancellation from changing its parent's circuit outcome.
 fn enter_nested_transport_scope(extensions: &mut RequestExtensions) {
     let parent = extensions.remove::<NestedTransportOutcome>();
     let mut stack = extensions.remove::<ParentTransportOutcomes>().unwrap_or_default();
-    stack.0.push(parent);
+    let forwarded = extensions.remove::<crate::UpstreamForwardedEndpoint>();
+    stack.0.push((parent, forwarded));
     extensions.insert(stack);
 }
 
 /// Restore the signal owned by the containing sub-request.
 fn restore_parent_transport_scope(extensions: &mut RequestExtensions) {
     extensions.remove::<NestedTransportOutcome>();
+    extensions.remove::<crate::UpstreamForwardedEndpoint>();
     let Some(mut stack) = extensions.remove::<ParentTransportOutcomes>() else {
         return;
     };
-    if let Some(Some(parent)) = stack.0.pop() {
-        extensions.insert(parent);
+    if let Some((parent, forwarded)) = stack.0.pop() {
+        if let Some(parent) = parent {
+            extensions.insert(parent);
+        }
+        if let Some(forwarded) = forwarded {
+            extensions.insert(forwarded);
+        }
     }
     if !stack.0.is_empty() {
         extensions.insert(stack);
@@ -854,6 +861,7 @@ impl FilteredSubrequestExecutor {
         let in_transport = Arc::new(AtomicBool::new(false));
         let in_transport_inner = Arc::clone(&in_transport);
         let transport_outcome_inner = transport_outcome.clone();
+        let mut forwarding: Option<(Arc<str>, RequestProgress)> = None;
 
         let step_span = tracing::info_span!("filtered_subrequest", step = label, iteration = iteration);
 
@@ -1016,11 +1024,12 @@ impl FilteredSubrequestExecutor {
                 for address in &fallback_addresses {
                     let mut per_address = upstream.clone();
                     per_address.address = Arc::from(address.to_string().as_str());
-                    built.push(build_peer(&per_address, pipeline.allow_private_upstreams()).await);
+                    let peer = build_peer(&per_address, pipeline.allow_private_upstreams()).await;
+                    built.push((Arc::clone(&per_address.address), peer));
                 }
                 built
             } else {
-                vec![build_peer(upstream, pipeline.allow_private_upstreams()).await]
+                vec![(Arc::clone(&upstream.address), build_peer(upstream, pipeline.allow_private_upstreams()).await)]
             };
             apply_request_header_mutations(&mut sub_headers, &filter_ctx);
             // Mirror the normal proxy path (`apply_authority_override`): a
@@ -1105,7 +1114,7 @@ impl FilteredSubrequestExecutor {
                     };
                     let mut response =
                         Err(SubRequestError::Connect("filtered_subrequest: no addresses to dial".to_owned()));
-                    for peer in &peers {
+                    for (address, peer) in &peers {
                         // Recompute the remaining budget before every fallback
                         // attempt so a slow-but-not-refused earlier address cannot
                         // hand each later attempt the full step budget again; the
@@ -1117,10 +1126,15 @@ impl FilteredSubrequestExecutor {
                         if attempt_budget.is_zero() {
                             break;
                         }
+                        let progress = RequestProgress::default();
+                        forwarding = Some((Arc::clone(address), progress.clone()));
+                        if let Some(selected) = filter_ctx.upstream.as_mut() {
+                            selected.address = Arc::clone(address);
+                        }
                         response = match peer {
                             Ok(peer) => self
                                 .client
-                                .send_streaming(peer, &request, attempt_budget, limits.clone(), Some(&framework_headers))
+                                .send_streaming_with_progress(peer, &request, attempt_budget, limits.clone(), Some(&framework_headers), Some(&progress))
                                 .await,
                             Err(error) => Err(SubRequestError::Connect(error.to_string())),
                         };
@@ -1133,6 +1147,7 @@ impl FilteredSubrequestExecutor {
                         break;
                     }
                     in_transport_inner.store(false, Ordering::Release);
+                    transport::publish_forwarding(&mut filter_ctx, forwarding.as_ref());
                     match response {
                         Ok(response) => {
                             let status = response.status;
@@ -1206,7 +1221,7 @@ impl FilteredSubrequestExecutor {
                 },
                 SubRequestResponseMode::Buffered => {
                     let mut attempt = None;
-                    for peer in &peers {
+                    for (address, peer) in &peers {
                         // Recompute the remaining budget before every fallback
                         // attempt (see the streaming arm). If the step deadline is
                         // already reached, stop dialing and fall through to the
@@ -1217,10 +1232,15 @@ impl FilteredSubrequestExecutor {
                         if attempt_budget.is_zero() {
                             break;
                         }
+                        let progress = RequestProgress::default();
+                        forwarding = Some((Arc::clone(address), progress.clone()));
+                        if let Some(selected) = filter_ctx.upstream.as_mut() {
+                            selected.address = Arc::clone(address);
+                        }
                         let outcome = match peer {
                             Ok(peer) => match self
                                 .client
-                                .execute(peer, &request, self.max_response_bytes.min(pipeline.response_buffer_limit()), attempt_budget, Some(&framework_headers))
+                                .execute_with_progress(peer, &request, self.max_response_bytes.min(pipeline.response_buffer_limit()), attempt_budget, Some(&framework_headers), &progress)
                                 .await
                             {
                                 Ok(response) => (response, ResponseOrigin::Upstream, None),
@@ -1262,6 +1282,7 @@ impl FilteredSubrequestExecutor {
                         )
                     });
                     in_transport_inner.store(false, Ordering::Release);
+                    transport::publish_forwarding(&mut filter_ctx, forwarding.as_ref());
                     transport_outcome_inner.response(response.status);
                     sanitize_subresponse_headers(&mut response.headers);
                     response_header.status = http::StatusCode::from_u16(response.status)
@@ -1318,6 +1339,7 @@ impl FilteredSubrequestExecutor {
             .instrument(step_span))
             .await;
 
+        transport::publish_forwarding(&mut filter_ctx, forwarding.as_ref());
         let outer_deadline = timed.is_err();
         let mut raw = match timed {
             Ok(Ok(raw)) => raw,
