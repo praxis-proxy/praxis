@@ -24,6 +24,9 @@ jobs:
   # ----------------------------------------------------------------------------
 
   lint:
+    env:
+      # 0.10.1 uses a Path API unavailable on our pinned Rust toolchain.
+      CARGO_MACHETE_VERSION: "0.9.2"
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
@@ -37,10 +40,11 @@ jobs:
         uses: praxis-proxy/conventions/.github/actions/setup-rust-lint@2a0d28ddd3690ed73347ddbe59d08dac02f604ce # v0.5.0
 
       - name: Install cargo-machete
-        # setup-rust-lint's rust-cache also restores ~/.cargo/bin, so the binary
-        # may already be present. Install only when it is absent; otherwise
-        # `cargo install` aborts with "binary already exists".
-        run: command -v cargo-machete > /dev/null || cargo install cargo-machete --locked
+        # The shared Rust cache can restore a different or broken binary.
+        run: |
+          if [ "$(cargo machete --version 2>/dev/null || true)" != "$CARGO_MACHETE_VERSION" ]; then
+            cargo install cargo-machete --locked --version "$CARGO_MACHETE_VERSION" --force
+          fi
 
       - name: Lint
         run: make lint
