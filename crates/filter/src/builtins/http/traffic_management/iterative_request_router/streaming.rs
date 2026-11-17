@@ -198,16 +198,7 @@ impl IrrStreamingSession {
 
     /// Reject a complete logical chunk before it can spend bandwidth allowance.
     fn checked_chunk_total(&self, bytes: usize) -> Result<usize, FilterError> {
-        let total = self
-            .emitted_bytes
-            .checked_add(bytes)
-            .ok_or_else(|| -> FilterError { "iterative_request_router: stream byte count overflow".into() })?;
-        if self.max_stream_response_bytes.is_some_and(|limit| total > limit) {
-            return Err("iterative_request_router: logical stream byte limit exceeded"
-                .to_owned()
-                .into());
-        }
-        Ok(total)
+        checked_output_total(self.emitted_bytes, self.max_stream_response_bytes, bytes)
     }
 
     /// Pass the remaining logical ceiling into the active body before pacing.
@@ -486,17 +477,15 @@ impl IrrStreamingSession {
         if let Some(chunk) = self.next_queued().await? {
             return Ok(Some(chunk));
         }
-        if let Some(completion) = self.pending_completion.as_ref()
-            && let Err(error) = self.checked_chunk_total(completion.next_chunk_len())
-        {
-            self.pending_completion = None;
-            self.done = true;
-            return Err(error);
-        }
+        let emitted = self.emitted_bytes;
+        let limit = self.max_stream_response_bytes;
         if let Some(completion) = self.pending_completion.as_mut() {
-            let result = completion.next_chunk().await;
+            let result = completion
+                .next_chunk(|bytes| checked_output_total(emitted, limit, bytes).map(|_| ()))
+                .await;
             if result.is_err() {
                 self.done = true;
+                self.pending_completion = None;
             }
             if let Some(chunk) = result? {
                 return self.checked_chunk(chunk);
@@ -508,16 +497,13 @@ impl IrrStreamingSession {
 
     /// Admit queued buffered-step output only after its logical ceiling check.
     async fn next_queued(&mut self) -> Result<Option<Bytes>, FilterError> {
-        while let Some(output) = self.pending_chunks.front() {
-            if let Err(error) = self.checked_chunk_total(output.next_chunk_len()) {
-                self.pending_chunks.clear();
-                self.done = true;
-                return Err(error);
-            }
-            let Some(output) = self.pending_chunks.front_mut() else {
-                break;
-            };
-            match output.next_chunk().await {
+        let emitted = self.emitted_bytes;
+        let limit = self.max_stream_response_bytes;
+        while let Some(output) = self.pending_chunks.front_mut() {
+            match output
+                .next_chunk(|bytes| checked_output_total(emitted, limit, bytes).map(|_| ()))
+                .await
+            {
                 Ok(Some(chunk)) => return self.checked_chunk(chunk),
                 Ok(None) => {
                     self.pending_chunks.pop_front();
@@ -531,6 +517,17 @@ impl IrrStreamingSession {
         }
         Ok(None)
     }
+}
+
+/// Validate a complete logical output before splitting it into paced prefixes.
+fn checked_output_total(emitted: usize, limit: Option<usize>, bytes: usize) -> Result<usize, FilterError> {
+    let total = emitted
+        .checked_add(bytes)
+        .ok_or_else(|| -> FilterError { "iterative_request_router: stream byte count overflow".into() })?;
+    if limit.is_some_and(|limit| total > limit) {
+        return Err("iterative_request_router: logical stream byte limit exceeded".into());
+    }
+    Ok(total)
 }
 
 /// Enforce the shared retained-state and pending-output ceiling using the

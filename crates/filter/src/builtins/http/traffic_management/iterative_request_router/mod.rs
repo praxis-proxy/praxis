@@ -968,7 +968,7 @@ async fn collect_pending_chunks(
     chunks: impl Iterator<Item = CompletionOutput>,
 ) -> Result<(), FilterError> {
     for mut output in chunks {
-        while let Some(chunk) = output.next_chunk().await? {
+        while let Some(chunk) = output.next_chunk(|_| Ok(())).await? {
             target.extend_from_slice(&chunk);
         }
     }

@@ -60,6 +60,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Check every logical subrequest output against its size limit before pacing,
+  including output following empty emissions or consuming callbacks.
+
 - Bound buffered IRR emissions retained across steps by the overall request
   deadline rather than the timeout of their completed producing step.
 
