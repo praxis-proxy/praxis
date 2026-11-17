@@ -213,7 +213,11 @@ fn is_grpc(session: &Session) -> bool {
 
 /// An event stream has to stay on the streaming path.
 fn is_event_stream(session: &Session) -> bool {
-    contains_header_ascii(session, http::header::ACCEPT, b"text/event-stream")
+    contains_header_ascii(
+        &session.req_header().headers,
+        http::header::ACCEPT,
+        b"text/event-stream",
+    )
 }
 
 /// `header`'s value starts with `prefix`, ignoring ASCII case.
@@ -227,8 +231,8 @@ fn has_header_prefix(session: &Session, header: http::HeaderName, prefix: &[u8])
 }
 
 /// `header`'s value contains `needle`, ignoring ASCII case.
-fn contains_header_ascii(session: &Session, header: http::HeaderName, needle: &[u8]) -> bool {
-    session.req_header().headers.get(header).is_some_and(|value| {
+fn contains_header_ascii(headers: &HeaderMap, header: http::HeaderName, needle: &[u8]) -> bool {
+    headers.get_all(header).iter().any(|value| {
         value
             .as_bytes()
             .windows(needle.len())
@@ -872,6 +876,33 @@ fn client_status(status: Option<u16>) -> u16 {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, reason = "tests")]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accept_sse_in_later_field_stays_streaming() {
+        for values in [
+            vec!["text/event-stream", "application/json"],
+            vec!["application/json", "text/event-stream"],
+            vec!["application/json, text/event-stream"],
+            vec!["application/json", "TEXT/EVENT-STREAM"],
+        ] {
+            let mut headers = HeaderMap::new();
+            for value in values {
+                headers.append(http::header::ACCEPT, value.parse().unwrap());
+            }
+            assert!(
+                contains_header_ascii(&headers, http::header::ACCEPT, b"text/event-stream"),
+                "every Accept field must participate in the SSE gate"
+            );
+        }
+        let mut headers = HeaderMap::new();
+        headers.append(http::header::ACCEPT, "application/json".parse().unwrap());
+        headers.append(http::header::ACCEPT, "text/plain".parse().unwrap());
+        assert!(!contains_header_ascii(
+            &headers,
+            http::header::ACCEPT,
+            b"text/event-stream"
+        ));
+    }
 
     #[test]
     #[expect(
