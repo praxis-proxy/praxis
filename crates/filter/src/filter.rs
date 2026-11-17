@@ -475,6 +475,9 @@ pub trait HttpFilter: Send + Sync {
     /// calls [`FilterAction::Release`] or end-of-stream; use this
     /// when the filter needs the full body before making a decision
     /// (e.g. JSON parsing for routing).
+    /// A filter-declared [`BodyMode::SizeLimit`] does not install an
+    /// independent transfer limit. The listener body ceiling remains
+    /// the hard cap when buffering is requested.
     ///
     /// [`FilterAction::Release`]: crate::FilterAction::Release
     fn request_body_mode(&self) -> BodyMode {
@@ -489,6 +492,9 @@ pub trait HttpFilter: Send + Sync {
     /// calls [`FilterAction::Release`] or end-of-stream; use this
     /// when the filter needs the complete response body (e.g.
     /// response persistence).
+    /// A filter-declared [`BodyMode::SizeLimit`] does not install an
+    /// independent transfer limit. The listener body ceiling remains
+    /// the hard cap when buffering is requested.
     ///
     /// [`FilterAction::Release`]: crate::FilterAction::Release
     fn response_body_mode(&self) -> BodyMode {

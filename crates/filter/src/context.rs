@@ -1040,18 +1040,22 @@ impl HttpFilterContext<'_> {
         Box::pin(client.send_streaming(peer, request, timeout, limits, fw)).await
     }
 
-    /// Upgrade the request body delivery mode for this request.
+    /// Request buffered delivery of this request's body.
     ///
-    /// Merges `mode` into the current mode using ratchet-up
-    /// semantics: `StreamBuffer > SizeLimit > Stream`. A mode
-    /// can only be upgraded, never downgraded.
+    /// Only [`BodyMode::StreamBuffer`] promotes delivery; multiple buffer
+    /// requests use the largest limit. The listener's body ceiling remains
+    /// the hard cap. Passing [`BodyMode::SizeLimit`] does not install an
+    /// independent filter-specific transfer limit.
     pub fn set_request_body_mode(&mut self, mode: BodyMode) {
         merge_body_mode(&mut self.request_body_mode, mode);
     }
 
-    /// Upgrade the response body delivery mode for this request.
+    /// Request buffered delivery of this request's response body.
     ///
-    /// Same ratchet-up semantics as [`set_request_body_mode`].
+    /// Only [`BodyMode::StreamBuffer`] promotes delivery; multiple buffer
+    /// requests use the largest limit. The listener's body ceiling remains
+    /// the hard cap. Passing [`BodyMode::SizeLimit`] does not install an
+    /// independent filter-specific transfer limit.
     ///
     /// [`set_request_body_mode`]: Self::set_request_body_mode
     pub fn set_response_body_mode(&mut self, mode: BodyMode) {
