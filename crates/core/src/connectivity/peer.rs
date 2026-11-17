@@ -999,8 +999,8 @@ fn alpn_for(version: UpstreamHttpVersion) -> ALPN {
 ///
 /// # Errors
 ///
-/// Returns an error if client identity material cannot be converted safely
-/// for Pingora.
+/// Returns an error if explicit CA or client identity material cannot be
+/// converted safely for Pingora.
 ///
 /// [`HttpPeer`]: pingora_core::upstreams::peer::HttpPeer
 /// [`CachedClusterTls`]: praxis_tls::CachedClusterTls
@@ -1012,10 +1012,14 @@ pub fn apply_cached_tls(peer: &mut HttpPeer, tls: &praxis_tls::CachedClusterTls,
         peer.options.verify_hostname = false;
     }
 
-    if let Some(ca) = tls.ca()
-        && let Some(converted) =
-            ca.converted_or_init(|| -> Arc<[pingora_core::utils::tls::WrappedX509]> { Arc::from(ca_from_cached(ca)) })
-    {
+    if let Some(ca) = tls.ca() {
+        let converted = ca
+            .converted_or_init(|| -> Result<Arc<[pingora_core::utils::tls::WrappedX509]>, String> {
+                ca_from_cached(ca).map(Arc::from)
+            })
+            .ok_or("cached CA conversion has an incompatible type")?
+            .as_ref()
+            .map_err(Clone::clone)?;
         peer.options.ca = Some(Arc::clone(converted));
     }
 
@@ -1032,18 +1036,27 @@ pub fn apply_cached_tls(peer: &mut HttpPeer, tls: &praxis_tls::CachedClusterTls,
 
 /// Convert cached CA DER bytes into [`WrappedX509`] values.
 ///
+/// # Errors
+///
+/// Returns an error if no certificate is accepted by both Pingora's X.509
+/// parser and its rustls trust store.
+///
 /// [`WrappedX509`]: pingora_core::utils::tls::WrappedX509
 #[cfg(feature = "pingora")]
-pub fn ca_from_cached(cached: &praxis_tls::CachedCaCerts) -> Vec<pingora_core::utils::tls::WrappedX509> {
-    cached
+pub fn ca_from_cached(
+    cached: &praxis_tls::CachedCaCerts,
+) -> Result<Vec<pingora_core::utils::tls::WrappedX509>, String> {
+    let mut roots = pingora_core::tls::RootCertStore::empty();
+    let converted = cached
         .der_certs()
         .iter()
-        .filter_map(|der| {
-            pingora_core::utils::tls::WrappedX509::parse(der.clone())
-                .inspect_err(|err| tracing::warn!("failed to parse cached CA cert: {err}"))
-                .ok()
-        })
-        .collect()
+        .enumerate()
+        .filter_map(|(index, der)| usable_pingora_ca(der, &mut roots, index))
+        .collect::<Vec<_>>();
+    if converted.is_empty() {
+        return Err("none of the upstream CA certificates is usable".to_owned());
+    }
+    Ok(converted)
 }
 
 /// Convert cached client cert/key DER bytes into a [`CertKey`].
@@ -1071,6 +1084,29 @@ pub fn client_cert_from_cached(
         cached.cert_der().to_vec(),
         cached.key_der().to_vec(),
     ))
+}
+
+/// Retain a CA only when both Pingora parsing and rustls trust accept it.
+#[cfg(feature = "pingora")]
+fn usable_pingora_ca(
+    der: &[u8],
+    roots: &mut pingora_core::tls::RootCertStore,
+    index: usize,
+) -> Option<pingora_core::utils::tls::WrappedX509> {
+    let wrapped = match pingora_core::utils::tls::WrappedX509::parse(der.to_vec()) {
+        Ok(wrapped) => wrapped,
+        Err(error) => {
+            tracing::warn!(index, %error, "skipping CA certificate rejected by Pingora parser");
+            return None;
+        },
+    };
+    match roots.add(pingora_core::tls::CertificateDer::from(der)) {
+        Ok(()) => Some(wrapped),
+        Err(error) => {
+            tracing::warn!(index, %error, "skipping CA certificate rejected by root store");
+            None
+        },
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -1593,17 +1629,25 @@ mod tests {
     #[test]
     #[cfg(feature = "pingora")]
     fn apply_cached_tls_memoizes_ca_conversion() {
-        let cached_ca = Arc::new(praxis_tls::CachedCaCerts::new(vec![vec![1, 2, 3]]));
+        let key = rcgen::KeyPair::generate().unwrap();
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let der = params.self_signed(&key).unwrap().der().to_vec();
+        let cached_ca = Arc::new(praxis_tls::CachedCaCerts::new(vec![der]));
         let converted_a: *const [pingora_core::utils::tls::WrappedX509] = cached_ca
-            .converted_or_init(|| -> Arc<[pingora_core::utils::tls::WrappedX509]> {
-                Arc::from(ca_from_cached(&cached_ca))
+            .converted_or_init(|| -> Result<Arc<[pingora_core::utils::tls::WrappedX509]>, String> {
+                ca_from_cached(&cached_ca).map(Arc::from)
             })
+            .unwrap()
+            .as_ref()
             .map(Arc::as_ptr)
             .unwrap();
         let converted_b: *const [pingora_core::utils::tls::WrappedX509] = cached_ca
-            .converted_or_init(|| -> Arc<[pingora_core::utils::tls::WrappedX509]> {
-                Arc::from(ca_from_cached(&cached_ca))
+            .converted_or_init(|| -> Result<Arc<[pingora_core::utils::tls::WrappedX509]>, String> {
+                ca_from_cached(&cached_ca).map(Arc::from)
             })
+            .unwrap()
+            .as_ref()
             .map(Arc::as_ptr)
             .unwrap();
         assert_eq!(
@@ -1640,6 +1684,21 @@ mod tests {
         assert!(
             client_cert_from_cached(&bad_key).is_err(),
             "raw key bytes rejected by Pingora's key conversion must return an error"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "pingora")]
+    fn pingora_ca_conversion_keeps_valid_root_in_mixed_bundle() {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let valid = params.self_signed(&key).unwrap().der().to_vec();
+        let cached = praxis_tls::CachedCaCerts::new(vec![vec![1, 2, 3], valid]);
+        assert_eq!(
+            ca_from_cached(&cached).unwrap().len(),
+            1,
+            "Pingora must keep the usable root while skipping invalid material"
         );
     }
 

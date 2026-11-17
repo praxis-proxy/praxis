@@ -38,6 +38,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **Breaking:** Pingora helpers `apply_cached_tls`, `ca_from_cached`,
+  `client_cert_from_cached`, and `http_peer` now return `Result`; embedding
+  callers must handle invalid material.
 - **Breaking:** `TcpFilterContext` now carries `lb_selection`; custom
   constructors must initialize it to `None`. Built-in TCP load balancing
   retains each acquired endpoint claim through timeout and cancellation
@@ -74,6 +77,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Reject configured upstream CA bundles with no usable trust anchor during
+  configuration, while retaining valid roots in mixed bundles.
 - Reject malformed upstream mTLS client certificate chains and invalid raw
   keys before Pingora peer construction can abort the proxy.
 - Expose divergent routed endpoint declarations alongside the endpoint-health

@@ -57,9 +57,12 @@ pub fn http_peer(spec: &PeerSpec) -> Result<HttpPeer, EgressError> {
     if spec.tls
         && peer.options.ca.is_none()
         && let Some(anchors) = &spec.trust_anchors
-        && let Some(converted) =
-            anchors.converted_or_init(|| -> Arc<[WrappedX509]> { Arc::from(ca_from_cached(anchors)) })
     {
+        let converted = anchors
+            .converted_or_init(|| -> Result<Arc<[WrappedX509]>, String> { ca_from_cached(anchors).map(Arc::from) })
+            .ok_or_else(|| EgressError::Connect("cached CA conversion has an incompatible type".to_owned()))?
+            .as_ref()
+            .map_err(|error| EgressError::Connect(error.clone()))?;
         peer.options.ca = Some(Arc::clone(converted));
     }
 
@@ -311,7 +314,7 @@ mod tests {
 
     #[test]
     fn trust_anchors_apply_to_tls_peers_without_a_cluster_ca() {
-        let anchors = Arc::new(CachedCaCerts::new(vec![vec![1, 2, 3]]));
+        let anchors = Arc::new(CachedCaCerts::new(vec![ca_der()]));
         let mut spec = PeerSpec::new("127.0.0.1:8443".parse().unwrap(), true, "upstream.test");
         spec.trust_anchors = Some(Arc::clone(&anchors));
 
@@ -351,6 +354,18 @@ mod tests {
             "hostname verification stays on by default"
         );
         assert_eq!(peer.sni, "idp.example.com", "the server name carries over unchanged");
+    }
+
+    #[test]
+    fn explicit_unusable_runtime_ca_returns_error() {
+        let mut spec = PeerSpec::new("127.0.0.1:8443".parse().unwrap(), true, "upstream.test");
+        for roots in [Vec::new(), vec![vec![1, 2, 3]]] {
+            spec.trust_anchors = Some(Arc::new(CachedCaCerts::new(roots)));
+            assert!(
+                matches!(http_peer(&spec), Err(EgressError::Connect(_))),
+                "explicit empty or invalid CA material must fail before dialing"
+            );
+        }
     }
 
     #[tokio::test]
@@ -556,5 +571,13 @@ mod tests {
             Arc::ptr_eq(&first.inner, &second.inner),
             "a cloned connector must share the pool"
         );
+    }
+
+    /// Generate a trust anchor accepted by both Pingora and rustls.
+    fn ca_der() -> Vec<u8> {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        params.self_signed(&key).unwrap().der().to_vec()
     }
 }

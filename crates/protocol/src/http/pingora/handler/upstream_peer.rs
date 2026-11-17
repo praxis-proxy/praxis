@@ -948,7 +948,7 @@ mod tests {
         let ca_path = ca.ca_path.to_str().expect("ca path should be valid UTF-8");
 
         let cached = praxis_tls::CachedCaCerts::from_pem_file(ca_path).expect("valid CA should parse");
-        let wrapped = peer_utils::ca_from_cached(&cached);
+        let wrapped = peer_utils::ca_from_cached(&cached).expect("valid CA should convert");
         assert_eq!(wrapped.len(), 1, "should produce one WrappedX509");
     }
 

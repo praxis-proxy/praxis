@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2024 Praxis Contributors
 
-//! Pre-parsed TLS certificate data for eager caching.
+//! TLS certificate material cached for use by protocol adapters.
 //!
-//! Certs and keys are read from disk once at config time, parsed
-//! from PEM into DER byte vectors, and stored in [`Arc`]-wrapped
-//! containers. Per-connection code converts the DER bytes into
-//! library-specific types without touching the filesystem.
+//! File constructors read and validate certs and keys at config time, then
+//! store DER bytes in [`Arc`]-wrapped containers. Raw constructors only store
+//! bytes; adapters must validate their library-specific conversion and handle
+//! errors before using the material, without touching the filesystem.
 
 use std::{
     any::Any,
@@ -69,7 +69,10 @@ impl fmt::Debug for ConvertedSlot {
 // CachedCaCerts
 // -----------------------------------------------------------------------------
 
-/// DER-encoded CA certificates loaded and parsed at config time.
+/// Cached DER-encoded CA certificate bytes.
+///
+/// File-loaded certificates are validated at config time. Raw bytes passed to
+/// [`Self::new`] remain unchecked until an adapter converts them.
 ///
 /// ```
 /// use praxis_tls::CachedCaCerts;
@@ -87,7 +90,10 @@ pub struct CachedCaCerts {
 }
 
 impl CachedCaCerts {
-    /// Wrap pre-parsed DER certificate bytes.
+    /// Store DER certificate bytes without validating them.
+    ///
+    /// [`Self::from_pem_file`] validates file inputs early. Adapters must use
+    /// fallible conversion for values created directly with this constructor.
     pub fn new(der_certs: Vec<Vec<u8>>) -> Self {
         Self {
             converted: ConvertedSlot::default(),
@@ -119,11 +125,29 @@ impl CachedCaCerts {
     /// # Errors
     ///
     /// Returns [`TlsError`] if the file cannot be read, contains no
-    /// certificates, or has invalid PEM encoding.
+    /// certificates, has invalid PEM encoding, or has no usable trust anchor.
     ///
     /// [`TlsError`]: crate::TlsError
     pub fn from_pem_file(ca_path: &str) -> Result<Self, TlsError> {
-        let certs = load_and_validate_certs(ca_path, "CA")?;
+        let mut roots = rustls::RootCertStore::empty();
+        let certs = load_and_validate_certs(ca_path, "CA")?
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, der)| {
+                validate_ca_der(&der, &mut roots)
+                    .inspect_err(|error| {
+                        tracing::warn!(ca_path, index, %error, "skipping unusable upstream CA certificate");
+                    })
+                    .ok()
+                    .map(|()| der)
+            })
+            .collect::<Vec<_>>();
+        if certs.is_empty() {
+            return Err(TlsError::FileLoadError {
+                path: ca_path.to_owned(),
+                detail: "no usable CA certificates found".to_owned(),
+            });
+        }
         tracing::info!(ca_path, count = certs.len(), "cached CA certificates");
         Ok(Self::new(certs))
     }
@@ -377,6 +401,14 @@ fn validate_x509_der(der: &[u8]) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+/// Require both a parseable X.509 certificate and a usable rustls trust anchor.
+fn validate_ca_der(der: &[u8], roots: &mut rustls::RootCertStore) -> Result<(), String> {
+    validate_x509_der(der)?;
+    roots
+        .add(rustls::pki_types::CertificateDer::from(der))
+        .map_err(|error| error.to_string())
+}
+
 /// Read a PEM certificate file, parse its certificates, and validate
 /// that at least one is present.
 fn load_and_validate_certs(path: &str, context: &str) -> Result<Vec<Vec<u8>>, TlsError> {
@@ -495,6 +527,89 @@ mod tests {
 
         let cached = CachedCaCerts::from_pem_file(path.to_str().unwrap()).expect("multi-cert PEM should parse");
         assert_eq!(cached.der_certs().len(), 2, "should parse two CA certs");
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one table covers empty, invalid, mixed, and multiple usable roots"
+    )]
+    fn ca_bundle_requires_usable_trust_material() {
+        let ca = gen_ca_file();
+        let valid = std::fs::read_to_string(&ca.ca_path).unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("ca-bundle.pem");
+
+        for content in [String::new(), malformed_cert_pem()] {
+            std::fs::write(&path, content).unwrap();
+            let result = CachedCaCerts::from_pem_file(path.to_str().unwrap());
+            assert!(
+                matches!(result, Err(TlsError::FileLoadError { path: error_path, .. }) if error_path == path.to_str().unwrap()),
+                "an empty or unusable CA file must report its path"
+            );
+        }
+
+        std::fs::write(&path, &valid).unwrap();
+        assert_eq!(
+            CachedCaCerts::from_pem_file(path.to_str().unwrap())
+                .unwrap()
+                .der_certs()
+                .len(),
+            1,
+            "a valid CA must be retained"
+        );
+
+        std::fs::write(&path, format!("{valid}{}", malformed_cert_pem())).unwrap();
+        assert_eq!(
+            CachedCaCerts::from_pem_file(path.to_str().unwrap())
+                .unwrap()
+                .der_certs()
+                .len(),
+            1,
+            "a mixed CA bundle must retain the usable root"
+        );
+
+        let second = gen_ca_file();
+        let second_pem = std::fs::read_to_string(&second.ca_path).unwrap();
+        std::fs::write(&path, format!("{valid}{second_pem}")).unwrap();
+        assert_eq!(
+            CachedCaCerts::from_pem_file(path.to_str().unwrap())
+                .unwrap()
+                .der_certs()
+                .len(),
+            2,
+            "two usable roots must both be retained"
+        );
+    }
+
+    #[test]
+    fn ca_bundle_rejects_malformed_validity_and_keeps_valid_member() {
+        let ca = gen_ca_file();
+        let valid = std::fs::read_to_string(&ca.ca_path).unwrap();
+        let mut der = parse_cert_pem(ca.ca_path.to_str().unwrap()).unwrap().remove(0);
+        let timestamp = der.windows(2).position(|bytes| bytes == [0x17, 13]).unwrap();
+        der[timestamp.saturating_add(2)] = b'x';
+        assert!(
+            rustls::RootCertStore::empty()
+                .add(rustls::pki_types::CertificateDer::from(der.as_slice()))
+                .is_ok(),
+            "trust-anchor extraction alone must miss this malformed X.509 date"
+        );
+        let malformed = certificate_pem(&der);
+        std::fs::write(&ca.ca_path, &malformed).unwrap();
+        assert!(
+            matches!(CachedCaCerts::from_pem_file(ca.ca_path.to_str().unwrap()),
+                Err(TlsError::FileLoadError { path, .. }) if path == ca.ca_path.to_str().unwrap()),
+            "an all-unusable Pingora bundle must fail at file loading with its path"
+        );
+        std::fs::write(&ca.ca_path, format!("{malformed}{valid}")).unwrap();
+        let cached = CachedCaCerts::from_pem_file(ca.ca_path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            cached.der_certs().len(),
+            1,
+            "mixed bundles must retain the valid member"
+        );
+        validate_x509_der(&cached.der_certs()[0]).expect("the retained CA must pass X.509 syntax parsing");
     }
 
     #[test]
