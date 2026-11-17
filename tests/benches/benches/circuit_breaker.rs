@@ -16,7 +16,6 @@
     clippy::too_many_lines,
     clippy::panic,
     clippy::unit_arg,
-    clippy::map_with_unused_argument_over_ranges,
     reason = "benchmarks"
 )]
 
@@ -32,6 +31,10 @@ use std::{
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use praxis_core::circuit::{CircuitBreaker, CircuitBreakerConfig, CircuitCheck};
+
+mod circuit_workload;
+
+use circuit_workload::{WorkCounts, run_closed, run_open, worker_iterations};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -210,12 +213,12 @@ fn bench_concurrent_closed(b: &mut criterion::Bencher<'_>, thread_count: usize) 
 
         thread::scope(|scope| {
             let handles: Vec<_> = (0..thread_count)
-                .map(|_| {
+                .map(|worker| {
                     let breaker = Arc::clone(&breaker);
                     let ready = Arc::clone(&ready);
                     let go = Arc::clone(&go);
                     let finished = Arc::clone(&finished);
-                    let count = iterations / u64::try_from(thread_count).unwrap();
+                    let count = worker_iterations(iterations, thread_count, worker);
 
                     scope.spawn(move || {
                         ready.wait();
@@ -223,12 +226,9 @@ fn bench_concurrent_closed(b: &mut criterion::Bencher<'_>, thread_count: usize) 
                             std::hint::spin_loop();
                         }
 
-                        for _ in 0..count {
-                            if let CircuitCheck::Allowed(token) = breaker.try_acquire() {
-                                breaker.record_success(token);
-                            }
-                        }
+                        let counts = run_closed(&breaker, count);
                         finished.fetch_add(1, Ordering::Release);
+                        counts
                     })
                 })
                 .collect();
@@ -242,9 +242,26 @@ fn bench_concurrent_closed(b: &mut criterion::Bencher<'_>, thread_count: usize) 
             }
             let elapsed = start.elapsed();
 
-            for handle in handles {
-                handle.join().unwrap();
-            }
+            let counts = handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .fold(WorkCounts::default(), WorkCounts::combine);
+            assert_eq!(
+                counts.attempted, iterations,
+                "closed workers must attempt every requested acquisition"
+            );
+            assert_eq!(
+                counts.allowed, iterations,
+                "closed breaker must admit every attempted acquisition"
+            );
+            assert_eq!(
+                counts.completed, iterations,
+                "closed workers must record every admitted success"
+            );
+            assert_eq!(
+                counts.rejected, 0,
+                "closed contention must not exercise the rejection path"
+            );
 
             elapsed
         })
@@ -260,9 +277,10 @@ fn bench_concurrent_open(b: &mut criterion::Bencher<'_>, thread_count: usize) {
             half_open_timeout: Duration::from_millis(5_000),
         }));
 
-        if let CircuitCheck::Allowed(token) = breaker.try_acquire() {
-            breaker.record_failure(token);
-        }
+        let CircuitCheck::Allowed(token) = breaker.try_acquire() else {
+            panic!("a fresh breaker must allow the request that trips it");
+        };
+        breaker.record_failure(token);
 
         let ready = Arc::new(Barrier::new(thread_count + 1));
         let go = Arc::new(AtomicBool::new(false));
@@ -270,12 +288,12 @@ fn bench_concurrent_open(b: &mut criterion::Bencher<'_>, thread_count: usize) {
 
         thread::scope(|scope| {
             let handles: Vec<_> = (0..thread_count)
-                .map(|_| {
+                .map(|worker| {
                     let breaker = Arc::clone(&breaker);
                     let ready = Arc::clone(&ready);
                     let go = Arc::clone(&go);
                     let finished = Arc::clone(&finished);
-                    let count = iterations / u64::try_from(thread_count).unwrap();
+                    let count = worker_iterations(iterations, thread_count, worker);
 
                     scope.spawn(move || {
                         ready.wait();
@@ -283,10 +301,9 @@ fn bench_concurrent_open(b: &mut criterion::Bencher<'_>, thread_count: usize) {
                             std::hint::spin_loop();
                         }
 
-                        for _ in 0..count {
-                            let _ = breaker.try_acquire();
-                        }
+                        let counts = run_open(&breaker, count);
                         finished.fetch_add(1, Ordering::Release);
+                        counts
                     })
                 })
                 .collect();
@@ -300,9 +317,20 @@ fn bench_concurrent_open(b: &mut criterion::Bencher<'_>, thread_count: usize) {
             }
             let elapsed = start.elapsed();
 
-            for handle in handles {
-                handle.join().unwrap();
-            }
+            let counts = handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .fold(WorkCounts::default(), WorkCounts::combine);
+            assert_eq!(
+                counts.attempted, iterations,
+                "open workers must attempt every requested acquisition"
+            );
+            assert_eq!(
+                counts.rejected, iterations,
+                "tripped breaker must reject every attempted acquisition"
+            );
+            assert_eq!(counts.allowed, 0, "open contention must not admit a request");
+            assert_eq!(counts.completed, 0, "open contention must not issue tokens to complete");
 
             elapsed
         })

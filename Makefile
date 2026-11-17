@@ -959,8 +959,9 @@ build-test-proxy:
 	$(call require-features,$(call package-features,praxis-proxy))
 	cargo build -p praxis-proxy --features $(call package-features,praxis-proxy)
 
-# Everything under tests/ (schema, security, resilience, integration) in a
-# single pass, every feature on. Conformance is separate (test-conformance).
+# The integration suites run in a single pass with their optional features
+# enabled. The benchmark package adds untimed fixture tests; Criterion bench
+# targets are not selected. Conformance is separate (test-conformance).
 test-integration: build-test-proxy ## schema, security, resilience and integration suites
 	$(call require-features,$(call package-features,$(SUITE_PACKAGES)))
 	PRAXIS_BIN="$(TEST_PROXY_BIN)" cargo test --features $(call package-features,$(SUITE_PACKAGES)) \
@@ -970,6 +971,7 @@ test-integration: build-test-proxy ## schema, security, resilience and integrati
 		-p praxis-tests-resilience \
 		-p praxis-tests-rollout \
 		-p praxis-tests-integration \
+		-p praxis-tests-benches \
 		$(_NOCAPTURE)
 
 test-conformance: $(H2SPEC) ## RFC conformance suite (fetches h2spec)
@@ -1129,9 +1131,10 @@ publish: ## publish the release crates to crates.io
 # cannot reach, and that lib coverage is what keeps the workspace above the
 # threshold. Only their own source is kept out of the measurement, via the
 # --ignore-filename-regex 'tests/' below. `cargo llvm-cov --exclude <pkg>` would
-# stop those tests running entirely, dropping the covered lib code with them, so
-# only genuinely non-contributing packages are excluded: benches (no #[test]
-# cases), conformance (needs the external h2spec binary), and xtask (dev tool).
+# stop those tests running entirely, dropping the covered lib code with them.
+# The benchmark package is excluded from this coverage run; its untimed
+# fixture tests run in test-integration. Conformance needs the external h2spec
+# binary and xtask is a dev tool, so both are excluded here too.
 COVERAGE_MIN  := 96
 LLVM_COV_ARGS := --workspace \
 	--exclude praxis-tests-benches \
