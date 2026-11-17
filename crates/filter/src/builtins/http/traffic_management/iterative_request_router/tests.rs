@@ -333,6 +333,37 @@ steps:
     );
 }
 
+#[cfg(feature = "cloud-events-filter")]
+#[test]
+fn rejects_request_complete_cloud_events_in_step() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        "
+initial_step: step1
+steps:
+  - name: step1
+    filters:
+      - filter: cloud_events
+        on: request_complete
+        destination: https://events.example.test/events
+        source: urn:praxis:test
+        type: test.event
+      - filter: static_response
+        status: 200
+    on_result:
+      - default: true
+        done: true
+",
+    )
+    .unwrap();
+    let err = super::IterativeRequestRouterFilter::from_config(&yaml)
+        .err()
+        .expect("a request-completion observer in an iterative step must be rejected");
+    assert!(
+        err.to_string().contains("request-completion observer"),
+        "unexpected error: {err}"
+    );
+}
+
 #[test]
 fn rejects_protocol_only_compression_step() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(

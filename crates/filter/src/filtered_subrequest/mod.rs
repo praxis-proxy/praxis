@@ -516,6 +516,8 @@ impl FilteredSubrequestExecutor {
     /// the transition-time headers and a pull-based body that keeps applying the
     /// chain's response-body filters as chunks flow; otherwise the fully
     /// filtered response is returned as [`CalloutResponse::Buffered`].
+    /// A pipeline declaring terminal request-completion observers is rejected:
+    /// a subrequest has no listener completion callback for that hook.
     ///
     /// # Errors
     ///
@@ -787,6 +789,14 @@ impl FilteredSubrequestExecutor {
         // Every error below is handed back through `into_parts`, which restores
         // one parent checkpoint, so enter the scope before the first of them.
         enter_nested_upstream_scope(&mut extensions, inherits_binding);
+        if pipeline.has_request_completion_observer() {
+            return Err(FilteredSubrequestError::new(
+                "filtered_subrequest: request-completion observers require a listener request"
+                    .to_owned()
+                    .into(),
+                extensions,
+            ));
+        }
 
         let remaining = deadline
             .checked_duration_since(Instant::now())

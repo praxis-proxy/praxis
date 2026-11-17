@@ -58,7 +58,8 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | [access-log-syslog.yaml](configs/observability/access-log-syslog.yaml) | Ships access log records to a syslog daemon as RFC 3164 messages, bypassing the tracing subscriber |
 | [access-log-template.yaml](configs/observability/access-log-template.yaml) | Renders a configurable text line for each request |
 | [access-logging.yaml](configs/observability/access-logging.yaml) | Structured JSON logging with sampling; logs ~10% of requests. request_id ensures each log line has a correlation ID. access_log emits method, path, status, and timing |
-| [cloud-events.yaml](configs/observability/cloud-events.yaml) | Publishes a bounded, best-effort CloudEvents 1.0 response event after the upstream response completes |
+| [cloud-events-request-complete.yaml](configs/observability/cloud-events-request-complete.yaml) | Publishes a bounded, best-effort CloudEvent when a request ends, including responses that abort after their headers are sent |
+| [cloud-events.yaml](configs/observability/cloud-events.yaml) | Publishes a bounded, best-effort CloudEvents 1.0 response event after a final bodyless response or response end-of-stream |
 | [errors-total.yaml](configs/observability/errors-total.yaml) | Prometheus counter for proxy errors classified by cause, covering filter rejections, timeouts, unreachable upstreams and internal faults |
 | [grpc-access-log.yaml](configs/observability/grpc-access-log.yaml) | Logs how each gRPC call ended |
 | [grpc-health-check.yaml](configs/observability/grpc-health-check.yaml) | Probes upstream endpoints with `grpc.health.v1.Health/Check` instead of an HTTP GET |

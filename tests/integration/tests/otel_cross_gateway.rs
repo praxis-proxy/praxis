@@ -938,7 +938,13 @@ fn cloud_events_delivery_keeps_the_request_span_as_parent() {
             .expect("signal CloudEvents delivery finished");
     });
     let endpoint = format!("http://127.0.0.1:{collector_port}");
-    let config = cloud_events_proxy_config(free_port(), backend.port(), event_port, &endpoint, false);
+    let config = cloud_events_proxy_config(
+        free_port(),
+        backend.port(),
+        event_port,
+        &endpoint,
+        CloudEventsScenario::CompletedResponse,
+    );
     let tracing_guard = praxis_core::logging::init_tracing(&config).expect("OTLP tracing setup");
     let proxy = start_full_proxy(&config);
     wait_for_tcp(proxy.addr());
@@ -1084,7 +1090,13 @@ fn cloud_events_fallback_dispatch_keeps_the_request_span_as_parent() {
             .expect("write incomplete upstream response body");
     });
     let endpoint = format!("http://127.0.0.1:{collector_port}");
-    let config = cloud_events_proxy_config(free_port(), truncated_port, event_port, &endpoint, true);
+    let config = cloud_events_proxy_config(
+        free_port(),
+        truncated_port,
+        event_port,
+        &endpoint,
+        CloudEventsScenario::AbortedWithAccessLog,
+    );
     let tracing_guard = praxis_core::logging::init_tracing(&config).expect("OTLP tracing setup");
     let proxy = start_full_proxy(&config);
     wait_for_tcp(proxy.addr());
@@ -1137,17 +1149,26 @@ fn cloud_events_fallback_dispatch_keeps_the_request_span_as_parent() {
 }
 
 #[cfg(feature = "cloud-events-filter")]
+/// `CloudEvents` phase and access-log composition for the two tracing fixtures.
+#[derive(Clone, Copy)]
+enum CloudEventsScenario {
+    /// A normal response reaches body end-of-stream.
+    CompletedResponse,
+    /// A response aborts after headers, with independent access logging.
+    AbortedWithAccessLog,
+}
+
+#[cfg(feature = "cloud-events-filter")]
 fn cloud_events_proxy_config(
     listener_port: u16,
     backend_port: u16,
     event_port: u16,
     endpoint: &str,
-    include_access_log: bool,
+    scenario: CloudEventsScenario,
 ) -> Config {
-    let access_log_filter = if include_access_log {
-        "      - filter: access_log\n"
-    } else {
-        ""
+    let (phase, access_log_filter) = match scenario {
+        CloudEventsScenario::CompletedResponse => ("response_complete", ""),
+        CloudEventsScenario::AbortedWithAccessLog => ("request_complete", "      - filter: access_log\n"),
     };
     let yaml = format!(
         r#"
@@ -1160,7 +1181,7 @@ filter_chains:
     filters:
       - filter: trace_context
       - filter: cloud_events
-        on: response_complete
+        on: {phase}
         destination: "http://127.0.0.1:{event_port}/events"
         source: urn:praxis:test
         type: test.response.completed

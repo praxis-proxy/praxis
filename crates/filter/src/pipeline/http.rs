@@ -417,6 +417,10 @@ impl FilterPipeline {
     ///
     /// Returns [`FilterError`] if the filter fails with a closed
     /// `failure_mode`.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "response hook execution also records terminal observer eligibility"
+    )]
     async fn run_response_hook(
         &self,
         pf: &PipelineFilter,
@@ -425,7 +429,19 @@ impl FilterPipeline {
         let AnyFilter::Http(http_filter) = &pf.filter else {
             return Ok(None);
         };
+        let interim = ctx.response_header.as_ref().is_some_and(|response| {
+            response.status.is_informational() && response.status != http::StatusCode::SWITCHING_PROTOCOLS
+        });
+        let track_completion = self.has_request_completion_observer
+            && ctx.response_header.is_some()
+            && !interim
+            && http_filter.observes_request_completion();
         if skip_by_response_conditions(http_filter.as_ref(), &pf.response_conditions, ctx) {
+            if track_completion {
+                ctx.extensions
+                    .get_or_insert_with(super::CompletionResponseHooks::default)
+                    .mark(pf.filter_id, false);
+            }
             return Ok(None);
         }
         ctx.current_filter_id = Some(pf.filter_id);
@@ -437,7 +453,13 @@ impl FilterPipeline {
         )
         .await;
         ctx.current_filter_id = None;
-        match outcome? {
+        let outcome = outcome?;
+        if track_completion {
+            ctx.extensions
+                .get_or_insert_with(super::CompletionResponseHooks::default)
+                .mark(pf.filter_id, true);
+        }
+        match outcome {
             HeaderFilterOutcome::Continue
             | HeaderFilterOutcome::TerminalResponse(_)
             | HeaderFilterOutcome::StreamingTerminalResponse(_) => Ok(None),

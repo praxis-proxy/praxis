@@ -3524,6 +3524,7 @@ async fn skip_to_excludes_skipped_filters_from_response() {
 
     let pipeline = with_body_indices(FilterPipeline {
         body_capabilities: BodyCapabilities::default(),
+        has_request_completion_observer: false,
         compression: None,
         filters: vec![filter_a, filter_b, filter_c],
         record_filter_duration_metrics: false,
@@ -3607,6 +3608,7 @@ async fn skip_to_excludes_skipped_filters_from_body_hooks() {
 
     let pipeline = with_body_indices(FilterPipeline {
         body_capabilities: BodyCapabilities::default(),
+        has_request_completion_observer: false,
         compression: None,
         filters: vec![filter_a, filter_b, filter_c],
         record_filter_duration_metrics: false,
@@ -3668,6 +3670,7 @@ async fn body_hooks_run_for_every_filter_before_the_request_phase() {
 
     let pipeline = with_body_indices(FilterPipeline {
         body_capabilities: BodyCapabilities::default(),
+        has_request_completion_observer: false,
         compression: None,
         filters: vec![
             PipelineFilter::new(
@@ -3742,6 +3745,7 @@ async fn all_executed_filters_run_on_response() {
 
     let pipeline = with_body_indices(FilterPipeline {
         body_capabilities: BodyCapabilities::default(),
+        has_request_completion_observer: false,
         compression: None,
         filters: vec![
             PipelineFilter::new(
@@ -3972,6 +3976,7 @@ async fn skipped_filter_skips_its_branches() {
 
     let pipeline = with_body_indices(FilterPipeline {
         body_capabilities: BodyCapabilities::default(),
+        has_request_completion_observer: false,
         compression: None,
         filters: vec![parent],
         record_filter_duration_metrics: false,
@@ -4787,6 +4792,30 @@ impl HttpFilter for NamedNoopFilter {
     }
 }
 
+/// Assert deferred dispatch establishes the selected invocation's identity.
+struct DeferredIdentityProbe {
+    /// Identity assigned to the wrapped access-log instance.
+    expected_id: usize,
+    /// Real access-log implementation, retaining its sink and field assertions.
+    inner: AnyFilter,
+}
+
+#[async_trait]
+impl HttpFilter for DeferredIdentityProbe {
+    fn name(&self) -> &'static str {
+        "access_log"
+    }
+
+    async fn on_request(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Continue)
+    }
+
+    fn emit_deferred_record(&self, ctx: &crate::HttpFilterContext<'_>, status: u16) -> bool {
+        assert_eq!(ctx.current_filter_id, Some(self.expected_id));
+        self.inner.emit_deferred_record(ctx, status)
+    }
+}
+
 /// A filter that immediately rejects all requests.
 struct RejectFilter;
 
@@ -5572,6 +5601,7 @@ impl HttpFilter for StreamBufferBodyDoneFilter {
 /// Recompute the precomputed body-filter index lists for a hand-built
 /// pipeline literal, mirroring what [`FilterPipeline::build`] does.
 fn with_body_indices(mut pipeline: FilterPipeline) -> FilterPipeline {
+    pipeline.has_request_completion_observer = super::pipeline_has_request_completion_observer(&pipeline.filters);
     let (request, response) = super::body::body_filter_indices(&pipeline.filters);
     pipeline.request_head_filter_indices = super::body::request_head_filter_indices(&pipeline.filters);
     pipeline.request_body_filter_indices = request;
@@ -5591,6 +5621,7 @@ fn with_body_indices(mut pipeline: FilterPipeline) -> FilterPipeline {
 fn test_pipeline(body_capabilities: BodyCapabilities, filters: Vec<PipelineFilter>) -> FilterPipeline {
     with_body_indices(FilterPipeline {
         body_capabilities,
+        has_request_completion_observer: false,
         compression: None,
         filters,
         record_filter_duration_metrics: false,
@@ -6034,6 +6065,7 @@ fn make_pipeline(filters: Vec<Box<dyn HttpFilter>>) -> FilterPipeline {
 
     with_body_indices(FilterPipeline {
         body_capabilities,
+        has_request_completion_observer: false,
         compression: None,
         filters,
         record_filter_duration_metrics: false,
@@ -6075,6 +6107,7 @@ fn make_pipeline_with_conditions(
 
     with_body_indices(FilterPipeline {
         body_capabilities,
+        has_request_completion_observer: false,
         compression: None,
         filters,
         record_filter_duration_metrics: false,
@@ -6116,6 +6149,7 @@ fn make_pipeline_with_response_conditions(
 
     with_body_indices(FilterPipeline {
         body_capabilities,
+        has_request_completion_observer: false,
         compression: None,
         filters,
         record_filter_duration_metrics: false,
@@ -6787,6 +6821,7 @@ fn streaming_capability_detected_when_filter_declares_it() {
     let streaming_pf = super::test_filters::streaming_capable_filter();
     let pipeline = with_body_indices(FilterPipeline {
         body_capabilities: BodyCapabilities::default(),
+        has_request_completion_observer: false,
         compression: None,
         filters: vec![streaming_pf],
         health_registry: None,
@@ -8762,6 +8797,346 @@ mod bound_upstream_body_barrier {
 // -----------------------------------------------------------------------------
 // filter_request_conditions_match (selection axis)
 // -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn deferred_access_record_uses_first_eligible_instance() {
+    let dir = tempfile::tempdir().unwrap();
+    let excluded = dir.path().join("excluded.ndjson");
+    let included = dir.path().join("included.ndjson");
+    let entries = format!(
+        r#"
+- filter: access_log
+  fields: [path]
+  sink: {{type: file, path: "{}"}}
+  conditions:
+    - when:
+        path_prefix: /export
+- filter: access_log
+  fields: [status]
+  sink: {{type: file, path: "{}"}}
+  conditions:
+    - when:
+        path_prefix: /private
+"#,
+        excluded.display(),
+        included.display(),
+    );
+    let mut entries: Vec<FilterEntry> = serde_yaml::from_str(&entries).unwrap();
+    let mut pipeline = FilterPipeline::build(&mut entries, &FilterRegistry::with_builtins()).unwrap();
+    let selected = pipeline.filters.get_mut(1).unwrap();
+    let inner = std::mem::replace(
+        &mut selected.filter,
+        AnyFilter::Http(Box::new(NamedNoopFilter("placeholder"))),
+    );
+    selected.filter = AnyFilter::Http(Box::new(DeferredIdentityProbe {
+        expected_id: selected.filter_id,
+        inner,
+    }));
+    let request = crate::test_utils::make_request(Method::GET, "/private");
+    let mut ctx = crate::test_utils::make_filter_context(&request);
+    let time_source = praxis_core::time::FixedTimeSource::new(std::time::Duration::from_millis(1_700_000_000_123));
+    ctx.time_source = &time_source;
+    ctx.current_filter_id = Some(99);
+    assert!(pipeline.emit_deferred_access_record(&mut ctx, 502));
+    let contents = wait_for_deferred_access_record(&included).await;
+    let record: serde_json::Value = serde_json::from_str(contents.lines().next().unwrap()).unwrap();
+    assert_eq!(
+        record
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>(),
+        ["status", "timestamp"].into_iter().collect()
+    );
+    assert_eq!(record["timestamp"], "2023-11-14T22:13:20.123Z");
+    assert_eq!(record["status"], "502");
+    assert!(!excluded.exists() || std::fs::read_to_string(&excluded).unwrap_or_default().is_empty());
+    assert_eq!(
+        ctx.current_filter_id,
+        Some(99),
+        "identity must be restored after dispatch"
+    );
+}
+
+#[cfg(feature = "cloud-events-filter")]
+#[tokio::test]
+async fn deferred_access_log_is_not_claimed_by_cloud_events() {
+    for cloud_first in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let access_path = dir.path().join("access.ndjson");
+        let cloud = "- filter: cloud_events
+  on: response_complete
+  destination: http://127.0.0.1:9/events
+  source: urn:praxis:test
+  type: test.event
+";
+        let access = format!(
+            "- filter: access_log\n  fields: [status]\n  sink: {{type: file, path: \"{}\"}}\n",
+            access_path.display()
+        );
+        let yaml = if cloud_first {
+            format!("{cloud}{access}")
+        } else {
+            format!("{access}{cloud}")
+        };
+        let mut entries: Vec<FilterEntry> = serde_yaml::from_str(&yaml).unwrap();
+        let pipeline = FilterPipeline::build(&mut entries, &FilterRegistry::with_builtins()).unwrap();
+        let request = crate::test_utils::make_request(Method::GET, "/private");
+        let mut ctx = crate::test_utils::make_filter_context(&request);
+        assert!(pipeline.emit_deferred_access_record(&mut ctx, 502));
+        let contents = wait_for_deferred_access_record(&access_path).await;
+        assert!(contents.contains("\"status\":\"502\""));
+    }
+}
+
+/// Record each terminal hook's bound invocation identity and written status.
+struct CompletionProbe(Arc<std::sync::Mutex<Vec<(usize, u16)>>>);
+
+/// Stop the response unwind before an earlier completion observer.
+struct RejectingResponseFilter;
+
+#[async_trait]
+impl HttpFilter for RejectingResponseFilter {
+    fn name(&self) -> &'static str {
+        "rejecting_response"
+    }
+
+    async fn on_request(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Continue)
+    }
+
+    async fn on_response(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Reject(crate::Rejection::status(500)))
+    }
+}
+
+#[async_trait]
+impl HttpFilter for CompletionProbe {
+    fn name(&self) -> &'static str {
+        "completion_probe"
+    }
+
+    async fn on_request(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Continue)
+    }
+
+    fn on_request_complete(&self, ctx: &mut crate::HttpFilterContext<'_>, status: u16) {
+        self.0.lock().unwrap().push((ctx.current_filter_id.unwrap(), status));
+    }
+
+    fn observes_request_completion(&self) -> bool {
+        true
+    }
+}
+
+#[test]
+fn request_completion_keeps_invocations_and_fails_closed_without_status() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut pipeline = make_pipeline(vec![
+        Box::new(CompletionProbe(Arc::clone(&seen))),
+        Box::new(CompletionProbe(Arc::clone(&seen))),
+    ]);
+    pipeline.filters[0].response_conditions = serde_yaml::from_str("- when: {status: [502]}").unwrap();
+    pipeline.filters[1].response_conditions = serde_yaml::from_str("- when: {status: [503]}").unwrap();
+    let request = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&request);
+    ctx.executed_filter_indices = vec![true, true];
+    ctx.current_filter_id = Some(99);
+
+    pipeline.emit_request_completion(&mut ctx, 0);
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "unknown status cannot match response scope"
+    );
+    pipeline.emit_request_completion(&mut ctx, 502);
+    pipeline.emit_request_completion(&mut ctx, 503);
+    assert_eq!(*seen.lock().unwrap(), [(0, 502), (1, 503)]);
+    assert_eq!(ctx.current_filter_id, Some(99));
+
+    ctx.executed_filter_indices[1] = false;
+    pipeline.emit_request_completion(&mut ctx, 503);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [(0, 502), (1, 503)],
+        "skipped request scope stays skipped"
+    );
+}
+
+#[test]
+fn unreached_response_hook_fails_closed_for_header_scope() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut pipeline = make_pipeline(vec![
+        Box::new(CompletionProbe(Arc::clone(&seen))),
+        Box::new(CompletionProbe(Arc::clone(&seen))),
+        Box::new(CompletionProbe(Arc::clone(&seen))),
+    ]);
+    pipeline.filters[0].response_conditions = serde_yaml::from_str("- when: {headers_present: [x-policy]}").unwrap();
+    pipeline.filters[1].response_conditions = serde_yaml::from_str("- unless: {headers_present: [x-policy]}").unwrap();
+    pipeline.filters[2].response_conditions = serde_yaml::from_str("- when: {status: [502]}").unwrap();
+    let request = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&request);
+    ctx.executed_filter_indices = vec![true, true, true];
+
+    pipeline.emit_request_completion(&mut ctx, 502);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [(2, 502)],
+        "unknown headers cannot satisfy either header scope"
+    );
+}
+
+#[test]
+fn pipeline_without_completion_observer_skips_terminal_dispatch() {
+    let pipeline = make_pipeline(vec![Box::new(NamedNoopFilter("ordinary"))]);
+    assert!(!pipeline.has_request_completion_observer());
+    let request = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&request);
+    ctx.executed_filter_indices = vec![true];
+    ctx.current_filter_id = Some(99);
+    pipeline.emit_request_completion(&mut ctx, 200);
+    assert_eq!(ctx.current_filter_id, Some(99));
+}
+
+#[tokio::test]
+async fn request_completion_reaches_only_executed_branch_invocations() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut pipeline = make_pipeline(vec![Box::new(NamedNoopFilter("host"))]);
+    pipeline.filters[0].branches = vec![ResolvedBranch {
+        condition: None,
+        filters: vec![PipelineFilter::new(
+            1,
+            AnyFilter::Http(Box::new(CompletionProbe(Arc::clone(&seen)))),
+            vec![],
+            vec![],
+        )],
+        max_iterations: None,
+        name: Arc::from("completion_branch"),
+        rejoin: RejoinTarget::Next,
+    }];
+    pipeline.has_request_completion_observer = super::pipeline_has_request_completion_observer(&pipeline.filters);
+    assert!(pipeline.has_request_completion_observer());
+    let request = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&request);
+    ctx.executed_filter_indices = vec![true];
+    pipeline.emit_request_completion(&mut ctx, 200);
+    assert!(seen.lock().unwrap().is_empty());
+    ctx.executed_branch_filters = vec![false, true];
+    drop(pipeline.execute_http_response(&mut ctx).await.unwrap());
+    pipeline.emit_request_completion(&mut ctx, 200);
+    assert_eq!(*seen.lock().unwrap(), [(1, 200)]);
+}
+
+#[tokio::test]
+async fn request_completion_respects_recorded_response_hook_scope() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut pipeline = make_pipeline(vec![
+        Box::new(CompletionProbe(Arc::clone(&seen))),
+        Box::new(CompletionProbe(Arc::clone(&seen))),
+    ]);
+    pipeline.filters[0].response_conditions = serde_yaml::from_str("- when: {status: [200]}").unwrap();
+    pipeline.filters[1].response_conditions = serde_yaml::from_str("- when: {status: [201]}").unwrap();
+    let request = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&request);
+    ctx.executed_filter_indices = vec![true, true];
+    let mut response = crate::test_utils::make_response();
+    ctx.response_header = Some(&mut response);
+    drop(pipeline.execute_http_response(&mut ctx).await.unwrap());
+    ctx.response_header = None;
+
+    pipeline.emit_request_completion(&mut ctx, 200);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [(0, 200)],
+        "201-scoped observer did not run its response hook"
+    );
+}
+
+#[tokio::test]
+async fn interim_response_never_authorizes_completion_scope() {
+    for (interim_scope, final_scope, expected) in [(103, 200, 1), (200, 103, 0)] {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut pipeline = make_pipeline(vec![
+            Box::new(CompletionProbe(Arc::clone(&seen))),
+            Box::new(CompletionProbe(Arc::clone(&seen))),
+        ]);
+        pipeline.filters[0].response_conditions =
+            serde_yaml::from_str(&format!("- when: {{status: [{interim_scope}]}}")).unwrap();
+        pipeline.filters[1].response_conditions =
+            serde_yaml::from_str(&format!("- when: {{status: [{final_scope}]}}")).unwrap();
+        let request = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&request);
+        ctx.executed_filter_indices = vec![true, true];
+
+        let mut interim = crate::test_utils::make_response();
+        interim.status = StatusCode::EARLY_HINTS;
+        ctx.response_header = Some(&mut interim);
+        drop(pipeline.execute_http_response(&mut ctx).await.unwrap());
+        ctx.response_header = None;
+        assert!(ctx.extensions.get::<super::CompletionResponseHooks>().is_none());
+
+        let mut final_response = crate::test_utils::make_response();
+        final_response.status = StatusCode::OK;
+        ctx.response_header = Some(&mut final_response);
+        drop(pipeline.execute_http_response(&mut ctx).await.unwrap());
+        ctx.response_header = None;
+        pipeline.emit_request_completion(&mut ctx, 200);
+        assert_eq!(*seen.lock().unwrap(), [(expected, 200)]);
+    }
+}
+
+#[tokio::test]
+async fn interim_only_failure_uses_terminal_status_scope() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut pipeline = make_pipeline(vec![Box::new(CompletionProbe(Arc::clone(&seen)))]);
+    pipeline.filters[0].response_conditions = serde_yaml::from_str("- when: {status: [502]}").unwrap();
+    let request = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&request);
+    ctx.executed_filter_indices = vec![true];
+    let mut interim = crate::test_utils::make_response();
+    interim.status = StatusCode::EARLY_HINTS;
+    ctx.response_header = Some(&mut interim);
+    drop(pipeline.execute_http_response(&mut ctx).await.unwrap());
+    ctx.response_header = None;
+    pipeline.emit_request_completion(&mut ctx, 502);
+    assert_eq!(*seen.lock().unwrap(), [(0, 502)]);
+}
+
+#[tokio::test]
+async fn response_short_circuit_still_runs_terminal_observer() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut pipeline = make_pipeline(vec![
+        Box::new(CompletionProbe(Arc::clone(&seen))),
+        Box::new(RejectingResponseFilter),
+    ]);
+    pipeline.filters[0].response_conditions = serde_yaml::from_str("- when: {status: [500]}").unwrap();
+    let request = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&request);
+    ctx.executed_filter_indices = vec![true, true];
+    let mut response = crate::test_utils::make_response();
+    ctx.response_header = Some(&mut response);
+    let result = pipeline.execute_http_response(&mut ctx).await.unwrap();
+    assert!(matches!(result, FilterAction::Reject(_)));
+    ctx.response_header = None;
+
+    pipeline.emit_request_completion(&mut ctx, 500);
+    assert_eq!(*seen.lock().unwrap(), [(0, 500)]);
+}
+
+/// Wait for exactly one deferred access record without blocking the runtime.
+async fn wait_for_deferred_access_record(path: &std::path::Path) -> String {
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let contents = std::fs::read_to_string(path).unwrap_or_default();
+            if contents.lines().count() == 1 {
+                return contents;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("exactly one deferred access record within one second")
+}
 
 /// Build a single-`access_log`-filter pipeline scoped to `provider` via a
 /// `selected_upstream` `when` condition. `build` does not enforce ordering, so

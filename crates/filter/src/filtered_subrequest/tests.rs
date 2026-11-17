@@ -9,6 +9,51 @@
 
 use http::HeaderMap;
 
+#[cfg(feature = "cloud-events-filter")]
+#[tokio::test]
+#[expect(
+    clippy::large_futures,
+    reason = "drives the filtered subrequest API through its placement guard"
+)]
+async fn direct_callout_rejects_request_completion_observer() {
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+
+    let registry = crate::FilterRegistry::with_builtins();
+    let mut entries: Vec<crate::FilterEntry> = serde_yaml::from_str(
+        "- filter: cloud_events\n  on: request_complete\n  destination: https://events.example.test/events\n  source: urn:praxis:test\n  type: test.event\n",
+    )
+    .unwrap();
+    let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
+    let client = praxis_core::subrequest::SubRequestClient::new(crate::test_support::connector(1, None));
+    let downstream = crate::SubrequestRuntime::new(None, false, None, Instant::now());
+    let executor =
+        crate::FilteredSubrequestExecutor::for_callout(client, downstream, 0, 1_048_576, Duration::from_secs(5));
+    let request = crate::SubRequest {
+        method: http::Method::GET,
+        uri: http::Uri::from_static("/"),
+        headers: HeaderMap::new(),
+        body: bytes::Bytes::new(),
+    };
+    let result = executor
+        .run(
+            &pipeline,
+            &request,
+            crate::RequestExtensions::default(),
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await;
+    let err = result
+        .err()
+        .expect("direct callout must reject an unsupported completion observer");
+    assert!(
+        err.to_string()
+            .contains("request-completion observers require a listener request")
+    );
+}
+
 // -----------------------------------------------------------------------------
 // Rejection Conversion
 // -----------------------------------------------------------------------------

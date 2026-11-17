@@ -32,7 +32,7 @@ use super::{
     connected_to_upstream, fail_to_proxy,
     health_util::{ended_by_client, record_passive_health},
     hop_by_hop::{self, RemoveHeader as _},
-    logging_util::{logging_cleanup, maybe_emit_fallback_access_log},
+    logging_util::{emit_completion_observers, logging_cleanup},
     metrics_util::emit_request_metrics,
     request_body_filter, request_filter, response_body_filter, response_filter, response_trailer_filter,
     response_trailers,
@@ -627,7 +627,7 @@ impl ProxyHttp for PingoraHttpHandler {
             release_retry_state(ctx);
             ctx.ended_by_client = ended_by_client(e, ctx.upstream_response_status);
             logging_cleanup(&pipeline, ctx).await;
-            maybe_emit_fallback_access_log(&pipeline, written_status, ctx);
+            emit_completion_observers(&pipeline, written_status, ctx);
         }
         .instrument(span)
         .await;

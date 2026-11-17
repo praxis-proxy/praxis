@@ -140,7 +140,14 @@ pub struct CloudEventsFilter {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CloudEventsFilterConfig {
-    /// Lifecycle phase for this publisher.
+    /// Choose `response_complete` for a final bodyless response or response-body
+    /// end-of-stream, and `request_complete` for terminal success, aborts, or
+    /// early failures. `request_complete` is supported only in listener
+    /// pipelines. Response conditions use the final response at this filter's
+    /// position; if unavailable, header-dependent conditions skip publication
+    /// and status-only conditions require a known written status. For
+    /// `request_complete`, `response.status` is unavailable when no status was
+    /// written; a required mapping then suppresses the event.
     on: CloudEventsPhase,
     /// HTTP endpoint receiving the structured `CloudEvent`.
     destination: String,
@@ -225,8 +232,10 @@ enum CloudEventsPhase {
     Request,
     /// Publish after response headers are available.
     ResponseHeaders,
-    /// Publish after the response has completed.
+    /// Publish after a final bodyless response or response-body end-of-stream.
     ResponseComplete,
+    /// Publish when the request ends, including failed or aborted responses.
+    RequestComplete,
 }
 
 /// Delivery behavior for a `CloudEvents` publisher.
@@ -278,7 +287,7 @@ struct CloudEventsMapping {
 /// Cached response metadata for emission on the body phase.
 #[derive(Clone, Debug)]
 struct CloudEventsState {
-    /// Response status captured during the response-header phase.
+    /// Response status captured from headers or terminal written status.
     status: Option<u16>,
     /// Response headers captured during the response-header phase.
     response_headers: Option<HeaderMap>,
@@ -709,15 +718,17 @@ impl HttpFilter for CloudEventsFilter {
             self.maybe_emit(ctx);
             return Ok(FilterAction::Continue);
         }
-        if self.on == CloudEventsPhase::ResponseComplete {
-            let (status, response_headers, bodyless, has_response) = match ctx.response_header.as_ref() {
+        if matches!(
+            self.on,
+            CloudEventsPhase::ResponseComplete | CloudEventsPhase::RequestComplete
+        ) {
+            let (status, response_headers, bodyless) = match ctx.response_header.as_ref() {
                 Some(response) => (
                     self.needs_response_status.then_some(response.status.as_u16()),
                     self.needs_response_headers.then(|| response.headers.clone()),
                     super::bodyless_response(response.status, &ctx.request.method),
-                    true,
                 ),
-                None => (None, None, false, false),
+                None => (None, None, false),
             };
 
             ctx.insert_filter_state(CloudEventsState {
@@ -726,36 +737,36 @@ impl HttpFilter for CloudEventsFilter {
                 emitted: false,
             });
 
-            if bodyless || !has_response {
+            if self.on == CloudEventsPhase::ResponseComplete && bodyless {
                 self.maybe_emit(ctx);
             }
         }
         Ok(FilterAction::Continue)
     }
 
-    // TODO(#1228): generalize deferred-record dispatch so incomplete lifecycle
-    // handling is not coupled to the access-log fallback path.
-    fn emit_deferred_record(&self, ctx: &HttpFilterContext<'_>, status: u16) -> bool {
-        if self.on != CloudEventsPhase::ResponseComplete
-            || ctx
-                .get_filter_state::<CloudEventsState>()
-                .is_some_and(|state| state.emitted)
-        {
-            return false;
+    fn on_request_complete(&self, ctx: &mut HttpFilterContext<'_>, status: u16) {
+        if self.on != CloudEventsPhase::RequestComplete {
+            return;
         }
+        if ctx.get_filter_state::<CloudEventsState>().is_none() {
+            ctx.insert_filter_state(CloudEventsState {
+                status: None,
+                response_headers: None,
+                emitted: false,
+            });
+        }
+        let Some(state) = ctx.get_filter_state_mut::<CloudEventsState>() else {
+            return;
+        };
+        if state.emitted {
+            return;
+        }
+        state.status = (status != 0).then_some(status);
+        self.maybe_emit(ctx);
+    }
 
-        let fallback_state = CloudEventsState {
-            status: (status != 0).then_some(status),
-            response_headers: ctx.response_header.as_ref().map(|response| response.headers.clone()),
-            emitted: false,
-        };
-        let state = ctx.get_filter_state::<CloudEventsState>().or(Some(&fallback_state));
-        let Some(event) = self.build_event_with_state(ctx, state) else {
-            crate::metrics::record_cloud_events_skipped("missing_required");
-            return true;
-        };
-        let _ = self.enqueue_event(ctx, &event);
-        true
+    fn observes_request_completion(&self) -> bool {
+        self.on == CloudEventsPhase::RequestComplete
     }
 
     fn response_body_access(&self) -> BodyAccess {
@@ -1586,7 +1597,7 @@ mod tests {
 
     #[test]
     fn event_phase_declares_only_the_body_hook_it_uses() {
-        for phase in ["request", "response_headers", "response_complete"] {
+        for phase in ["request", "response_headers", "response_complete", "request_complete"] {
             let filter = phase_filter(phase);
             assert_eq!(filter.request_body_access(), crate::BodyAccess::None);
             let expected = if phase == "response_complete" {
@@ -1642,7 +1653,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn response_complete_emits_without_response_metadata() {
+    async fn response_complete_skips_without_response_metadata() {
         let filter = phase_filter("response_complete");
         let request = crate::test_utils::make_request(Method::GET, "/");
         let mut ctx = crate::test_utils::make_filter_context(&request);
@@ -1650,7 +1661,66 @@ mod tests {
 
         drop(filter.on_response(&mut ctx).await.unwrap());
 
-        assert!(ctx.get_filter_state::<super::CloudEventsState>().unwrap().emitted);
+        assert!(!ctx.get_filter_state::<super::CloudEventsState>().unwrap().emitted);
+    }
+
+    #[tokio::test]
+    async fn request_complete_uses_terminal_status_and_marks_once() {
+        let filter = phase_filter("request_complete");
+        let request = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&request);
+        ctx.current_filter_id = Some(0);
+        drop(filter.on_response(&mut ctx).await.unwrap());
+        assert!(!ctx.get_filter_state::<super::CloudEventsState>().unwrap().emitted);
+
+        filter.on_request_complete(&mut ctx, 502);
+        let state = ctx.get_filter_state::<super::CloudEventsState>().unwrap();
+        assert_eq!(state.status, Some(502));
+        assert!(state.emitted);
+        filter.on_request_complete(&mut ctx, 503);
+        assert_eq!(
+            ctx.get_filter_state::<super::CloudEventsState>().unwrap().status,
+            Some(502)
+        );
+    }
+
+    #[test]
+    fn request_complete_synthesizes_state_after_unreached_response_hook() {
+        let filter = phase_filter("request_complete");
+        let request = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&request);
+        ctx.current_filter_id = Some(7);
+
+        filter.on_request_complete(&mut ctx, 502);
+        let state = ctx.get_filter_state::<super::CloudEventsState>().unwrap();
+        assert_eq!(state.status, Some(502));
+        assert!(state.emitted);
+    }
+
+    #[tokio::test]
+    async fn request_complete_does_not_reuse_unwritten_response_status() {
+        let yaml =
+            config("on: request_complete\ndata:\n  status: {value: response.status, type: integer, required: true}");
+        let cfg: CloudEventsFilterConfig = serde_yaml::from_value(yaml).unwrap();
+        let filter = CloudEventsFilter::build(cfg).unwrap();
+        let request = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&request);
+        ctx.current_filter_id = Some(0);
+        let mut response = crate::test_utils::make_response();
+        ctx.response_header = Some(&mut response);
+        drop(filter.on_response(&mut ctx).await.unwrap());
+        ctx.response_header = None;
+        assert_eq!(
+            ctx.get_filter_state::<super::CloudEventsState>().unwrap().status,
+            Some(200)
+        );
+
+        filter.on_request_complete(&mut ctx, 0);
+        assert_eq!(ctx.get_filter_state::<super::CloudEventsState>().unwrap().status, None);
+        assert!(
+            filter.build_event(&ctx).is_none(),
+            "required written status is unavailable"
+        );
     }
 
     #[tokio::test]
@@ -1665,7 +1735,7 @@ mod tests {
         assert!(ctx.get_filter_state::<super::CloudEventsState>().is_none());
     }
 
-    async fn publish_deferred_event(response: &'static [u8], authenticated: bool) -> String {
+    async fn publish_completed_event(response: &'static [u8], authenticated: bool) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (sender, receiver) = oneshot::channel();
@@ -1733,11 +1803,11 @@ mod tests {
         ctx.subrequest_client = Some(&client);
 
         let mut response = crate::test_utils::make_response();
+        response.status = http::StatusCode::NO_CONTENT;
         ctx.response_header = Some(&mut response);
         drop(filter.on_response(&mut ctx).await.unwrap());
         ctx.response_header = None;
-        assert!(!ctx.get_filter_state::<super::CloudEventsState>().unwrap().emitted);
-        assert!(filter.emit_deferred_record(&ctx, 502));
+        assert!(ctx.get_filter_state::<super::CloudEventsState>().unwrap().emitted);
         let request = tokio::time::timeout(Duration::from_secs(2), receiver)
             .await
             .unwrap()
@@ -1760,10 +1830,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn publishes_deferred_event_with_and_without_authorization() {
+    async fn publishes_completed_event_with_and_without_authorization() {
         for authenticated in [true, false] {
             let request_text =
-                publish_deferred_event(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n", authenticated).await;
+                publish_completed_event(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n", authenticated).await;
             assert!(request_text.starts_with("POST /events HTTP/1.1\r\n"));
         }
     }
@@ -1772,7 +1842,7 @@ mod tests {
     async fn records_authorization_rejection() {
         crate::test_utils::install_metrics_recorder();
         let request_text =
-            publish_deferred_event(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n", true).await;
+            publish_completed_event(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n", true).await;
 
         assert!(request_text.contains("authorization: Bearer metering-secret"));
         let metrics = tokio::time::timeout(Duration::from_secs(1), async {

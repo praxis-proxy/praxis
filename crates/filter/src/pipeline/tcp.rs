@@ -495,6 +495,7 @@ mod tests {
             .collect();
         FilterPipeline {
             body_capabilities: BodyCapabilities::default(),
+            has_request_completion_observer: false,
             compression: None,
             filters,
             record_filter_duration_metrics: false,

@@ -92,13 +92,33 @@ impl AnyFilter {
         }
     }
 
-    /// Emit this filter's end-of-request record from the logging phase.
+    /// Forward a deferred access-record claim to the selected HTTP filter.
     ///
-    /// Returns whether a record was emitted. TCP filters have no HTTP
-    /// request to log.
+    /// The pipeline selects only the first top-level `access_log` instance
+    /// whose own request conditions match and binds its invocation identity
+    /// before calling this method. This forwarding method does not select
+    /// eligible filters or bind their identity itself.
+    ///
+    /// Returns whether the access record was claimed, even if sampling or
+    /// emit conditions suppress it. TCP filters cannot claim an HTTP record.
     pub fn emit_deferred_record(&self, ctx: &crate::HttpFilterContext<'_>, status: u16) -> bool {
         match self {
             Self::Http(f) => f.emit_deferred_record(ctx, status),
+            Self::Tcp(_) => false,
+        }
+    }
+
+    /// Forward terminal request completion to an HTTP filter.
+    pub fn on_request_complete(&self, ctx: &mut crate::HttpFilterContext<'_>, status: u16) {
+        if let Self::Http(filter) = self {
+            filter.on_request_complete(ctx, status);
+        }
+    }
+
+    /// Whether the HTTP filter needs the terminal completion hook.
+    pub fn observes_request_completion(&self) -> bool {
+        match self {
+            Self::Http(filter) => filter.observes_request_completion(),
             Self::Tcp(_) => false,
         }
     }

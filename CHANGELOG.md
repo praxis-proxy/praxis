@@ -32,12 +32,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `/ready` also reports the `initializing`, `draining`, and `stopped`
   lifecycle phases with `503` instead of claiming readiness.
 
+- Experimental CloudEvents `on: request_complete` publishes one best-effort
+  event when a request ends, including aborted responses and early failures.
 - `cargo xtask rollout` and `make test-rollout` exercise Kubernetes pod
   loss, rollouts, config reloads, TLS rotation, node drain, and upstream
   failure under continuous HTTP/1.1, HTTP/2, and HTTPS traffic.
 
 ### Changed
 
+- CloudEvents `on: response_complete` publishes only after a final bodyless
+  response or response-body end-of-stream; use `request_complete` to observe
+  terminal failures and aborted streams.
+- **Breaking:** FilterPipeline::emit_deferred_records is replaced by emit_deferred_access_record, which dispatches only eligible access_log instances.
 - **Breaking:** HttpFilterContext now carries request_header_mutations for ordered header operations; custom constructors must initialize the field.
 - **Breaking:** BodyReadError includes TimedOut; exhaustive matches in custom management request implementations must handle it.
 - **Breaking:** SessionStoreRegistry replaces cluster-only get/insert access with explicit candidate generation binding and publication.
@@ -177,6 +183,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Security
 
+- Keep incomplete-request access logging scoped to one eligible access-log instance and prevent CloudEvents fallback publication outside its configured conditions.
 - Bound total request-body read time for enabled Hyper admin PUT routes and return 408 without applying partial KV or log-level updates.
 - Count pending TCP TLS handshakes against global and listener-group connection
   limits.
