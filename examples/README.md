@@ -213,7 +213,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | [rate-limiting-shadow.yaml](configs/traffic-management/rate-limiting-shadow.yaml) | Observe a rate limit before enforcing it |
 | [rate-limiting.yaml](configs/traffic-management/rate-limiting.yaml) | Token bucket rate limiter with per-IP or global modes |
 | [redirect.yaml](configs/traffic-management/redirect.yaml) | Returns a 3xx redirect without contacting any upstream |
-| [retry-policy.yaml](configs/traffic-management/retry-policy.yaml) | Automatically retries failed upstream requests with exponential backoff and a token-bucket budget to prevent retry storms |
+| [retry-policy.yaml](configs/traffic-management/retry-policy.yaml) | Retries connection failures and resets up to two times per request, with exponential backoff between attempts |
 | [ring-hash.yaml](configs/traffic-management/ring-hash.yaml) | Routes requests to a stable backend by hashing a configurable request header through a sorted virtual-node ring |
 | [round-robin.yaml](configs/traffic-management/round-robin.yaml) | Default strategy |
 | [session-affinity.yaml](configs/traffic-management/session-affinity.yaml) | Hashes a request header to pin a user's requests to one backend |

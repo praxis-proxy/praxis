@@ -80,6 +80,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Describe the retry-policy example as capped connection/reset retries with backoff, without an unconfigured token-bucket budget.
 - Keep Hyper upstream response read deadlines active while a streaming request upload makes progress.
 - Honor final filtered response status in Hyper body delivery and framing, including safe conversion of bodyless 304 responses to 200.
 - Classify failed Hyper terminal EOF sends as downstream disconnects while preserving request state through cancellation and completion.
