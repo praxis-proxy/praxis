@@ -19,6 +19,7 @@ use praxis_core::config::Config;
 use praxis_test_utils::{
     TestCertificates, TlsProbeOutcome, free_port, http_get, https_get, start_backend, start_proxy,
     start_request_counting_backend, start_tls_backend, start_tls_proxy, start_tls_proxy_no_wait, tls_negative_probe,
+    tls_probe::{self, ClientHello, Offer, Reply},
     wait_for_https,
 };
 
@@ -81,8 +82,8 @@ fn rfc8446_tls_10_connection_rejected() {
     let config = Config::from_yaml(&yaml).unwrap();
     let proxy = start_tls_proxy(&config, &certs.client_config());
 
-    let rejected = attempt_legacy_tls(proxy.addr(), 0x0301);
-    assert!(rejected, "TLS 1.0 (0x0301) connection must be rejected by rustls");
+    assert_tls12_probe_control(proxy.addr());
+    attempt_legacy_tls(proxy.addr(), 0x0301).expect("TLS 1.0 must receive fatal protocol_version");
 }
 
 /// [RFC 8446]: TLS 1.1 connections must be rejected.
@@ -97,8 +98,8 @@ fn rfc8446_tls_11_connection_rejected() {
     let config = Config::from_yaml(&yaml).unwrap();
     let proxy = start_tls_proxy(&config, &certs.client_config());
 
-    let rejected = attempt_legacy_tls(proxy.addr(), 0x0302);
-    assert!(rejected, "TLS 1.1 (0x0302) connection must be rejected by rustls");
+    assert_tls12_probe_control(proxy.addr());
+    attempt_legacy_tls(proxy.addr(), 0x0302).expect("TLS 1.1 must receive fatal protocol_version");
 }
 
 /// [RFC 8446 Section 4.2]: when the client offers `h2` via ALPN,
@@ -379,54 +380,112 @@ fn build_tls13_client_config(certs: &TestCertificates) -> Arc<rustls::ClientConf
     Arc::new(config)
 }
 
-/// Attempt a TLS connection with a crafted legacy ClientHello
-/// (TLS 1.0 or 1.1 record version). Returns `true` if the
-/// connection was rejected.
-fn attempt_legacy_tls(addr: &str, version: u16) -> bool {
-    use std::{
-        io::{Read as _, Write as _},
-        net::TcpStream,
-        time::Duration,
-    };
+/// Require the same listener to accept a comparable TLS 1.2 offer.
+fn assert_tls12_probe_control(addr: &str) {
+    let reply = tls_probe::probe(addr, &ClientHello::tls12("localhost", true));
+    assert!(
+        matches!(
+            reply,
+            Reply::ServerHello {
+                version: tls_probe::TLS12,
+                ..
+            }
+        ),
+        "TLS 1.2 control: {reply:?}"
+    );
+}
 
-    let version_major = (version >> 8) as u8;
-    let version_minor = (version & 0xFF) as u8;
+/// Serialize a complete pre-1.3 ClientHello with the requested legacy version.
+fn legacy_hello(version: u16) -> Vec<u8> {
+    let mut record = ClientHello::tls12("localhost", true).to_record();
+    record.get_mut(1..3).unwrap().copy_from_slice(&version.to_be_bytes());
+    record.get_mut(9..11).unwrap().copy_from_slice(&version.to_be_bytes());
+    record
+}
 
-    #[rustfmt::skip]
-    let client_hello: Vec<u8> = vec![
-        0x16,                                   // ContentType: Handshake
-        version_major, version_minor,           // ProtocolVersion
-        0x00, 0x2f,                             // Length of payload
-        0x01,                                   // HandshakeType: ClientHello
-        0x00, 0x00, 0x2b,                       // Length
-        version_major, version_minor,           // ClientVersion
-        // Random (32 bytes)
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00,                                   // SessionID length: 0
-        0x00, 0x02,                             // CipherSuites length: 2
-        0x00, 0x2f,                             // TLS_RSA_WITH_AES_128_CBC_SHA
-        0x01,                                   // CompressionMethods length: 1
-        0x00,                                   // null compression
-    ];
+/// Send a legacy offer and require an exact fatal `protocol_version` record.
+fn attempt_legacy_tls(addr: &str, version: u16) -> Result<(), String> {
+    use std::{io::Write as _, net::TcpStream, time::Duration};
+    let mut stream = TcpStream::connect(addr).map_err(|error| error.to_string())?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .map_err(|error| error.to_string())?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .map_err(|error| error.to_string())?;
+    stream
+        .write_all(&legacy_hello(version))
+        .map_err(|error| error.to_string())?;
+    require_protocol_version_alert(&mut stream)
+}
 
-    let Ok(mut stream) = TcpStream::connect(addr) else {
-        return true;
-    };
-    drop(stream.set_read_timeout(Some(Duration::from_secs(2))));
-    drop(stream.set_write_timeout(Some(Duration::from_secs(2))));
-
-    if stream.write_all(&client_hello).is_err() {
-        return true;
+/// Read a whole TLS record and accept only fatal `protocol_version`.
+fn require_protocol_version_alert(reader: &mut impl std::io::Read) -> Result<(), String> {
+    let mut header = [0_u8; 5];
+    reader
+        .read_exact(&mut header)
+        .map_err(|error| format!("alert header: {error}"))?;
+    let len = usize::from(u16::from_be_bytes([header[3], header[4]]));
+    if header[0] != 0x15 || len != 2 {
+        return Err(format!("expected a two-byte alert record, got {header:?}"));
     }
-
-    let mut buf = [0_u8; 256];
-    match stream.read(&mut buf) {
-        Ok(0) | Err(_) => true,
-        Ok(n) => n >= 1 && buf[0] == 0x15,
+    let mut alert = [0_u8; 2];
+    reader
+        .read_exact(&mut alert)
+        .map_err(|error| format!("alert payload: {error}"))?;
+    if alert != [2, tls_probe::alerts::PROTOCOL_VERSION] {
+        return Err(format!("expected fatal protocol_version, got {alert:?}"));
     }
+    Ok(())
+}
+
+#[test]
+fn legacy_probe_lengths_match_payload() {
+    for version in [0x0301, 0x0302] {
+        let record = legacy_hello(version);
+        assert_eq!(
+            usize::from(u16::from_be_bytes([record[3], record[4]])),
+            record.len() - 5
+        );
+        let handshake_len = u32::from_be_bytes([0, record[6], record[7], record[8]]);
+        assert_eq!(usize::try_from(handshake_len).unwrap(), record.len() - 9);
+        assert_eq!(&record[1..3], &version.to_be_bytes());
+        assert_eq!(&record[9..11], &version.to_be_bytes());
+        let offer = Offer::parse(&record);
+        assert_eq!(offer.versions, [version]);
+        assert!(!offer.signature_algorithms.is_empty());
+        assert!(!offer.cipher_suites.is_empty());
+    }
+}
+
+#[test]
+fn legacy_probe_requires_protocol_version_alert() {
+    use std::io;
+    struct OneByte<R>(R);
+    impl<R: io::Read> io::Read for OneByte<R> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let length = buf.len().min(1);
+            self.0.read(&mut buf[..length])
+        }
+    }
+    struct Timeout;
+    impl io::Read for Timeout {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::new(io::ErrorKind::TimedOut, "timeout"))
+        }
+    }
+    let alert = [0x15, 3, 3, 0, 2, 2, tls_probe::alerts::PROTOCOL_VERSION];
+    require_protocol_version_alert(&mut OneByte(&alert[..])).unwrap();
+    for bad in [
+        &[][..],
+        &[0x15, 3, 3, 0, 2, 2][..],
+        &[0x15, 3, 3, 0, 2, 2, 40][..],
+        &[0x16, 3, 3, 0, 2, 2, 70][..],
+    ] {
+        let mut input = bad;
+        assert!(require_protocol_version_alert(&mut input).is_err(), "accepted {bad:?}");
+    }
+    assert!(require_protocol_version_alert(&mut Timeout).is_err());
 }
 
 /// Attempt a TLS handshake with the given ALPN protocols and
