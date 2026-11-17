@@ -5,7 +5,10 @@
 
 use pingora_core::protocols::http::HttpTask;
 use pingora_proxy::Session;
-use praxis_core::grpc::{GrpcStatusCode, encode_grpc_message};
+use praxis_core::{
+    grpc::{GrpcStatusCode, encode_grpc_message},
+    next_hop_headers::is_forbidden_client_response_header,
+};
 use praxis_filter::GrpcErrorMapping;
 use tracing::debug;
 
@@ -53,25 +56,58 @@ pub(crate) async fn send_trailers_only(
 /// still has to go through the `END_STREAM` path, or an HTTP/2 client
 /// loses the status.
 pub(crate) async fn send_grpc_rejection(session: &mut Session, rejection: &praxis_filter::Rejection) {
-    let mut header = match pingora_http::ResponseHeader::build(rejection.status, Some(rejection.headers.len())) {
-        Ok(header) => header,
-        Err(error) => {
-            debug!(%error, "could not build a gRPC rejection header");
-            return;
-        },
+    let Some(header) = build_grpc_rejection_header(rejection, session.req_header().version) else {
+        return;
     };
+    debug!("sending gRPC rejection as a trailers-only response");
+    write_header_only(session, header).await;
+}
+
+/// Build a preformatted rejection with safe headers and an empty H1 body boundary.
+fn build_grpc_rejection_header(
+    rejection: &praxis_filter::Rejection,
+    version: http::Version,
+) -> Option<pingora_http::ResponseHeader> {
+    let mut header = pingora_http::ResponseHeader::build(rejection.status, Some(rejection.headers.len()))
+        .inspect_err(|error| debug!(%error, "could not build a gRPC rejection header"))
+        .ok()?;
+    append_grpc_string_headers(&mut header, rejection);
+    append_grpc_map_headers(&mut header, rejection);
+    // H2 ends the header block with END_STREAM. H1 needs its own boundary.
+    if matches!(version, http::Version::HTTP_10 | http::Version::HTTP_11)
+        && rejection.status >= 200
+        && rejection.status != 204
+        && rejection.status != 304
+    {
+        let _inserted = header.insert_header(http::header::CONTENT_LENGTH, "0");
+    }
+    Some(header)
+}
+
+/// Copy safe string-valued fields except untrusted body framing.
+fn append_grpc_string_headers(header: &mut pingora_http::ResponseHeader, rejection: &praxis_filter::Rejection) {
     for (name, value) in &rejection.headers {
-        // An HTTP/2 response carries no content-length: END_STREAM on the
-        // header block already says the body is empty.
-        if session.req_header().version == http::Version::HTTP_2 && name.eq_ignore_ascii_case("content-length") {
+        if is_forbidden_client_response_header(name) || name.eq_ignore_ascii_case("content-length") {
             continue;
         }
         if let Err(error) = header.append_header(name.clone(), value.clone()) {
             debug!(%error, name, "dropping unencodable gRPC rejection header");
         }
     }
-    debug!("sending gRPC rejection as a trailers-only response");
-    write_header_only(session, header).await;
+}
+
+/// Copy safe byte-valued fields except untrusted body framing.
+fn append_grpc_map_headers(header: &mut pingora_http::ResponseHeader, rejection: &praxis_filter::Rejection) {
+    if let Some(headers) = rejection.header_map.as_deref() {
+        for (name, value) in headers {
+            if is_forbidden_client_response_header(name.as_str()) || name == http::header::CONTENT_LENGTH {
+                continue;
+            }
+            if let Err(error) = header.append_header(name.clone(), value.clone()) {
+                debug!(%error, %name, "dropping unencodable gRPC rejection header");
+            }
+        }
+    }
 }
 
 /// Write a header block that ends the downstream stream.
@@ -228,6 +264,159 @@ mod tests {
         for (kind, expected_ct) in kinds {
             let mapping = GrpcErrorMapping::new(kind, true);
             assert_eq!(mapping.content_type().to_str().unwrap(), expected_ct);
+        }
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one matrix proves both header representations on H1 and H2"
+    )]
+    fn grpc_rejection_strips_forbidden_headers() {
+        let mut rejection = praxis_filter::Rejection::status(200)
+            .with_header("grpc-status", "7")
+            .with_header("grpc-message", "denied")
+            .with_header("x-safe", "kept")
+            .with_header("x-praxis-secret", "hidden")
+            .with_header("x-ext-protocol-secret", "hidden")
+            .with_header("x-ext-agent-secret", "hidden")
+            .with_header("connection", "close")
+            .with_header("content-length", "0");
+        let mut opaque = http::HeaderMap::new();
+        opaque.insert("x-praxis-map", http::HeaderValue::from_static("hidden"));
+        opaque.insert("x-map-safe", http::HeaderValue::from_static("kept"));
+        rejection.header_map = Some(Box::new(opaque));
+
+        for version in [http::Version::HTTP_11, http::Version::HTTP_2] {
+            let header = build_grpc_rejection_header(&rejection, version).unwrap();
+            assert_eq!(header.headers.get("grpc-status").unwrap(), "7");
+            assert_eq!(header.headers.get("grpc-message").unwrap(), "denied");
+            assert_eq!(header.headers.get("x-safe").unwrap(), "kept");
+            assert_eq!(header.headers.get("x-map-safe").unwrap(), "kept");
+            for name in [
+                "x-praxis-secret",
+                "x-ext-protocol-secret",
+                "x-ext-agent-secret",
+                "connection",
+                "x-praxis-map",
+            ] {
+                assert!(!header.headers.contains_key(name), "{name} must not escape");
+            }
+            assert_eq!(
+                header.headers.contains_key(http::header::CONTENT_LENGTH),
+                version == http::Version::HTTP_11,
+                "only H1 needs an explicit empty-body boundary"
+            );
+            if version == http::Version::HTTP_11 {
+                assert_eq!(header.headers.get(http::header::CONTENT_LENGTH).unwrap(), "0");
+            }
+        }
+    }
+
+    #[test]
+    fn grpc_rejection_normalizes_missing_and_conflicting_lengths() {
+        for (case, string_lengths, map_lengths) in [
+            ("missing", vec![], vec![]),
+            ("string zero", vec!["0"], vec![]),
+            ("string nonzero", vec!["19"], vec![]),
+            ("string nonnumeric", vec!["bogus"], vec![]),
+            ("string empty", vec![""], vec![]),
+            ("string comma list", vec!["0, 19"], vec![]),
+            ("string duplicates", vec!["0", "19"], vec![]),
+            ("map zero", vec![], vec!["0"]),
+            ("map nonzero", vec![], vec!["19"]),
+            ("map nonnumeric", vec![], vec!["bogus"]),
+            ("map empty", vec![], vec![""]),
+            ("map comma list", vec![], vec!["0, 19"]),
+            ("map duplicates", vec![], vec!["0", "19"]),
+            ("cross-channel conflict", vec!["19"], vec!["0"]),
+        ] {
+            assert_grpc_rejection_length_case(case, &string_lengths, &map_lengths);
+        }
+    }
+
+    /// Compare one source-channel permutation across H1 and H2.
+    fn assert_grpc_rejection_length_case(case: &str, string_lengths: &[&str], map_lengths: &[&str]) {
+        let mut rejection = praxis_filter::Rejection::status(200).with_header("grpc-status", "7");
+        for length in string_lengths {
+            rejection
+                .headers
+                .push(("Content-Length".to_owned(), (*length).to_owned()));
+        }
+        let mut map = http::HeaderMap::new();
+        for length in map_lengths {
+            map.append(
+                http::header::CONTENT_LENGTH,
+                http::HeaderValue::from_str(length).unwrap(),
+            );
+        }
+        rejection.header_map = Some(Box::new(map));
+        for version in [http::Version::HTTP_10, http::Version::HTTP_11, http::Version::HTTP_2] {
+            let header = build_grpc_rejection_header(&rejection, version).unwrap();
+            assert_grpc_rejection_length(version, &header.headers, case);
+        }
+    }
+
+    /// Require one exact H1 length and no H2 length after normalization.
+    fn assert_grpc_rejection_length(version: http::Version, headers: &http::HeaderMap, case: &str) {
+        let lengths = headers
+            .get_all(http::header::CONTENT_LENGTH)
+            .iter()
+            .map(http::HeaderValue::as_bytes)
+            .collect::<Vec<_>>();
+        if version == http::Version::HTTP_2 {
+            assert!(lengths.is_empty(), "{case}: H2 END_STREAM is the body boundary");
+        } else {
+            assert_eq!(lengths, [b"0".as_slice()], "{case}: H1 needs one exact zero length");
+        }
+        assert_eq!(headers.get("grpc-status").unwrap(), "7", "{case}");
+    }
+
+    #[test]
+    fn body_prohibited_grpc_rejection_statuses_never_gain_length() {
+        for status in [101, 204, 304] {
+            let rejection = praxis_filter::Rejection::status(status)
+                .with_header("grpc-status", "7")
+                .with_header("content-length", "19");
+            for version in [http::Version::HTTP_10, http::Version::HTTP_11, http::Version::HTTP_2] {
+                let header = build_grpc_rejection_header(&rejection, version).unwrap();
+                assert_eq!(header.status.as_u16(), status, "the rejection status is preserved");
+                assert!(
+                    !header.headers.contains_key(http::header::CONTENT_LENGTH),
+                    "status {status} on {version:?} cannot carry a body length"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn grpc_rejection_drops_unencodable_string_headers() {
+        let rejection = praxis_filter::Rejection::status(200)
+            .with_header("grpc-status", "7")
+            .with_header("x-safe", "kept")
+            .with_header("bad name", "hidden")
+            .with_header("x-invalid-value", "bad\r\nvalue");
+        for version in [http::Version::HTTP_11, http::Version::HTTP_2] {
+            let header = build_grpc_rejection_header(&rejection, version).unwrap();
+            assert_eq!(header.headers.get("grpc-status").unwrap(), "7");
+            assert_eq!(header.headers.get("x-safe").unwrap(), "kept");
+            assert!(!header.headers.contains_key("x-invalid-value"));
+            assert_eq!(
+                header.headers.len(),
+                if version == http::Version::HTTP_2 { 2 } else { 3 }
+            );
+            assert_grpc_rejection_length(version, &header.headers, "invalid string fields");
+        }
+    }
+
+    #[test]
+    fn grpc_rejection_invalid_status_returns_none() {
+        let mut rejection = praxis_filter::Rejection::status(200).with_header("grpc-status", "7");
+        for status in [0, 1000] {
+            rejection.status = status;
+            for version in [http::Version::HTTP_11, http::Version::HTTP_2] {
+                assert!(build_grpc_rejection_header(&rejection, version).is_none());
+            }
         }
     }
 }

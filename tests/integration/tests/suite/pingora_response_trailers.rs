@@ -3,13 +3,9 @@
 
 //! Wire regressions for final body and trailer dispatch across the HTTP adapters.
 
-#[cfg(feature = "pingora")]
 use std::{
     io::{Read as _, Write as _},
-    net::TcpStream,
-};
-use std::{
-    net::TcpListener,
+    net::{TcpListener, TcpStream},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -26,7 +22,10 @@ use praxis_filter::{
     BodyAccess, BodyRequirement, FilterAction, FilterError, FilterFactory, FilterRegistry, HttpFilter,
     HttpFilterContext, Rejection,
 };
-use praxis_test_utils::{H2Response, free_port, read_h2_response, start_full_proxy_with_registry, wait_for_tcp};
+use praxis_test_utils::{
+    H2Response, free_port, http_send, parse_header, parse_status, read_h2_response, start_full_proxy_with_registry,
+    wait_for_tcp,
+};
 
 #[derive(Clone, Copy)]
 enum ProbeMode {
@@ -39,6 +38,10 @@ enum ProbeMode {
     FailAtEof,
     RejectAtEof,
     FailAtEofWithoutTrailer,
+    GrpcReject,
+    GrpcRejectStringLength,
+    GrpcRejectMapLength,
+    GrpcRejectConflictingLengths,
 }
 
 struct TrailerProbe {
@@ -65,6 +68,45 @@ impl HttpFilter for TrailerProbe {
     }
 
     async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        if matches!(
+            self.mode,
+            ProbeMode::GrpcReject
+                | ProbeMode::GrpcRejectStringLength
+                | ProbeMode::GrpcRejectMapLength
+                | ProbeMode::GrpcRejectConflictingLengths
+        ) {
+            let mut rejection = Rejection::status(200)
+                .with_header("grpc-status", "7")
+                .with_header("grpc-message", "denied")
+                .with_header("x-safe", "kept")
+                .with_header("x-duplicate", "first")
+                .with_header("x-duplicate", "second")
+                .with_header("te", "trailers")
+                .with_header("x-praxis-secret", "hidden")
+                .with_header("x-ext-protocol-secret", "hidden")
+                .with_header("x-ext-agent-secret", "hidden");
+            if matches!(
+                self.mode,
+                ProbeMode::GrpcRejectStringLength | ProbeMode::GrpcRejectConflictingLengths
+            ) {
+                rejection.headers.push(("Content-Length".to_owned(), "19".to_owned()));
+            }
+            let mut headers = http::HeaderMap::new();
+            for name in ["x-praxis-map", "x-ext-protocol-map", "x-ext-agent-map", "te"] {
+                headers.insert(name, http::HeaderValue::from_static("hidden"));
+            }
+            headers.insert("x-map-safe", http::HeaderValue::from_static("kept"));
+            headers.insert("x-map-opaque", http::HeaderValue::from_bytes(b"\x80kept").unwrap());
+            headers.append("x-duplicate", http::HeaderValue::from_static("third"));
+            headers.append("x-duplicate", http::HeaderValue::from_static("fourth"));
+            if matches!(self.mode, ProbeMode::GrpcRejectMapLength) {
+                headers.insert(http::header::CONTENT_LENGTH, http::HeaderValue::from_static("19"));
+            } else if matches!(self.mode, ProbeMode::GrpcRejectConflictingLengths) {
+                headers.insert(http::header::CONTENT_LENGTH, http::HeaderValue::from_static("0"));
+            }
+            rejection.header_map = Some(Box::new(headers));
+            return Ok(FilterAction::Reject(rejection));
+        }
         Ok(FilterAction::Continue)
     }
 
@@ -100,7 +142,11 @@ impl HttpFilter for TrailerProbe {
             | ProbeMode::NoEof
             | ProbeMode::FailAtEof
             | ProbeMode::RejectAtEof
-            | ProbeMode::FailAtEofWithoutTrailer => Ok(None),
+            | ProbeMode::FailAtEofWithoutTrailer
+            | ProbeMode::GrpcReject
+            | ProbeMode::GrpcRejectStringLength
+            | ProbeMode::GrpcRejectMapLength
+            | ProbeMode::GrpcRejectConflictingLengths => Ok(None),
             ProbeMode::Convert => Ok(Some(Bytes::from_static(b"converted"))),
             ProbeMode::Error | ProbeMode::ErrorNoEof => {
                 trailers.insert("x-partial", http::HeaderValue::from_static("leak"));
@@ -285,49 +331,6 @@ fn chunked_body_complete(mut remaining: &[u8]) -> bool {
         }
         remaining = &after_chunk[2..];
     }
-}
-
-/// Read exactly one response head without losing non-UTF-8 header values or
-/// consuming body bytes on the persistent connection.
-#[cfg(feature = "pingora")]
-fn read_http1_head(stream: &mut TcpStream) -> Http1Head {
-    let mut raw = Vec::new();
-    while !raw.ends_with(b"\r\n\r\n") {
-        let mut byte = [0_u8];
-        stream.read_exact(&mut byte).expect("complete HTTP/1 response head");
-        raw.push(byte[0]);
-        assert!(raw.len() <= 16_384, "HTTP/1 response head exceeded 16 KiB");
-    }
-    let mut lines = raw.split(|byte| *byte == b'\n');
-    let status_line = lines.next().unwrap();
-    let status = std::str::from_utf8(status_line)
-        .unwrap()
-        .split_whitespace()
-        .nth(1)
-        .unwrap()
-        .parse()
-        .unwrap();
-    let mut headers = http::HeaderMap::new();
-    for line in lines {
-        let line = line.strip_suffix(b"\r").unwrap_or(line);
-        if line.is_empty() {
-            break;
-        }
-        let colon = line.iter().position(|byte| *byte == b':').unwrap();
-        let name = http::HeaderName::from_bytes(&line[..colon]).unwrap();
-        let value = http::HeaderValue::from_bytes(line[colon + 1..].trim_ascii()).unwrap();
-        headers.append(name, value);
-    }
-    Http1Head { status, headers }
-}
-
-/// HTTP/1 response head with byte-preserving fields.
-#[cfg(feature = "pingora")]
-struct Http1Head {
-    /// HTTP response status.
-    status: u16,
-    /// All received fields, including duplicate and opaque values.
-    headers: http::HeaderMap,
 }
 
 #[test]
@@ -542,6 +545,262 @@ fn hyper_expected_body(filter: &str, original_len: usize) -> Vec<u8> {
     }
 }
 
+#[test]
+fn preformatted_grpc_rejection_strips_reserved_headers() {
+    for filter in [
+        "grpc_reject",
+        "grpc_reject_string_length",
+        "grpc_reject_map_length",
+        "grpc_reject_conflicting_lengths",
+        "static_grpc",
+    ] {
+        assert_preformatted_grpc_rejection_headers(filter);
+    }
+}
+
+#[test]
+fn preformatted_grpc_rejection_keeps_http1_connection_usable() {
+    for filter in [
+        "grpc_reject",
+        "grpc_reject_string_length",
+        "grpc_reject_map_length",
+        "grpc_reject_conflicting_lengths",
+        "static_grpc",
+    ] {
+        let registry = registry();
+        let config = Config::from_yaml(&proxy_yaml(free_port(), free_port(), filter)).unwrap();
+        let proxy = start_full_proxy_with_registry(&config, &registry);
+        wait_for_tcp(proxy.addr());
+        let mut stream = TcpStream::connect(proxy.addr()).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        for method in ["GET", "HEAD", "GET"] {
+            write!(stream, "{method} / HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+            let response = read_http1_head(&mut stream);
+            assert_eq!(response.status, 200, "{filter}, {method} request");
+            assert_eq!(response.headers.get("grpc-status").unwrap(), "7");
+            assert_eq!(response.headers.get("grpc-message").unwrap(), "denied");
+            assert_eq!(response.headers.get("x-safe").unwrap(), "kept");
+            assert_eq!(response.headers.get("x-map-safe").unwrap(), "kept");
+            if method == "GET" {
+                read_empty_http1_body(&mut stream, &response.headers, filter);
+            }
+            for name in [
+                "te",
+                "x-praxis-secret",
+                "x-ext-protocol-secret",
+                "x-ext-agent-secret",
+                "x-praxis-map",
+                "x-ext-protocol-map",
+                "x-ext-agent-map",
+            ] {
+                assert!(!response.headers.contains_key(name), "{filter}: {name} must not escape");
+            }
+            if filter.starts_with("grpc_reject") {
+                assert_eq!(response.headers.get("x-map-opaque").unwrap().as_bytes(), b"\x80kept");
+                assert_eq!(
+                    response
+                        .headers
+                        .get_all("x-duplicate")
+                        .iter()
+                        .map(http::HeaderValue::as_bytes)
+                        .collect::<Vec<_>>(),
+                    [
+                        b"first".as_slice(),
+                        b"second".as_slice(),
+                        b"third".as_slice(),
+                        b"fourth".as_slice()
+                    ],
+                    "{filter}: duplicate order across both header representations"
+                );
+            }
+        }
+    }
+}
+
+/// Read exactly one response head without losing non-UTF-8 header values or
+/// consuming body bytes on the persistent connection.
+fn read_http1_head(stream: &mut TcpStream) -> Http1Head {
+    let mut raw = Vec::new();
+    while !raw.ends_with(b"\r\n\r\n") {
+        let mut byte = [0_u8];
+        stream.read_exact(&mut byte).expect("complete HTTP/1 response head");
+        raw.push(byte[0]);
+        assert!(raw.len() <= 16_384, "HTTP/1 response head exceeded 16 KiB");
+    }
+    let mut lines = raw.split(|byte| *byte == b'\n');
+    let status_line = lines.next().unwrap();
+    let status = std::str::from_utf8(status_line)
+        .unwrap()
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .parse()
+        .unwrap();
+    let mut headers = http::HeaderMap::new();
+    for line in lines {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        if line.is_empty() {
+            break;
+        }
+        let colon = line.iter().position(|byte| *byte == b':').unwrap();
+        let name = http::HeaderName::from_bytes(&line[..colon]).unwrap();
+        let value = http::HeaderValue::from_bytes(line[colon + 1..].trim_ascii()).unwrap();
+        headers.append(name, value);
+    }
+    Http1Head { status, headers }
+}
+
+/// Consume one unambiguously empty HTTP/1 body before reusing its connection.
+fn read_empty_http1_body(stream: &mut TcpStream, headers: &http::HeaderMap, filter: &str) {
+    let lengths = headers.get_all(http::header::CONTENT_LENGTH).iter().collect::<Vec<_>>();
+    let encodings = headers
+        .get_all(http::header::TRANSFER_ENCODING)
+        .iter()
+        .collect::<Vec<_>>();
+    match (lengths.as_slice(), encodings.as_slice()) {
+        ([length], []) => assert_eq!(length.as_bytes(), b"0", "{filter}: empty body length"),
+        ([], [encoding]) if encoding.as_bytes().eq_ignore_ascii_case(b"chunked") => {
+            let size = read_http1_line(stream);
+            let digits = size.split(|byte| *byte == b';').next().unwrap();
+            assert_eq!(digits, b"0", "{filter}: chunked rejection must have no DATA");
+            loop {
+                if read_http1_line(stream).is_empty() {
+                    break;
+                }
+            }
+        },
+        _ => panic!("{filter}: ambiguous empty-body framing: {headers:?}"),
+    }
+}
+
+/// Read one CRLF-terminated framing line without consuming the next response.
+fn read_http1_line(stream: &mut TcpStream) -> Vec<u8> {
+    let mut line = Vec::new();
+    while !line.ends_with(b"\r\n") {
+        let mut byte = [0_u8];
+        stream.read_exact(&mut byte).expect("complete HTTP/1 framing line");
+        line.push(byte[0]);
+        assert!(line.len() <= 16_384, "HTTP/1 framing line exceeded 16 KiB");
+    }
+    line.truncate(line.len() - 2);
+    line
+}
+
+/// HTTP/1 response head with byte-preserving fields.
+struct Http1Head {
+    /// HTTP response status.
+    status: u16,
+    /// All received fields, including duplicate and opaque values.
+    headers: http::HeaderMap,
+}
+
+fn assert_preformatted_grpc_rejection_headers(filter: &str) {
+    let proxy_port = free_port();
+    let registry = registry();
+    let config = Config::from_yaml(&proxy_yaml(proxy_port, free_port(), filter)).unwrap();
+    let proxy = start_full_proxy_with_registry(&config, &registry);
+    let raw = http_send(
+        proxy.addr(),
+        "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(parse_status(&raw), 200, "{filter}: H1 gRPC rejection uses HTTP 200");
+    assert_eq!(
+        parse_header(&raw, "grpc-status").as_deref(),
+        Some("7"),
+        "{filter}: H1 gRPC status must survive"
+    );
+    assert_eq!(
+        parse_header(&raw, "grpc-message").as_deref(),
+        Some("denied"),
+        "{filter}: H1 gRPC message must survive"
+    );
+    assert_eq!(
+        parse_header(&raw, "x-safe").as_deref(),
+        Some("kept"),
+        "{filter}: H1 safe headers must survive"
+    );
+    assert_eq!(
+        parse_header(&raw, "x-map-safe").as_deref(),
+        Some("kept"),
+        "{filter}: H1 map headers must survive"
+    );
+    for name in [
+        "te",
+        "x-praxis-secret",
+        "x-ext-protocol-secret",
+        "x-ext-agent-secret",
+        "x-praxis-map",
+        "x-ext-protocol-map",
+        "x-ext-agent-map",
+    ] {
+        assert!(
+            parse_header(&raw, name).is_none(),
+            "{filter}: H1 {name} must be stripped"
+        );
+    }
+    let (response, body) = h2_exchange(proxy.addr(), false);
+    assert_eq!(response.status, Some(200), "{filter}: H2 gRPC rejection uses HTTP 200");
+    assert!(response.end_stream, "{filter}: H2 rejection must complete cleanly");
+    assert!(body.is_empty(), "{filter}: H2 rejection has no DATA payload");
+    let headers = response.headers.unwrap();
+    assert!(
+        !headers.contains_key(http::header::CONTENT_LENGTH),
+        "{filter}: H2 END_STREAM must not inherit a filter length"
+    );
+    for name in [
+        "te",
+        "x-praxis-secret",
+        "x-ext-protocol-secret",
+        "x-ext-agent-secret",
+        "x-praxis-map",
+        "x-ext-protocol-map",
+        "x-ext-agent-map",
+    ] {
+        assert!(!headers.contains_key(name), "{filter}: H2 {name} must be stripped");
+    }
+    assert_eq!(
+        headers.get("grpc-status").unwrap(),
+        "7",
+        "{filter}: H2 gRPC status must survive"
+    );
+    assert_eq!(
+        headers.get("grpc-message").unwrap(),
+        "denied",
+        "{filter}: H2 gRPC message must survive"
+    );
+    assert_eq!(
+        headers.get("x-safe").unwrap(),
+        "kept",
+        "{filter}: H2 safe headers must survive"
+    );
+    assert_eq!(
+        headers.get("x-map-safe").unwrap(),
+        "kept",
+        "{filter}: H2 map headers must survive"
+    );
+    if filter.starts_with("grpc_reject") {
+        assert_eq!(
+            headers.get("x-map-opaque").unwrap().as_bytes(),
+            b"\x80kept",
+            "H2 opaque values stay intact"
+        );
+        assert_eq!(
+            headers
+                .get_all("x-duplicate")
+                .iter()
+                .map(http::HeaderValue::as_bytes)
+                .collect::<Vec<_>>(),
+            [
+                b"first".as_slice(),
+                b"second".as_slice(),
+                b"third".as_slice(),
+                b"fourth".as_slice()
+            ],
+            "H2 retains duplicates from both representations in append order"
+        );
+    }
+}
+
 fn registry() -> FilterRegistry {
     registry_with_eof(&Arc::new(AtomicBool::new(false)))
 }
@@ -558,6 +817,16 @@ fn registry_with_eof(eof_seen: &Arc<AtomicBool>) -> FilterRegistry {
         ("test_trailer_fail", ProbeMode::FailAtEof),
         ("test_trailer_reject", ProbeMode::RejectAtEof),
         ("test_trailer_fail_without", ProbeMode::FailAtEofWithoutTrailer),
+        ("test_trailer_grpc_reject", ProbeMode::GrpcReject),
+        (
+            "test_trailer_grpc_reject_string_length",
+            ProbeMode::GrpcRejectStringLength,
+        ),
+        ("test_trailer_grpc_reject_map_length", ProbeMode::GrpcRejectMapLength),
+        (
+            "test_trailer_grpc_reject_conflicting_lengths",
+            ProbeMode::GrpcRejectConflictingLengths,
+        ),
     ] {
         let eof_seen = Arc::clone(eof_seen);
         registry
@@ -591,11 +860,22 @@ fn proxy_yaml(proxy_port: u16, backend_port: u16, filter: &str) -> String {
         "fail" => "- filter: test_trailer_fail",
         "reject" => "- filter: test_trailer_reject",
         "fail_without_trailer" => "- filter: test_trailer_fail_without",
+        "grpc_reject" => "- filter: test_trailer_grpc_reject",
+        "grpc_reject_string_length" => "- filter: test_trailer_grpc_reject_string_length",
+        "grpc_reject_map_length" => "- filter: test_trailer_grpc_reject_map_length",
+        "grpc_reject_conflicting_lengths" => "- filter: test_trailer_grpc_reject_conflicting_lengths",
+        "static_grpc" => {
+            "- filter: static_response\n        status: 200\n        headers:\n          - {name: grpc-status, value: '7'}\n          - {name: grpc-message, value: denied}\n          - {name: x-safe, value: kept}\n          - {name: x-map-safe, value: kept}\n          - {name: x-praxis-secret, value: hidden}\n          - {name: x-ext-protocol-secret, value: hidden}\n          - {name: x-ext-agent-secret, value: hidden}"
+        },
         other => panic!("unknown probe filter: {other}"),
     };
-    let upstream = format!(
-        "\n      - filter: router\n        routes:\n          - path_prefix: '/'\n            cluster: backend\n      - filter: load_balancer\n        clusters:\n          - name: backend\n            endpoints: ['127.0.0.1:{backend_port}']\n            http:\n              version: h2"
-    );
+    let upstream = if filter == "static_grpc" {
+        String::new()
+    } else {
+        format!(
+            "\n      - filter: router\n        routes:\n          - path_prefix: '/'\n            cluster: backend\n      - filter: load_balancer\n        clusters:\n          - name: backend\n            endpoints: ['127.0.0.1:{backend_port}']\n            http:\n              version: h2"
+        )
+    };
     format!(
         "listeners:\n  - name: web\n    address: '127.0.0.1:{proxy_port}'\n    filter_chains: [main]\n\
          insecure_options:\n  allow_private_endpoints: true\n  allow_private_upstreams: true\n\
