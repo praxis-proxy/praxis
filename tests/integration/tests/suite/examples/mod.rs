@@ -140,6 +140,7 @@ mod tcp_byte_counters;
 mod tcp_connection_metrics;
 mod tcp_connections_total;
 mod timeout;
+mod tls_examples;
 mod trace_context;
 #[cfg(feature = "otel")]
 mod tracing_otlp;
