@@ -17,6 +17,7 @@ permissions: {}
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_MACHETE_VERSION: "0.9.2"
 
 jobs:
   # ----------------------------------------------------------------------------
@@ -37,10 +38,11 @@ jobs:
         uses: praxis-proxy/conventions/.github/actions/setup-rust-lint@2a0d28ddd3690ed73347ddbe59d08dac02f604ce # v0.5.0
 
       - name: Install cargo-machete
-        # setup-rust-lint's rust-cache also restores ~/.cargo/bin, so the binary
-        # may already be present. Install only when it is absent; otherwise
-        # `cargo install` aborts with "binary already exists".
-        run: command -v cargo-machete > /dev/null || cargo install cargo-machete --locked
+        # The shared Rust cache may restore a different tool version.
+        run: |
+          if ! cargo-machete --version 2>/dev/null | grep -Fxq "${CARGO_MACHETE_VERSION}"; then
+            cargo install cargo-machete --version "=${CARGO_MACHETE_VERSION}" --locked --force
+          fi
 
       - name: Lint
         run: make lint
