@@ -28,6 +28,7 @@ use crate::{
         log_config_change_audit, log_restart_required_changes, warn_insecure_option_escalations,
         warn_stateful_filter_reset,
     },
+    server::HealthTaskLifecycle,
     startup_checks::{
         warn_insecure_key_permissions, warn_insecure_log_file_permissions, warn_insecure_sink_file_permissions,
     },
@@ -66,6 +67,7 @@ pub(crate) fn reload_pipelines(
     listener_meta: &praxis_protocol::http::health::ListenerMetaStore,
     cluster_meta: &praxis_protocol::http::health::ClusterMetaStore,
     health_shutdown: &Arc<Mutex<CancellationToken>>,
+    health_lifecycle: Option<&HealthTaskLifecycle>,
     kv_stores: &praxis_core::kv::KvStoreRegistry,
     session_stores: &Arc<praxis_filter::SessionStoreRegistry>,
     slow_start_registry: &Arc<praxis_filter::SlowStartRegistry>,
@@ -193,6 +195,7 @@ pub(crate) fn reload_pipelines(
         new_config,
         &health_registry,
         health_shutdown,
+        health_lifecycle,
         subrequest_client.upstream_ca(),
     );
 
@@ -452,11 +455,16 @@ fn health_checked_cluster_names(config: &Config) -> Vec<&str> {
 /// Cancel old health check tasks and spawn new ones from the
 /// updated config.
 #[expect(clippy::expect_used, reason = "poisoned mutex is unrecoverable")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "health generation replacement needs current and root owners"
+)]
 fn respawn_health_checks(
     old_config: &Config,
     config: &Config,
     health_registry: &HealthRegistry,
     health_shutdown: &Arc<Mutex<CancellationToken>>,
+    health_lifecycle: Option<&HealthTaskLifecycle>,
     upstream_ca: Option<Arc<praxis_tls::CachedCaCerts>>,
 ) {
     // One critical section swaps in the fresh token and hands back both
@@ -466,7 +474,7 @@ fn respawn_health_checks(
     let (old_token, new_token) = {
         let mut guard = health_shutdown.lock().expect("health shutdown lock poisoned");
         let old = guard.clone();
-        *guard = CancellationToken::new();
+        *guard = health_lifecycle.map_or_else(CancellationToken::new, HealthTaskLifecycle::new_token);
         (old, guard.clone())
     };
     old_token.cancel();
@@ -492,7 +500,10 @@ fn respawn_health_checks(
         .collect();
     let registry = Arc::clone(health_registry);
 
-    spawn_health_check_thread(clusters, registry, new_token, upstream_ca);
+    let handle = spawn_health_check_thread(clusters, registry, new_token, upstream_ca);
+    if let Some(owner) = health_lifecycle {
+        owner.track(handle);
+    }
 }
 
 /// Spawn the reloaded health-check probes on a dedicated thread + runtime.
@@ -506,8 +517,12 @@ fn spawn_health_check_thread(
     registry: HealthRegistry,
     new_token: CancellationToken,
     upstream_ca: Option<Arc<praxis_tls::CachedCaCerts>>,
-) {
+) -> std::thread::JoinHandle<()> {
+    #[cfg(test)]
+    let observation = crate::server::background_observation::capture();
     std::thread::spawn(move || {
+        #[cfg(test)]
+        let _observation = crate::server::background_observation::start("health check runtime", observation);
         let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
             Ok(rt) => rt,
             Err(err) => {
@@ -524,7 +539,7 @@ fn spawn_health_check_thread(
             );
             new_token.cancelled().await;
         });
-    });
+    })
 }
 
 // -----------------------------------------------------------------------------
@@ -598,6 +613,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
             &empty_kv_stores(),
             &empty_session_stores(),
             &empty_slow_start_registry(),
@@ -655,6 +671,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
             &empty_kv_stores(),
             &empty_session_stores(),
             &empty_slow_start_registry(),
@@ -710,6 +727,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
             &empty_kv_stores(),
             &empty_session_stores(),
             &empty_slow_start_registry(),
@@ -759,6 +777,7 @@ filter_chains:
                 &meta,
                 &cluster_meta,
                 &shutdown,
+                None,
                 &empty_kv_stores(),
                 &empty_session_stores(),
                 &empty_slow_start_registry(),
@@ -789,6 +808,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
             &empty_kv_stores(),
             &empty_session_stores(),
             &empty_slow_start_registry(),
@@ -829,6 +849,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
         );
 
         assert!(result.is_err(), "grouped TCP listeners must keep identical chains");
@@ -859,6 +880,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
         );
 
         assert!(
@@ -886,6 +908,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
         );
 
         assert!(
@@ -909,6 +932,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
         );
 
         assert!(result.is_ok(), "consistent chain edits must reload: {result:?}");
@@ -933,6 +957,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
         );
 
         assert!(
@@ -959,6 +984,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
         )
         .expect_err("allow_private_upstreams is captured by forward_proxy listeners at startup");
         assert!(err.to_string().contains("allow_private_upstreams"), "{err}");
@@ -981,6 +1007,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
         );
         assert!(result.is_ok(), "{result:?}");
     }
@@ -1000,6 +1027,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
         );
         assert!(result.is_ok(), "{result:?}");
     }
@@ -1024,6 +1052,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
         );
 
         let err = result.expect_err("the CONNECT runtime is captured at startup");
@@ -1059,6 +1088,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
         );
 
         assert!(result.is_err(), "the destination matcher is built at startup");
@@ -1078,6 +1108,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
         );
 
         assert!(result.is_err(), "the CONNECT gate is set when the handler is bound");
@@ -1111,6 +1142,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
         );
 
         assert!(
@@ -1148,6 +1180,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
         )
         .expect("removing a listener without forward_proxy is accepted");
 
@@ -1160,6 +1193,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
         );
 
         assert!(
@@ -1184,6 +1218,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
         );
 
         assert!(result.is_ok(), "an unchanged block must not block reloads: {result:?}");
@@ -1224,6 +1259,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
             &empty_kv_stores(),
             &empty_session_stores(),
             &empty_slow_start_registry(),
@@ -1246,6 +1282,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
             &empty_kv_stores(),
             &empty_session_stores(),
             &empty_slow_start_registry(),
@@ -1332,6 +1369,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
             &empty_kv_stores(),
             &empty_session_stores(),
             &empty_slow_start_registry(),
@@ -1413,6 +1451,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
             &empty_kv_stores(),
             &empty_session_stores(),
             &empty_slow_start_registry(),
@@ -1604,6 +1643,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
             &kv_stores,
             &session_stores,
             &empty_slow_start_registry(),
@@ -1660,6 +1700,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
             &empty_kv_stores(),
             &empty_session_stores(),
             &empty_slow_start_registry(),
@@ -1709,6 +1750,7 @@ filter_chains:
                 &meta,
                 &cluster_meta,
                 &shutdown,
+                None,
                 &empty_kv_stores(),
                 &empty_session_stores(),
                 &empty_slow_start_registry(),
@@ -1751,6 +1793,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
             &empty_kv_stores(),
             &empty_session_stores(),
             &empty_slow_start_registry(),
@@ -1780,6 +1823,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
             &empty_kv_stores(),
             &empty_session_stores(),
             &empty_slow_start_registry(),
@@ -1824,6 +1868,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
             &empty_kv_stores(),
             &empty_session_stores(),
             &empty_slow_start_registry(),
@@ -1867,6 +1912,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
             &empty_kv_stores(),
             &empty_session_stores(),
             &empty_slow_start_registry(),
@@ -2461,6 +2507,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
             &empty_kv_stores(),
             &empty_session_stores(),
             &empty_slow_start_registry(),
@@ -2517,6 +2564,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
             &empty_kv_stores(),
             &empty_session_stores(),
             &empty_slow_start_registry(),
@@ -2536,6 +2584,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
             &empty_kv_stores(),
             &empty_session_stores(),
             &empty_slow_start_registry(),
@@ -2589,6 +2638,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
             &empty_kv_stores(),
             &empty_session_stores(),
             &empty_slow_start_registry(),
@@ -2670,6 +2720,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
             &empty_kv_stores(),
             &empty_session_stores(),
             &empty_slow_start_registry(),
@@ -2703,6 +2754,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
             &empty_kv_stores(),
             &empty_session_stores(),
             &empty_slow_start_registry(),
@@ -2897,6 +2949,7 @@ filter_chains:
         meta: &praxis_protocol::http::health::ListenerMetaStore,
         cluster_meta: &praxis_protocol::http::health::ClusterMetaStore,
         shutdown: &Arc<Mutex<CancellationToken>>,
+        health_lifecycle: Option<&HealthTaskLifecycle>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         reload_pipelines(
             new_config,
@@ -2906,6 +2959,7 @@ filter_chains:
             meta,
             cluster_meta,
             shutdown,
+            health_lifecycle,
             &empty_kv_stores(),
             &empty_session_stores(),
             &empty_slow_start_registry(),

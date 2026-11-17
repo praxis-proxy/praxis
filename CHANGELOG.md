@@ -77,6 +77,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Returning server calls stop their config watcher, health checks, and
+  housekeeping after shutdown or startup failure.
+- Failed cross-protocol listener registration stops certificate watchers
+  started by earlier successful registrations; returning servers explicitly
+  stop certificate watchers.
 - Reject configured upstream CA bundles with no usable trust anchor during
   configuration, while retaining valid roots in mixed bundles.
 - Reject malformed upstream mTLS client certificate chains and invalid raw
