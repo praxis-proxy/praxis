@@ -26,21 +26,24 @@ group use identical `filter_chains` and
 ## Connection Lifecycle
 
 ```text
-accept -> admission -> SNI peek -> filters -> connect -> forward -> disconnect
+accept -> admission -> TLS (if configured) -> SNI peek -> filters -> connect -> forward -> disconnect
 ```
 
-1. **Accept**: Pingora accepts the TCP connection.
-   The proxy extracts remote and local socket
-   addresses from the session digest.
+1. **Accept**: the backend accepts the TCP connection.
+   Hyper admits before spawning its connection task;
+   Pingora admits in its pre-TLS callback, after its
+   accept task and L4 buffers exist.
 
-2. **Admission gates**: two checks run before any
-   work begins:
+2. **Admission gates**: the shared token is acquired
+   before a TLS handshake or at plain TCP entry:
    - Memory pressure: if the process exceeds its
      memory threshold, the connection is dropped.
    - Connection limits: a global semaphore
-     (`runtime.max_connections`) and a per-listener
+     (`runtime.max_connections`) and a TCP-group
      semaphore (`max_connections`) must both have
      available permits.
+   - File descriptor pressure: a forecast claim is held
+     until an upstream connection opens or the session ends.
 
 3. **SNI peek** (filter-routed mode only): reads the
    initial bytes to extract the TLS `ClientHello`
@@ -121,8 +124,9 @@ without interception.
 Three independent timeouts protect different phases:
 
 ```text
-|-- SNI peek --|-------- session timeout ---------|
-               |---- max duration (hard cap) -----|
+|-- TLS --|-- SNI peek --|-- filters --|-- connect --|-- forward --|
+|--------------------- max duration -----------------------------|
+                                           |-- session timeout --|
 ```
 
 ### SNI Peek Timeout (5 seconds)
@@ -146,11 +150,14 @@ transfer.
 
 ### Max Duration (`tcp_max_duration_secs`)
 
-A hard cap on total session lifetime regardless of
-activity. Wraps the entire forwarding phase in
-`tokio::time::timeout`. Useful for preventing
-indefinite connections to services like databases
-or message brokers.
+An absolute budget counted from admission, covering
+shared setup and forwarding and Hyper's TLS handshake.
+The forwarding-only session timeout remains separate.
+Pingora's pre-TLS callback starts this budget before
+its handshake, but Pingora fixes that handshake's own
+timeout at 60 seconds. A stalled Pingora handshake can
+therefore exceed the configured maximum until Pingora
+returns; the proxy then rejects the expired token.
 
 ### Upstream Connect Timeout (10 seconds)
 

@@ -676,6 +676,7 @@ default_upstream: "10.0.0.1:443"
             local_addr: "0.0.0.0:443",
             sni,
             upstream_addr: None,
+            lb_selection: None,
             cluster: None,
             health_registry: None,
             kv_stores: None,

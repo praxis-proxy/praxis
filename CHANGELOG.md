@@ -38,6 +38,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **Breaking:** `TcpFilterContext` now carries `lb_selection`; custom
+  constructors must initialize it to `None`. Built-in TCP load balancing
+  retains each acquired endpoint claim through timeout and cancellation
+  cleanup.
 - Update the Pingora fork dependencies to v0.11.4.
 - **Breaking:** `HttpFilterContext::filter_metadata` is now a
   `FilterMetadata` instead of a `HashMap<String, String>`. Its `insert`
@@ -70,6 +74,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Apply TCP maximum durations across setup and forwarding, including Hyper
+  TLS setup. Pingora's initial TLS handshake retains its separate timeout.
 - Stop certificate watchers started by earlier listeners when HTTP or TCP
   listener registration fails.
 - Preserve unmodified MCP request and response bodies, and emit inference
@@ -112,6 +118,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Security
 
+- Count pending TCP TLS handshakes against global and listener-group connection
+  limits.
 - Policy content scanners now receive secondary MCP tool text alongside
   structured results.
 - Inference output policy now inspects recognized Responses text and Chat and
