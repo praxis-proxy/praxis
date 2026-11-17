@@ -78,6 +78,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Reject inline Basic Auth usernames containing a colon during configuration
+  loading.
 - Apply CORS requested-header policy to every preflight field line, including
   undecodable values.
 - Configure active health checks in zone-aware and priority load-balancing

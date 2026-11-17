@@ -145,6 +145,26 @@ credentials:
 }
 
 #[test]
+fn rejects_colon_in_username() {
+    for username in [":admin", "team:admin", "admin:"] {
+        for source in ["password: secret", "env_var: UNSET_TEST_SECRET"] {
+            let config = yaml(&format!("credentials:\n  - username: '{username}'\n    {source}\n"));
+            let error = serde_yaml::from_value::<super::config::BasicAuthConfig>(config)
+                .expect_err("username containing colon must fail config validation");
+            assert!(
+                error.to_string().contains("must not contain ':'"),
+                "username {username:?} with {source} must fail for the username: {error}"
+            );
+        }
+    }
+    let valid = yaml("credentials:\n  - username: team-admin\n    password: a:b:c\n");
+    assert!(
+        BasicAuthFilter::from_config(&valid).is_ok(),
+        "valid username and colon-bearing password must load"
+    );
+}
+
+#[test]
 fn rejects_realm_with_double_quote() {
     let yaml = yaml(
         r#"
