@@ -3,13 +3,46 @@
 
 //! The `policy` security filter — Praxis's in-process policy engine.
 //!
-//! Embeds the Praxis Policy Engine in-process to enforce multi-source
-//! identity, APL (Authorization Policy Logic) route policy, RFC 8693 token
-//! exchange, field redaction, session taint, audit emission, and (under
-//! `body_access: read_write`) request / response body rewriting. Content
-//! scanning is a host plugin: the engine dispatches it, and a policy that
-//! wants one names its `kind:`.
-//! Everything runs as linked Rust crates — no sidecar, no FFI.
+//! The `policy` filter embeds the [Praxis Policy Engine (PPE)](https://github.com/praxis-proxy/policy)
+//! for JWT and API-key authentication, authorization, identity delegation,
+//! rate limiting and data protection across HTTP APIs, MCP tools, prompts
+//! and resources, and AI inference requests.
+//!
+//! Policies combine shared defaults and route-specific controls, with ordered
+//! evaluation that stops on denial.
+//!
+//! See the [PPE documentation](https://github.com/praxis-proxy/policy/blob/main/docs/content/index.md)
+//! for policy configuration, plugin references and worked examples.
+//!
+//! It provides:
+//!
+//! - **Identity and authorization:** independently validated user, agent and workload identities through JWTs or API
+//!   keys; attribute-based rules and embedded Cedar, CEL and OPA/Rego decisions.
+//!
+//! - **Identity delegation:** act on behalf of a user or as an application or workload, select the delegation subject
+//!   and actor, and obtain upstream credentials scoped to the target audience and permissions through OAuth token
+//!   exchange, or retrieve upstream credentials from Vault KV v2.
+//!
+//! - **Header controls:** project verified identity and claims into upstream headers, control response headers, and
+//!   strip configured names or prefixes.
+//!
+//! - **Data protection:** input validation, MCP argument and tool-result redaction and masking, inference request
+//!   inspection, and session taint labels for data-flow controls across calls.
+//!
+//! - **Rate limiting:** enforce request limits before authentication by client address, or after authentication by
+//!   resolved identity and claims, with configurable limits per policy route. Counters are local to each limiter
+//!   instance.
+//!
+//! - **Approval and accountability:** out-of-band human approval through OIDC CIBA, and configurable decision and
+//!   effect auditing.
+//!
+//! - **Extensibility:** host-provided plugins for content scanning, custom validation and audit destinations.
+//!
+//! The engine runs in process as linked Rust crates. Available plugins depend
+//! on build features. MCP body rewriting and response policy require
+//! `body_access: read_write`; inference response content inspection covers
+//! non-streaming JSON responses. Trusted host metadata can also be evaluated
+//! at end of stream without buffering the response.
 //!
 //! Compiled in and registered under the YAML name `policy` by default.
 //! Build with `--no-default-features` to leave the filter and the policy
@@ -23,7 +56,7 @@
 //! often consults more than one engine, mints a token for the downstream
 //! call, strips sensitive fields from the payload, and writes an audit
 //! record — in the right order with the right short-circuits. The policy engine makes
-//! that orchestration declarative: a policy is a per-entity chain of APL
+//! that orchestration declarative: each entity has an ordered chain of
 //! steps, the PDP is one step, and the steps around it express the rest.
 //!
 //! # Where it sits in the chain
@@ -81,7 +114,7 @@
 //! A host filter may also provide [`PolicyResponseContext`] after observing a
 //! response; in that case `cmf.llm_output` evaluates its trusted `custom.*`
 //! values at end of stream without buffering or exposing response content, and
-//! returns plugin-written custom values through [`PolicyResponseOutput`]. APL
+//! returns plugin-written custom values through [`PolicyResponseOutput`]. Policy
 //! field mutators do not rewrite inference bodies in either direction.
 //! Host filters that create [`PolicyResponseContext`] at end of stream must be
 //! placed after `policy` in the filter chain, because response-body filters
@@ -90,32 +123,68 @@
 //! # The policy document
 //!
 //! `config_path` points at the policy document (operator-supplied):
-//! a `plugins` toolbox, a `global` block, and `routes`. Each route's
-//! `policy` is an ordered list of APL steps that short-circuit on the
-//! first deny:
+//! a `plugins` toolbox, a `global` block, and `routes`. Each route defines
+//! input validation, pre-invocation authorization, result transforms and
+//! post-invocation authorization. Rules short-circuit on the first deny:
 //!
 //! | Step | Effect |
 //! |---|---|
 //! | `require(predicate)` | Deny unless the predicate holds. |
 //! | `<predicate>: deny('reason', 'code')` | Deny with a reason + violation code when the predicate holds. |
 //! | `cedar: { … }` / `cel: { expr: … }` | Consult the registered PDP; `on_allow` / `on_deny` attach reactions. |
-//! | `delegate(plugin, target:, audience:, permissions:)` | Mint an audience-scoped token (RFC 8693) and attach it upstream. |
+//! | `delegate(plugin, target:, audience:, permissions:)` | Obtain an upstream credential through OAuth token exchange or Vault. |
 //! | `run(name)` / `plugin(name)` | Invoke a named plugin (PII scan, audit). |
 //! | `taint(label, session)` | Record a session label (see below). |
 //! | `args.<field>: "… \| redact(…) \| mask(n)"` | Rewrite a request argument (needs `body_access: read_write`). |
 //! | `result.<field>: "… \| redact(…)"` | Rewrite a response field on the way back. |
 //!
-//! Two PDP backends are compiled into the same binary: `cedar-direct`
-//! (Cedar policy sets) and `cel` (inline CEL boolean expressions). A
-//! route selects one with a `cedar:` or `cel:` step.
+//! The default build includes three embedded PDP backends: `cedar-direct`
+//! (Cedar policy sets), `cel` (inline CEL boolean expressions), and `opa`
+//! (Rego policies). A route selects one with a `cedar:`, `cel:`, or `opa:`
+//! step. Narrower builds select backends through Cargo features.
 //!
 //! # Identity
 //!
-//! Each `identity/jwt` plugin reads its own configured header (e.g.
-//! `Authorization`, `X-User-Token`) and validates the JWT against the
-//! issuer's live JWKS; one request can carry several identities. An early
-//! identity gate in the request phase rejects a request with no valid
-//! token (HTTP 401) before the body is buffered.
+//! Authentication uses `identity/jwt` for verified JWTs, including OIDC tokens
+//! and SPIFFE JWT-SVIDs, or `identity/api-key` for opaque keys resolved through
+//! a file or HTTP directory. JWT credentials can come from headers, cookies
+//! or query parameters; header credentials can require `DPoP` proofs. Multiple
+//! resolvers independently populate user, client and workload identity slots.
+//! See [Identity configuration].
+//!
+//! The JWT plugin maps verified OIDC claims into identity attributes through
+//! `claim_mapper` presets (`standard`, `keycloak`, `auth0`, `cognito`,
+//! `ibmverify`) or an inline `claim_map`. Custom maps select claim paths,
+//! merge role and permission collections, and can deny when required claims
+//! are missing. See [OIDC claim mapping].
+//!
+//! # Identity delegation and Vault
+//!
+//! `delegator/vault` retrieves upstream personal access tokens (PATs) or API keys
+//! from Vault KV v2 instead of exchanging an OAuth token. Vault JWT authentication supports
+//! caller-scoped access for users, clients and workloads; `AppRole` supports
+//! credentials owned by this deployment (`subject: this_workload`). The
+//! delegator is included in `policy-builtins` or selected individually with
+//! `policy-delegator-vault`. Vault policies must enforce credential isolation.
+//! See [Vault delegation recipes].
+//!
+//! Vault delegation is separate from the `secrets:` registry, for which
+//! the filter registers only the `env` provider.
+//!
+//! # Header assertions
+//!
+//! Header assertions project verified identity and mapped claims onto the wire.
+//! `assertions.request` sets upstream headers; `assertions.response` controls
+//! headers sent to the client. Incoming values for asserted names are removed
+//! before injection, even when the source is absent. `strip:` removes additional header names or
+//! prefix patterns. Response contracts must be declared at `global`,
+//! `global.defaults.http` or an `http:` route; other placements fail to load.
+//! See [Header assertions].
+//!
+//! [Identity configuration]: https://github.com/praxis-proxy/policy/blob/main/docs/content/apl/identity.md
+//! [OIDC claim mapping]: https://github.com/praxis-proxy/policy/blob/main/docs/content/identity-delegation.md#reading-claims-the-way-your-idp-writes-them
+//! [Header assertions]: https://github.com/praxis-proxy/policy/blob/main/docs/content/assertions.md
+//! [Vault delegation recipes]: https://github.com/praxis-proxy/policy/blob/main/docs/content/identity-delegation.md#recipe-8-a-users-vault-stored-credential
 //!
 //! # Sessions and taint
 //!
@@ -136,17 +205,13 @@
 //! - Response phase: with `body_access: read_write`, the filter dispatches post hooks for `tool:`, `prompt:`, and
 //!   `resource:` routes. Attribute-only `post_invocation` rules run for all three entity types; `result.<field>`
 //!   redactions currently work only for tools. A deny replaces the body with a JSON-RPC error envelope fitted to the
-//!   committed Content-Length. Prompt/resource result projection remains blocked on [policy #75]; host-side content
-//!   projection is tracked in [Praxis #1330]. `result:` field pipelines on prompt/resource routes are rejected at load,
-//!   including inherited pipelines.
+//!   committed Content-Length. Prompt and resource results are not projected into field pipelines. `result:` field
+//!   pipelines on prompt/resource routes are rejected at load, including inherited pipelines.
 //!
 //! `read_only` skips MCP entity response rules and content-based inference
 //! response rules. Metadata-only inference response rules can still run when a
 //! host filter supplies [`PolicyResponseContext`]. A response-only route adds
 //! no request-phase route rule; identity checks and `global` policy still apply.
-//!
-//! [policy #75]: https://github.com/praxis-proxy/policy/issues/75
-//! [Praxis #1330]: https://github.com/praxis-proxy/praxis/issues/1330
 //!
 //! # Decisions and denials
 //!
@@ -214,7 +279,7 @@ pub use host_plugins::{PolicyPluginFactoryFn, register_policy_plugin_factory};
 ///
 /// Checks what is compiled in, not runtime readiness: host plugin factories
 /// carry no FIPS evidence, Policy's crypto capability report must be the
-/// FIPS profile, and the experimental limiter has not been validated with
+/// FIPS profile, and the request limiter has not been validated with
 /// the FIPS backend. A missing provider or non-FIPS OpenSSL defaults fail
 /// filter construction instead, when the engine initializes or JWT config
 /// loads.

@@ -32,4 +32,4 @@ Transformation filters modify requests and responses in flight, rewriting URLs, 
 ## Related Documentation
 
 - [Filter Reference](../../../docs/filters/README.md)
-- [Request Processing](../../../docs/architecture/request-flow.md)
+- [Life of a Request](../../../docs/architecture/life-of-a-request.md)

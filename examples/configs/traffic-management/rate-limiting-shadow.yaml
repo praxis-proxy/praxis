@@ -30,6 +30,7 @@ filter_chains:
     filters:
       - filter: rate_limit
         mode: per_ip
+        scope: local         # counters are per-process
         rate: 1              # demo value; tune against the metric
         burst: 2             # demo value; tune against the metric
         shadow: true         # observe only: count would-be rejections, never 429

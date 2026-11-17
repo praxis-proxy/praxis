@@ -13,7 +13,7 @@ In `per_ip` mode, IPv6 clients are keyed by network prefix (`ipv6_prefix_len`, d
 
 The per-IP table fails closed: once it holds 200,000 keys that are still within their idle window (`2 * burst / rate` seconds), every previously unseen client gets a 429 until entries age out. A large `burst`-to-`rate` ratio stretches that window, so a client rotating addresses can hold the table full more cheaply; on internet-facing listeners prefer `ipv6_prefix_len: 64` and a modest ratio.
 
-State is all managed locally.
+Bucket counter scope is in explicit `local` mode - each replica enforces its own `rate` and `burst`, and a restart or filter rebuild resets its buckets. `local` is the only supported value for the moment.
 
 `shadow: true` evaluates the limit without rejecting: over-limit requests are allowed through, counted in `praxis_rate_limit_limited_total{shadow="true"}` and logged as shadow decisions, while the response headers still report the bucket state. The bucket evolves exactly as under enforcement, so the count is the number of requests the limit would have rejected. Tune `rate` and `burst` against it, then remove the flag to enforce.
 
@@ -22,6 +22,7 @@ State is all managed locally.
 | Field | Type | Required | Description |
 |-------|------|---------|-------------|
 | `mode` | `global` \| `per_ip` | yes | Whether to use a single global bucket or per-IP buckets. |
+| `scope` | `local` | yes | Scope of bucket token counters. |
 | `rate` | number | yes | Tokens replenished per second. |
 | `burst` | integer | yes | Maximum bucket capacity. |
 | `ipv6_prefix_len` | integer | no | IPv6 network prefix length (1-128) that `per_ip` mode groups clients by. Defaults to 128, one bucket per address. Set 64 on internet-facing listeners, where one subscriber controls a whole /64 and can rotate addresses to evade the limit; keep 128 inside a cluster or LAN, where a node or segment shares one /64. IPv4 clients are keyed by full address. Ignored in `global` mode. |
@@ -32,6 +33,7 @@ State is all managed locally.
 ```yaml
 filter: rate_limit
 mode: per_ip        # "per_ip" or "global"
+scope: local        # counters are process-local
 rate: 100           # tokens per second
 burst: 200          # max bucket capacity
 ipv6_prefix_len: 64 # per_ip: group IPv6 clients by /64 (default 128)

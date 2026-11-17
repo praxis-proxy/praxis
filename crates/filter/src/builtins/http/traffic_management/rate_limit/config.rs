@@ -41,6 +41,28 @@ pub enum RateLimitMode {
 }
 
 // -----------------------------------------------------------------------------
+// RateLimitScope
+// -----------------------------------------------------------------------------
+
+/// Scope of bucket rate-limit counters.
+///
+/// ```
+/// use praxis_filter::RateLimitScope;
+///
+/// let scope: RateLimitScope = serde_yaml::from_str("local").unwrap();
+/// assert!(matches!(scope, RateLimitScope::Local));
+///
+/// assert!(serde_yaml::from_str::<RateLimitScope>("valkey").is_err());
+/// ```
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum RateLimitScope {
+    /// Counters are kept within the process. Each replica enforces its own
+    /// `rate` and `burst`, restarts and filter rebuilds reset the buckets.
+    Local,
+}
+
+// -----------------------------------------------------------------------------
 // RateLimitConfig
 // -----------------------------------------------------------------------------
 
@@ -50,6 +72,9 @@ pub enum RateLimitMode {
 pub(super) struct RateLimitConfig {
     /// Whether to use a single global bucket or per-IP buckets.
     pub mode: RateLimitMode,
+
+    /// Scope of bucket token counters.
+    pub scope: RateLimitScope,
 
     /// Tokens replenished per second.
     pub rate: f64,

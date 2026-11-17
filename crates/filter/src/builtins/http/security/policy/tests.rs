@@ -535,10 +535,8 @@ async fn dispatch_tool_session(filter: &PolicyFilter, subject: &str, tool: &str,
         .expect("filter ran")
 }
 
-/// Write a policy document with two identity plugins, each reading its own
-/// header. Demonstrates the multi-source agentic identity story PR1
-/// targets — one request can carry user + agent JWTs simultaneously,
-/// both validated, both contributing to a typed `Extensions` context.
+/// Write a policy document that independently validates user and agent JWTs
+/// from separate headers and contributes both identities to `Extensions`.
 #[expect(
     clippy::too_many_lines,
     reason = "test fixture — the YAML literal is the bulk; splitting utilities would obscure the shape under test"
@@ -2290,9 +2288,6 @@ async fn auth_rejection_carries_diagnostic_headers() {
     assert!(violation.is_some(), "X-Policy-Violation header is expected");
 }
 
-/// The PR1 multi-source story: one request carries a user JWT in
-/// `Authorization` and an agent JWT in `X-Agent-Token`. Both plugins
-/// validate their respective headers and the request passes.
 #[tokio::test(flavor = "multi_thread")]
 async fn multi_source_both_identities_continue() {
     let (_dir, path) = write_multi_source_config();

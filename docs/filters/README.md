@@ -580,7 +580,10 @@ not match.
   conditions:
     - when:
         grpc: true
-  requests_per_second: 100
+  mode: global
+  scope: local
+  rate: 100
+  burst: 200
 ```
 
 ```yaml

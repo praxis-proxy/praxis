@@ -1,10 +1,41 @@
 # Getting Started
 
+This guide is for repository contributors building and changing Praxis.
+To configure and run your first local proxy, use the
+[operator quickstart](../quickstart.md).
+
 ## Requirements
 
-- Rust stable 1.92+
-- Rust nightly (for `rustfmt`)
+For a local build and targeted tests, install:
+
+- Git and Make
+- Rust stable pinned by [`rust-toolchain.toml`](../../rust-toolchain.toml)
+  (rustup selects it automatically in the checkout)
 - CMake 3.31+
+- System OpenSSL development libraries and `pkg-config`
+
+Clone the repository and work from its root:
+
+```console
+git clone https://github.com/praxis-proxy/praxis.git
+cd praxis
+cargo build -p praxis-proxy
+```
+
+Run a focused test while making changes, for example the core unit tests:
+
+```console
+cargo test -p praxis-proxy-core --lib
+```
+
+See [conventions](conventions.md) for the checks required for your change.
+
+## Tools for linting and specialist workflows
+
+Install the tools needed by the targets you plan to run. FIPS, container,
+coverage, and rollout workflows have additional requirements below.
+
+- Rust nightly for `rustfmt`, at `NIGHTLY_VERSION` in the Makefile
 - Docker 29.3.0+ or Podman (for container builds; the FIPS image, its
   signature verification and Red Hat's scanner need Podman on Linux)
 - Go 1.26+ (`make fips-scanner`, optional)

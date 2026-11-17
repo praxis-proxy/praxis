@@ -165,6 +165,7 @@ filter_chains:
   - name: main
     filters:
       - filter: rate_limit
+        scope: local
         mode: global
         rate: 1
         burst: 1
@@ -321,11 +322,13 @@ filter_chains:
   - name: main
     filters:
       - filter: rate_limit
+        scope: local
         mode: global
         rate: 1
         burst: 1
         shadow: true
       - filter: rate_limit
+        scope: local
         mode: global
         rate: 1
         burst: 4
@@ -376,6 +379,7 @@ filter_chains:
   - name: main
     filters:
       - filter: rate_limit
+        scope: local
         mode: global
         rate: 1
         burst: 1
@@ -444,6 +448,7 @@ filter_chains:
   - name: main
     filters:
       - filter: rate_limit
+        scope: local
         mode: {mode}
         rate: {rate}
         burst: {burst}
