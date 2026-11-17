@@ -81,6 +81,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - Keep Hyper upstream response read deadlines active while a streaming request upload makes progress.
 - Honor final filtered response status in Hyper body delivery and framing, including safe conversion of bodyless 304 responses to 200.
+- Classify failed Hyper terminal EOF sends as downstream disconnects while preserving request state through cancellation and completion.
 - Preserve sticky-session bindings across reloads and conflicting listener bounds while retiring stores no longer used by serving pipelines.
 - Create header affinity only for the selected endpoint with forwarding evidence, including nested and hedged requests; failed dials and local responses cannot establish a binding.
 - Settle nested circuit-breaker tokens on filtered subrequest timeout or cancellation without changing neutral half-open recovery policy.
