@@ -77,6 +77,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Correct payload documentation for transfer limits, buffering limits, and
+  reserved metadata headers.
 - Pass through non-native gRPC response media types in the gRPC-Web filter.
 - Prevent JSON body add operations from duplicating an existing member when
   source metadata is extracted later in the same object.
