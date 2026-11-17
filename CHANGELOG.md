@@ -76,6 +76,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `context_meta` and `context_headers`, so response-phase rules see the same
   operator context as the request path when no request-phase identity was
   stashed.
+- **Breaking:** Reject invalid header names for `consistent_hash`, `maglev`,
+  and `ring_hash` instead of silently hashing by request path.
 - **Breaking:** statically buffered request pipelines now reject a finite
   `body_limits.max_request_bytes` above `body_limits.max_buffer_bytes` at
   startup, config validation, and reload, naming both fields and byte values.
