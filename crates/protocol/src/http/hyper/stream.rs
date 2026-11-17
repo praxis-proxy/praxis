@@ -170,8 +170,8 @@ impl Relaying {
     /// or the time to offer the queued body again.
     ///
     /// `due` is when the awaited upstream chunk is overdue. It is kept
-    /// across the turns spent offering the queued body again, so those do
-    /// not restart the read timeout the way every other step does.
+    /// across upload progress and retries. Only an upstream body event
+    /// starts a new read budget.
     async fn next_step(&mut self, due: &mut Option<Due>) -> Step {
         let queued = self.upload.has_outgoing();
         if due.is_none() {
@@ -185,7 +185,7 @@ impl Relaying {
             frame = self.upload.next_live(), if self.upload.is_live() && !queued => Step::Client(frame),
             () = tokio::time::sleep(UPLOAD_RETRY), if queued => Step::Retry,
         };
-        if !matches!(step, Step::Retry) {
+        if matches!(step, Step::Upstream(_)) {
             *due = None;
         }
         step
@@ -196,10 +196,10 @@ impl Relaying {
         if let Some(ended) = self.resume().await {
             return ended;
         }
-        let mut due = None;
+        let mut due = self.read_timeout.and_then(Due::within);
         loop {
-            if self.upload.has_outgoing() && self.push_upload().await {
-                due = None;
+            if self.upload.has_outgoing() {
+                self.push_upload().await;
             }
             let step = Box::pin(self.next_step(&mut due)).await;
             if let Some(ended) = Box::pin(self.take_step(step)).await {
@@ -209,15 +209,12 @@ impl Relaying {
     }
 
     /// Hand what is queued of the client's body to the upstream, for as long
-    /// as it keeps taking it; the response is relayed in between. Returns
-    /// whether the upstream took any of it.
-    async fn push_upload(&mut self) -> bool {
+    /// as it keeps taking it; the response is relayed in between.
+    async fn push_upload(&mut self) {
         match self.upload.flush(&mut self.session, UPLOAD_SLICE).await {
-            Ok(Flush::Done | Flush::Taken) => true,
-            Ok(Flush::Blocked) => false,
+            Ok(Flush::Done | Flush::Taken | Flush::Blocked) => {},
             Err(end) => {
                 self.stop_upload(end);
-                false
             },
         }
     }
@@ -431,6 +428,7 @@ mod tests {
     use http_body_util::BodyExt as _;
     use praxis_core::egress::Connector as _;
     use praxis_filter::{BodyMode, FilterAction, FilterPipeline};
+    use tokio::io::AsyncWriteExt as _;
 
     use super::*;
     use crate::http::hyper::{
@@ -919,6 +917,135 @@ mod tests {
         assert!(
             matches!(&ended, Ok(Ended::Upstream(failure)) if failure.kind == FailureKind::ReadTimeout),
             "an upstream that neither takes the request body nor sends the response trips the read timeout"
+        );
+    }
+
+    #[tokio::test]
+    async fn client_upload_progress_does_not_extend_upstream_body_timeout() {
+        assert_stalled_upload_times_out().await;
+        assert_timely_upstream_data_arrives().await;
+    }
+
+    /// The stalled upstream, upload writer and hook observations share one lifetime.
+    struct ProgressFixture {
+        /// Keep the upstream accept loop alive while the relay runs.
+        _upstream: Upstream,
+        /// The response-body relay under the read deadline.
+        relaying: Relaying,
+        /// The client side that trickles request-body frames.
+        writer: tokio::io::DuplexStream,
+        /// Number of request-body hook invocations.
+        uploads: Arc<Mutex<usize>>,
+        /// The downstream body whose receiver must stay alive.
+        body: ProxyBody,
+    }
+
+    /// Observe each upload frame so the timeout assertion proves real progress.
+    fn observing_uploads(uploads: &Arc<Mutex<usize>>) -> FilterPipeline {
+        let observed = Arc::clone(uploads);
+        scripted_pipeline(Script {
+            request_body: Some((
+                BodyMode::Stream,
+                Arc::new(move |_body, _ends| {
+                    *observed.lock().unwrap() += 1;
+                    Ok(FilterAction::Continue)
+                }),
+            )),
+            ..Script::default()
+        })
+    }
+
+    /// Build a relay whose upstream sends a head but no response-body bytes.
+    async fn progress_fixture() -> ProgressFixture {
+        let upstream = Upstream::answering(b"HTTP/1.1 200 OK\r\ncontent-length: 10\r\n\r\n").await;
+        let (connector, mut session) = session_to(&upstream, Method::POST).await;
+        session.read_response_head().await.unwrap();
+        let uploads = Arc::new(Mutex::new(0_usize));
+        let mut flight = Flight::for_tests(observing_uploads(&uploads));
+        flight.ctx.request_snapshot = Some(praxis_filter::Request {
+            method: Method::POST,
+            uri: "/".parse().unwrap(),
+            headers: HeaderMap::new(),
+        });
+        let (upload, mut client) = streaming_upload(&flight.ctx).await;
+        let (relay, body) = Relay::new();
+        let relaying = Relaying {
+            connector,
+            flight,
+            read_timeout: Some(Duration::from_millis(250)),
+            relay,
+            session,
+            start: Start::Fresh,
+            upload,
+        };
+        ProgressFixture {
+            _upstream: upstream,
+            relaying,
+            writer: client.stream.take().unwrap(),
+            uploads,
+            body,
+        }
+    }
+
+    /// Repeated upload progress must not renew a stalled response-read deadline.
+    async fn assert_stalled_upload_times_out() {
+        let ProgressFixture {
+            _upstream,
+            mut relaying,
+            mut writer,
+            uploads,
+            body,
+        } = progress_fixture().await;
+        // Establish real sockets first, then run the deadline and recurring
+        // client progress on virtual time. A reset on any upload event now
+        // keeps the pump alive until the distinct two-second watchdog fails.
+        tokio::time::pause();
+        let started = Instant::now();
+        let pumping = tokio::spawn(async move { relaying.pump().await });
+        let writing = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                if writer.write_all(b"1\r\nx\r\n").await.is_err() {
+                    break;
+                }
+            }
+        });
+        let outcome = tokio::time::timeout(Duration::from_secs(2), pumping).await;
+        let elapsed = started.elapsed();
+        writing.abort();
+        tokio::time::resume();
+        let ended = outcome
+            .expect("ongoing upload must not renew the read deadline")
+            .unwrap();
+        assert_stalled_outcome(ended, elapsed, &uploads);
+        drop(body);
+    }
+
+    /// Check both the timeout result and that several upload hooks ran first.
+    fn assert_stalled_outcome(ended: Ended, elapsed: Duration, uploads: &Arc<Mutex<usize>>) {
+        assert!(
+            matches!(ended, Ended::Upstream(failure) if failure.kind == FailureKind::ReadTimeout),
+            "upload progress must not renew the response read deadline"
+        );
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "the deadline must remain near one interval"
+        );
+        assert!(
+            *uploads.lock().unwrap() >= 3,
+            "multiple upload frames must actually pass the request body hook"
+        );
+    }
+
+    /// A timely upstream body remains deliverable under the same read budget.
+    async fn assert_timely_upstream_data_arrives() {
+        let (_upstream, connector, session) = answered(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok").await;
+        let (mut relaying, body) = relaying(connector, empty_pipeline(), session, Start::Fresh, true).await;
+        relaying.read_timeout = Some(Duration::from_millis(250));
+        assert_eq!(
+            run_and_collect(relaying, body).await.unwrap(),
+            "ok",
+            "timely upstream data must still arrive"
         );
     }
 
