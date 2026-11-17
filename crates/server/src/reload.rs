@@ -180,9 +180,7 @@ pub(crate) fn reload_pipelines(
         swapped.push(name);
     }
 
-    listener_meta.store(Arc::new(praxis_protocol::http::health::listener_meta_from_config(
-        new_config,
-    )));
+    listener_meta.store(Arc::new(merged_listener_meta(new_config, live, listener_meta)));
     cluster_meta.store(Arc::new(praxis_protocol::http::health::cluster_meta_from_config(
         new_config,
     )));
@@ -199,6 +197,37 @@ pub(crate) fn reload_pipelines(
     info!(swapped = ?swapped, skipped = ?skipped, "config reload complete");
 
     Ok(())
+}
+
+/// Keep bound transport metadata for live slots across a filter-only reload.
+///
+/// A removed HTTP listener remains bound with its old pipeline. A changed
+/// address or TLS block also cannot rebind a live slot, while its new chains
+/// are applied above. Newly configured, unbound listeners remain in the
+/// configured metadata map but cannot appear in `/api/pipelines` without a
+/// live slot.
+fn merged_listener_meta(
+    config: &Config,
+    live: &ListenerPipelines,
+    store: &praxis_protocol::http::health::ListenerMetaStore,
+) -> std::collections::HashMap<String, praxis_protocol::http::health::ListenerMeta> {
+    let previous = store.load();
+    let mut next = praxis_protocol::http::health::listener_meta_from_config(config);
+    for name in live.listener_names() {
+        let Some(bound) = previous.get(name) else {
+            continue;
+        };
+        if let Some(applied) = next.get_mut(name) {
+            applied.address.clone_from(&bound.address);
+            applied.protocol = bound.protocol;
+            applied.tls = bound.tls;
+        } else {
+            let mut retained = bound.clone();
+            retained.configured_in_current_generation = false;
+            next.insert(name.to_owned(), retained);
+        }
+    }
+    next
 }
 
 /// Refuse a config that changes the protocol of a listener whose handler
@@ -695,8 +724,8 @@ filter_chains:
         );
         assert_eq!(
             loaded.get("web").unwrap().address,
-            "127.0.0.1:9090",
-            "meta should reflect reloaded listener address"
+            "127.0.0.1:8080",
+            "meta should retain the bound listener address"
         );
         assert_eq!(
             loaded.get("web").unwrap().chain_names,
@@ -987,6 +1016,7 @@ filter_chains:
     fn tcp_listener_removal_rejects_reload() {
         let (live, old_config, registry, shutdown, meta, cluster_meta) =
             setup_live_pipelines_from(tcp_group_config("tcp_lb", "tcp_lb", "db_pool", false));
+        let original_meta = meta.load_full();
 
         let new_config = tcp_web_config();
         let result = reload_tcp(
@@ -1003,6 +1033,10 @@ filter_chains:
         assert!(
             result.is_err(),
             "removing a bound TCP listener cannot be applied without a restart"
+        );
+        assert!(
+            Arc::ptr_eq(&meta.load_full(), &original_meta),
+            "rejected TCP removal must preserve live listener metadata"
         );
     }
 
@@ -1358,8 +1392,10 @@ filter_chains:
         )
         .expect("removing a listener from the config is accepted");
         assert!(
-            meta.load().get("web").is_none(),
-            "the removed listener has no metadata entry to compare against"
+            meta.load()
+                .get("web")
+                .is_some_and(|entry| !entry.configured_in_current_generation),
+            "the removed listener remains bound with retained metadata"
         );
 
         let readded_as_tcp = tcp_web_config();

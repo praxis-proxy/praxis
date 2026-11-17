@@ -77,6 +77,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- `/api/pipelines` keeps still-bound HTTP listeners visible after their removal
+  from a reloaded config and reports bound transport settings with the applied
+  chains.
 - Reloaded hedged HTTPS requests retain the global upstream CA loaded at
   startup while applying new response body limits.
 - Returning server calls stop their config watcher, health checks, and
