@@ -52,6 +52,9 @@ const CRASH_EXIT_CODES: [i64; 7] = [101, 132, 134, 135, 136, 137, 139];
 /// Longest tag a container engine accepts, including the generated suffix.
 const MAX_IMAGE_TAG_LEN: usize = 128;
 
+/// Container terminations tolerated because they preceded the pod watch.
+type StartupRetries = BTreeSet<(String, String)>;
+
 /// Retains pod lifecycle events, including containers removed during rollouts.
 struct PodWatch {
     /// Watch process, stopped even when a scenario returns an error.
@@ -62,7 +65,7 @@ struct PodWatch {
     ///
     /// These are pre-watch startup retries: a nonzero exit here is tolerated
     /// unless it is a panic or signal. Anything else is a rollout failure.
-    startup_retries: BTreeSet<(String, String)>,
+    startup_retries: StartupRetries,
 }
 
 /// Runs an OpenSSL client inside the cluster so pod IPs can be probed directly.
@@ -196,33 +199,13 @@ impl Drop for HttpProbePod {
 impl PodWatch {
     /// Starts watching before any disruption and waits for the initial list.
     fn start(cluster: &str) -> Result<Self, String> {
-        let events = NamedTempFile::new().map_err(|error| error.to_string())?;
-        let output = events.reopen().map_err(|error| error.to_string())?;
-        let child = Command::new("kubectl")
-            .args([
-                "--context",
-                &format!("kind-{cluster}"),
-                "-n",
-                "praxis",
-                "get",
-                "pods",
-                "-l",
-                "app.kubernetes.io/instance=rollout",
-                "--watch",
-                "--output-watch-events",
-                "-o=json",
-            ])
-            .stdout(output)
-            .spawn()
-            .map_err(|error| error.to_string())?;
-        // Keep the child under the cleanup guard before the fallible snapshot,
-        // so a snapshot error still kills the spawned watch.
+        let (startup_retries, (child, events)) =
+            baseline_then_spawn(|| startup_retries(cluster), || spawn_pod_watch(cluster))?;
         let mut watch = Self {
             child,
             events,
-            startup_retries: BTreeSet::new(),
+            startup_retries,
         };
-        watch.startup_retries = startup_retries(cluster)?;
         for _ in 0..100 {
             if watch.child.try_wait().map_err(|error| error.to_string())?.is_some() {
                 return Err("pod watch exited before scenarios began".to_owned());
@@ -287,6 +270,40 @@ impl PodWatch {
     }
 }
 
+/// Captures tolerated exits before opening the event stream.
+fn baseline_then_spawn<T>(
+    snapshot: impl FnOnce() -> Result<StartupRetries, String>,
+    spawn: impl FnOnce() -> Result<T, String>,
+) -> Result<(StartupRetries, T), String> {
+    let baseline = snapshot()?;
+    let stream = spawn()?;
+    Ok((baseline, stream))
+}
+
+/// Starts the pod event stream and keeps its output available for validation.
+fn spawn_pod_watch(cluster: &str) -> Result<(Child, NamedTempFile), String> {
+    let events = NamedTempFile::new().map_err(|error| error.to_string())?;
+    let output = events.reopen().map_err(|error| error.to_string())?;
+    let child = Command::new("kubectl")
+        .args([
+            "--context",
+            &format!("kind-{cluster}"),
+            "-n",
+            "praxis",
+            "get",
+            "pods",
+            "-l",
+            "app.kubernetes.io/instance=rollout",
+            "--watch",
+            "--output-watch-events",
+            "-o=json",
+        ])
+        .stdout(output)
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    Ok((child, events))
+}
+
 impl Drop for PodWatch {
     fn drop(&mut self) {
         drop(self.child.kill());
@@ -299,7 +316,7 @@ impl Drop for PodWatch {
 /// Matching on `(pod UID, container ID)` identifies a termination instance.
 /// `finishedAt` has second granularity, so two exits in the same second would
 /// otherwise collide; the container ID is unique per container instance.
-fn startup_retries(cluster: &str) -> Result<BTreeSet<(String, String)>, String> {
+fn startup_retries(cluster: &str) -> Result<StartupRetries, String> {
     let pods = kubectl(
         cluster,
         ["get", "pods", "-l", "app.kubernetes.io/instance=rollout", "-o=json"],
@@ -310,7 +327,7 @@ fn startup_retries(cluster: &str) -> Result<BTreeSet<(String, String)>, String> 
 }
 
 /// Collects `(pod UID, container ID)` for every terminated container instance.
-fn terminations(pods: &serde_json::Value) -> BTreeSet<(String, String)> {
+fn terminations(pods: &serde_json::Value) -> StartupRetries {
     let mut retries = BTreeSet::new();
     let items = pods.get("items").and_then(serde_json::Value::as_array);
     for pod in items.into_iter().flatten() {
@@ -336,7 +353,7 @@ fn terminations(pods: &serde_json::Value) -> BTreeSet<(String, String)> {
 }
 
 /// Validates exits from current and previous states and retains deleted pods.
-fn check_pod_events(events: &str, startup_retries: &BTreeSet<(String, String)>) -> Result<(), String> {
+fn check_pod_events(events: &str, startup_retries: &StartupRetries) -> Result<(), String> {
     let mut latest = BTreeMap::new();
     let mut deletion_deadlines = BTreeMap::new();
     for event in serde_json::Deserializer::from_str(events).into_iter::<serde_json::Value>() {
@@ -428,7 +445,7 @@ fn check_pod_exit(
     pod: &serde_json::Value,
     terminating: bool,
     deadline: Option<&chrono::DateTime<chrono::FixedOffset>>,
-    startup_retries: Option<&BTreeSet<(String, String)>>,
+    startup_retries: Option<&StartupRetries>,
 ) -> Result<(), String> {
     let containers = pod
         .pointer("/status/containerStatuses")
@@ -2562,6 +2579,44 @@ mod tests {
     }
 
     #[test]
+    fn pod_watch_baseline_is_captured_before_stream_start() {
+        let phase = std::cell::Cell::new(0);
+        let (baseline, observed_phase) = baseline_then_spawn(
+            || {
+                assert_eq!(phase.get(), 0, "snapshot must be the first operation");
+                phase.set(1);
+                Ok(BTreeSet::from([("proxy-a".to_owned(), "container-a".to_owned())]))
+            },
+            || {
+                assert_eq!(phase.get(), 1, "the stream must start after the snapshot");
+                phase.set(2);
+                Ok(phase.get())
+            },
+        )
+        .unwrap();
+        assert_eq!(observed_phase, 2);
+
+        let old_exit = pod_exit_event("proxy-a", "container-a", 1);
+        let new_exit = pod_exit_event("proxy-b", "container-b", 1);
+        assert_eq!(
+            check_pod_events(&old_exit.to_string(), &baseline),
+            Ok(()),
+            "a pre-watch code-1 startup retry must be tolerated"
+        );
+        assert!(
+            check_pod_events(&format!("{old_exit}\n{new_exit}"), &baseline).is_err(),
+            "a new code-1 exit after watch start must fail"
+        );
+        for code in [101, 139] {
+            let crash = pod_exit_event("proxy-a", "container-a", code);
+            assert!(
+                check_pod_events(&crash.to_string(), &baseline).is_err(),
+                "a baseline crash exit {code} must still fail"
+            );
+        }
+    }
+
+    #[test]
     fn deleted_pods_must_have_observed_exits_within_grace() {
         let mut deleted = deleted_pod_event();
         *deleted
@@ -2697,5 +2752,18 @@ mod tests {
             stdout: stdout.as_bytes().to_vec(),
             stderr: stderr.as_bytes().to_vec(),
         }
+    }
+
+    fn pod_exit_event(uid: &str, container_id: &str, code: i32) -> serde_json::Value {
+        serde_json::json!({
+            "type": "MODIFIED",
+            "object": {
+                "metadata": {"uid": uid},
+                "status": {"containerStatuses": [{"lastState": {"terminated": {
+                    "exitCode": code,
+                    "containerID": container_id
+                }}}]}
+            }
+        })
     }
 }
