@@ -8,7 +8,7 @@
 
 use std::{
     collections::BTreeMap,
-    io::{BufRead as _, BufReader, Read as _, Write as _},
+    io::{BufReader, Read as _, Write as _},
     net::{TcpStream, ToSocketAddrs as _},
     panic::AssertUnwindSafe,
     sync::{
@@ -37,6 +37,9 @@ const RECONNECT_POLL: Duration = Duration::from_millis(10);
 
 /// Largest health response body a load worker retains.
 const HEALTH_BODY_LIMIT: usize = 64;
+
+/// Maximum response body accepted by the status-only load reader.
+const LOAD_BODY_LIMIT: u64 = 16_777_216; // 16 MiB
 
 // -----------------------------------------------------------------------------
 // LoadReport
@@ -1159,91 +1162,153 @@ fn request(path: &str, close: bool) -> String {
 /// Read one response, returning its status and whether the connection may
 /// carry another request.
 fn read_response(reader: &mut BufReader<TcpStream>) -> Result<(u16, bool), String> {
-    let status = read_status(reader)?;
-    let framing = read_headers(reader)?;
-    if framing.chunked {
-        read_chunked(reader)?;
-        Ok((status, !framing.close))
-    } else if let Some(length) = framing.content_length {
-        let mut body = vec![0_u8; length];
-        reader
-            .read_exact(&mut body)
-            .map_err(|err| format!("read body: {err}"))?;
-        Ok((status, !framing.close))
-    } else {
-        let mut body = Vec::new();
-        reader
-            .read_to_end(&mut body)
-            .map_err(|err| format!("read body: {err}"))?;
-        Ok((status, false))
+    read_response_with_limit(reader, LOAD_BODY_LIMIT)
+}
+
+/// Read with an explicit body ceiling so boundary tests need small payloads.
+fn read_response_with_limit(reader: &mut BufReader<TcpStream>, max_body: u64) -> Result<(u16, bool), String> {
+    let response = crate::net::http1::read_h1_response(reader, false, max_body, |_| Ok(()));
+    if let Some((kind, error)) = response.abort {
+        return Err(format!("read response ({kind:?}): {error}"));
     }
+    let status = response
+        .status
+        .ok_or_else(|| "response ended before its status".to_owned())?;
+    let reusable = response
+        .completion
+        .is_some_and(|completion| completion != crate::net::H1Completion::CloseDelimited)
+        && !response.headers.iter().any(|(name, value)| {
+            name == "connection"
+                && value
+                    .split(',')
+                    .any(|option| option.trim().eq_ignore_ascii_case("close"))
+        });
+    Ok((status, reusable))
 }
 
-/// How a response body is delimited and whether the connection closes.
-#[derive(Default)]
-struct Framing {
-    /// `Transfer-Encoding: chunked`.
-    chunked: bool,
+#[cfg(test)]
+mod tests {
+    use std::net::TcpListener;
 
-    /// `Connection: close`.
-    close: bool,
+    use super::*;
 
-    /// `Content-Length`, when present.
-    content_length: Option<usize>,
-}
+    #[test]
+    #[expect(clippy::too_many_lines, reason = "connection reuse and malformed trailer cases")]
+    fn chunked_trailers_preserve_connection_reuse() {
+        for trailers in [b"0\r\n\r\n".as_slice(), b"0\r\nX-Check: yes\r\n\r\n"] {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("listen");
+            let addr = listener.local_addr().expect("address").to_string();
+            let trailers = trailers.to_vec();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("one accepted socket");
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .expect("read timeout");
+                for index in 0..2 {
+                    let mut request = vec![0_u8; request("/", false).len()];
+                    stream.read_exact(&mut request).expect("request on same socket");
+                    if index == 0 {
+                        stream
+                            .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nok\r\n")
+                            .expect("first response");
+                        for part in trailers.chunks(2) {
+                            stream.write_all(part).expect("fragmented trailers");
+                        }
+                    } else {
+                        stream
+                            .write_all(b"HTTP/1.1 201 OK\r\nContent-Length: 0\r\n\r\n")
+                            .expect("second response");
+                    }
+                }
+                1
+            });
+            let report = concurrent_gets(&addr, "/", 1, 2, true);
+            assert_eq!(
+                server.join().expect("server"),
+                1,
+                "both responses must use one accepted socket"
+            );
+            assert_eq!(report.count(200), 1, "first status");
+            assert_eq!(report.count(201), 1, "second status after complete trailers");
+            assert!(report.failures.is_empty(), "no framing failure: {:?}", report.failures);
+        }
 
-/// Read the status line and return the status code.
-fn read_status(reader: &mut BufReader<TcpStream>) -> Result<u16, String> {
-    let mut status_line = String::new();
-    let read = reader
-        .read_line(&mut status_line)
-        .map_err(|err| format!("read status: {err}"))?;
-    if read == 0 {
-        return Err("connection closed before a response".to_owned());
+        let bad = response_socket(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx!!0\r\n\r\n");
+        let report = collect_responses(vec![bad]);
+        assert_eq!(report.failures.len(), 1, "bad chunk CRLF must count as a load failure");
+        assert_eq!(report.count(200), 0, "malformed chunk must not count as status 200");
     }
-    status_line
-        .split_whitespace()
-        .nth(1)
-        .and_then(|code| code.parse::<u16>().ok())
-        .ok_or_else(|| format!("malformed status line: {status_line:?}"))
-}
 
-/// Read headers through the blank line, keeping only framing.
-fn read_headers(reader: &mut BufReader<TcpStream>) -> Result<Framing, String> {
-    let mut framing = Framing::default();
-    loop {
-        let mut line = String::new();
-        reader
-            .read_line(&mut line)
-            .map_err(|err| format!("read header: {err}"))?;
-        let Some((name, value)) = line.trim_end().split_once(':') else {
-            return Ok(framing);
-        };
-        let value = value.trim().to_ascii_lowercase();
-        match name.trim().to_ascii_lowercase().as_str() {
-            "content-length" => framing.content_length = value.parse::<usize>().ok(),
-            "transfer-encoding" => framing.chunked = value.contains("chunked"),
-            "connection" => framing.close = value.contains("close"),
-            _ => {},
+    #[test]
+    fn truncated_headers_are_load_failures() {
+        for response in [
+            b"HTTP/1.1 200 OK\r\n".as_slice(),
+            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nX-Test: pa",
+        ] {
+            let report = collect_responses(vec![response_socket(response)]);
+            assert_eq!(report.failures.len(), 1, "incomplete header must count as a failure");
+            assert_eq!(report.count(200), 0, "incomplete header must not count as status 200");
+        }
+        let report = collect_responses(vec![response_socket(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")]);
+        assert_eq!(report.count(200), 1, "complete empty body succeeds");
+        assert!(report.failures.is_empty(), "complete response has no failures");
+    }
+
+    #[test]
+    #[expect(clippy::too_many_lines, reason = "bounded framing cases at each response boundary")]
+    fn response_lengths_are_bounded() {
+        let oversized = [
+            b"HTTP/1.1 200 OK\r\nContent-Length: 65\r\n\r\n".to_vec(),
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nffffffffffffffff\r\n".to_vec(),
+            format!("HTTP/1.1 200 OK\r\nX-Large: {}\r\n\r\n", "a".repeat(65_536)).into_bytes(),
+            format!("HTTP/1.1 200 {}\r\n\r\n", "a".repeat(65_536)).into_bytes(),
+            format!(
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n{}\r\n",
+                "a".repeat(65_536)
+            )
+            .into_bytes(),
+            format!(
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nX-Large: {}\r\n\r\n",
+                "a".repeat(65_536)
+            )
+            .into_bytes(),
+            format!("HTTP/1.1 200 OK\r\n\r\n{}", "a".repeat(65)).into_bytes(),
+        ];
+        for response in oversized {
+            let result = read_response_with_limit(&mut BufReader::new(response_socket(&response)), 64);
+            assert!(result.is_err(), "oversized response must fail without allocation");
+        }
+        for response in [
+            format!("HTTP/1.1 200 OK\r\nContent-Length: 64\r\n\r\n{}", "a".repeat(64)).into_bytes(),
+            format!(
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n40\r\n{}\r\n0\r\n\r\n",
+                "a".repeat(64)
+            )
+            .into_bytes(),
+        ] {
+            assert_eq!(
+                read_response_with_limit(&mut BufReader::new(response_socket(&response)), 64)
+                    .expect("exact limit")
+                    .0,
+                200,
+                "a body exactly at the limit remains valid"
+            );
         }
     }
-}
 
-/// Consume a chunked body up to and including its terminating chunk.
-fn read_chunked(reader: &mut BufReader<TcpStream>) -> Result<(), String> {
-    loop {
-        let mut size_line = String::new();
-        reader
-            .read_line(&mut size_line)
-            .map_err(|err| format!("read chunk size: {err}"))?;
-        let size = usize::from_str_radix(size_line.trim().split(';').next().unwrap_or(""), 16)
-            .map_err(|err| format!("malformed chunk size {size_line:?}: {err}"))?;
-        let mut chunk = vec![0_u8; size + 2];
-        reader
-            .read_exact(&mut chunk)
-            .map_err(|err| format!("read chunk: {err}"))?;
-        if size == 0 {
-            return Ok(());
-        }
+    /// Return a socket whose peer writes one response and then closes.
+    fn response_socket(response: &[u8]) -> TcpStream {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listen");
+        let addr = listener.local_addr().expect("address");
+        let response = response.to_vec();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            stream.write_all(&response).expect("write response");
+        });
+        let stream = TcpStream::connect(addr).expect("connect");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("read timeout");
+        stream
     }
 }
