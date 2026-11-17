@@ -78,6 +78,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Describe unmatched SNI routing as connection closure without promising a
+  TLS alert.
 - Document session-affinity remapping when endpoint membership changes.
 - Clarify endpoint weight behavior and P2C selection costs in load-balancing
   guidance.
