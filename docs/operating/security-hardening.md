@@ -156,7 +156,9 @@ relying on the bind address.
   for multi-domain deployments (SNI routing).
 - Enable CRL checking for mTLS listeners by adding
   `crl_paths` to the `client_ca` block. CRL paths
-  reject directory traversal (`..`). See
+  reject directory traversal (`..`). A CRL past its
+  `nextUpdate` rejects every client it covers, so
+  refresh CRL files before they expire. See
   [tls.md](tls.md) for configuration details.
 - CRL and client CA files reload only on listeners
   with exactly one certificate and `hot_reload` not

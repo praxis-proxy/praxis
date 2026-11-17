@@ -33,6 +33,7 @@ use crate::{ClientCertMode, TlsError};
 ///
 /// When `crl_paths` is non-empty, the verifier checks presented client
 /// certificates against the provided CRLs and rejects revoked certificates.
+/// A CRL past its `nextUpdate` fails verification.
 ///
 /// For `ClientCertMode::RequireNamed`, `trusted_spiffe_ids` is the set of
 /// SPIFFE IDs authorized at the handshake. An empty set accepts any valid
@@ -79,7 +80,10 @@ pub(crate) fn build_client_verifier(
 
     if !crl_paths.is_empty() {
         let crls = load_crls(crl_paths)?;
-        builder = builder.with_crls(crls);
+        // Reject a CRL past its nextUpdate (rustls defaults to ignoring it). The
+        // check runs per handshake, so a loaded CRL that goes stale fails closed
+        // until it is refreshed.
+        builder = builder.with_crls(crls).enforce_revocation_expiration();
     }
 
     let verifier_err = |detail: String| TlsError::FileLoadError {
@@ -292,6 +296,10 @@ fn load_ca_root_store(ca_path: &str) -> Result<RootCertStore, TlsError> {
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
 mod tests {
+    // The parent module imports `UnixTime` only under `spiffe`.
+    #[cfg(not(feature = "spiffe"))]
+    use rustls::pki_types::UnixTime;
+
     use super::*;
     use crate::test_utils::{ensure_crypto_provider, gen_ca_file};
 
@@ -434,6 +442,50 @@ mod tests {
         assert_eq!(crls.len(), 1, "exactly one CRL should be parsed");
     }
 
+    /// 2030-01-01T00:00:00Z, a fixed verification time so no test reads the clock.
+    const VERIFY_AT_2030: u64 = 1_893_456_000;
+
+    #[test]
+    fn a_current_crl_accepts_an_unrevoked_client() {
+        let dir = tempfile::TempDir::new().expect("tempdir creation should succeed");
+        let (ca_path, crl_path, leaf) = gen_ca_crl_and_leaf(dir.path(), (2036, 1, 1));
+
+        verify_at(&crl_verifier(&ca_path, &crl_path), &leaf, VERIFY_AT_2030)
+            .expect("a CRL before its nextUpdate is accepted");
+    }
+
+    #[test]
+    fn an_expired_crl_rejects_the_client() {
+        let dir = tempfile::TempDir::new().expect("tempdir creation should succeed");
+        let (ca_path, crl_path, leaf) = gen_ca_crl_and_leaf(dir.path(), (2029, 1, 1));
+
+        let err = verify_at(&crl_verifier(&ca_path, &crl_path), &leaf, VERIFY_AT_2030)
+            .expect_err("a CRL past its nextUpdate must not be trusted");
+        assert!(
+            matches!(
+                err,
+                rustls::Error::InvalidCertificate(
+                    rustls::CertificateError::ExpiredRevocationList
+                        | rustls::CertificateError::ExpiredRevocationListContext { .. }
+                )
+            ),
+            "an expired CRL should fail as ExpiredRevocationList, got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_loaded_crl_starts_rejecting_once_it_expires() {
+        // Expiry is checked per handshake against the handshake time, so one
+        // verifier accepts before nextUpdate and rejects after it, no reload.
+        let dir = tempfile::TempDir::new().expect("tempdir creation should succeed");
+        let (ca_path, crl_path, leaf) = gen_ca_crl_and_leaf(dir.path(), (2029, 1, 1));
+        let verifier = crl_verifier(&ca_path, &crl_path);
+        let before_expiry = 1_846_022_400; // 2028-07-01T00:00:00Z
+
+        verify_at(&verifier, &leaf, before_expiry).expect("accepted before nextUpdate");
+        verify_at(&verifier, &leaf, VERIFY_AT_2030).expect_err("rejected after nextUpdate");
+    }
+
     #[test]
     fn load_ca_root_store_rejects_garbage_certificate_der() {
         let temp_dir = tempfile::TempDir::new().expect("tempdir creation should succeed");
@@ -558,8 +610,18 @@ mod tests {
     // Test Utilities
     // -------------------------------------------------------------------------
 
-    /// Generate a CA PEM and an empty CRL PEM signed by that CA.
+    /// Generate a CA PEM and an empty CRL PEM signed by that CA, valid until 2036.
     fn gen_ca_and_crl(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+        let (ca_path, crl_path, _leaf) = gen_ca_crl_and_leaf(dir, (2036, 1, 1));
+        (ca_path, crl_path)
+    }
+
+    /// Generate a CA PEM, an empty CRL PEM it signs with `next_update`
+    /// as (year, month, day), and a non-revoked clientAuth leaf DER it signs.
+    fn gen_ca_crl_and_leaf(
+        dir: &std::path::Path,
+        next_update: (i32, u8, u8),
+    ) -> (std::path::PathBuf, std::path::PathBuf, CertificateDer<'static>) {
         let ca_key = rcgen::KeyPair::generate().expect("CA key generation");
         let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("CA params");
         ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
@@ -569,9 +631,11 @@ mod tests {
         let ca_cert = ca_params.self_signed(&ca_key).expect("CA self-sign");
         let issuer = rcgen::Issuer::from_params(&ca_params, &ca_key);
 
+        let leaf_der = mint_crl_client(&issuer);
+
         let crl = rcgen::CertificateRevocationListParams {
-            this_update: rcgen::date_time_ymd(2026, 1, 1),
-            next_update: rcgen::date_time_ymd(2036, 1, 1),
+            this_update: rcgen::date_time_ymd(2025, 1, 1),
+            next_update: rcgen::date_time_ymd(next_update.0, next_update.1, next_update.2),
             crl_number: rcgen::SerialNumber::from_slice(&[1]),
             issuing_distribution_point: None,
             revoked_certs: Vec::new(),
@@ -584,7 +648,45 @@ mod tests {
         let crl_path = dir.join("crl.pem");
         std::fs::write(&ca_path, ca_cert.pem()).expect("write CA PEM");
         std::fs::write(&crl_path, crl.pem().expect("CRL PEM encoding")).expect("write CRL PEM");
-        (ca_path, crl_path)
+        (ca_path, crl_path, leaf_der)
+    }
+
+    /// Mint a clientAuth leaf, signed by `issuer`, that no test CRL revokes.
+    fn mint_crl_client(issuer: &rcgen::Issuer<'_, impl rcgen::SigningKey>) -> CertificateDer<'static> {
+        let leaf_key = rcgen::KeyPair::generate().expect("leaf key generation");
+        let mut leaf_params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("leaf params");
+        leaf_params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "CRL Test Client");
+        leaf_params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ClientAuth];
+        leaf_params.serial_number = Some(rcgen::SerialNumber::from_slice(&[7]));
+        leaf_params
+            .signed_by(&leaf_key, issuer)
+            .expect("leaf signing")
+            .der()
+            .clone()
+    }
+
+    /// Build a `Require` verifier over `ca_path` and `crl_path`.
+    fn crl_verifier(ca_path: &std::path::Path, crl_path: &std::path::Path) -> Arc<dyn ClientCertVerifier> {
+        ensure_crypto_provider();
+        build_client_verifier(
+            ca_path.to_str().expect("ca path should be valid UTF-8"),
+            ClientCertMode::Require,
+            &[crl_path.to_str().expect("crl path should be valid UTF-8").to_owned()],
+            &[],
+        )
+        .expect("build require verifier with CRL")
+    }
+
+    /// Run `leaf` through `verifier` as if the handshake happened at `unix_secs`.
+    fn verify_at(
+        verifier: &Arc<dyn ClientCertVerifier>,
+        leaf: &CertificateDer<'_>,
+        unix_secs: u64,
+    ) -> Result<(), rustls::Error> {
+        let now = UnixTime::since_unix_epoch(std::time::Duration::from_secs(unix_secs));
+        verifier.verify_client_cert(leaf, &[], now).map(|_verified| ())
     }
 
     /// Mint a CA (written to a temp PEM) and a client leaf it signs carrying
