@@ -557,13 +557,15 @@ async fn http2_request(
         let status = response.status();
         let mut stream = response.into_body();
         let mut body = Vec::with_capacity(2);
-        while body.len() < 2 {
-            let Some(chunk) = stream.data().await else { break };
+        while let Some(chunk) = stream.data().await {
             let chunk = chunk?;
-            let keep = (2 - body.len()).min(chunk.len());
-            body.extend_from_slice(&chunk[..keep]);
             stream.flow_control().release_capacity(chunk.len())?;
+            if chunk.len() > 2_usize.saturating_sub(body.len()) {
+                return Err(format!("health response exceeds two bytes: {status}").into());
+            }
+            body.extend_from_slice(&chunk);
         }
+        let _trailers = stream.trailers().await?;
         if status != http::StatusCode::OK || body != b"ok" {
             return Err(format!("unexpected health response: {status} {body:?}").into());
         }
@@ -952,6 +954,77 @@ mod continuous_tests {
             total, RECONNECT_BACKOFF,
             "a running worker must request the full backoff"
         );
+    }
+
+    #[test]
+    #[expect(clippy::too_many_lines, reason = "multiple driven HTTP/2 completion cases")]
+    fn http2_health_requires_complete_stream() {
+        for (case, success) in [
+            ("complete", true),
+            ("split", true),
+            ("trailers", true),
+            ("same-frame-extra", false),
+            ("later-extra", false),
+            ("reset", false),
+            ("stall", false),
+        ] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listen");
+            let endpoint = listener.local_addr().expect("address").to_string();
+            let server = std::thread::spawn(move || {
+                let (stream, _) = listener.accept().expect("accept");
+                stream.set_nonblocking(true).expect("nonblocking socket");
+                worker_runtime().block_on(async {
+                    let stream = tokio::net::TcpStream::from_std(stream).expect("Tokio socket");
+                    let mut connection = h2::server::handshake(stream).await.expect("handshake");
+                    let (_, mut respond) = connection.accept().await.expect("stream").expect("request");
+                    let response = http::Response::builder().status(200).body(()).expect("response");
+                    let mut send = respond.send_response(response, false).expect("headers");
+                    match case {
+                        "complete" => send.send_data(bytes::Bytes::from_static(b"ok"), true).expect("body"),
+                        "split" => {
+                            send.send_data(bytes::Bytes::from_static(b"o"), false)
+                                .expect("first byte");
+                            send.send_data(bytes::Bytes::from_static(b"k"), true)
+                                .expect("second byte");
+                        },
+                        "trailers" => {
+                            send.send_data(bytes::Bytes::from_static(b"ok"), false).expect("body");
+                            send.send_trailers(http::HeaderMap::new())
+                                .expect("legal empty trailers");
+                        },
+                        "same-frame-extra" => send.send_data(bytes::Bytes::from_static(b"okX"), true).expect("body"),
+                        "later-extra" | "reset" | "stall" => {
+                            send.send_data(bytes::Bytes::from_static(b"ok"), false)
+                                .expect("incomplete body");
+                            let _ = tokio::time::timeout(Duration::from_millis(30), connection.accept()).await;
+                            if case == "later-extra" {
+                                send.send_data(bytes::Bytes::from_static(b"X"), true)
+                                    .expect("late byte");
+                            } else if case == "reset" {
+                                send.send_reset(h2::Reason::CANCEL);
+                            }
+                        },
+                        _ => unreachable!("fixed test case"),
+                    }
+                    let delay = if case == "stall" { 350 } else { 100 };
+                    let _ = tokio::time::timeout(Duration::from_millis(delay), connection.accept()).await;
+                });
+            });
+            let runtime = worker_runtime();
+            let client = connect_http2(&runtime, &endpoint).expect("client");
+            let deadline = if case == "stall" {
+                Duration::from_millis(120)
+            } else {
+                Duration::from_secs(2)
+            };
+            let result = runtime.block_on(async { tokio::time::timeout(deadline, http2_request(client)).await });
+            assert_eq!(
+                matches!(result, Ok(Ok(_))),
+                success,
+                "{case}: exact completed body required"
+            );
+            server.join().expect("server");
+        }
     }
 }
 
