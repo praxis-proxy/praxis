@@ -55,7 +55,7 @@ mod types;
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU8, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -134,6 +134,7 @@ struct ParentUpstreamStates(Vec<ParentUpstreamState>);
 /// cannot take it as its own.
 #[cfg(feature = "upstream-binding")]
 fn enter_nested_upstream_scope(extensions: &mut RequestExtensions, inherits_binding: bool) {
+    enter_nested_transport_scope(extensions);
     let (binding, frozen) = if inherits_binding {
         (
             extensions.get::<BoundUpstream>().cloned(),
@@ -161,12 +162,14 @@ fn enter_nested_upstream_scope(extensions: &mut RequestExtensions, inherits_bind
 /// nested pipeline only starts without the parent's upstream selection.
 #[cfg(not(feature = "upstream-binding"))]
 fn enter_nested_upstream_scope(extensions: &mut RequestExtensions, _inherits_binding: bool) {
+    enter_nested_transport_scope(extensions);
     extensions.remove::<SelectedClusterApplication>();
 }
 
 /// Remove nested routing state and restore the most recent parent checkpoint.
 #[cfg(feature = "upstream-binding")]
 fn restore_parent_upstream_scope(extensions: &mut RequestExtensions) {
+    restore_parent_transport_scope(extensions);
     extensions.remove::<SelectedClusterApplication>();
     let Some(mut states) = extensions.remove::<ParentUpstreamStates>() else {
         return;
@@ -198,6 +201,7 @@ fn restore_parent_upstream_scope(extensions: &mut RequestExtensions) {
 /// the nested pipeline's upstream selection.
 #[cfg(not(feature = "upstream-binding"))]
 fn restore_parent_upstream_scope(extensions: &mut RequestExtensions) {
+    restore_parent_transport_scope(extensions);
     extensions.remove::<SelectedClusterApplication>();
 }
 
@@ -210,6 +214,78 @@ fn restore_parent_upstream_scope(extensions: &mut RequestExtensions) {
 /// The absolute per-step deadline still bounds total duration; this only
 /// caps the gap between upstream chunks so a stalled source is abandoned.
 pub(crate) const STREAMING_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Cancellation-safe outcome of a nested transport phase.
+///
+/// A filter can retain the shared signal while its async response hook is
+/// cancelled. A local timeout leaves it neutral; transport entry is a failure
+/// until the transport supplies an actual response outcome.
+#[derive(Clone)]
+pub(crate) struct NestedTransportOutcome(Arc<AtomicU8>);
+
+/// Test-only suspension after transport classification but before peer setup.
+#[cfg(test)]
+#[derive(Clone)]
+pub(super) struct PeerPreparationGate {
+    /// Signals that the executor reached peer preparation.
+    pub(super) entered: Arc<tokio::sync::Notify>,
+    /// Releases peer preparation when a test chooses to.
+    pub(super) release: Arc<tokio::sync::Notify>,
+}
+
+/// Parent transport signals suspended while a child sub-request executes.
+#[derive(Default)]
+struct ParentTransportOutcomes(Vec<Option<NestedTransportOutcome>>);
+
+/// Keep child cancellation from changing its parent's circuit outcome.
+fn enter_nested_transport_scope(extensions: &mut RequestExtensions) {
+    let parent = extensions.remove::<NestedTransportOutcome>();
+    let mut stack = extensions.remove::<ParentTransportOutcomes>().unwrap_or_default();
+    stack.0.push(parent);
+    extensions.insert(stack);
+}
+
+/// Restore the signal owned by the containing sub-request.
+fn restore_parent_transport_scope(extensions: &mut RequestExtensions) {
+    extensions.remove::<NestedTransportOutcome>();
+    let Some(mut stack) = extensions.remove::<ParentTransportOutcomes>() else {
+        return;
+    };
+    if let Some(Some(parent)) = stack.0.pop() {
+        extensions.insert(parent);
+    }
+    if !stack.0.is_empty() {
+        extensions.insert(stack);
+    }
+}
+
+impl NestedTransportOutcome {
+    /// Make a neutral signal for the next nested exchange.
+    pub(crate) fn new() -> Self {
+        Self(Arc::new(AtomicU8::new(0)))
+    }
+
+    /// Start an unresolved transport attempt.
+    pub(crate) fn start(&self) {
+        self.0.store(1, Ordering::Release);
+    }
+
+    /// Record the transport's response classification before async hooks run.
+    pub(crate) fn response(&self, status: u16) {
+        self.0
+            .store(u8::from(status >= 500).saturating_add(2), Ordering::Release);
+    }
+
+    /// Whether cancellation should count as an upstream failure.
+    pub(crate) fn failed(&self) -> bool {
+        matches!(self.0.load(Ordering::Acquire), 1 | 3)
+    }
+
+    /// Whether a successful upstream response was observed before cancellation.
+    pub(crate) fn succeeded(&self) -> bool {
+        self.0.load(Ordering::Acquire) == 2
+    }
+}
 
 // -----------------------------------------------------------------------------
 // Retained-State Accounting
@@ -742,6 +818,8 @@ impl FilteredSubrequestExecutor {
         let mut filter_ctx = build_sub_filter_context(pipeline, &sub_req, resources);
         filter_ctx.extensions = std::mem::take(&mut extensions);
         filter_ctx.extensions.insert(RetainedFilterResults::default());
+        let transport_outcome = NestedTransportOutcome::new();
+        filter_ctx.extensions.insert(transport_outcome.clone());
         filter_ctx.enable_stream_chunk_emission(self.max_state_bytes);
         // A callout may stage a pre-resolved upstream (for example a URL prepared
         // via `prepare_url_target`) so the executor dials a specific destination
@@ -775,6 +853,7 @@ impl FilteredSubrequestExecutor {
         let step_deadline = step_started.checked_add(step_budget).unwrap_or(deadline);
         let in_transport = Arc::new(AtomicBool::new(false));
         let in_transport_inner = Arc::clone(&in_transport);
+        let transport_outcome_inner = transport_outcome.clone();
 
         let step_span = tracing::info_span!("filtered_subrequest", step = label, iteration = iteration);
 
@@ -918,6 +997,13 @@ impl FilteredSubrequestExecutor {
                 .clone()
                 .unwrap_or_else(|| Arc::clone(&destination_authority));
             in_transport_inner.store(true, Ordering::Release);
+            transport_outcome_inner.start();
+            filter_ctx.upstream_reached = true;
+            #[cfg(test)]
+            if let Some(gate) = filter_ctx.extensions.get::<PeerPreparationGate>() {
+                gate.entered.notify_one();
+                gate.release.notified().await;
+            }
             // Build one transport peer per validated address so a connection
             // refusal can fall back to the next. With no staged fallback set (or
             // a single address) this is exactly the prior single-peer dial: the
@@ -1050,6 +1136,7 @@ impl FilteredSubrequestExecutor {
                     match response {
                         Ok(response) => {
                             let status = response.status;
+                            transport_outcome_inner.response(status);
                             let mut headers = response.headers;
                             sanitize_subresponse_headers(&mut headers);
                             response_header.status = http::StatusCode::from_u16(status)
@@ -1084,6 +1171,7 @@ impl FilteredSubrequestExecutor {
                         },
                         Err(error) => {
                             let (status, kind) = classify_transport_failure(&error);
+                            transport_outcome_inner.response(status);
                             warn!(step = label, %error, status, "filtered sub-request streaming transport failure");
                             let response = SubResponse { version: http::Version::HTTP_11, status, headers: HeaderMap::new(), body: Bytes::new() };
                             response_header.status = http::StatusCode::from_u16(status)
@@ -1174,6 +1262,7 @@ impl FilteredSubrequestExecutor {
                         )
                     });
                     in_transport_inner.store(false, Ordering::Release);
+                    transport_outcome_inner.response(response.status);
                     sanitize_subresponse_headers(&mut response.headers);
                     response_header.status = http::StatusCode::from_u16(response.status)
                         .map_err(|error| -> FilterError { error.into() })?;
@@ -1229,6 +1318,7 @@ impl FilteredSubrequestExecutor {
             .instrument(step_span))
             .await;
 
+        let outer_deadline = timed.is_err();
         let mut raw = match timed {
             Ok(Ok(raw)) => raw,
             Ok(Err(error)) => return Err(FilteredSubrequestError::capture(error, &mut filter_ctx)),
@@ -1312,6 +1402,13 @@ impl FilteredSubrequestExecutor {
                 return Err(error);
             }
             outcome.response.body = completion_body.unwrap_or_default();
+        }
+        if outer_deadline {
+            // The async response-header phase has no remaining budget. Body
+            // completion has already run where applicable; dropping the
+            // remaining per-filter state settles cancellation guards before
+            // the caller receives this completed synthetic response.
+            filter_ctx.filter_state.clear();
         }
         let (kind, response_snapshot, completed) = match raw {
             RawResponse::Complete(outcome) => {

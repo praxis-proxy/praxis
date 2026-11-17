@@ -376,14 +376,14 @@ fn make_filter(threshold: u32, recovery_secs: u64) -> CircuitBreakerFilter {
     let mut breakers = std::collections::HashMap::new();
     breakers.insert(
         Arc::from("backend"),
-        InstrumentedCircuitBreaker::new(
+        Arc::new(InstrumentedCircuitBreaker::new(
             "backend",
             CoreCircuitBreakerConfig {
                 threshold,
                 recovery_window: std::time::Duration::from_secs(recovery_secs),
                 half_open_timeout: std::time::Duration::from_secs(9999),
             },
-        ),
+        )),
     );
     CircuitBreakerFilter { breakers }
 }
@@ -398,13 +398,227 @@ fn make_two_cluster_filter(threshold: u32, recovery_secs: u64) -> CircuitBreaker
     let mut breakers = std::collections::HashMap::new();
     breakers.insert(
         Arc::from("cluster-a"),
-        InstrumentedCircuitBreaker::new("cluster-a", config.clone()),
+        Arc::new(InstrumentedCircuitBreaker::new("cluster-a", config.clone())),
     );
     breakers.insert(
         Arc::from("cluster-b"),
-        InstrumentedCircuitBreaker::new("cluster-b", config),
+        Arc::new(InstrumentedCircuitBreaker::new("cluster-b", config)),
     );
     CircuitBreakerFilter { breakers }
+}
+
+#[tokio::test]
+async fn cancelled_transport_guard_records_failure() {
+    let filter = make_filter(1, 30);
+    let request = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&request);
+    ctx.cluster = Some(Arc::from("backend"));
+    ctx.current_filter_id = Some(0);
+    let outcome = crate::filtered_subrequest::NestedTransportOutcome::new();
+    ctx.extensions.insert(outcome.clone());
+    assert!(matches!(
+        filter.on_request(&mut ctx).await.unwrap(),
+        FilterAction::Continue
+    ));
+
+    outcome.start();
+    drop(ctx);
+
+    let mut next = crate::test_utils::make_filter_context(&request);
+    next.cluster = Some(Arc::from("backend"));
+    next.current_filter_id = Some(0);
+    assert!(
+        matches!(filter.on_request(&mut next).await.unwrap(), FilterAction::Reject(_)),
+        "a cancelled transport attempt must record the failure exactly once"
+    );
+}
+
+/// Delegate to a real shared breaker so executor tests can inspect token counts.
+struct SharedCircuitFilter(Arc<CircuitBreakerFilter>);
+
+#[async_trait::async_trait]
+impl crate::HttpFilter for SharedCircuitFilter {
+    fn name(&self) -> &'static str {
+        "shared_circuit"
+    }
+
+    async fn on_request(&self, ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, crate::FilterError> {
+        self.0.on_request(ctx).await
+    }
+
+    async fn on_response(&self, ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, crate::FilterError> {
+        self.0.on_response(ctx).await
+    }
+}
+
+/// Suspend after the preceding breaker entered, before any upstream work.
+struct PendingLocalFilter(Arc<tokio::sync::Notify>);
+
+#[async_trait::async_trait]
+impl crate::HttpFilter for PendingLocalFilter {
+    fn name(&self) -> &'static str {
+        "pending_local"
+    }
+
+    async fn on_request(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, crate::FilterError> {
+        self.0.notify_one();
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+#[expect(
+    clippy::large_futures,
+    reason = "drives a real nested executor through half-open cancellation"
+)]
+async fn outer_deadline_releases_local_probe() {
+    use std::time::{Duration, Instant};
+    for abort in [false, true] {
+        let filter = Arc::new(make_filter(1, 0));
+        let breaker = Arc::clone(filter.breakers.get("backend").unwrap());
+        let praxis_core::circuit::CircuitCheck::Allowed(token) = breaker.try_acquire() else {
+            panic!("closed breaker must admit");
+        };
+        breaker.record_failure(token);
+        assert_eq!(breaker.inner.state(), praxis_core::circuit::CircuitState::Open);
+        assert_eq!(breaker.inner.in_flight(), 0);
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let mut registry = crate::FilterRegistry::with_builtins();
+        registry
+            .register(
+                "shared_circuit",
+                crate::FilterFactory::Http(Arc::new(move |_| {
+                    Ok(Box::new(SharedCircuitFilter(Arc::clone(&filter))))
+                })),
+            )
+            .unwrap();
+        let signal = Arc::clone(&entered);
+        registry
+            .register(
+                "pending_local",
+                crate::FilterFactory::Http(Arc::new(move |_| Ok(Box::new(PendingLocalFilter(Arc::clone(&signal)))))),
+            )
+            .unwrap();
+        let mut entries: Vec<crate::FilterEntry> = serde_yaml::from_str("- filter: router\n  routes:\n    - path_prefix: /\n      cluster: backend\n- filter: shared_circuit\n- filter: pending_local\n").unwrap();
+        let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
+        let worker = tokio::spawn(async move {
+            let client = praxis_core::subrequest::SubRequestClient::new(crate::test_support::connector(4, None));
+            let executor = crate::FilteredSubrequestExecutor::for_callout(
+                client,
+                crate::SubrequestRuntime::new(None, false, None, Instant::now()),
+                0,
+                1024,
+                Duration::from_secs(5),
+            );
+            let request = crate::SubRequest {
+                method: http::Method::GET,
+                uri: http::Uri::from_static("/"),
+                headers: http::HeaderMap::new(),
+                body: bytes::Bytes::new(),
+            };
+            executor
+                .run(
+                    &pipeline,
+                    &request,
+                    crate::RequestExtensions::default(),
+                    Instant::now()
+                        + if abort {
+                            Duration::from_secs(5)
+                        } else {
+                            Duration::from_millis(100)
+                        },
+                )
+                .await
+                .unwrap()
+        });
+        tokio::time::timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .unwrap();
+        assert_eq!(
+            breaker.inner.state(),
+            praxis_core::circuit::CircuitState::HalfOpen,
+            "test must own a real half-open probe"
+        );
+        assert_eq!(
+            breaker.inner.in_flight(),
+            1,
+            "pending hook must retain the acquired token"
+        );
+        if abort {
+            worker.abort();
+            assert!(matches!(worker.await, Err(error) if error.is_cancelled()));
+        } else {
+            match worker.await.unwrap() {
+                crate::CalloutResponse::Buffered(response) => assert_eq!(response.status, 504),
+                crate::CalloutResponse::Streaming { .. } => panic!("local timeout cannot stream"),
+            }
+        }
+        assert_eq!(
+            breaker.inner.in_flight(),
+            0,
+            "local cancellation must settle the slot before returning"
+        );
+        assert_eq!(
+            breaker.inner.state(),
+            praxis_core::circuit::CircuitState::HalfOpen,
+            "neutral settlement preserves timeout-based recovery"
+        );
+        assert!(
+            matches!(breaker.try_acquire(), praxis_core::circuit::CircuitCheck::Rejected),
+            "neutral settlement must not admit an early replacement probe"
+        );
+    }
+}
+
+#[tokio::test]
+async fn cancelled_response_hook_uses_observed_upstream_result() {
+    let filter = make_filter(2, 30);
+    let request = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut prior = crate::test_utils::make_filter_context(&request);
+    prior.cluster = Some(Arc::from("backend"));
+    prior.current_filter_id = Some(0);
+    assert!(matches!(
+        filter.on_request(&mut prior).await.unwrap(),
+        FilterAction::Continue
+    ));
+    let mut failure = crate::test_utils::make_response();
+    failure.status = http::StatusCode::BAD_GATEWAY;
+    prior.response_header = Some(&mut failure);
+    drop(filter.on_response(&mut prior).await.unwrap());
+
+    let mut ctx = crate::test_utils::make_filter_context(&request);
+    ctx.cluster = Some(Arc::from("backend"));
+    ctx.current_filter_id = Some(0);
+    let outcome = crate::filtered_subrequest::NestedTransportOutcome::new();
+    ctx.extensions.insert(outcome.clone());
+    assert!(matches!(
+        filter.on_request(&mut ctx).await.unwrap(),
+        FilterAction::Continue
+    ));
+
+    outcome.start();
+    outcome.response(200);
+    drop(ctx);
+
+    let mut later_failure = crate::test_utils::make_filter_context(&request);
+    later_failure.cluster = Some(Arc::from("backend"));
+    later_failure.current_filter_id = Some(0);
+    assert!(matches!(
+        filter.on_request(&mut later_failure).await.unwrap(),
+        FilterAction::Continue
+    ));
+    let mut failure = crate::test_utils::make_response();
+    failure.status = http::StatusCode::BAD_GATEWAY;
+    later_failure.response_header = Some(&mut failure);
+    drop(filter.on_response(&mut later_failure).await.unwrap());
+
+    let mut next = crate::test_utils::make_filter_context(&request);
+    next.cluster = Some(Arc::from("backend"));
+    next.current_filter_id = Some(0);
+    assert!(
+        matches!(filter.on_request(&mut next).await.unwrap(), FilterAction::Continue),
+        "observed success during cancelled hooks must reset the previous failure streak"
+    );
 }
 
 #[test]
@@ -427,4 +641,152 @@ fn stale_breaker_drop_keeps_newer_gauge_owner() {
         !lock_gauge_owners().contains_key("gauge-owner-reload"),
         "dropping the current owner should release the gauge"
     );
+}
+
+/// Suspend a response hook before the real breaker can consume its token.
+struct PendingCircuitResponse {
+    entered: Arc<tokio::sync::Notify>,
+    streaming: bool,
+}
+
+#[async_trait::async_trait]
+impl crate::HttpFilter for PendingCircuitResponse {
+    fn name(&self) -> &'static str {
+        "pending_circuit_response"
+    }
+
+    fn may_select_streaming_subrequest_response(&self) -> bool {
+        self.streaming
+    }
+
+    async fn on_request(&self, ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, crate::FilterError> {
+        if self.streaming {
+            ctx.set_subrequest_response_mode(crate::SubRequestResponseMode::Streaming);
+        }
+        Ok(FilterAction::Continue)
+    }
+
+    async fn on_response(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, crate::FilterError> {
+        self.entered.notify_one();
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+#[expect(clippy::large_futures, reason = "drives real nested responses through cancellation")]
+async fn outer_deadline_cancels_response_hook_and_settles_observed_outcome() {
+    use std::time::{Duration, Instant};
+
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    for (streaming, upstream_status) in [(false, 200), (true, 200), (false, 503), (true, 503)] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let backend = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut head = Vec::new();
+            while !head.ends_with(b"\r\n\r\n") {
+                head.push(socket.read_u8().await.unwrap());
+            }
+            let response = if upstream_status == 200 {
+                b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n".as_slice()
+            } else {
+                b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n".as_slice()
+            };
+            socket.write_all(response).await.unwrap();
+            head
+        });
+        let filter = Arc::new(make_filter(1, 0));
+        let breaker = Arc::clone(filter.breakers.get("backend").unwrap());
+        let praxis_core::circuit::CircuitCheck::Allowed(token) = breaker.try_acquire() else {
+            panic!("closed breaker must admit");
+        };
+        breaker.record_failure(token);
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let signal = Arc::clone(&entered);
+        let mut registry = crate::FilterRegistry::with_builtins();
+        registry
+            .register(
+                "shared_circuit",
+                crate::FilterFactory::Http(Arc::new(move |_| {
+                    Ok(Box::new(SharedCircuitFilter(Arc::clone(&filter))))
+                })),
+            )
+            .unwrap();
+        registry
+            .register(
+                "pending_circuit_response",
+                crate::FilterFactory::Http(Arc::new(move |_| {
+                    Ok(Box::new(PendingCircuitResponse {
+                        entered: Arc::clone(&signal),
+                        streaming,
+                    }))
+                })),
+            )
+            .unwrap();
+        let yaml = format!(
+            "- filter: router\n  routes:\n    - path_prefix: /\n      cluster: backend\n- filter: shared_circuit\n- filter: load_balancer\n  clusters:\n    - name: backend\n      endpoints: ['{address}']\n- filter: pending_circuit_response\n"
+        );
+        let mut entries = serde_yaml::from_str::<Vec<crate::FilterEntry>>(&yaml).unwrap();
+        let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
+        let worker = tokio::spawn(async move {
+            let client = praxis_core::subrequest::SubRequestClient::new(crate::test_support::connector(4, None));
+            let executor = crate::FilteredSubrequestExecutor::for_callout(
+                client,
+                crate::SubrequestRuntime::new(None, false, None, Instant::now()),
+                0,
+                1024,
+                Duration::from_secs(5),
+            );
+            let request = crate::SubRequest {
+                method: http::Method::GET,
+                uri: http::Uri::from_static("/"),
+                headers: http::HeaderMap::new(),
+                body: bytes::Bytes::new(),
+            };
+            executor
+                .run(
+                    &pipeline,
+                    &request,
+                    crate::RequestExtensions::default(),
+                    Instant::now() + Duration::from_millis(200),
+                )
+                .await
+                .unwrap()
+        });
+        tokio::time::timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .unwrap();
+        assert!(
+            backend.await.unwrap().starts_with(b"GET /"),
+            "backend must actually receive the request"
+        );
+        assert_eq!(
+            breaker.inner.in_flight(),
+            1,
+            "pending response hook must still own the half-open token"
+        );
+        assert_eq!(breaker.inner.state(), praxis_core::circuit::CircuitState::HalfOpen);
+        match tokio::time::timeout(Duration::from_secs(2), worker)
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            crate::CalloutResponse::Buffered(response) => assert_eq!(response.status, 504),
+            crate::CalloutResponse::Streaming { .. } => panic!("stalled header hook cannot return a live body"),
+        }
+        assert_eq!(
+            breaker.inner.in_flight(),
+            0,
+            "deadline must synchronously settle the cancelled hook's token"
+        );
+        assert_eq!(
+            breaker.inner.state(),
+            if upstream_status == 200 {
+                praxis_core::circuit::CircuitState::Closed
+            } else {
+                praxis_core::circuit::CircuitState::Open
+            },
+            "observed upstream {upstream_status} must settle the cancelled probe"
+        );
+    }
 }

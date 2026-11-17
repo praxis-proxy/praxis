@@ -162,7 +162,7 @@ openssl = { workspace = true }
 jsonwebtoken = { workspace = true }
 # The filter's own tests dial real sockets through the sub-request client, so
 # they need a backend even though the library does not.
-praxis-core = { workspace = true, features = ["pingora"] }
+praxis-core = { workspace = true, features = ["pingora", "test-support"] }
 opentelemetry_sdk = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 proptest = { workspace = true }
