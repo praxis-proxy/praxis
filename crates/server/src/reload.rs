@@ -104,10 +104,7 @@ pub(crate) fn reload_pipelines(
         .max_response_bytes
         .unwrap_or(usize::MAX)
         .min(new_config.body_limits.max_buffer_bytes.get());
-    let updated_client = praxis_core::subrequest::SubRequestClient::with_max_response_bytes(
-        subrequest_client.connector().clone(),
-        new_ceiling,
-    );
+    let updated_client = subrequest_client.with_response_ceiling(new_ceiling);
 
     // Hold the generation across the last fallible step. Publishing it inside
     // pipeline construction would retire live tables when a later step fails.
@@ -705,6 +702,97 @@ filter_chains:
             loaded.get("web").unwrap().chain_names,
             ["main"],
             "meta should preserve chain names after reload"
+        );
+    }
+
+    #[test]
+    fn reload_preserves_upstream_ca_and_updates_ceiling() {
+        praxis_tls::provider::install();
+        let mut startup = valid_config();
+        startup.runtime.upstream_ca_file = Some(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../tests/integration/fixtures/fips/ca-cert.pem"
+            )
+            .to_owned(),
+        );
+        let client = crate::pipelines::build_subrequest_client(&startup).expect("test CA must load");
+        let startup_ca = client.upstream_ca().expect("startup client has global CA");
+        let (live, old_config, registry, shutdown, meta, cluster_meta) = setup_live_pipelines_from(startup);
+        let mut next = old_config.clone();
+        next.body_limits.max_response_bytes = Some(8192);
+
+        reload_pipelines(
+            &next,
+            &old_config,
+            &registry,
+            &live,
+            &meta,
+            &cluster_meta,
+            &shutdown,
+            None,
+            &empty_kv_stores(),
+            &empty_session_stores(),
+            &empty_slow_start_registry(),
+            &client,
+            None,
+            &PipelineComposition::default(),
+        )
+        .expect("limit-only reload must succeed");
+        let applied = live.get("web").unwrap().load_full();
+        let applied_client = applied.subrequest_client().expect("reloaded pipeline has client");
+        assert_eq!(applied_client.max_response_bytes(), 8192, "new ceiling is applied");
+        assert!(
+            Arc::ptr_eq(&applied_client.upstream_ca().unwrap(), &startup_ca),
+            "global CA must retain its startup identity"
+        );
+        assert_ne!(client.max_response_bytes(), 8192, "original client must stay unchanged");
+
+        let mut changed_path = next.clone();
+        changed_path.runtime.upstream_ca_file = Some("/nonexistent/replacement-ca.pem".to_owned());
+        changed_path.body_limits.max_response_bytes = Some(4096);
+        let warnings = capture_warnings(|| log_restart_required_changes(&next, &changed_path));
+        assert_warning(
+            &warnings,
+            "startup-only runtime setting changed; requires restart",
+            &[("field", "runtime.upstream_ca_file")],
+        );
+        reload_pipelines(
+            &changed_path,
+            &next,
+            &registry,
+            &live,
+            &meta,
+            &cluster_meta,
+            &shutdown,
+            None,
+            &empty_kv_stores(),
+            &empty_session_stores(),
+            &empty_slow_start_registry(),
+            &client,
+            None,
+            &PipelineComposition::default(),
+        )
+        .expect("changed CA path remains startup-only");
+        let second_applied = live.get("web").unwrap().load_full();
+        let second_applied_client = second_applied
+            .subrequest_client()
+            .expect("reloaded pipeline has client");
+        assert_eq!(
+            second_applied_client.max_response_bytes(),
+            4096,
+            "later ceiling is applied"
+        );
+        assert!(
+            Arc::ptr_eq(&second_applied_client.upstream_ca().unwrap(), &startup_ca),
+            "new CA path must not hot-load or replace startup trust"
+        );
+        assert!(
+            empty_subrequest_client()
+                .with_response_ceiling(4096)
+                .upstream_ca()
+                .is_none(),
+            "no global CA keeps the default trust behavior"
         );
     }
 

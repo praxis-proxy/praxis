@@ -14,6 +14,12 @@ use praxis_test_utils::{
     },
     start_reloadable_proxy,
 };
+#[cfg(all(feature = "pingora", feature = "hedged-requests"))]
+use praxis_test_utils::{
+    TestCertificates,
+    net::http_client::{http_send, parse_body, parse_header, parse_status},
+    start_counting_tls_backend,
+};
 
 /// Poll `GET path` until `pred(status, body)` holds, returning the last
 /// observed response (after ~15s if the predicate never holds, so the
@@ -573,6 +579,85 @@ insecure_options:
     assert_eq!(body, "health-ok", "new health route should work after reload");
 }
 
+#[cfg(all(feature = "pingora", feature = "hedged-requests"))]
+#[test]
+fn hedged_private_ca_survives_reload() {
+    use std::sync::atomic::Ordering;
+
+    let certs = TestCertificates::generate();
+    let other = TestCertificates::generate();
+    let (first_port, first_accepts) = start_counting_tls_backend(&certs, "private-ca-ok");
+    let (second_port, second_accepts) = start_counting_tls_backend(&certs, "private-ca-ok");
+    let proxy_port = free_port();
+    let proxy_addr = format!("127.0.0.1:{proxy_port}");
+    let yaml = |generation: &str, global_ca: &std::path::Path, cluster_ca: Option<&std::path::Path>| {
+        hedged_tls_yaml(proxy_port, first_port, second_port, global_ca, cluster_ca, generation)
+    };
+    let proxy = start_reloadable_proxy(&yaml("first", &certs.ca_cert_path, None));
+    let (status, body) = http_get(&proxy_addr, "/", None);
+    assert_eq!(
+        (status, body.as_str()),
+        (200, "private-ca-ok"),
+        "startup hedge trusts global CA"
+    );
+
+    for (generation, path) in [
+        ("second", certs.ca_cert_path.as_path()),
+        ("third", other.ca_cert_path.as_path()),
+    ] {
+        let before = first_accepts.load(Ordering::Relaxed) + second_accepts.load(Ordering::Relaxed);
+        let response = proxy.reload_until(
+            &yaml(generation, path, None),
+            || hedged_response(&proxy_addr),
+            |raw| parse_header(raw, "x-test-generation").as_deref() == Some(generation),
+        );
+        assert_eq!(
+            parse_header(&response, "x-test-generation").as_deref(),
+            Some(generation),
+            "the hedged response itself must carry the applied generation: {response}"
+        );
+        assert_eq!(
+            (parse_status(&response), parse_body(&response)),
+            (200, "private-ca-ok".to_owned()),
+            "fresh hedged HTTPS requests retain startup global CA after {generation} reload"
+        );
+        let after = first_accepts.load(Ordering::Relaxed) + second_accepts.load(Ordering::Relaxed);
+        assert!(
+            after > before,
+            "{generation} request must open a fresh backend TLS connection"
+        );
+    }
+
+    let override_proxy_port = free_port();
+    let override_addr = format!("127.0.0.1:{override_proxy_port}");
+    let override_yaml = |generation: &str| {
+        hedged_tls_yaml(
+            override_proxy_port,
+            first_port,
+            second_port,
+            &other.ca_cert_path,
+            Some(&certs.ca_cert_path),
+            generation,
+        )
+    };
+    let override_proxy = start_reloadable_proxy(&override_yaml("first"));
+    let response = override_proxy.reload_until(
+        &override_yaml("second"),
+        || hedged_response(&override_addr),
+        |raw| parse_header(raw, "x-test-generation").as_deref() == Some("second"),
+    );
+    assert_eq!(
+        parse_header(&response, "x-test-generation").as_deref(),
+        Some("second"),
+        "cluster override must be exercised on the reloaded hedged pipeline: {response}"
+    );
+    assert_eq!(
+        (parse_status(&response), parse_body(&response)),
+        (200, "private-ca-ok".to_owned()),
+        "cluster CA must override the wrong global CA after reload"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Test Utilities
 // ---------------------------------------------------------------------------
@@ -729,5 +814,65 @@ filter_chains:
 insecure_options:
   allow_private_endpoints: true
 "#
+    )
+}
+
+/// Keep the generation header and private-CA backend body from the same request.
+#[cfg(all(feature = "pingora", feature = "hedged-requests"))]
+fn hedged_response(addr: &str) -> String {
+    http_send(addr, "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+}
+
+#[cfg(all(feature = "pingora", feature = "hedged-requests"))]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "listener and two backend ports plus TLS fixture paths and generation"
+)]
+fn hedged_tls_yaml(
+    proxy_port: u16,
+    first_port: u16,
+    second_port: u16,
+    global_ca: &std::path::Path,
+    cluster_ca: Option<&std::path::Path>,
+    generation: &str,
+) -> String {
+    let tls = cluster_ca.map_or_else(
+        || "sni: localhost".to_owned(),
+        |path| format!("sni: localhost, ca: {{ca_path: '{}'}}", path.display()),
+    );
+    format!(
+        r#"
+insecure_options:
+  allow_private_endpoints: true
+runtime:
+  upstream_ca_file: "{global_ca}"
+listeners:
+  - name: hedged
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains: [hedged]
+filter_chains:
+  - name: hedged
+    filters:
+      - filter: headers
+        response_set:
+          - name: X-Test-Generation
+            value: "{generation}"
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+            hedge_policy:
+              initial_requests: 2
+              max_attempts: 2
+              budget_percent: 100
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            tls: {{{tls}}}
+            endpoints:
+              - "127.0.0.1:{first_port}"
+              - "127.0.0.1:{second_port}"
+"#,
+        global_ca = global_ca.display(),
     )
 }

@@ -150,6 +150,17 @@ impl<C: Connector> SubRequestClient<C> {
         }
     }
 
+    /// Copy this client with a new buffered response ceiling.
+    ///
+    /// Keeps the connector and trust anchors loaded at startup. Use this when
+    /// a reload changes the body limit without rebuilding startup-only state.
+    #[must_use]
+    pub fn with_response_ceiling(&self, max_response_bytes: usize) -> Self {
+        let mut client = self.clone();
+        client.max_response_bytes = max_response_bytes.min(crate::config::MAX_BUFFER_BYTES);
+        client
+    }
+
     /// Trust `ca` when a cluster does not set its own CA.
     #[must_use]
     pub fn with_upstream_ca(mut self, ca: Arc<CachedCaCerts>) -> Self {

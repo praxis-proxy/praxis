@@ -77,6 +77,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Reloaded hedged HTTPS requests retain the global upstream CA loaded at
+  startup while applying new response body limits.
 - Returning server calls stop their config watcher, health checks, and
   housekeeping after shutdown or startup failure.
 - Failed cross-protocol listener registration stops certificate watchers
