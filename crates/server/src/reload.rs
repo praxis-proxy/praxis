@@ -558,12 +558,13 @@ fn spawn_health_check_thread(
 )]
 mod tests {
     use std::{
-        collections::HashMap,
+        collections::{BTreeMap, HashMap},
         sync::atomic::{AtomicUsize, Ordering},
     };
 
     use praxis_core::config::{InsecureOptions, SkipPipelineChecks};
     use praxis_filter::{CircuitBreakerFilter, FilterFactory, PipelineExtension, RequestExtensions};
+    use tracing_subscriber::layer::SubscriberExt as _;
 
     use super::*;
     use crate::composition::ServerComposition;
@@ -1948,7 +1949,8 @@ filter_chains:
         )
         .unwrap();
 
-        log_restart_required_changes(&old, &new);
+        let warnings = capture_warnings(|| log_restart_required_changes(&old, &new));
+        assert_warning(&warnings, "listener added in config", &[("listener", "api")]);
     }
 
     #[test]
@@ -1972,7 +1974,8 @@ filter_chains:
         .unwrap();
         let new = valid_config();
 
-        log_restart_required_changes(&old, &new);
+        let warnings = capture_warnings(|| log_restart_required_changes(&old, &new));
+        assert_warning(&warnings, "listener removed in config", &[("listener", "api")]);
     }
 
     #[test]
@@ -1993,39 +1996,44 @@ filter_chains:
         )
         .unwrap();
 
-        log_restart_required_changes(&old, &new);
+        let warnings = capture_warnings(|| log_restart_required_changes(&old, &new));
+        assert_warning(
+            &warnings,
+            "listener address changed",
+            &[
+                ("listener", "web"),
+                ("old_address", "127.0.0.1:8080"),
+                ("new_address", "127.0.0.1:9999"),
+            ],
+        );
     }
 
     #[test]
     fn tls_toggle_detected() {
         let old = valid_config();
-        let new = Config::from_yaml(
-            r#"
-listeners:
-  - name: web
-    address: "127.0.0.1:8080"
-    filter_chains: [main]
-    tls:
-      certificates:
-        - cert_path: "/tmp/cert.pem"
-          key_path: "/tmp/key.pem"
-filter_chains:
-  - name: main
-    filters:
-      - filter: static_response
-        status: 200
-"#,
-        )
-        .unwrap();
+        let new = config_with_tls_toggle();
 
-        log_restart_required_changes(&old, &new);
+        let warnings = capture_warnings(|| log_restart_required_changes(&old, &new));
+        assert_warning(&warnings, "TLS enabled; requires restart", &[("listener", "web")]);
+    }
+
+    #[test]
+    fn tls_disable_detected() {
+        let plain = valid_config();
+        let tls = config_with_tls_toggle();
+        let warnings = capture_warnings(|| log_restart_required_changes(&tls, &plain));
+        assert_warning(&warnings, "TLS disabled; requires restart", &[("listener", "web")]);
     }
 
     #[test]
     fn no_restart_required_no_warnings() {
         let old = valid_config();
         let new = valid_config();
-        log_restart_required_changes(&old, &new);
+        let warnings = capture_warnings(|| log_restart_required_changes(&old, &new));
+        assert!(
+            warnings.is_empty(),
+            "identical configs need no restart warning: {warnings:?}"
+        );
     }
 
     #[test]
@@ -2143,7 +2151,10 @@ filter_chains:
         )
         .unwrap();
 
-        detect_compression_additions(&old, &new);
+        let warnings = capture_warnings(|| log_restart_required_changes(&old, &new));
+        assert_warning(&warnings, "compression added; requires restart", &[("listener", "web")]);
+        let direct = capture_warnings(|| detect_compression_additions(&old, &new));
+        assert_warning(&direct, "compression added; requires restart", &[("listener", "web")]);
     }
 
     #[test]
@@ -2162,7 +2173,16 @@ filter_chains:
         )
         .unwrap();
 
-        detect_compression_additions(&config, &config);
+        let warnings = capture_warnings(|| log_restart_required_changes(&config, &config));
+        assert!(
+            warnings.is_empty(),
+            "already registered compression needs no restart warning: {warnings:?}"
+        );
+        let direct = capture_warnings(|| detect_compression_additions(&config, &config));
+        assert!(
+            direct.is_empty(),
+            "direct compression detector must also stay silent: {direct:?}"
+        );
     }
 
     #[test]
@@ -2783,6 +2803,84 @@ filter_chains:
     // -----------------------------------------------------------------------------
     // Test Utilities
     // -----------------------------------------------------------------------------
+
+    /// Captured warning and its structured tracing fields.
+    #[derive(Clone, Debug)]
+    struct WarningEvent {
+        /// Field values rendered by the tracing visitor.
+        fields: BTreeMap<String, String>,
+    }
+
+    /// Layer that records warning events for one synchronous detector call.
+    struct WarningCapture(Arc<Mutex<Vec<WarningEvent>>>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for WarningCapture {
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: tracing_subscriber::layer::Context<'_, S>) {
+            if *event.metadata().level() != tracing::Level::WARN {
+                return;
+            }
+            let mut visitor = WarningFieldVisitor(BTreeMap::new());
+            event.record(&mut visitor);
+            self.0.lock().unwrap().push(WarningEvent { fields: visitor.0 });
+        }
+    }
+
+    /// Visitor that keeps warning messages and named fields.
+    struct WarningFieldVisitor(BTreeMap<String, String>);
+
+    impl tracing::field::Visit for WarningFieldVisitor {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0.insert(field.name().to_owned(), format!("{value:?}"));
+        }
+    }
+
+    /// Capture warnings emitted in the calling thread.
+    fn capture_warnings(run: impl FnOnce()) -> Vec<WarningEvent> {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(WarningCapture(Arc::clone(&events)));
+        tracing::subscriber::with_default(subscriber, run);
+        let guard = events.lock().unwrap();
+        guard.clone()
+    }
+
+    /// Assert that one event carries a message and all named field values.
+    fn assert_warning(warnings: &[WarningEvent], message: &str, fields: &[(&str, &str)]) {
+        let found = warnings.iter().any(|warning| {
+            warning
+                .fields
+                .get("message")
+                .is_some_and(|value| value.contains(message))
+                && fields
+                    .iter()
+                    .all(|(name, expected)| warning.fields.get(*name).is_some_and(|value| value.contains(expected)))
+        });
+        assert!(
+            found,
+            "expected warning {message:?} with {fields:?}; observed {warnings:?}"
+        );
+    }
+
+    /// TLS-enabled variant of the minimal reload config.
+    fn config_with_tls_toggle() -> Config {
+        Config::from_yaml(
+            r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+    tls:
+      certificates:
+        - cert_path: "/tmp/cert.pem"
+          key_path: "/tmp/key.pem"
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#,
+        )
+        .unwrap()
+    }
 
     /// A policy-filter config whose policy document is `policy_path`.
     #[cfg(any(feature = "policy-builtins", feature = "policy-crypto-default"))]
