@@ -101,6 +101,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Security
 
+- Reject Terminal branches that can select an upstream endpoint while
+  bypassing later security filters.
 - Keep pre-request results bound to their filter instance so a later
   classifier cannot suppress an earlier instance's branch-gated security
   checks.

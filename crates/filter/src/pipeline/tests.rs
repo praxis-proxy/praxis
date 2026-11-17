@@ -774,6 +774,132 @@ fn terminal_branch_pipeline(branch_filter: AnyFilter, after_ran: Arc<AtomicUsize
     test_pipeline(BodyCapabilities::default(), vec![branching, after])
 }
 
+/// Distinct endpoint-selection placements around a response-less Terminal.
+#[derive(Clone, Copy, Debug)]
+enum TerminalEndpointCase {
+    ClusterOnly,
+    PriorTopLevel,
+    PriorHostBranch,
+    EarlierNextSibling,
+    TerminalLocal,
+    LaterSibling,
+    NestedTerminal,
+}
+
+/// Make a branch for the terminal endpoint-selection matrix.
+fn terminal_matrix_branch(name: &str, rejoin: RejoinTarget, filters: Vec<PipelineFilter>) -> ResolvedBranch {
+    ResolvedBranch {
+        name: Arc::from(name),
+        condition: None,
+        filters,
+        max_iterations: None,
+        rejoin,
+    }
+}
+
+/// Make a filter that actually selects a new endpoint.
+fn terminal_matrix_selector(id: usize) -> PipelineFilter {
+    PipelineFilter::new(
+        id,
+        AnyFilter::Http(Box::new(UpstreamSelectFilter("127.0.0.1:8000"))),
+        vec![],
+        vec![],
+    )
+}
+
+/// Make a no-op host for the terminal endpoint-selection matrix.
+fn terminal_matrix_host(id: usize) -> PipelineFilter {
+    PipelineFilter::new(id, AnyFilter::Http(Box::new(NamedNoopFilter("host"))), vec![], vec![])
+}
+
+/// Branches belonging to the current host in the endpoint matrix.
+fn terminal_matrix_branches(case: TerminalEndpointCase) -> Vec<ResolvedBranch> {
+    let terminal = |filters| terminal_matrix_branch("stop", RejoinTarget::Terminal, filters);
+    let next = |filters| terminal_matrix_branch("route", RejoinTarget::Next, filters);
+    match case {
+        TerminalEndpointCase::ClusterOnly => vec![terminal(vec![PipelineFilter::new(
+            20,
+            AnyFilter::Http(Box::new(ClusterSelectFilter("backend"))),
+            vec![],
+            vec![],
+        )])],
+        TerminalEndpointCase::PriorTopLevel | TerminalEndpointCase::PriorHostBranch => vec![terminal(vec![])],
+        TerminalEndpointCase::EarlierNextSibling => vec![next(vec![terminal_matrix_selector(20)]), terminal(vec![])],
+        TerminalEndpointCase::TerminalLocal => vec![terminal(vec![terminal_matrix_selector(20)])],
+        TerminalEndpointCase::LaterSibling => vec![terminal(vec![]), next(vec![terminal_matrix_selector(20)])],
+        TerminalEndpointCase::NestedTerminal => {
+            let mut nested = terminal_matrix_host(30);
+            nested.branches.push(terminal_matrix_branch(
+                "nested_stop",
+                RejoinTarget::Terminal,
+                vec![terminal_matrix_selector(20)],
+            ));
+            vec![terminal(vec![nested])]
+        },
+    }
+}
+
+/// Place endpoint selection relative to one Terminal and a later security filter.
+fn terminal_matrix_filters(case: TerminalEndpointCase) -> Vec<PipelineFilter> {
+    let mut filters = Vec::new();
+    if matches!(case, TerminalEndpointCase::PriorTopLevel) {
+        filters.push(terminal_matrix_selector(0));
+    } else if matches!(case, TerminalEndpointCase::PriorHostBranch) {
+        let mut prior = terminal_matrix_host(0);
+        prior.branches.push(terminal_matrix_branch(
+            "prior_route",
+            RejoinTarget::Next,
+            vec![terminal_matrix_selector(20)],
+        ));
+        filters.push(prior);
+    }
+    let mut host = terminal_matrix_host(10);
+    host.branches = terminal_matrix_branches(case);
+    filters.push(host);
+    let mut security = terminal_matrix_host(40);
+    security.is_security = true;
+    filters.push(security);
+    filters
+}
+
+/// Compare one validator outcome to the same pipeline's request result.
+async fn assert_terminal_endpoint_case(case: TerminalEndpointCase, forwards: bool) -> Result<(), FilterError> {
+    let filters = terminal_matrix_filters(case);
+    let mut errors = Vec::new();
+    super::checks::check_terminal_rejoin_bypasses_security(&filters, &mut errors);
+    assert_eq!(
+        !errors.is_empty(),
+        forwards,
+        "validator mismatch for {case:?}: {errors:?}"
+    );
+    let pipeline = test_pipeline(BodyCapabilities::default(), filters);
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let action = pipeline.execute_http_request(&mut ctx).await?;
+    assert_eq!(
+        matches!(action, FilterAction::Continue),
+        forwards,
+        "runtime mismatch for {case:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn terminal_endpoint_validation_matches_runtime() -> Result<(), FilterError> {
+    for (case, forwards) in [
+        (TerminalEndpointCase::ClusterOnly, false),
+        (TerminalEndpointCase::PriorTopLevel, false),
+        (TerminalEndpointCase::PriorHostBranch, false),
+        (TerminalEndpointCase::EarlierNextSibling, true),
+        (TerminalEndpointCase::TerminalLocal, true),
+        (TerminalEndpointCase::LaterSibling, false),
+        (TerminalEndpointCase::NestedTerminal, false),
+    ] {
+        assert_terminal_endpoint_case(case, forwards).await?;
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn execute_request_stops_on_first_reject() {
     let counter = Arc::new(AtomicUsize::new(0));
@@ -4693,6 +4819,10 @@ struct UpstreamSelectFilter(&'static str);
 impl HttpFilter for UpstreamSelectFilter {
     fn name(&self) -> &'static str {
         "upstream_select"
+    }
+
+    fn selects_upstream_endpoint(&self) -> bool {
+        true
     }
 
     async fn on_request(&self, ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {

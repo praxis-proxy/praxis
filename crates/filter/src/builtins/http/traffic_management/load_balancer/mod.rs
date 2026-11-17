@@ -323,6 +323,10 @@ impl HttpFilter for LoadBalancerFilter {
         "load_balancer"
     }
 
+    fn selects_upstream_endpoint(&self) -> bool {
+        true
+    }
+
     #[cfg(feature = "slow-start")]
     fn bind_slow_start(&self, registry: &Arc<crate::SlowStartRegistry>) {
         for binding in &self.ramps {

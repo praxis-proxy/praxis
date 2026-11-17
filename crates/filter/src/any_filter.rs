@@ -69,6 +69,14 @@ impl AnyFilter {
         }
     }
 
+    /// Whether this filter can assign an upstream endpoint address.
+    pub fn selects_upstream_endpoint(&self) -> bool {
+        match self {
+            Self::Http(f) => f.selects_upstream_endpoint(),
+            Self::Tcp(_) => false,
+        }
+    }
+
     /// Cluster names this filter may assign.
     pub fn selected_clusters(&self) -> Vec<String> {
         match self {

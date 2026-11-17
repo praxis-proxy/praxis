@@ -150,6 +150,16 @@ pub trait HttpFilter: Send + Sync {
         false
     }
 
+    /// Whether `on_request` can assign a new [`HttpFilterContext::upstream`]
+    /// endpoint address. Terminal-branch security validation uses this
+    /// capability to detect a branch that may forward around later security
+    /// filters. Extensions that assign an endpoint should override it.
+    ///
+    /// [`HttpFilterContext::upstream`]: crate::HttpFilterContext::upstream
+    fn selects_upstream_endpoint(&self) -> bool {
+        false
+    }
+
     /// The cluster names this filter may select at runtime.
     ///
     /// Return every configured cluster target so pipeline validation
