@@ -141,8 +141,8 @@ fn rfc9110_duplicate_cl_different_values_rejected() {
 
 /// [RFC 9110 Section 8.6]: two Content-Length headers with
 /// identical values. RFC 9110 permits collapsing same-valued
-/// duplicates to a single field rather than rejecting; Pingora
-/// 0.9.0 forwards them and Praxis canonicalizes to one value.
+/// duplicates to a single field rather than rejecting; the pinned
+/// Pingora fork forwards them and Praxis canonicalizes to one value.
 /// Conflicting values are still rejected.
 ///
 /// [RFC 9110 Section 8.6]: https://datatracker.ietf.org/doc/html/rfc9110#section-8.6

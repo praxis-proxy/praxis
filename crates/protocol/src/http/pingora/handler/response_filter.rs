@@ -283,7 +283,7 @@ fn strip_no_content_framing(resp: &mut praxis_filter::Response) -> bool {
 /// Headers were copied out of the Pingora response earlier, so they must
 /// always be written back. When the header name sequence is unchanged the map
 /// is moved straight back; when it changed we rebuild through Pingora's API.
-/// Either way the whole value is replaced, since 0.9.0 removed `DerefMut` on
+/// Either way the whole value is replaced, since Pingora has no `DerefMut` on
 /// `ResponseHeader`.
 ///
 /// The status is written back unconditionally: it lives in the plain
