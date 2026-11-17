@@ -46,19 +46,16 @@ them on every pull request.
 Accepted, documented advisory exceptions carry a
 reason each. cargo-deny ignores live in [deny.toml];
 cargo-audit ignores live in [.cargo/audit.toml]. The
-lists overlap but are not identical (see the `lru`
-note below):
+two tools use the same exception list. `deny.toml`
+gates both unmaintained and unsound advisories:
 
-- `RUSTSEC-2025-0134` (`rustls-pemfile`,
+- `RUSTSEC-2025-0134` (`rustls-pemfile` 2.2.0,
   unmaintained): transitive via the Pingora fork's
-  `pingora-rustls` only; `praxis-tls` migrated to
-  the `rustls::pki_types` PEM iterators.
-- `RUSTSEC-2026-0253` (`lru`, unsound `pop()` panic
-  safety): transitive via the Pingora fork. Ignored
-  only in [.cargo/audit.toml]; `deny.toml`'s
-  `unmaintained = "all"` does not gate `unsound`
-  advisories, so a cargo-deny ignore would be
-  unused. Tracked until a fixed release is available.
+  `pingora-rustls` and `rustls-native-certs` 0.7.
+- `RUSTSEC-2024-0436` (`paste` 1.0.15,
+  unmaintained): a compile-time macro dependency of
+  `cel` 0.12, pulled in by `limitador` for the Policy
+  rate limiter.
 
 [RustSec advisory database]: https://rustsec.org/
 [deny.toml]: ../../deny.toml
