@@ -77,6 +77,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Prevent JSON body add operations from duplicating an existing member when
+  source metadata is extracted later in the same object.
 - `/api/pipelines` keeps still-bound HTTP listeners visible after their removal
   from a reloaded config and reports bound transport settings with the applied
   chains.
