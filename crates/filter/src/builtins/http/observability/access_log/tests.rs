@@ -347,7 +347,9 @@ fn render_text_template_sanitizes_field_values() {
     let parts = vec![TemplatePart::Field(FieldToken::Metadata("llm.model".to_owned()))];
     let req = crate::test_utils::make_request(http::Method::GET, "/");
     let mut ctx = crate::test_utils::make_filter_context(&req);
-    ctx.set_metadata("llm.model", "gpt\ninjected 200");
+    ctx.filter_metadata
+        .insert("llm.model", "gpt\ninjected 200")
+        .expect("entry must fit in the filter's metadata");
     let line = render_text_template(&parts, &ctx, 200, None, 0);
     assert!(
         !line.contains('\n'),
@@ -364,7 +366,9 @@ fn render_text_template_escapes_quotes_and_backslashes() {
     ];
     let req = crate::test_utils::make_request(http::Method::GET, "/");
     let mut ctx = crate::test_utils::make_filter_context(&req);
-    ctx.set_metadata("llm.model", r#"gpt" status="200\"#);
+    ctx.filter_metadata
+        .insert("llm.model", r#"gpt" status="200\"#)
+        .expect("entry must fit in the filter's metadata");
     let line = render_text_template(&parts, &ctx, 200, None, 0);
     assert_eq!(
         line, r#"model="gpt\" status=\"200\\""#,
@@ -425,7 +429,9 @@ fn render_text_template_matches_json_projection_for_every_field() {
     ctx.client_addr = Some("203.0.113.7".parse().unwrap());
     ctx.request_body_bytes = 12;
     ctx.response_body_bytes = 34;
-    ctx.set_metadata("llm.model", "gpt-4o");
+    ctx.filter_metadata
+        .insert("llm.model", "gpt-4o")
+        .expect("entry must fit in the filter's metadata");
     let mut trailers = http::HeaderMap::new();
     let _prev = trailers.insert("grpc-status", http::HeaderValue::from_static("5"));
     let _prev = trailers.insert("grpc-message", http::HeaderValue::from_static("no%20such%20user"));
@@ -458,7 +464,9 @@ fn resolve_field_borrows_values_held_by_the_request() {
     let mut req = crate::test_utils::make_request(http::Method::GET, "/api");
     req.headers.insert("user-agent", "curl/8".parse().unwrap());
     let mut ctx = crate::test_utils::make_filter_context(&req);
-    ctx.set_metadata("llm.model", "gpt-4o");
+    ctx.filter_metadata
+        .insert("llm.model", "gpt-4o")
+        .expect("entry must fit in the filter's metadata");
 
     for (field, expected) in [
         (FieldToken::Method, "GET"),
@@ -718,7 +726,9 @@ fn build_record_emits_filter_metadata() {
     let fields = [FieldToken::Metadata("llm.model".to_owned())];
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat/completions");
     let mut ctx = crate::test_utils::make_filter_context(&req);
-    ctx.set_metadata("llm.model", "gpt-4o");
+    ctx.filter_metadata
+        .insert("llm.model", "gpt-4o")
+        .expect("entry must fit in the filter's metadata");
 
     let record = build_record_from_fields(&fields, &ctx, 200, None, 0);
     assert_eq!(record.get("metadata.llm.model"), Some(&"gpt-4o".to_owned()));

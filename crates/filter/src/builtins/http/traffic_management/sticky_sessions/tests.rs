@@ -3,7 +3,7 @@
 
 //! Unit tests for the sticky sessions filter.
 
-#![expect(clippy::unwrap_used, reason = "tests")]
+#![expect(clippy::expect_used, clippy::unwrap_used, reason = "tests")]
 #![expect(clippy::disallowed_methods, reason = "sync tests need thread::sleep")]
 
 use super::*;
@@ -257,7 +257,9 @@ fn handle_header_response_records_session() {
 
     let req = crate::test_utils::make_request(http::Method::GET, "/");
     let mut ctx = crate::test_utils::make_filter_context(&req);
-    ctx.set_metadata(META_SESSION_KEY, "header-key-abc");
+    ctx.filter_metadata
+        .insert(META_SESSION_KEY, "header-key-abc")
+        .expect("entry must fit in the filter's metadata");
 
     StickySessionsFilter::handle_header_response(&ctx, &store, &endpoint);
 
@@ -326,7 +328,9 @@ fn cookie_response_does_not_adopt_unknown_client_value() {
         http::HeaderValue::from_static("_praxis_route=attacker-chosen"),
     );
     let mut ctx = crate::test_utils::make_filter_context(&req);
-    ctx.set_metadata(META_SESSION_KEY, "attacker-chosen");
+    ctx.filter_metadata
+        .insert(META_SESSION_KEY, "attacker-chosen")
+        .expect("entry must fit in the filter's metadata");
     let mut resp = crate::test_utils::make_response();
     ctx.response_header = Some(&mut resp);
 
@@ -348,7 +352,9 @@ fn cookie_response_repins_known_value_after_failover() {
 
     let req = crate::test_utils::make_request(http::Method::GET, "/");
     let mut ctx = crate::test_utils::make_filter_context(&req);
-    ctx.set_metadata(META_SESSION_KEY, "sessA");
+    ctx.filter_metadata
+        .insert(META_SESSION_KEY, "sessA")
+        .expect("entry must fit in the filter's metadata");
     let mut resp = crate::test_utils::make_response();
     ctx.response_header = Some(&mut resp);
 
@@ -399,7 +405,9 @@ fn learn_response_repins_existing_binding_after_failover() {
 
     let req = crate::test_utils::make_request(http::Method::GET, "/");
     let mut ctx = crate::test_utils::make_filter_context(&req);
-    ctx.set_metadata(META_SESSION_KEY, "sess1");
+    ctx.filter_metadata
+        .insert(META_SESSION_KEY, "sess1")
+        .expect("entry must fit in the filter's metadata");
     let mut resp = crate::test_utils::make_response();
     ctx.response_header = Some(&mut resp);
 
@@ -431,7 +439,9 @@ fn learn_response_does_not_adopt_unknown_metadata_key() {
 
     let req = crate::test_utils::make_request(http::Method::GET, "/");
     let mut ctx = crate::test_utils::make_filter_context(&req);
-    ctx.set_metadata(META_SESSION_KEY, "never-bound");
+    ctx.filter_metadata
+        .insert(META_SESSION_KEY, "never-bound")
+        .expect("entry must fit in the filter's metadata");
     let mut resp = crate::test_utils::make_response();
     ctx.response_header = Some(&mut resp);
 

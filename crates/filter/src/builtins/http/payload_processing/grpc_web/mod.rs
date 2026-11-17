@@ -24,7 +24,7 @@ use tracing::{debug, trace};
 
 use self::frame::{Base64Stream, decode_base64, encode_trailer_frame};
 use crate::{
-    BodyAccess, BodyMode, FilterAction, FilterError, Rejection, ResponseTrailersPending,
+    BodyAccess, BodyMode, FilterAction, FilterError, FilterMetadata, Rejection, ResponseTrailersPending,
     filter::{HttpFilter, HttpFilterContext},
     parse_filter_config,
 };
@@ -223,7 +223,9 @@ impl HttpFilter for GrpcWebFilter {
         ctx.request_headers_to_set
             .push((http::header::TE, http::HeaderValue::from_static("trailers")));
 
-        ctx.set_metadata("grpc_web.encoding", kind.as_str());
+        ctx.filter_metadata
+            .insert("grpc_web.encoding", kind.as_str())
+            .unwrap_or_else(FilterMetadata::log_loss);
         ctx.filter_results
             .entry("grpc_web")
             .or_default()

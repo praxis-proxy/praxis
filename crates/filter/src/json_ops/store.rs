@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use crate::HttpFilterContext;
+use crate::{FilterMetadata, HttpFilterContext};
 
 // -----------------------------------------------------------------------------
 // Trait
@@ -95,8 +95,9 @@ impl JsonOpStore for MapStore {
 
 /// [`JsonOpStore`] adapter over [`HttpFilterContext`].
 ///
-/// Inherent context methods keep their names; this wrapper avoids a
-/// same-name trait impl on [`HttpFilterContext`].
+/// A wrapper rather than an impl on [`HttpFilterContext`], so the trait's
+/// `get_metadata` and `set_metadata` don't become context methods wherever
+/// [`JsonOpStore`] is in scope.
 pub struct HttpJsonStore<'a, 'ctx> {
     /// Borrowed request filter context.
     ctx: &'a mut HttpFilterContext<'ctx>,
@@ -113,11 +114,14 @@ use std::borrow::Cow;
 
 impl JsonOpStore for HttpJsonStore<'_, '_> {
     fn get_metadata(&self, key: &str) -> Option<&str> {
-        self.ctx.get_metadata(key)
+        self.ctx.filter_metadata.get(key)
     }
 
     fn set_metadata(&mut self, key: String, value: String) {
-        self.ctx.set_metadata(key, value);
+        self.ctx
+            .filter_metadata
+            .insert(key, value)
+            .unwrap_or_else(FilterMetadata::log_loss);
     }
 
     fn get_structured(&self, namespace: &str, key: &str) -> Option<&serde_json::Value> {

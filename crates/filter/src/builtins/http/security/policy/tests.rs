@@ -443,8 +443,12 @@ async fn dispatch_echo_method(filter: &PolicyFilter, subject: &str, method: Meth
         HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
     );
     let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", "echo");
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
     let body = bytes::Bytes::from_static(
         br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{}}}"#,
     );
@@ -524,8 +528,12 @@ async fn dispatch_tool_session(filter: &PolicyFilter, subject: &str, tool: &str,
         HeaderValue::from_str(session_id).expect("session header"),
     );
     let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", tool);
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", tool)
+        .expect("entry must fit in the filter's metadata");
     let body = bytes::Bytes::from_static(
         br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"t","arguments":{}}}"#,
     );
@@ -694,8 +702,12 @@ async fn dispatch_tool_with_header(
         HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
     );
     let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", tool);
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", tool)
+        .expect("entry must fit in the filter's metadata");
     let body = bytes::Bytes::from_static(
         br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"t","arguments":{}}}"#,
     );
@@ -805,8 +817,12 @@ async fn route_scoped_identity_is_published_only_after_authoritative_resolution(
         "unscoped header gate must not publish a route-dependent principal",
     );
 
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", "open-tool");
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "open-tool")
+        .expect("entry must fit in the filter's metadata");
     let mut body = Some(bytes::Bytes::from_static(
         br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"open-tool","arguments":{}}}"#,
     ));
@@ -1064,8 +1080,12 @@ async fn dispatch_tool_with_extra_headers(
             .insert(name, HeaderValue::from_str(value).expect("header value"));
     }
     let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", tool);
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", tool)
+        .expect("entry must fit in the filter's metadata");
     let body = bytes::Bytes::from_static(
         br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"t","arguments":{}}}"#,
     );
@@ -1139,8 +1159,12 @@ async fn context_headers_pending_mutation_flows_into_apl() {
         http::header::HeaderName::from_static("x-ext-agent-id"),
         HeaderValue::from_static("planner"),
     ));
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", "ctx-tool");
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "ctx-tool")
+        .expect("entry must fit in the filter's metadata");
     let body = bytes::Bytes::from_static(
         br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"t","arguments":{}}}"#,
     );
@@ -1679,8 +1703,12 @@ async fn request_assertions_reach_the_upstream_request() {
     req.headers.insert("x-auth-user-id", HeaderValue::from_static("root"));
     req.headers.insert("x-drop-me", HeaderValue::from_static("secret"));
     let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", "echo");
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
 
     let mut body = Some(bytes::Bytes::from_static(
         br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{}}}"#,
@@ -1745,8 +1773,12 @@ async fn a_policy_without_assertions_touches_no_upstream_header() {
         HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
     );
     let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", "echo");
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
 
     let mut body = Some(bytes::Bytes::from_static(
         br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{}}}"#,
@@ -2201,6 +2233,10 @@ allow if l.is_admin(input.subject.id)";
 /// Entity-aware policies resolve identity in the body phase. That producer
 /// path must publish the extension before later body filters execute.
 #[tokio::test(flavor = "multi_thread")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "linear scenario; seeded metadata writes span several lines"
+)]
 async fn entity_allow_publishes_authenticated_identity() {
     let (_dir, path) = write_tool_route_config();
     let filter = build_filter(path);
@@ -2212,8 +2248,12 @@ async fn entity_allow_publishes_authenticated_identity() {
         HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
     );
     let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", "echo");
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
     let mut body = Some(bytes::Bytes::from_static(
         br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{}}}"#,
     ));
@@ -2446,6 +2486,10 @@ async fn missing_protocol_metadata_rejects_when_required() {
 /// route-scoped resolver. The filter must reject instead of admitting the
 /// request with neither authorization nor a trusted identity projection.
 #[tokio::test(flavor = "multi_thread")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "linear scenario; seeded metadata writes span several lines"
+)]
 async fn missing_entity_name_rejects_after_successful_identity_gate() {
     let (_dir, path) = write_tool_route_config();
     let filter = build_filter(path);
@@ -2464,7 +2508,9 @@ async fn missing_entity_name_rejects_after_successful_identity_gate() {
         ctx.extensions.get::<AuthenticatedIdentity>().is_none(),
         "header gate must not publish identity before authoritative entity resolution",
     );
-    ctx.set_metadata("mcp.method", "tools/call");
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
 
     let action = filter
         .on_request_body(&mut ctx, &mut Some(bytes::Bytes::new()), true)
@@ -3069,8 +3115,12 @@ async fn on_request_body_dispatches_cmf_when_metadata_present() {
         HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
     );
     let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", "echo");
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
 
     let body = bytes::Bytes::from_static(
         br#"{"jsonrpc":"2.0","id":1,"method":"tools/call",
@@ -3345,8 +3395,12 @@ async fn response_phase_without_request_identity_fails_closed() {
 
     let req = make_request(Method::POST, "/");
     let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", "echo");
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
 
     let original = bytes::Bytes::from(format!(
         r#"{{"jsonrpc":"2.0","id":1,"result":{{"content":[{{"type":"text","text":"{}"}}]}}}}"#,
@@ -4079,8 +4133,12 @@ struct Queued {
 /// Run the `echo` policy and collect upstream header mutations.
 #[expect(clippy::too_many_lines, reason = "one linear dispatch plus three queue projections")]
 async fn queued_for_echo(filter: &PolicyFilter, ctx: &mut crate::HttpFilterContext<'_>) -> Queued {
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", "echo");
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
     let mut body = Some(bytes::Bytes::from_static(
         br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{}}}"#,
     ));
@@ -5245,6 +5303,10 @@ async fn require_model_false_admits_a_request_with_no_model() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "linear scenario; seeded metadata writes span several lines"
+)]
 async fn a_body_carrying_both_entity_coordinates_is_denied() {
     let (_dir, path) = write_llm_and_tool_config();
     let filter = build_filter(path);
@@ -5256,8 +5318,12 @@ async fn a_body_carrying_both_entity_coordinates_is_denied() {
         HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
     );
     let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", "echo");
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
     let body = bytes::Bytes::from_static(
         br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{}},"model":"other-model"}"#,
     );
@@ -5291,8 +5357,12 @@ async fn a_plain_mcp_request_still_takes_the_mcp_path() {
         HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
     );
     let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", "echo");
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
     let body = bytes::Bytes::from_static(
         br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{}}}"#,
     );
@@ -5468,9 +5538,9 @@ async fn the_parsed_model_reaches_filter_metadata() {
             .expect("filter ran"),
     );
 
-    assert_eq!(ctx.get_metadata("llm.model"), Some("allowed-model"));
+    assert_eq!(ctx.filter_metadata.get("llm.model"), Some("allowed-model"));
     assert_eq!(
-        ctx.get_metadata("llm.stream"),
+        ctx.filter_metadata.get("llm.stream"),
         Some("true"),
         "the streaming flag is recorded so the response half can skip an SSE body",
     );
@@ -6410,14 +6480,22 @@ fn the_mixed_fixture_opens_the_inference_response_half() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "linear scenario; seeded metadata writes span several lines"
+)]
 async fn the_inference_response_half_does_not_claim_mcp_responses() {
     let (_dir, path) = write_llm_and_tool_config();
     let filter = build_read_write_filter(path);
 
     let req = request_for_alice();
     let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", "echo");
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
     let request_body =
         bytes::Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#);
     drop(
@@ -6820,7 +6898,7 @@ async fn a_streaming_request_still_records_the_stream_flag() {
         .expect("filter ran");
     assert!(matches!(action, FilterAction::BodyDone), "got {action:?}");
     assert_eq!(
-        ctx.get_metadata("llm.stream"),
+        ctx.filter_metadata.get("llm.stream"),
         Some("true"),
         "the flag is read before the document moves to the policy",
     );
@@ -6956,14 +7034,22 @@ fn a_result_pipeline_alone_is_an_entity_route() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "linear scenario; seeded metadata writes span several lines"
+)]
 async fn a_post_only_tool_route_dispatches_its_hook() {
     let (_dir, path) = write_tool_post_only_config();
     let filter = build_read_write_filter(path);
 
     let req = request_for_alice();
     let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", "echo");
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
     let request_body =
         bytes::Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#);
     let action = filter
@@ -6997,8 +7083,12 @@ async fn a_tools_call_error_response_skips_post_hook() {
     let filter = build_read_write_filter(path);
     let req = request_for_alice();
     let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", "echo");
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
     let request_body =
         bytes::Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#);
     let action = filter
@@ -7137,8 +7227,12 @@ async fn post_only_round_trip(path: String, method: &str, name: &str, request_bo
     let filter = build_read_write_filter(path);
     let req = request_for_alice();
     let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("mcp.method", method);
-    ctx.set_metadata("mcp.name", name);
+    ctx.filter_metadata
+        .insert("mcp.method", method)
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", name)
+        .expect("entry must fit in the filter's metadata");
     drop(
         filter
             .on_request_body(&mut ctx, &mut Some(bytes::Bytes::from_static(request_body)), true)
@@ -7220,8 +7314,12 @@ async fn a_route_declaring_both_phases_still_dispatches_the_pre_half() {
 
     let req = request_for_alice();
     let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", "echo");
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
     let request_body =
         bytes::Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#);
     let action = filter
@@ -7251,8 +7349,12 @@ async fn a_result_pipeline_alone_redacts_the_response() {
 
     let req = request_for_alice();
     let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", "echo");
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
     let request_body =
         bytes::Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#);
     drop(
@@ -7278,6 +7380,10 @@ async fn a_result_pipeline_alone_redacts_the_response() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "linear scenario; seeded metadata writes span several lines"
+)]
 async fn large_policy_mutations_preserve_unrelated_request_and_response_content() {
     let (_dir, path) = write_entity_config_with_routes(
         r#"routes:
@@ -7291,8 +7397,12 @@ async fn large_policy_mutations_preserve_unrelated_request_and_response_content(
     let filter = build_read_write_filter(path);
     let req = request_for_alice();
     let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", "echo");
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
     let padding = "x".repeat(900_000);
     let original = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{"padding":padding,"ssn":"123-45-6789"}}}).to_string();
     let mut request = Some(bytes::Bytes::from(original));
@@ -7336,8 +7446,12 @@ async fn large_policy_response_growth_fails_closed_with_fitted_error() {
     let filter = build_read_write_filter(path);
     let req = request_for_alice();
     let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", "echo");
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
     let request =
         bytes::Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#);
     assert!(matches!(
@@ -7371,8 +7485,12 @@ async fn large_policy_response_without_identity_emits_a_fitted_error() {
     let filter = build_read_write_filter(path);
     let req = make_request(Method::POST, "/");
     let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", "echo");
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
     let original = serde_json::json!({"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"padding":"x".repeat(900_000),"ssn":"123-45-6789"}}}).to_string();
     let original_len = original.len();
     let mut response = Some(bytes::Bytes::from(original));
@@ -7398,8 +7516,12 @@ async fn malformed_classified_tool_response_returns_filter_error_without_partial
     let filter = build_read_write_filter(path);
     let req = request_for_alice();
     let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", "echo");
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
     let request =
         bytes::Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#);
     assert!(matches!(
@@ -7457,8 +7579,12 @@ async fn uninspectable_tool_response_is_error_but_empty_results_and_valid_errors
     let filter = build_read_write_filter(path);
     let req = request_for_alice();
     let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", "echo");
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
     let request =
         bytes::Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#);
     assert!(matches!(
@@ -7518,6 +7644,10 @@ async fn uninspectable_tool_response_is_error_but_empty_results_and_valid_errors
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "linear scenario; seeded metadata writes span several lines"
+)]
 async fn malformed_unclassified_and_request_only_policy_responses_are_not_newly_parsed() {
     let (_dir, path) = write_tool_route_config();
     let filter = build_read_write_filter(path);
@@ -7531,8 +7661,12 @@ async fn malformed_unclassified_and_request_only_policy_responses_are_not_newly_
     ));
     assert_eq!(body, Some(original.clone()));
 
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", "echo");
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
     let request =
         bytes::Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#);
     assert!(matches!(
@@ -7606,8 +7740,12 @@ async fn hold_tool_response_at_io_boundary(
     let mut ctx = make_filter_context(&req);
     ctx.extensions
         .insert(PolicyResponseStateOwner(Arc::clone(&drops.state)));
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", "echo");
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
     let request =
         bytes::Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#);
     assert!(matches!(
@@ -7691,8 +7829,12 @@ async fn cancelled_response_io_releases_policy_state_and_owned_body_on_both_side
     }
     let req = request_for_alice();
     let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", "echo");
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
     let request =
         bytes::Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#);
     assert!(matches!(
@@ -7812,8 +7954,12 @@ async fn cancelling_suspended_policy_releases_payload_and_next_request_is_clean(
     let task = tokio::spawn(async move {
         let req = request_for_alice();
         let mut ctx = make_filter_context(&req);
-        ctx.set_metadata("mcp.method", "tools/call");
-        ctx.set_metadata("mcp.name", "echo");
+        ctx.filter_metadata
+            .insert("mcp.method", "tools/call")
+            .expect("entry must fit in the filter's metadata");
+        ctx.filter_metadata
+            .insert("mcp.name", "echo")
+            .expect("entry must fit in the filter's metadata");
         let text = format!(
             r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"echo","arguments":{{"padding":"{}"}}}}}}"#,
             "x".repeat(900_000)
@@ -8068,6 +8214,10 @@ fn an_http_route_beside_entity_routes_fails_filter_construction() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "linear scenario; seeded metadata writes span several lines"
+)]
 async fn a_global_block_does_authorize_classified_mcp_traffic() {
     let (_dir, path) = write_entity_config_with_global_authz(
         r#"routes:
@@ -8085,8 +8235,12 @@ async fn a_global_block_does_authorize_classified_mcp_traffic() {
         HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
     );
     let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", "echo");
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
     let request_body =
         bytes::Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#);
     let action = filter

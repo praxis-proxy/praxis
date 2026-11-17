@@ -42,7 +42,7 @@ use tracing::{debug, warn};
 use self::config::{ClusterSessionConfig, CookieAttributes, PersistenceConfig, StickySessionsConfig, StorageConfig};
 pub use self::store::{SessionStore, SessionStoreRegistry};
 use crate::{
-    FilterError,
+    FilterError, FilterMetadata,
     actions::FilterAction,
     factory::parse_filter_config,
     filter::{HttpFilter, HttpFilterContext},
@@ -249,7 +249,8 @@ impl StickySessionsFilter {
         // client values would let an attacker flood the store with arbitrary
         // keys and evict legitimate sessions.
         let session_key = ctx
-            .get_metadata(META_SESSION_KEY)
+            .filter_metadata
+            .get(META_SESSION_KEY)
             .map(String::from)
             .or_else(|| Self::find_request_cookie(ctx, cookie_name))
             .filter(|key| store.get(key).is_some())
@@ -332,7 +333,7 @@ impl StickySessionsFilter {
         // backends set their session cookie once, so failed-over sessions
         // would otherwise bounce on every request. Only keys already in the
         // store are re-pinned; unknown client values are never adopted.
-        if let Some(session_key) = ctx.get_metadata(META_SESSION_KEY)
+        if let Some(session_key) = ctx.filter_metadata.get(META_SESSION_KEY)
             && let Some(current) = store.get(session_key)
             && current != *endpoint
         {
@@ -347,7 +348,7 @@ impl StickySessionsFilter {
 
     /// Handle response for header-type persistence.
     fn handle_header_response(ctx: &HttpFilterContext<'_>, store: &SessionStore, endpoint: &Arc<str>) {
-        let Some(session_key) = ctx.get_metadata(META_SESSION_KEY) else {
+        let Some(session_key) = ctx.filter_metadata.get(META_SESSION_KEY) else {
             return;
         };
         store.put(session_key, Arc::clone(endpoint));
@@ -379,7 +380,9 @@ impl HttpFilter for StickySessionsFilter {
             return Ok(FilterAction::Continue);
         }
 
-        ctx.set_metadata(META_SESSION_KEY, &session_key);
+        ctx.filter_metadata
+            .insert(META_SESSION_KEY, session_key)
+            .unwrap_or_else(FilterMetadata::log_loss);
 
         Ok(FilterAction::Continue)
     }
