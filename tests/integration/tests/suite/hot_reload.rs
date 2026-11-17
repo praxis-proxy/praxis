@@ -3,7 +3,17 @@
 
 //! Integration tests for hot config reload.
 
-use std::time::{Duration, Instant};
+use std::{
+    io::{BufRead as _, BufReader, Write as _},
+    net::TcpListener,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver},
+    },
+    thread::JoinHandle,
+    time::{Duration, Instant},
+};
 
 use praxis_test_utils::{
     PraxisProcess,
@@ -68,7 +78,7 @@ fn reload_route_change_shifts_traffic() {
 
 #[test]
 fn reload_adding_health_checks_restarts_health_tasks() {
-    let backend = start_backend_with_shutdown("healthy-backend");
+    let (backend, probe_events) = ProbeBackend::start();
     let proxy_port = free_port();
     let proxy = start_reloadable_proxy(&proxy_yaml(proxy_port, backend.port()));
     let addr = format!("127.0.0.1:{proxy_port}");
@@ -76,8 +86,15 @@ fn reload_adding_health_checks_restarts_health_tasks() {
     let (status, body) = http_get(&addr, "/", None);
     assert_eq!(status, 200, "initial request should succeed");
     assert_eq!(body, "healthy-backend", "initial route should hit the backend");
+    assert!(
+        probe_events.try_recv().is_err(),
+        "no health probes should run before reload"
+    );
 
     proxy.write_config(&health_checked_yaml(proxy_port, backend.port()));
+    probe_events
+        .recv_timeout(Duration::from_secs(15))
+        .expect("reload must start the dedicated HTTP health probe");
 
     let (status, body) = get_eventually(&addr, "/", |code, b| code == 200 && b == "healthy-backend");
     assert_eq!(
@@ -733,7 +750,7 @@ insecure_options:
     )
 }
 
-/// Proxy YAML whose cluster carries an active TCP health check.
+/// Proxy YAML whose cluster carries an observable HTTP health check.
 fn health_checked_yaml(proxy_port: u16, backend_port: u16) -> String {
     format!(
         r#"
@@ -749,7 +766,8 @@ clusters:
     endpoints:
       - "127.0.0.1:{backend_port}"
     health_check:
-      type: tcp
+      type: http
+      path: /_praxis_health_probe
       interval_ms: 1000
       timeout_ms: 500
       healthy_threshold: 1
@@ -768,6 +786,76 @@ filter_chains:
               - "127.0.0.1:{backend_port}"
 "#
     )
+}
+
+struct ProbeBackend {
+    port: u16,
+    stop: Arc<AtomicBool>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl ProbeBackend {
+    fn start() -> (Self, Receiver<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind probe backend");
+        let port = listener.local_addr().expect("backend address").port();
+        listener.set_nonblocking(true).expect("nonblocking backend listener");
+        let (probe_tx, probe_rx) = mpsc::channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        let worker = std::thread::spawn(move || {
+            while !worker_stop.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(2)))
+                            .expect("backend read timeout");
+                        stream
+                            .set_write_timeout(Some(Duration::from_secs(2)))
+                            .expect("backend write timeout");
+                        let mut reader = BufReader::new(stream);
+                        let mut request_line = String::new();
+                        if reader.read_line(&mut request_line).is_err() {
+                            continue;
+                        }
+                        if request_line.split_whitespace().nth(1) == Some("/_praxis_health_probe") {
+                            let _probe_sent = probe_tx.send(());
+                        }
+                        let response =
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 15\r\nConnection: close\r\n\r\nhealthy-backend";
+                        reader.get_mut().write_all(response).expect("backend response");
+                    },
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    },
+                    Err(error) => panic!("probe backend accept: {error}"),
+                }
+            }
+        });
+        (
+            Self {
+                port,
+                stop,
+                worker: Some(worker),
+            },
+            probe_rx,
+        )
+    }
+
+    fn port(&self) -> u16 {
+        self.port
+    }
+}
+
+impl Drop for ProbeBackend {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(worker) = self.worker.take() {
+            let result = worker.join();
+            if !std::thread::panicking() {
+                result.expect("probe backend worker");
+            }
+        }
+    }
 }
 
 fn static_yaml(proxy_port: u16, body: &str) -> String {
