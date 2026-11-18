@@ -272,7 +272,6 @@ filter_chains:
     }
 
     #[test]
-    #[ignore]
     fn cluster_meta_from_config_handles_branch_chains() {
         let config = Config::from_yaml(
             r#"
@@ -285,13 +284,13 @@ listeners:
 filter_chains:
   - name: main
     filters:
-      - filter: guardrails
-        action: flag
-        rules: []
+      - filter: grpc_detection
         branch_chains:
-          - on_result:
-              filter: guardrails
-              result: passed
+          - name: on_grpc
+            on_result:
+              filter: grpc_detection
+              key: kind
+              result: grpc
             rejoin: next
             chains:
               - name: inline_branch
@@ -307,13 +306,20 @@ filter_chains:
         let meta = cluster_meta_from_config(&config);
         let backend = meta.get("branch-backend").expect("branch cluster");
         assert_eq!(
+            backend.endpoint_source,
+            "chain:main/filter:grpc_detection/branch:on_grpc/chain:inline_branch/filter:load_balancer"
+        );
+        assert_eq!(backend.routed_definitions.len(), 1);
+        let route = backend.routed_definitions.first().expect("one routed declaration");
+        assert_eq!(route.source, backend.endpoint_source);
+        assert_eq!(route.endpoints, backend.endpoints);
+        assert_eq!(
             backend.endpoints,
             vec!["127.0.0.1:9300".to_owned()],
             "clusters in branch chains should be collected"
         );
     }
 
-    #[ignore]
     #[test]
     fn cluster_meta_from_config_handles_nested_branches() {
         let config = Config::from_yaml(
@@ -327,24 +333,24 @@ listeners:
 filter_chains:
   - name: main
     filters:
-      - filter: guardrails
-        action: flag
-        rules: []
+      - filter: grpc_detection
         branch_chains:
-          - on_result:
-              filter: guardrails
-              result: passed
+          - name: outer_grpc
+            on_result:
+              filter: grpc_detection
+              key: kind
+              result: grpc
             rejoin: next
             chains:
               - name: outer_branch
                 filters:
-                  - filter: guardrails
-                    action: flag
-                    rules: []
+                  - filter: grpc_detection
                     branch_chains:
-                      - on_result:
-                          filter: guardrails
-                          result: passed
+                      - name: inner_grpc
+                        on_result:
+                          filter: grpc_detection
+                          key: kind
+                          result: grpc
                         rejoin: next
                         chains:
                           - name: inner_branch
@@ -359,6 +365,14 @@ filter_chains:
         .expect("config should parse");
         let meta = cluster_meta_from_config(&config);
         let backend = meta.get("nested-backend").expect("nested branch cluster");
+        assert_eq!(
+            backend.endpoint_source,
+            "chain:main/filter:grpc_detection/branch:outer_grpc/chain:outer_branch/filter:grpc_detection/branch:inner_grpc/chain:inner_branch/filter:load_balancer"
+        );
+        assert_eq!(backend.routed_definitions.len(), 1);
+        let route = backend.routed_definitions.first().expect("one routed declaration");
+        assert_eq!(route.source, backend.endpoint_source);
+        assert_eq!(route.endpoints, backend.endpoints);
         assert_eq!(
             backend.endpoints,
             vec!["127.0.0.1:9400".to_owned()],
