@@ -114,19 +114,21 @@ pub(super) fn body_filter_indices(filters: &[PipelineFilter]) -> (Vec<usize>, Ve
 /// opts in by overriding [`runs_request_head`].
 ///
 /// Top-level only: branch filters never run the head hook, matching the
-/// body-phase precompute helpers. A filter that [`admits_at_request_head`] is
-/// left out when an earlier filter can end the request first, so that filter
-/// still answers or rejects before admission.
+/// body-phase precompute helpers. Without a `pre_read`, a filter that
+/// [`admits_at_request_head`] is left out when an earlier filter can end the
+/// request first, so that filter still answers or rejects before admission.
+/// A pre-read runs every body hook before any request phase, so there the
+/// earlier filter runs after admission either way, and the head is kept.
 ///
 /// [`on_request_head`]: crate::HttpFilter::on_request_head
 /// [`runs_request_head`]: crate::HttpFilter::runs_request_head
 /// [`admits_at_request_head`]: crate::HttpFilter::admits_at_request_head
-pub(super) fn request_head_filter_indices(filters: &[PipelineFilter]) -> Vec<usize> {
+pub(super) fn request_head_filter_indices(filters: &[PipelineFilter], pre_read: bool) -> Vec<usize> {
     let mut indices = Vec::new();
     for (idx, pf) in filters.iter().enumerate() {
         if let AnyFilter::Http(f) = &pf.filter
             && f.runs_request_head()
-            && !(f.admits_at_request_head() && first_request_ender(filters, idx).is_some())
+            && !(!pre_read && f.admits_at_request_head() && first_request_ender(filters, idx).is_some())
         {
             indices.push(idx);
         }
@@ -1250,26 +1252,53 @@ mod tests {
 
         let mut ip_acl = noop_filter("ip_acl");
         ip_acl.is_security = true;
-        let indices =
-            request_head_filter_indices(&[ip_acl, admitting_head_filter("policy"), head_filter("classifier")]);
+        let indices = request_head_filter_indices(
+            &[ip_acl, admitting_head_filter("policy"), head_filter("classifier")],
+            false,
+        );
         assert_eq!(
             indices,
             vec![2],
             "the policy admits in the request phase; the classifier still runs"
         );
 
-        let indices = request_head_filter_indices(&[noop_filter("static_response"), admitting_head_filter("policy")]);
+        let indices = request_head_filter_indices(
+            &[noop_filter("static_response"), admitting_head_filter("policy")],
+            false,
+        );
         assert!(indices.is_empty(), "an answering filter shields the policy too");
 
-        let indices = request_head_filter_indices(&[head_filter("classifier"), admitting_head_filter("policy")]);
+        let indices = request_head_filter_indices(&[head_filter("classifier"), admitting_head_filter("policy")], false);
         assert_eq!(indices, vec![0, 1], "a fact-publishing filter ends nothing");
+
+        let mut gated = noop_filter("gate");
+        gated.branches.push(crate::pipeline::branch::ResolvedBranch {
+            condition: None,
+            filters: vec![noop_filter("static_response")],
+            max_iterations: None,
+            name: std::sync::Arc::from("health"),
+            rejoin: crate::pipeline::branch::RejoinTarget::Next,
+        });
+        let indices = request_head_filter_indices(&[gated, admitting_head_filter("policy")], false);
+        assert!(
+            indices.is_empty(),
+            "an answering filter in a branch can end the request too"
+        );
+
+        let indices =
+            request_head_filter_indices(&[noop_filter("static_response"), admitting_head_filter("policy")], true);
+        assert_eq!(
+            indices,
+            vec![1],
+            "a pre-read runs admission before any request phase, so the head is kept"
+        );
     }
 
     #[test]
     fn request_head_filter_indices_collects_opted_in_filters() {
         let head = PipelineFilter::new(0, AnyFilter::Http(Box::new(HeadCapFilter)), vec![], vec![]);
         let plain = PipelineFilter::new(1, AnyFilter::Http(Box::new(NoopHttpFilter)), vec![], vec![]);
-        let indices = request_head_filter_indices(&[head, plain]);
+        let indices = request_head_filter_indices(&[head, plain], false);
         assert_eq!(indices, vec![0], "only the opted-in filter's index is collected");
     }
 
@@ -1277,7 +1306,7 @@ mod tests {
     fn request_head_filter_indices_empty_without_opt_in() {
         let plain = PipelineFilter::new(0, AnyFilter::Http(Box::new(NoopHttpFilter)), vec![], vec![]);
         assert!(
-            request_head_filter_indices(&[plain]).is_empty(),
+            request_head_filter_indices(&[plain], false).is_empty(),
             "a pipeline with no head participant collects no head indices"
         );
     }

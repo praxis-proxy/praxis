@@ -984,13 +984,13 @@ pub(super) fn check_selected_upstream_condition_pre_read(
 /// are evaluated at the head against the request as the client sent it, so
 /// headers an earlier filter sets are invisible to that evaluation. Branch
 /// filters never run at the head and are not checked.
-pub(super) fn check_head_admission_ordering(filters: &[PipelineFilter], warnings: &mut Vec<String>) {
+pub(super) fn check_head_admission_ordering(filters: &[PipelineFilter], pre_read: bool, warnings: &mut Vec<String>) {
     for (position, pf) in filters.iter().enumerate() {
         if !admits_at_request_head(pf) {
             continue;
         }
         let name = pf.filter.name();
-        if let Some(ender) = super::body::first_request_ender(filters, position) {
+        if let Some(ender) = super::body::first_request_ender(filters, position).filter(|_| !pre_read) {
             let ender = ender.filter.name();
             warnings.push(format!(
                 "filter '{name}' at position {position} admits in the request phase, not at the \
@@ -3268,7 +3268,7 @@ mod tests {
     fn head_admitting_policy_first_in_the_chain_warns_about_nothing() {
         let filters = vec![admitting_head_filter("policy"), security_noop_filter("ip_acl", vec![])];
         let mut warnings = Vec::new();
-        check_head_admission_ordering(&filters, &mut warnings);
+        check_head_admission_ordering(&filters, false, &mut warnings);
         assert!(warnings.is_empty(), "{warnings:?}");
     }
 
@@ -3282,7 +3282,7 @@ mod tests {
             let ender = earlier.filter.name();
             let filters = vec![earlier, admitting_head_filter("policy")];
             let mut warnings = Vec::new();
-            check_head_admission_ordering(&filters, &mut warnings);
+            check_head_admission_ordering(&filters, false, &mut warnings);
             assert_eq!(warnings.len(), 1, "{ender}: {warnings:?}");
             assert!(
                 warnings[0].contains("admits in the request phase") && warnings[0].contains(&format!("'{ender}'")),
@@ -3298,7 +3298,7 @@ mod tests {
             policy.conditions = vec![make_condition()];
             let filters = vec![earlier, policy];
             let mut warnings = Vec::new();
-            check_head_admission_ordering(&filters, &mut warnings);
+            check_head_admission_ordering(&filters, false, &mut warnings);
             assert_eq!(warnings.len(), 1, "{warnings:?}");
             assert!(warnings[0].contains("request conditions"), "{warnings:?}");
         }
@@ -3326,7 +3326,7 @@ mod tests {
         ];
         for (case, filters) in cases {
             let mut warnings = Vec::new();
-            check_head_admission_ordering(&filters, &mut warnings);
+            check_head_admission_ordering(&filters, false, &mut warnings);
             assert!(warnings.is_empty(), "{case}: {warnings:?}");
         }
     }

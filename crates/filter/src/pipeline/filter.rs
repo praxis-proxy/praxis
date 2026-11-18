@@ -87,12 +87,17 @@ pub(super) const ANSWERING_FILTERS: &[&str] = &["iterative_request_router", "red
 
 impl PipelineFilter {
     /// Whether this filter can end a request in its request phase, before a
-    /// later filter runs: it answers requests, declares terminal responses,
-    /// or is a security filter that may reject.
+    /// later filter runs: it answers requests, declares terminal responses, is
+    /// a security filter that may reject, or a filter in one of its branches
+    /// can.
     pub(crate) fn can_end_request(&self) -> bool {
         self.is_security
             || ANSWERING_FILTERS.contains(&self.filter.name())
             || matches!(&self.filter, AnyFilter::Http(filter) if filter.produces_terminal_response())
+            || self
+                .branches
+                .iter()
+                .any(|branch| branch.filters.iter().any(Self::can_end_request))
     }
 
     /// Create a `PipelineFilter` with no branches or name.

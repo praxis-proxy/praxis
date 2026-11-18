@@ -52,8 +52,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   before the declared-body-size 413 and inference model and body denials,
   and inference and pre-read MCP requests resolve the global identity once
   more. Behind an earlier filter that can answer or reject the request
-  (`cors`, `ip_acl`, `static_response`, `redirect`, ...), the policy admits
-  in the request phase as before, so that filter still runs first;
+  (`cors`, `ip_acl`, `static_response`, `redirect`, ...), in a pipeline that
+  does not pre-read the body, the policy admits in the request phase as
+  before, so that filter still runs first (a pre-read already runs the
+  policy's body hook before any request phase, so there the head is kept);
   `HttpFilter::admits_at_request_head` declares a head hook that may reject.
   When an entity default, group or route extends or replaces the global
   `authentication:`, the policy never runs the global gate: the route judges

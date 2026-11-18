@@ -94,11 +94,13 @@ runs once at ingress, never inside an iterative exchange. Facts it publishes
 both during a later `stream_buffer` pre-read and the request phase.
 
 A filter whose head hook may reject the request, as an admission check does,
-declares `admits_at_request_head`. The pipeline skips that hook when an
-earlier top-level filter can end the request in its request phase (a security
-filter, or one that answers like `static_response` or `redirect`), and the
-filter admits in `on_request` instead, so the earlier filter still runs
-first. The `policy` filter uses the head phase this way: it rate-limits and
+declares `admits_at_request_head`. In a pipeline without a `stream_buffer`
+pre-read, the pipeline skips that hook when an earlier top-level filter, or a
+filter in one of its branches, can end the request in its request phase (a
+security filter, or one that answers like `static_response` or `redirect`),
+and the filter admits in `on_request` instead, so the earlier filter still
+runs first. A pre-read runs body hooks before any request phase, so there the
+head hook is kept. The `policy` filter uses the head phase this way: it rate-limits and
 authenticates before any filter reads the body; see
 [`policy`](http/security/policy.md).
 

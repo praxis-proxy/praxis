@@ -111,6 +111,18 @@ fn an_earlier_ip_acl_still_rejects_before_admission() {
 }
 
 #[test]
+fn a_pre_reading_pipeline_keeps_head_admission_behind_an_earlier_ip_acl() {
+    let backend = start_header_echo_backend();
+    let ip_acl = "      - filter: ip_acl\n        deny:\n          - \"127.0.0.0/8\"\n\n";
+    let proxy = start_proxy(&load_example(free_port(), backend.port(), Some(ip_acl)));
+    assert_eq!(
+        status_without_body(proxy.addr(), None, 64),
+        401,
+        "the pre-read would run policy before ip_acl anyway, so the head still rejects first"
+    );
+}
+
+#[test]
 fn an_earlier_static_response_still_answers_without_credentials() {
     let backend = start_header_echo_backend();
     let health = "      - filter: static_response\n        conditions:\n          - when:\n              path: \

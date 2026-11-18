@@ -5603,7 +5603,7 @@ impl HttpFilter for StreamBufferBodyDoneFilter {
 fn with_body_indices(mut pipeline: FilterPipeline) -> FilterPipeline {
     pipeline.has_request_completion_observer = super::pipeline_has_request_completion_observer(&pipeline.filters);
     let (request, response) = super::body::body_filter_indices(&pipeline.filters);
-    pipeline.request_head_filter_indices = super::body::request_head_filter_indices(&pipeline.filters);
+    pipeline.request_head_filter_indices = super::body::request_head_filter_indices(&pipeline.filters, false);
     pipeline.request_body_filter_indices = request;
     pipeline.response_body_filter_indices = response;
     pipeline.selected_upstream_request_body_filter_indices =

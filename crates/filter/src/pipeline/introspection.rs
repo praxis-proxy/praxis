@@ -105,7 +105,7 @@ pub struct BranchConditionInfo {
 impl FilterPipeline {
     /// Public introspection snapshot of the resolved filter chain.
     pub fn introspection(&self) -> Vec<FilterIntrospection> {
-        snapshot_filters(&self.filters, true)
+        snapshot_filters(&self.filters, Some(&self.request_head_filter_indices))
     }
 }
 
@@ -113,12 +113,13 @@ impl FilterPipeline {
 // Walkers
 // -----------------------------------------------------------------------------
 
-/// Snapshot an ordered filter list.
-fn snapshot_filters(filters: &[PipelineFilter], top_level: bool) -> Vec<FilterIntrospection> {
+/// Snapshot an ordered filter list; `head_indices` is set for the top level,
+/// naming the filters whose request-head hook the pipeline runs.
+fn snapshot_filters(filters: &[PipelineFilter], head_indices: Option<&[usize]>) -> Vec<FilterIntrospection> {
     filters
         .iter()
         .enumerate()
-        .map(|(index, pf)| snapshot_filter(index, pf, filters, top_level))
+        .map(|(index, pf)| snapshot_filter(index, pf, filters, head_indices))
         .collect()
 }
 
@@ -127,9 +128,10 @@ fn snapshot_filter(
     index: usize,
     pf: &PipelineFilter,
     siblings: &[PipelineFilter],
-    top_level: bool,
+    head_indices: Option<&[usize]>,
 ) -> FilterIntrospection {
-    let head = top_level && super::body::request_head_filter_indices(siblings).contains(&index);
+    let top_level = head_indices.is_some();
+    let head = head_indices.is_some_and(|indices| indices.contains(&index));
     let (phases, request_body, response_body) = phase_and_body_info(pf, top_level, head);
     let mut conditions = pf.conditions.clone();
     redact_condition_headers(&mut conditions);
@@ -213,7 +215,7 @@ fn snapshot_branch(branch: &ResolvedBranch, parent_siblings: &[PipelineFilter]) 
     BranchIntrospection {
         name: branch.name.to_string(),
         condition: branch.condition.as_ref().map(branch_condition_info),
-        filters: snapshot_filters(&branch.filters, false),
+        filters: snapshot_filters(&branch.filters, None),
         max_iterations: branch.max_iterations,
         rejoin: rejoin_label(&branch.rejoin, parent_siblings),
     }
