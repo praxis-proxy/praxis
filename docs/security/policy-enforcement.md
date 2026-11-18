@@ -3,8 +3,9 @@
 Praxis Core's `policy` filter embeds the [Praxis Policy Engine (PPE)][ppe]. Use
 it to authorize API and tool calls, obtain upstream credentials, redact
 sensitive fields, require approval, or restrict actions after a session reads
-sensitive data. These rules run inside the proxy, before requests reach the
-backend or responses return to the caller.
+sensitive data. Request rules run before forwarding to the backend. Response
+rules can inspect buffered content, while streaming metadata rules run at EOF
+after chunks have been released.
 
 ## Core, PPE, and Praxis AI
 
@@ -164,7 +165,7 @@ scenarios.
 | MCP body rewriting and response rules | `body_access: read_write`; tool results support field pipelines, prompt and resource results do not. |
 | Inference request authorization | A top-level `model` and matching `llm:` route; no MCP classifier required. |
 | Inference response content inspection | `body_access: read_write` and a non-streaming JSON response; inference bodies are not rewritten by field mutators. |
-| Streaming inference response metadata | A host filter supplies trusted metadata; response content is not exposed on this path. |
+| Streaming inference response metadata | A host filter supplies trusted metadata, evaluated at EOF after chunks are released. Denials are reported through `PolicyResponseOutput`; this path neither inspects nor blocks streamed content. |
 | Cross-call session labels | A configured session store; use persistent storage when labels must survive restarts. |
 | Plugins and decision points | The corresponding build features and any services those plugins need. |
 
