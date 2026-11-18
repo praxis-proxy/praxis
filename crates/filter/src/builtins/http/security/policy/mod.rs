@@ -217,12 +217,14 @@
 //! authorizes once the request is classified, resolving the route's identity
 //! then; each limiter charges a request once.
 //!
-//! The head resolves identity only when the global resolver is the one that
-//! judges every route. When an entity default, group or route adds to or
-//! replaces the global `authentication:`, the policy never runs the global
-//! gate: the head runs the pre-identity limiter only, identity waits for the
-//! route, and the request body is buffered (up to `max_buffer_bytes`) until
-//! the route decides. A policy with `context_headers` keeps today's timing:
+//! Sections append their `authentication:` steps to the global ones, so a
+//! global step that denies at the head denies on every route that keeps it.
+//! When an entity default, group or route sets `replace_inherited`, or
+//! `global.defaults.http` or an `http:` route adds steps only the head would
+//! run, the policy never runs the global gate: the head runs the pre-identity
+//! limiter only, identity waits for the route, the request body is buffered
+//! (up to `max_buffer_bytes`) until the route decides, and a startup warning
+//! names the section. A policy with `context_headers` keeps today's timing:
 //! those values can come from filters that run after the head.
 //!
 //! The head judges the request as the client sent it plus the trusted header

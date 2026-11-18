@@ -43,7 +43,7 @@ use super::{
     common_message_format::{entity_for_protocol_method, entity_for_protocol_method_post},
     config::{BodyAccessMode, PolicyFilterConfig},
     construction::{
-        engine_error, only_global_authentication, parse_trusted_proxies, refuse_fips_blockers,
+        engine_error, head_identity_blocker, parse_trusted_proxies, refuse_fips_blockers,
         refuse_query_credentials_with_delegation, require_dpop_external_base_url,
     },
     context::{PolicyResponseContext, PolicyResponseOutput},
@@ -463,28 +463,44 @@ pub struct PolicyFilter {
 enum HeadAdmission {
     /// No head phase: `context_headers` may read values set after it.
     Off,
-    /// `ratelimit.pre_identity` only: an entity default, bundle, group or route
-    /// can extend or replace the global resolver, so identity waits for the
-    /// route.
+    /// `ratelimit.pre_identity` only: a section replaces the global resolvers,
+    /// or adds steps only the head would run, so identity waits for the route.
     Defer,
     /// The pre-identity limiter and the identity gate.
     Gate,
 }
 
 impl HeadAdmission {
-    /// The head work for a policy document and filter config.
-    fn for_policy(
-        cfg: &PolicyFilterConfig,
-        entity_routes: bool,
-        policy: &ppe::praxis_policy_core::config::PolicyConfig,
-    ) -> Self {
+    /// The head work for a filter config, given what stops the global
+    /// resolvers from judging at the head, if anything.
+    fn for_policy(cfg: &PolicyFilterConfig, blocker: Option<&str>) -> Self {
         if !cfg.context_headers.is_empty() {
             Self::Off
-        } else if !entity_routes || only_global_authentication(policy) {
-            Self::Gate
-        } else {
+        } else if blocker.is_some() {
             Self::Defer
+        } else {
+            Self::Gate
         }
+    }
+
+    /// Warn that a deferring policy no longer rejects unauthenticated requests
+    /// before their body is read, and why.
+    fn warn_on_defer(cfg: &PolicyFilterConfig, blocker: &str, llm_routes: bool) {
+        let buffering = if cfg.body_access == BodyAccessMode::ReadOnly && !llm_routes {
+            format!(
+                "; request bodies are buffered up to max_buffer_bytes ({})",
+                cfg.max_buffer_bytes
+            )
+        } else {
+            String::new()
+        };
+        tracing::warn!(
+            target: "policy.filter",
+            "policy: {}: {blocker}, so the request head runs only the pre-identity limiter and \
+             unauthenticated requests are rejected once the route resolves identity, after the \
+             body is read{buffering}",
+            cfg.config_path,
+        );
     }
 }
 
@@ -760,15 +776,10 @@ impl PolicyFilter {
             (mgr.has_hooks_for(HOOK_HTTP_RESPONSE) || !response_assertions.is_empty()).then_some(HOOK_HTTP_RESPONSE);
 
         let limit_pre = mgr.has_hooks_for(HOOK_RATELIMIT_PRE_IDENTITY);
-        let head = HeadAdmission::for_policy(&cfg, entity_routes, &policy_config);
-        if head == HeadAdmission::Defer && cfg.body_access == BodyAccessMode::ReadOnly && !llm_routes {
-            tracing::warn!(
-                target: "policy.filter",
-                "policy: {}: a route's authentication decides identity at end of stream, so request \
-                 bodies are buffered up to max_buffer_bytes ({}) before they are forwarded",
-                cfg.config_path,
-                cfg.max_buffer_bytes,
-            );
+        let blocker = entity_routes.then(|| head_identity_blocker(&policy_config)).flatten();
+        let head = HeadAdmission::for_policy(&cfg, blocker.as_deref());
+        if let Some(blocker) = blocker.as_deref().filter(|_| head == HeadAdmission::Defer) {
+            HeadAdmission::warn_on_defer(&cfg, blocker, llm_routes);
         }
         let llm_route_table = llm_routes.then(|| Arc::new(policy_config));
         let limit_post = mgr.has_hooks_for(HOOK_RATELIMIT_POST_IDENTITY);

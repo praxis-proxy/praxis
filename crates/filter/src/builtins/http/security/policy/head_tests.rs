@@ -9,7 +9,7 @@ use http::{HeaderName, HeaderValue};
 
 use super::{
     config::{ContextField, PolicyFilterConfig},
-    construction::only_global_authentication,
+    construction::head_identity_blocker,
     filter::PolicyFilter,
     rate_limit_tests::{
         Calls, HOST_LIMITERS, TOOL_SUBJECT_LIMIT, context, filter, filter_config, plugins, recorded_policy, rejection,
@@ -196,6 +196,38 @@ async fn a_context_table_lost_after_the_head_fails_the_body_closed() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn an_additive_route_keeps_authentication_at_the_head() {
+    let yaml = ROUTE_REPLACES_GLOBAL.replace("      replace_inherited: true\n", "");
+    let (_dir, path, calls) = recorded_policy("test/head-route-adds", &yaml);
+    let filter = filter(path);
+    assert!(matches!(filter.request_body_mode(), BodyMode::Stream));
+    let req = request(Some("alice"));
+    let mut ctx = context(&req, 1);
+    assert!(matches!(head(&filter, &mut ctx).await, FilterAction::Continue));
+    assert_eq!(
+        plugins(&calls),
+        ["pre", "who"],
+        "the global resolver judges at the head: the route only appends to it"
+    );
+    assert!(matches!(tool_body(&filter, &mut ctx).await, FilterAction::BodyDone));
+    assert_eq!(plugins(&calls), ["pre", "who", "who", "key"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_policy_without_authentication_neither_defers_nor_buffers() {
+    let yaml = "routes:
+  - tool: echo
+    authorization:
+      pre_invocation:
+        - \"allow\"
+";
+    let (_dir, path, _calls) = recorded_policy("test/head-no-auth", yaml);
+    let filter = filter(path);
+    assert!(filter.runs_request_head());
+    assert!(matches!(filter.request_body_mode(), BodyMode::Stream));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_route_that_replaces_global_authentication_defers_identity() {
     let (_dir, path, calls) = recorded_policy("test/head-route-replaces", ROUTE_REPLACES_GLOBAL);
     let filter = filter(path);
@@ -359,11 +391,18 @@ async fn the_pipeline_runs_each_stage_once_across_the_head_and_request_phases() 
 }
 
 #[test]
-fn only_a_lone_global_block_lets_the_global_resolver_judge_every_route() {
-    for (case, yaml, expected) in authentication_layouts() {
+fn only_dropped_or_head_only_steps_keep_the_global_resolver_from_the_head() {
+    for (case, yaml, blocker) in additive_layouts().into_iter().chain(blocking_layouts()) {
         let yaml = format!("{PLUGINS}{yaml}");
         let config = ppe::praxis_policy_core::config::parse_config(&yaml).unwrap();
-        assert_eq!(only_global_authentication(&config), expected, "{case}");
+        let found = head_identity_blocker(&config);
+        match blocker {
+            None => assert_eq!(found, None, "{case}"),
+            Some(section) => assert!(
+                found.as_deref().is_some_and(|reason| reason.contains(section)),
+                "{case}: {found:?}"
+            ),
+        }
     }
 }
 
@@ -371,36 +410,60 @@ fn only_a_lone_global_block_lets_the_global_resolver_judge_every_route() {
 // Test Utilities
 // -----------------------------------------------------------------------------
 
-/// Authentication layouts, and whether only the global block authenticates.
-fn authentication_layouts() -> [(&'static str, String, bool); 6] {
+/// Layouts whose sections only append to the global resolver.
+fn additive_layouts() -> [(&'static str, String, Option<&'static str>); 5] {
     let global = "global:\n  authentication: [who]\n";
     [
-        ("global only", format!("{global}routes:\n  - tool: echo\n"), true),
-        ("no authentication", "routes:\n  - tool: echo\n".to_owned(), false),
+        ("global only", format!("{global}routes:\n  - tool: echo\n"), None),
+        ("no authentication", "routes:\n  - tool: echo\n".to_owned(), None),
         (
             "an additive route",
             format!("{global}routes:\n  - tool: echo\n    authentication: [key]\n"),
-            false,
+            None,
         ),
         (
-            "a replacing route",
-            format!(
-                "{global}routes:\n  - tool: echo\n    authentication:\n      replace_inherited: true\n      steps: \
-                 [key]\n"
-            ),
-            false,
-        ),
-        (
-            "an entity default",
+            "an additive entity default",
             format!("{global}  defaults:\n    tool:\n      authentication: [key]\nroutes:\n  - tool: echo\n"),
-            false,
+            None,
         ),
         (
-            "a group",
+            "an additive group",
             format!(
                 "{global}groups:\n  keyed:\n    authentication: [key]\nroutes:\n  - tool: echo\n    groups: keyed\n"
             ),
-            false,
+            None,
+        ),
+    ]
+}
+
+/// Layouts that keep the global resolver from judging at the head, and the
+/// section the reason names.
+fn blocking_layouts() -> [(&'static str, String, Option<&'static str>); 4] {
+    let global = "global:\n  authentication: [who]\n";
+    let replacing = "authentication:\n      replace_inherited: true\n      steps: [key]\n";
+    [
+        (
+            "a replacing route",
+            format!("{global}routes:\n  - tool: echo\n    {replacing}"),
+            Some("routes[0]"),
+        ),
+        (
+            "a replacing entity default",
+            format!(
+                "{global}  defaults:\n    tool:\n      {}routes:\n  - tool: echo\n",
+                replacing.replace("\n      ", "\n        ")
+            ),
+            Some("global.defaults.tool"),
+        ),
+        (
+            "a replacing group",
+            format!("{global}groups:\n  keyed:\n    {replacing}routes:\n  - tool: echo\n    groups: keyed\n"),
+            Some("groups.keyed"),
+        ),
+        (
+            "additive http defaults",
+            format!("{global}  defaults:\n    http:\n      authentication: [key]\nroutes:\n  - tool: echo\n"),
+            Some("global.defaults.http"),
         ),
     ]
 }

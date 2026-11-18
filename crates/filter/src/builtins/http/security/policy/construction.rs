@@ -118,13 +118,47 @@ pub(super) fn require_dpop_external_base_url(policy: &PolicyConfig) -> Result<()
     Ok(())
 }
 
-/// Whether global authentication is the only authentication in the document.
+/// What stops the global resolvers from judging an entity route's credential at
+/// the request head, naming the section, if anything does.
 ///
-/// Entity defaults, bundles, groups and routes can extend or replace the
-/// global resolvers, and the entity route is unknown until the body is
-/// classified, so only then does the global resolver judge every request.
-pub(super) fn only_global_authentication(policy: &PolicyConfig) -> bool {
-    policy.global.authentication.is_some() && authentication_blocks(policy).nth(1).is_none()
+/// A section's `authentication:` steps are appended to the ones it inherits,
+/// so a global step that denies at the head denies on every route that keeps
+/// it. Only a section that sets `replace_inherited` drops them. The head
+/// resolves on the `http` coordinates, so `global.defaults.http` and `http:`
+/// routes add steps there that entity routes never run. This assumes a global
+/// step decides the same on the `http` coordinates as inside a route's chain.
+pub(super) fn head_identity_blocker(policy: &PolicyConfig) -> Option<String> {
+    let global = &policy.global;
+    let sections = sorted(&global.defaults, "global.defaults")
+        .chain(sorted(&global.bundles, "groups"))
+        .chain(sorted(&policy.groups, "groups"))
+        .filter_map(|(section, group)| group.authentication.as_ref().map(|auth| (section, auth, false)));
+    let routes = policy.routes.iter().enumerate().filter_map(|(index, route)| {
+        route
+            .authentication
+            .as_ref()
+            .map(|auth| (format!("routes[{index}]"), auth, route.http.is_some()))
+    });
+    sections.chain(routes).find_map(|(section, auth, http_route)| {
+        if http_route || section == "global.defaults.http" {
+            Some(format!("`{section}` adds authentication on the http coordinates"))
+        } else {
+            auth.replace_inherited
+                .then(|| format!("`{section}` sets `authentication.replace_inherited`"))
+        }
+    })
+}
+
+/// The named sections of `map` as `prefix.name`, in name order.
+fn sorted<'p>(
+    map: &'p std::collections::HashMap<String, PolicyGroup>,
+    prefix: &'p str,
+) -> impl Iterator<Item = (String, &'p PolicyGroup)> {
+    let mut names: Vec<_> = map.iter().collect();
+    names.sort_by(|left, right| left.0.cmp(right.0));
+    names
+        .into_iter()
+        .map(move |(name, group)| (format!("{prefix}.{name}"), group))
 }
 
 /// Every `authentication:` block in the document: global, entity defaults,

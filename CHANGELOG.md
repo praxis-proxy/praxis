@@ -59,10 +59,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   before, so that filter still runs first (a pre-read already runs the
   policy's body hook before any request phase, so there the head is kept);
   `HttpFilter::admits_at_request_head` declares a head hook that may reject.
-  When an entity default, group or route extends or replaces the global
-  `authentication:`, the policy never runs the global gate: the route judges
-  the credential, the head runs the limiter only, and the body is buffered
-  (up to `max_buffer_bytes`) until the route decides. Policies with
+  When an entity default, group or route sets `replace_inherited`, or
+  `global.defaults.http` or an `http:` route adds authentication, the policy
+  never runs the global gate: the route judges the credential, the head runs
+  the limiter only, the body is buffered (up to `max_buffer_bytes`) until the
+  route decides, and a startup warning names the section. Policies with
   `context_headers` keep the previous timing. Pipeline construction warns
   when an earlier filter moves admission out of the head and about request
   conditions on a head-admitting policy.
