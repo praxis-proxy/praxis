@@ -20,8 +20,8 @@ use std::{
 use praxis_core::config::Config;
 use praxis_filter::{FilterAction, FilterError, FilterFactory, FilterRegistry, HttpFilter, HttpFilterContext};
 use praxis_test_utils::{
-    example_config_path, free_port, http_send, parse_body, parse_status, patch_yaml, start_header_echo_backend,
-    start_proxy, start_proxy_with_registry, start_reloadable_proxy,
+    example_config_path, free_port, http_get, http_send, parse_body, parse_status, patch_yaml,
+    start_header_echo_backend, start_proxy, start_proxy_with_registry, start_reloadable_proxy,
 };
 
 // Identity parameters mirrored from
@@ -204,7 +204,11 @@ fn a_request_admitted_before_a_reload_finishes_on_its_pipeline() {
     let backend = start_header_echo_backend();
     let dir = tempfile::TempDir::new().unwrap();
     let port = free_port();
-    let open = load_example_yaml(port, backend.port(), None);
+    let admin = format!("127.0.0.1:{}", free_port());
+    let open = format!(
+        "admin:\n  metrics_address: \"{admin}\"\n{}",
+        load_example_yaml(port, backend.port(), None)
+    );
     let fixture = format!("{}/fixtures/admission-policy.yaml", env!("CARGO_MANIFEST_DIR"));
     let closed_policy = dir.path().join("closed-policy.yaml");
     let closed_rules = std::fs::read_to_string(&fixture)
@@ -227,6 +231,7 @@ fn a_request_admitted_before_a_reload_finishes_on_its_pipeline() {
     )
     .unwrap();
     held.flush().unwrap();
+    wait_until_in_flight(&admin);
 
     let after = proxy.reload_until(
         &closed,
@@ -381,11 +386,41 @@ fn status_without_body(addr: &str, token: Option<&str>, content_length: u64) -> 
     )
     .unwrap();
     stream.flush().unwrap();
-    let mut head = [0_u8; 64];
-    let read = stream
-        .read(&mut head)
-        .unwrap_or_else(|e| panic!("no answer without the body; the proxy waited for it: {e}"));
-    parse_status(&String::from_utf8_lossy(head.get(..read).unwrap()))
+    let mut status_line = Vec::new();
+    let mut byte = [0_u8; 1];
+    while !status_line.ends_with(b"\r\n") && status_line.len() < 256 {
+        let read = stream
+            .read(&mut byte)
+            .unwrap_or_else(|e| panic!("no answer without the body; the proxy waited for it: {e}"));
+        if read == 0 {
+            break;
+        }
+        status_line.extend_from_slice(&byte);
+    }
+    parse_status(&String::from_utf8_lossy(&status_line))
+}
+
+/// Wait until the proxy behind `admin` counts a request in flight on the
+/// example's listener, so the held request has its pipeline pinned.
+fn wait_until_in_flight(admin: &str) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let (_status, metrics) = http_get(admin, "/metrics", None);
+        let in_flight = metrics
+            .lines()
+            .find(|line| line.starts_with("praxis_http_active_requests{") && line.contains("listener=\"default\""))
+            .and_then(|line| line.split_whitespace().last())
+            .and_then(|value| value.parse::<f64>().ok())
+            .unwrap_or_default();
+        if in_flight >= 1.0 {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the held request never reached the proxy:\n{metrics}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 /// Mint an HS256 JWT accepted by the fixture's `jwt-user` plugin.
