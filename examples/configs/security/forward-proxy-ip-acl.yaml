@@ -1,12 +1,14 @@
 # Forward Proxy (Client ACL)
 #
-# Forward proxy with no destination allowlist: any destination is
-# reachable, and egress control rests on the ip_acl filter gating which
-# clients may open tunnels. Validation refuses an enabled forward_proxy
-# that has neither allow_destinations nor an ip_acl/policy filter, so the
-# listener is never an open relay. Private and reserved destination
-# addresses stay unreachable unless insecure_options.allow_private_upstreams
-# is set.
+# Forward proxy with no destination allowlist: any destination other than a
+# private or reserved address is reachable, and egress control rests on the
+# ip_acl filter gating which clients may open tunnels. Validation refuses an
+# enabled forward_proxy that has neither allow_destinations nor an
+# unconditional ip_acl/policy filter, but it checks that such a filter is
+# present, not that it restricts anything: an ip_acl with no allow or deny
+# entries admits every client, so keep the allow list narrow. Private and
+# reserved destination addresses stay unreachable unless
+# insecure_options.allow_private_upstreams is set.
 #
 #   Client 10.1.2.3 -- CONNECT any.host:443 --> Praxis :8080 --> any.host:443
 #   Client 192.0.2.9 -- CONNECT any.host:443 --> Praxis :8080 --> 403
