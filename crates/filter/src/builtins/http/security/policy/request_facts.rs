@@ -5,13 +5,11 @@
 
 use std::{collections::HashMap, net::IpAddr, sync::Arc};
 
-use http::{HeaderMap, HeaderName, HeaderValue};
+use http::HeaderMap;
 use ppe::praxis_policy_core::extensions::{HttpExtension, http::SecretHeaderProvenance};
 use praxis_core::connectivity::CidrRange;
 
-use crate::{
-    Request, client_address::resolve_client_address, context::TrustedHeaderMutation, filter::HttpFilterContext,
-};
+use crate::{Request, client_address::resolve_client_address, filter::HttpFilterContext};
 
 // -----------------------------------------------------------------------------
 // RequestFacts
@@ -159,42 +157,14 @@ impl RequestView {
 // Helpers
 // -----------------------------------------------------------------------------
 
-/// The request headers with this pass's queued trusted mutations applied,
-/// with the precedence the head phase applies them: the ordered log, else the
-/// grouped queues.
+/// The request headers with this pass's queued trusted mutations applied, as
+/// the head phase applies them once it ends.
 fn head_headers(ctx: &HttpFilterContext<'_>) -> HeaderMap {
     let mut headers = ctx.request.headers.clone();
-    if ctx.pre_read_mutations.is_empty() {
-        for name in &ctx.request_headers_to_remove {
-            headers.remove(name);
-        }
-        for (name, value) in &ctx.request_headers_to_set {
-            headers.insert(name.clone(), value.clone());
-        }
-        for (name, value) in &ctx.extra_request_headers {
-            append(&mut headers, name.as_bytes(), value);
-        }
-        return headers;
-    }
-    for mutation in &ctx.pre_read_mutations {
-        match mutation {
-            TrustedHeaderMutation::Remove(name) => {
-                headers.remove(name);
-            },
-            TrustedHeaderMutation::Set(name, value) => {
-                headers.insert(name.clone(), value.clone());
-            },
-            TrustedHeaderMutation::Add(name, value) => append(&mut headers, name.as_str().as_bytes(), value),
-        }
+    for mutation in ctx.pass_header_mutations() {
+        mutation.apply_to(&mut headers);
     }
     headers
-}
-
-/// Append `value` under `name`; the head phase skips an invalid pair too.
-fn append(headers: &mut HeaderMap, name: &[u8], value: &str) {
-    if let (Ok(name), Ok(value)) = (HeaderName::from_bytes(name), HeaderValue::from_str(value)) {
-        headers.append(name, value);
-    }
 }
 
 /// The bare request host, ASCII-lowercased and without a port: the URI's

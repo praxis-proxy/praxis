@@ -142,6 +142,25 @@ impl TrustedHeaderMutation {
             Self::Remove(n) | Self::Set(n, _) | Self::Add(n, _) => n == name,
         }
     }
+
+    /// Apply this mutation to `headers`. An add whose value is not a valid
+    /// header value is skipped with a warning.
+    pub fn apply_to(&self, headers: &mut HeaderMap) {
+        match self {
+            Self::Remove(name) => {
+                headers.remove(name);
+            },
+            Self::Set(name, value) => {
+                headers.insert(name.clone(), value.clone());
+            },
+            Self::Add(name, value) => match http::header::HeaderValue::from_str(value) {
+                Ok(value) => {
+                    headers.append(name.clone(), value);
+                },
+                Err(error) => tracing::warn!(header = %name, %error, "skipping invalid trusted add mutation"),
+            },
+        }
+    }
 }
 
 /// Tri-state result from [`HttpFilterContext::pending_header_value`].
@@ -1166,6 +1185,44 @@ impl HttpFilterContext<'_> {
         }
     }
 
+    /// This pass's trusted header mutations in application order: the ordered
+    /// [`pre_read_mutations`] log, or, when the pass wrote none, the grouped
+    /// queues. A pass uses one mechanism, so the two never mix.
+    ///
+    /// [`pre_read_mutations`]: Self::pre_read_mutations
+    pub fn pass_header_mutations(&self) -> Vec<TrustedHeaderMutation> {
+        if self.pre_read_mutations.is_empty() {
+            self.grouped_queue_mutations()
+        } else {
+            self.pre_read_mutations.clone()
+        }
+    }
+
+    /// The grouped header queues as ordered trusted mutations: removes, then
+    /// sets, then adds. A promoted header with an invalid name or value is
+    /// skipped with a warning.
+    pub fn grouped_queue_mutations(&self) -> Vec<TrustedHeaderMutation> {
+        let removes = self
+            .request_headers_to_remove
+            .iter()
+            .cloned()
+            .map(TrustedHeaderMutation::Remove);
+        let sets = self
+            .request_headers_to_set
+            .iter()
+            .map(|(name, value)| TrustedHeaderMutation::Set(name.clone(), value.clone()));
+        let adds = self.extra_request_headers.iter().filter_map(|(name, value)| {
+            let valid = HeaderName::from_bytes(name.as_bytes())
+                .ok()
+                .filter(|_| http::header::HeaderValue::from_str(value).is_ok());
+            if valid.is_none() {
+                tracing::warn!(header = %name, "skipping invalid promoted header");
+            }
+            valid.map(|name| TrustedHeaderMutation::Add(name, value.clone()))
+        });
+        removes.chain(sets).chain(adds).collect()
+    }
+
     /// Iterator over trusted mutations in application order: prior passes
     /// first, then the current pass.
     fn trusted_mutations(&self) -> impl Iterator<Item = &TrustedHeaderMutation> {
@@ -1704,6 +1761,55 @@ mod tests {
             };
             assert_eq!(resp.status.as_u16(), code);
         }
+    }
+
+    #[test]
+    fn trusted_mutations_apply_in_order_and_skip_invalid_adds() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-a", "client".parse().unwrap());
+        headers.insert("x-b", "client".parse().unwrap());
+        let name = |n: &'static str| HeaderName::from_static(n);
+        for mutation in [
+            TrustedHeaderMutation::Set(name("x-a"), "set".parse().unwrap()),
+            TrustedHeaderMutation::Remove(name("x-b")),
+            TrustedHeaderMutation::Add(name("x-a"), "added".to_owned()),
+            TrustedHeaderMutation::Add(name("x-c"), "bad\nvalue".to_owned()),
+        ] {
+            mutation.apply_to(&mut headers);
+        }
+        let x_a: Vec<_> = headers.get_all("x-a").iter().collect();
+        assert_eq!(x_a, ["set", "added"]);
+        assert!(!headers.contains_key("x-b"));
+        assert!(!headers.contains_key("x-c"), "an invalid add is skipped");
+    }
+
+    #[test]
+    fn pass_mutations_prefer_the_ordered_log_over_the_grouped_queues() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.extra_request_headers.push((Cow::Borrowed("x-add"), "v".to_owned()));
+        ctx.extra_request_headers
+            .push((Cow::Borrowed("bad name"), "v".to_owned()));
+        ctx.request_headers_to_set
+            .push((HeaderName::from_static("x-set"), "v".parse().unwrap()));
+        ctx.request_headers_to_remove.push(HeaderName::from_static("x-remove"));
+        let grouped: Vec<_> = ctx
+            .pass_header_mutations()
+            .iter()
+            .map(|mutation| match mutation {
+                TrustedHeaderMutation::Remove(name) => format!("remove {name}"),
+                TrustedHeaderMutation::Set(name, _) => format!("set {name}"),
+                TrustedHeaderMutation::Add(name, _) => format!("add {name}"),
+            })
+            .collect();
+        assert_eq!(grouped, ["remove x-remove", "set x-set", "add x-add"]);
+
+        ctx.pre_read_mutations
+            .push(TrustedHeaderMutation::Remove(HeaderName::from_static("x-log")));
+        assert!(matches!(
+            ctx.pass_header_mutations().as_slice(),
+            [TrustedHeaderMutation::Remove(name)] if name == "x-log"
+        ));
     }
 
     #[test]
