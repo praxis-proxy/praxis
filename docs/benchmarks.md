@@ -227,7 +227,7 @@ After the run completes, visualize and compare:
 ```console
 cargo xtask benchmark visualize \
     results/praxis-vs-envoy.yaml \
-    --output results/praxis-vs-envoy.svg
+    --output results/charts
 ```
 
 ### Quick Praxis vs Envoy
@@ -332,22 +332,26 @@ Each report contains:
 
 ## Visualization
 
-Generate an SVG chart from a report:
+Generate SVG charts from a report. `--output` names a directory
+(default: `target/criterion`):
 
 ```console
 cargo xtask benchmark visualize report.yaml
 cargo xtask benchmark visualize report.yaml \
-    --output comparison.svg
+    --output results/charts
 ```
 
-Produces two panels: latency percentiles and
-throughput. Proxy colors: Praxis=green, Envoy=blue,
-NGINX=red, HAProxy=purple.
+The command writes eight separate files named
+`<report-stem>-<metric>.svg`, for p99, minimum, mean, and
+maximum latency; request and data throughput; average CPU;
+and peak memory. For `report.yaml`, one example is
+`results/charts/report-p99-latency.svg`. Proxy colors:
+Praxis=green, Envoy=blue, NGINX=red, HAProxy=purple.
 
 ## Regression Detection
 
-Compare two reports and exit non-zero if any metric
-regressed beyond the threshold:
+Compare two reports and exit non-zero if a stable, matching
+Praxis scenario meets the regression rule:
 
 ```console
 cargo xtask benchmark compare baseline.yaml current.yaml
@@ -355,10 +359,14 @@ cargo xtask benchmark compare baseline.yaml current.yaml \
     --threshold 0.10
 ```
 
-Default threshold: 5%. A regression is flagged when
-p99 latency increases or throughput decreases beyond
-the threshold. The output includes per-scenario
-change percentages and improvement/regression flags.
+Default threshold: 5%. A scenario fails only when p99 latency
+increases **and** throughput decreases, each strictly beyond
+the threshold. Isolated movement is treated as noise: a 20%
+latency increase with unchanged throughput passes at a 5%
+threshold, while a 20% latency increase together with a 10%
+throughput decrease fails. Current-run results with coefficient
+of variation above 0.15 are skipped. The output shows each
+scenario's percentage changes and PASS, FAIL, or SKIP status.
 
 ## Flamegraph Profiling
 
@@ -415,12 +423,14 @@ in `praxis-proxy/conventions`:
   (`cargo audit`, `cargo deny`) on push/PR
 - `container.yaml`: build, run, and health-check the
   container image on push/PR
-- `microbenchmarks.yaml`: Criterion microbenchmarks
-  with baseline comparison on push/PR
+- `microbenchmarks.yaml`: Criterion microbenchmarks run
+  daily or by manual dispatch, with `target/criterion/`
+  uploaded as an artifact; the workflow does not configure
+  a push/PR baseline comparison
 - `benchmarks.yaml`: comparative benchmarks (Praxis
   vs Envoy) on push to main
-- `coverage.yaml`: code coverage gate (95% minimum)
-  on push/PR
+- `coverage.yaml`: coverage workflow on push/PR;
+  the repository's `make coverage-check` floor is 97%
 - `codeql.yaml`: CodeQL security analysis on push/PR
   and weekly schedule
 - `documentation.yaml`: rustdoc generation on push/PR

@@ -34,7 +34,11 @@ pub(crate) mod config;
 mod cookie;
 mod store;
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use tracing::{debug, warn};
@@ -42,7 +46,7 @@ use tracing::{debug, warn};
 use self::config::{ClusterSessionConfig, CookieAttributes, PersistenceConfig, StickySessionsConfig, StorageConfig};
 pub use self::store::{SessionStore, SessionStoreRegistry};
 use crate::{
-    FilterError,
+    FilterError, FilterMetadata,
     actions::FilterAction,
     factory::parse_filter_config,
     filter::{HttpFilter, HttpFilterContext},
@@ -64,6 +68,8 @@ const MAX_SESSION_KEY_LEN: usize = 256;
 pub struct StickySessionsFilter {
     /// Per-cluster session persistence configurations keyed by cluster name.
     configs: HashMap<Arc<str>, Arc<ClusterSessionConfig>>,
+    /// Store Arcs frozen for this filter's pipeline generation.
+    bound_stores: HashMap<Arc<str>, OnceLock<Arc<SessionStore>>>,
     /// Filter-owned session stores (used as fallback when pipeline stores are not set).
     stores: Arc<SessionStoreRegistry>,
 }
@@ -87,56 +93,42 @@ impl StickySessionsFilter {
             .map(|c| (Arc::<str>::from(c.name.as_str()), Arc::new(c)))
             .collect();
 
-        let stores = Arc::new(Self::build_stores(&configs));
+        let bound_stores = configs.keys().map(|name| (Arc::clone(name), OnceLock::new())).collect();
+        let stores = Arc::new(SessionStoreRegistry::new());
 
-        Ok(Box::new(Self { configs, stores }))
+        Ok(Box::new(Self {
+            configs,
+            bound_stores,
+            stores,
+        }))
     }
 
-    /// The session store registry owned by this filter instance.
-    ///
-    /// The server layer should call this after pipeline construction to
-    /// extract the stores and inject them into the pipeline via
-    /// `FilterPipeline::set_session_stores`, preserving them across reloads.
-    pub fn session_stores(&self) -> &Arc<SessionStoreRegistry> {
-        &self.stores
-    }
-
-    /// Build session stores for all configured clusters.
-    fn build_stores(configs: &HashMap<Arc<str>, Arc<ClusterSessionConfig>>) -> SessionStoreRegistry {
-        let registry = SessionStoreRegistry::new();
-        for (name, cfg) in configs {
-            let store = match cfg.storage {
-                StorageConfig::Local => Arc::new(SessionStore::new(
-                    cfg.max_entries.get(),
-                    Duration::from_secs(cfg.ttl_secs),
-                    cfg.eviction,
-                )),
-            };
-            registry.insert(Arc::clone(name), store);
-        }
-        registry
-    }
-
-    /// Resolve the session store for `cluster_name`, creating it on first use.
-    ///
-    /// Prefers the pipeline-wide registry, which the server preserves across
-    /// config reloads, and falls back to the filter's own registry when an
-    /// embedding application has not called `FilterPipeline::set_session_stores`.
+    /// Return the store frozen for this filter, or bind its local fallback.
     fn session_store(
         &self,
         ctx: &HttpFilterContext<'_>,
         cfg: &ClusterSessionConfig,
         cluster_name: &str,
     ) -> Arc<SessionStore> {
-        let registry = ctx.session_stores.unwrap_or(&self.stores);
-        match cfg.storage {
-            StorageConfig::Local => registry.get_or_create(
+        let Some(slot) = self.bound_stores.get(cluster_name) else {
+            return self.stores.get_or_create(
                 cluster_name,
                 cfg.max_entries.get(),
                 Duration::from_secs(cfg.ttl_secs),
                 cfg.eviction,
-            ),
-        }
+            );
+        };
+        Arc::clone(slot.get_or_init(|| {
+            let registry = ctx.session_stores.unwrap_or(&self.stores);
+            match cfg.storage {
+                StorageConfig::Local => registry.get_or_create(
+                    cluster_name,
+                    cfg.max_entries.get(),
+                    Duration::from_secs(cfg.ttl_secs),
+                    cfg.eviction,
+                ),
+            }
+        }))
     }
 
     /// Get the cluster config for the current request's cluster.
@@ -249,7 +241,8 @@ impl StickySessionsFilter {
         // client values would let an attacker flood the store with arbitrary
         // keys and evict legitimate sessions.
         let session_key = ctx
-            .get_metadata(META_SESSION_KEY)
+            .filter_metadata
+            .get(META_SESSION_KEY)
             .map(String::from)
             .or_else(|| Self::find_request_cookie(ctx, cookie_name))
             .filter(|key| store.get(key).is_some())
@@ -332,7 +325,7 @@ impl StickySessionsFilter {
         // backends set their session cookie once, so failed-over sessions
         // would otherwise bounce on every request. Only keys already in the
         // store are re-pinned; unknown client values are never adopted.
-        if let Some(session_key) = ctx.get_metadata(META_SESSION_KEY)
+        if let Some(session_key) = ctx.filter_metadata.get(META_SESSION_KEY)
             && let Some(current) = store.get(session_key)
             && current != *endpoint
         {
@@ -347,9 +340,16 @@ impl StickySessionsFilter {
 
     /// Handle response for header-type persistence.
     fn handle_header_response(ctx: &HttpFilterContext<'_>, store: &SessionStore, endpoint: &Arc<str>) {
-        let Some(session_key) = ctx.get_metadata(META_SESSION_KEY) else {
+        let Some(session_key) = ctx.filter_metadata.get(META_SESSION_KEY) else {
             return;
         };
+        let forwarded_to_endpoint = ctx
+            .extensions
+            .get::<crate::UpstreamForwardedEndpoint>()
+            .is_some_and(|forwarded| forwarded.0 == *endpoint);
+        if !ctx.upstream_reached || !forwarded_to_endpoint {
+            return;
+        }
         store.put(session_key, Arc::clone(endpoint));
     }
 }
@@ -358,6 +358,21 @@ impl StickySessionsFilter {
 impl HttpFilter for StickySessionsFilter {
     fn name(&self) -> &'static str {
         "sticky_sessions"
+    }
+
+    fn bind_session_stores(&self, registry: &Arc<SessionStoreRegistry>) {
+        for (name, cfg) in &self.configs {
+            if let Some(slot) = self.bound_stores.get(name) {
+                let _bound = slot.get_or_init(|| match cfg.storage {
+                    StorageConfig::Local => registry.get_or_create(
+                        name,
+                        cfg.max_entries.get(),
+                        Duration::from_secs(cfg.ttl_secs),
+                        cfg.eviction,
+                    ),
+                });
+            }
+        }
     }
 
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
@@ -379,7 +394,9 @@ impl HttpFilter for StickySessionsFilter {
             return Ok(FilterAction::Continue);
         }
 
-        ctx.set_metadata(META_SESSION_KEY, &session_key);
+        ctx.filter_metadata
+            .insert(META_SESSION_KEY, session_key)
+            .unwrap_or_else(FilterMetadata::log_loss);
 
         Ok(FilterAction::Continue)
     }

@@ -156,6 +156,14 @@ pub struct ReloadableServerConfig {
 
     /// Handle to swap the client verifier atomically (mTLS only).
     pub verifier_handle: Option<Arc<arc_swap::ArcSwap<crate::reload::VerifierState>>>,
+
+    /// Digests of the watched files, captured before the startup load.
+    ///
+    /// The watcher seeds its polling baseline with these. A file that changes
+    /// during or after the load therefore differs from the baseline and is
+    /// reloaded on the first poll, instead of being recorded as already
+    /// loaded while the served state is stale.
+    pub startup_hashes: Vec<Option<[u8; 32]>>,
 }
 
 /// Build a `rustls::ServerConfig` that uses a
@@ -184,6 +192,23 @@ pub fn build_reloadable_server_config(
     tls: &ListenerTls,
     advertise_http_alpn: bool,
 ) -> Result<ReloadableServerConfig, TlsError> {
+    build_reloadable_server_config_with(tls, advertise_http_alpn, || {})
+}
+
+/// Build a reloadable config, running `between_snapshot_and_load` after the
+/// startup digest snapshot.
+///
+/// The hook exists so tests can rotate a file in the exact window the watcher
+/// baseline is meant to protect: after the snapshot, before the load.
+#[cfg(feature = "config-reload")]
+fn build_reloadable_server_config_with(
+    tls: &ListenerTls,
+    advertise_http_alpn: bool,
+    between_snapshot_and_load: impl FnOnce(),
+) -> Result<ReloadableServerConfig, TlsError> {
+    // Snapshot before the load so a rotation during it still differs from the baseline.
+    let startup_hashes = startup_file_hashes(tls);
+    between_snapshot_and_load();
     let builder = build_config_builder(tls)?;
 
     let (builder, verifier_handle) = if tls.client_cert_mode == ClientCertMode::None {
@@ -208,19 +233,49 @@ pub fn build_reloadable_server_config(
 
     let config = builder.with_cert_resolver(Arc::new(resolver));
     let mut config = finish_server_config(config, advertise_http_alpn, tls.cipher_suites.is_some())?;
-    if verifier_handle.is_some() {
-        // A handshake authenticated before reload can finish afterward. Cache
-        // invalidation alone lets it insert stale authentication into the new
-        // cache. The builder also leaves stateless ticket production disabled.
-        config.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
-        config.send_tls13_tickets = 0;
-    }
+    disable_resumption(&mut config, verifier_handle.is_some());
 
     Ok(ReloadableServerConfig {
         config: Arc::new(config),
         cert_handle,
         verifier_handle,
+        startup_hashes,
     })
+}
+
+/// Disable session resumption when client authentication is configured.
+///
+/// A handshake authenticated before a reload can finish afterward. Cache
+/// invalidation alone lets it insert stale authentication into the new cache.
+/// The builder also leaves stateless ticket production disabled.
+#[cfg(feature = "config-reload")]
+fn disable_resumption(config: &mut ServerConfig, client_auth: bool) {
+    if client_auth {
+        config.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
+        config.send_tls13_tickets = 0;
+    }
+}
+
+/// Digest the files the startup load is about to read.
+///
+/// Mirrors the watcher's path order (primary certificate, key, then CA and CRL
+/// files) so the returned baseline lines up with what polling compares.
+#[cfg(feature = "config-reload")]
+fn startup_file_hashes(tls: &ListenerTls) -> Vec<Option<[u8; 32]>> {
+    let Some(primary) = tls.certificates.first() else {
+        return Vec::new();
+    };
+    let ca_cfg = (tls.client_cert_mode != ClientCertMode::None)
+        .then_some(tls.client_ca.as_ref())
+        .flatten();
+    crate::watcher::watched_paths(
+        primary,
+        ca_cfg.map(|ca| ca.ca_path.as_str()),
+        ca_cfg.map_or(&[], |ca| ca.crl_paths.as_slice()),
+    )
+    .iter()
+    .map(|path| crate::watcher::file_digest(path))
+    .collect()
 }
 
 // -----------------------------------------------------------------------------
@@ -445,6 +500,63 @@ mod tests {
             config.alpn_protocols,
             vec![b"h2".to_vec(), b"http/1.1".to_vec()],
             "ALPN should include h2 and http/1.1"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "config-reload")]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "builds the listener fixture and asserts the snapshot/load boundary"
+    )]
+    fn reloadable_baseline_is_taken_before_the_load() {
+        let certs = gen_test_certs();
+        let tls = ListenerTls {
+            certificates: vec![CertKeyPair {
+                cert_path: certs.cert_path.to_str().expect("cert path").to_owned(),
+                default: false,
+                key_path: certs.key_path.to_str().expect("key path").to_owned(),
+                server_names: Vec::new(),
+            }],
+            cipher_suites: None,
+            client_ca: None,
+            client_cert_mode: ClientCertMode::None,
+            trusted_spiffe_ids: Vec::new(),
+            hot_reload: None,
+            min_version: None,
+        };
+        let baseline = startup_file_hashes(&tls);
+        let replacement = gen_test_certs();
+        let replacement_cert = std::fs::read(&replacement.cert_path).expect("replacement cert");
+        let replacement_key = std::fs::read(&replacement.key_path).expect("replacement key");
+        let expected = loader::load_cert_and_key(&CertKeyPair {
+            cert_path: replacement.cert_path.to_str().expect("cert path").to_owned(),
+            default: false,
+            key_path: replacement.key_path.to_str().expect("key path").to_owned(),
+            server_names: Vec::new(),
+        })
+        .expect("load replacement")
+        .0;
+
+        let built = build_reloadable_server_config_with(&tls, false, || {
+            std::fs::write(&certs.cert_path, &replacement_cert).expect("write cert");
+            std::fs::write(&certs.key_path, &replacement_key).expect("write key");
+        })
+        .expect("build reloadable config");
+
+        assert_eq!(
+            built.startup_hashes, baseline,
+            "the baseline must describe the pre-load files"
+        );
+        assert_ne!(
+            built.startup_hashes,
+            startup_file_hashes(&tls),
+            "a rotation between the snapshot and the load must leave a stale baseline"
+        );
+        assert_eq!(
+            built.cert_handle.load().cert,
+            expected,
+            "the load must install the rotated certificate"
         );
     }
 
@@ -941,6 +1053,64 @@ mod tests {
                 "no client-requested TLS 1.3 tickets"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(feature = "config-reload")]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one fixture walks the no-mTLS, mTLS and CRL baseline cases"
+    )]
+    fn startup_file_hashes_follow_the_configured_client_auth_files() -> Result<(), Box<dyn std::error::Error>> {
+        let certs = gen_test_certs();
+        let mut tls = ListenerTls::new_validated(
+            certs.cert_path.to_str().ok_or("cert path is not UTF-8")?,
+            certs.key_path.to_str().ok_or("key path is not UTF-8")?,
+        )?;
+        let cert = crate::watcher::file_digest(&tls.certificates[0].cert_path);
+        let key = crate::watcher::file_digest(&tls.certificates[0].key_path);
+        assert_eq!(
+            startup_file_hashes(&tls),
+            vec![cert, key],
+            "no client auth watches only the certificate and key"
+        );
+
+        let ca_path = certs.ca_cert_path.to_str().ok_or("CA path is not UTF-8")?.to_owned();
+        let ca = crate::watcher::file_digest(&ca_path);
+        tls.client_ca = Some(CaConfig {
+            ca_path: ca_path.clone(),
+            crl_paths: Vec::new(),
+        });
+        tls.client_cert_mode = ClientCertMode::Require;
+        assert_eq!(
+            startup_file_hashes(&tls),
+            vec![cert, key, ca],
+            "mTLS adds the client CA and no CRL paths"
+        );
+
+        let crl_one = tempfile::NamedTempFile::new()?;
+        let crl_two = tempfile::NamedTempFile::new()?;
+        std::fs::write(crl_one.path(), b"first CRL")?;
+        std::fs::write(crl_two.path(), b"second CRL, different length")?;
+        let crl_one_path = crl_one.path().to_str().ok_or("CRL path is not UTF-8")?.to_owned();
+        let crl_two_path = crl_two.path().to_str().ok_or("CRL path is not UTF-8")?.to_owned();
+        let expected = vec![
+            cert,
+            key,
+            ca,
+            crate::watcher::file_digest(&crl_one_path),
+            crate::watcher::file_digest(&crl_two_path),
+        ];
+        tls.client_ca = Some(CaConfig {
+            ca_path,
+            crl_paths: vec![crl_one_path, crl_two_path],
+        });
+        assert_eq!(
+            startup_file_hashes(&tls),
+            expected,
+            "mTLS covers every configured CRL in order"
+        );
         Ok(())
     }
 

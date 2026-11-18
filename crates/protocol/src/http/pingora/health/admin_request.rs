@@ -38,6 +38,10 @@ pub trait AdminRequest: Send {
 /// Why a management request's body could not be read.
 #[derive(Debug, thiserror::Error)]
 pub enum BodyReadError {
+    /// The body did not finish within the transport's total read budget.
+    #[error("request body read timed out")]
+    TimedOut,
+
     /// The body is larger than the handler's limit.
     #[error("request body exceeds the limit")]
     TooLarge,

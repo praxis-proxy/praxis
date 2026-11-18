@@ -292,12 +292,16 @@ impl CorsFilter {
             return self.disallowed_preflight();
         }
 
-        if let Some(rh) = request.headers.get("access-control-request-headers")
-            && let Ok(rh) = rh.to_str()
-            && !rh.is_empty()
-            && !self.are_headers_allowed(rh)
+        if request
+            .headers
+            .get_all("access-control-request-headers")
+            .iter()
+            .any(|value| match value.to_str() {
+                Ok(headers) => !headers.is_empty() && !self.are_headers_allowed(headers),
+                Err(_) => true,
+            })
         {
-            debug!(headers = %rh, "preflight headers not allowed");
+            debug!("preflight requested headers not allowed or undecodable");
             return self.disallowed_preflight();
         }
 

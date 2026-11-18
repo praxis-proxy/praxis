@@ -396,6 +396,15 @@ filter_chains:
               methods: ["POST", "PUT", "PATCH"]
 ```
 
+`MaxBodyGuard` checks only the declared `Content-Length` when the
+request arrives. Chunked uploads and other requests without that
+header are not compared with its `max_content_length` value. For a
+cumulative request transfer ceiling, configure
+`body_limits.max_request_bytes` as described in the
+[payload size limits guide](../operating/configuration.md#payload-size-limits).
+With streaming requests, a body-limit rejection may occur after the
+headers or an earlier body prefix has reached the upstream.
+
 Custom filters participate identically to built-ins: same
 ordering, context access, and short-circuit capability.
 

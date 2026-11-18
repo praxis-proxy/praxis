@@ -30,6 +30,19 @@ pub struct ClusterMeta {
     pub name: String,
     /// Upstream socket addresses (`host:port`).
     pub endpoints: Vec<String>,
+    /// Declaration supplying the endpoint health rows.
+    pub endpoint_source: String,
+    /// Inline routing declarations for this cluster name.
+    pub routed_definitions: Vec<RoutedClusterDefinition>,
+}
+
+/// An inline routing declaration with its configuration path.
+#[derive(Clone, Debug, Serialize)]
+pub struct RoutedClusterDefinition {
+    /// Chain, branch and filter path declaring the endpoints.
+    pub source: String,
+    /// Addresses routed by this declaration.
+    pub endpoints: Vec<String>,
 }
 
 /// Hot-swappable cluster metadata for `/api/stats`.
@@ -50,7 +63,7 @@ pub fn cluster_meta_from_config(config: &Config) -> HashMap<String, ClusterMeta>
 
     for chain in &config.filter_chains {
         for entry in &chain.filters {
-            collect_clusters_from_entry(entry, &mut meta);
+            collect_clusters_from_entry(entry, &format!("chain:{}", chain.name), &mut meta);
         }
     }
 
@@ -62,6 +75,8 @@ fn cluster_meta_from_cluster(cluster: &Cluster) -> ClusterMeta {
     ClusterMeta {
         name: cluster.name.to_string(),
         endpoints: cluster.endpoints.iter().map(|ep| ep.address().to_owned()).collect(),
+        endpoint_source: "top_level".to_owned(),
+        routed_definitions: Vec::new(),
     }
 }
 
@@ -70,30 +85,47 @@ fn cluster_meta_from_cluster(cluster: &Cluster) -> ClusterMeta {
 // -----------------------------------------------------------------------------
 
 /// Merge inline and nested load-balancer clusters into `meta`.
-fn collect_clusters_from_entry(entry: &FilterEntry, meta: &mut HashMap<String, ClusterMeta>) {
+fn collect_clusters_from_entry(entry: &FilterEntry, scope: &str, meta: &mut HashMap<String, ClusterMeta>) {
+    let source = format!("{scope}/filter:{}", entry.name.as_deref().unwrap_or(&entry.filter_type));
     if CLUSTER_BEARING_FILTERS.contains(&entry.filter_type.as_str())
         && let Some(clusters) = inline_clusters_from_entry(entry)
     {
         for cluster in clusters {
-            meta.entry(cluster.name.to_string())
-                .or_insert_with(|| cluster_meta_from_cluster(&cluster));
+            record_routed_cluster(&cluster, &source, meta);
         }
     }
 
     for branch in entry.branch_chains.as_deref().unwrap_or_default() {
         for chain_ref in &branch.chains {
-            if let ChainRef::Inline { filters, .. } = chain_ref {
+            if let ChainRef::Inline { name, filters } = chain_ref {
                 for nested in filters {
-                    collect_clusters_from_entry(nested, meta);
+                    collect_clusters_from_entry(nested, &format!("{source}/branch:{}/chain:{name}", branch.name), meta);
                 }
             }
         }
     }
 
     if entry.filter_type == STEP_BEARING_FILTER {
-        for nested in step_filters_from_entry(entry) {
-            collect_clusters_from_entry(&nested, meta);
+        for (step, nested) in step_filters_from_entry(entry) {
+            collect_clusters_from_entry(&nested, &format!("{source}/step:{step}"), meta);
         }
+    }
+}
+
+/// Preserve the health view while recording every routed declaration.
+fn record_routed_cluster(cluster: &Cluster, source: &str, meta: &mut HashMap<String, ClusterMeta>) {
+    let mut candidate = cluster_meta_from_cluster(cluster);
+    let definition = RoutedClusterDefinition {
+        source: source.to_owned(),
+        endpoints: candidate.endpoints.clone(),
+    };
+    match meta.entry(candidate.name.clone()) {
+        std::collections::hash_map::Entry::Occupied(mut entry) => entry.get_mut().routed_definitions.push(definition),
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            source.clone_into(&mut candidate.endpoint_source);
+            candidate.routed_definitions.push(definition);
+            entry.insert(candidate);
+        },
     }
 }
 
@@ -107,7 +139,7 @@ fn inline_clusters_from_entry(entry: &FilterEntry) -> Option<Vec<Cluster>> {
 }
 
 /// Deserialize nested filters from an `iterative_request_router` entry.
-fn step_filters_from_entry(entry: &FilterEntry) -> Vec<FilterEntry> {
+fn step_filters_from_entry(entry: &FilterEntry) -> Vec<(usize, FilterEntry)> {
     let serde_yaml::Value::Mapping(mapping) = &entry.config else {
         return Vec::new();
     };
@@ -115,7 +147,7 @@ fn step_filters_from_entry(entry: &FilterEntry) -> Vec<FilterEntry> {
         return Vec::new();
     };
     let mut filters = Vec::new();
-    for step in steps {
+    for (index, step) in steps.iter().enumerate() {
         let serde_yaml::Value::Mapping(step_map) = step else {
             continue;
         };
@@ -123,7 +155,7 @@ fn step_filters_from_entry(entry: &FilterEntry) -> Vec<FilterEntry> {
             continue;
         };
         if let Ok(parsed) = serde_yaml::from_value::<Vec<FilterEntry>>(step_filters.clone()) {
-            filters.extend(parsed);
+            filters.extend(parsed.into_iter().map(|filter| (index, filter)));
         }
     }
     filters
@@ -240,7 +272,6 @@ filter_chains:
     }
 
     #[test]
-    #[ignore]
     fn cluster_meta_from_config_handles_branch_chains() {
         let config = Config::from_yaml(
             r#"
@@ -253,13 +284,13 @@ listeners:
 filter_chains:
   - name: main
     filters:
-      - filter: guardrails
-        action: flag
-        rules: []
+      - filter: grpc_detection
         branch_chains:
-          - on_result:
-              filter: guardrails
-              result: passed
+          - name: on_grpc
+            on_result:
+              filter: grpc_detection
+              key: kind
+              result: grpc
             rejoin: next
             chains:
               - name: inline_branch
@@ -275,13 +306,20 @@ filter_chains:
         let meta = cluster_meta_from_config(&config);
         let backend = meta.get("branch-backend").expect("branch cluster");
         assert_eq!(
+            backend.endpoint_source,
+            "chain:main/filter:grpc_detection/branch:on_grpc/chain:inline_branch/filter:load_balancer"
+        );
+        assert_eq!(backend.routed_definitions.len(), 1);
+        let route = backend.routed_definitions.first().expect("one routed declaration");
+        assert_eq!(route.source, backend.endpoint_source);
+        assert_eq!(route.endpoints, backend.endpoints);
+        assert_eq!(
             backend.endpoints,
             vec!["127.0.0.1:9300".to_owned()],
             "clusters in branch chains should be collected"
         );
     }
 
-    #[ignore]
     #[test]
     fn cluster_meta_from_config_handles_nested_branches() {
         let config = Config::from_yaml(
@@ -295,24 +333,24 @@ listeners:
 filter_chains:
   - name: main
     filters:
-      - filter: guardrails
-        action: flag
-        rules: []
+      - filter: grpc_detection
         branch_chains:
-          - on_result:
-              filter: guardrails
-              result: passed
+          - name: outer_grpc
+            on_result:
+              filter: grpc_detection
+              key: kind
+              result: grpc
             rejoin: next
             chains:
               - name: outer_branch
                 filters:
-                  - filter: guardrails
-                    action: flag
-                    rules: []
+                  - filter: grpc_detection
                     branch_chains:
-                      - on_result:
-                          filter: guardrails
-                          result: passed
+                      - name: inner_grpc
+                        on_result:
+                          filter: grpc_detection
+                          key: kind
+                          result: grpc
                         rejoin: next
                         chains:
                           - name: inner_branch
@@ -327,6 +365,14 @@ filter_chains:
         .expect("config should parse");
         let meta = cluster_meta_from_config(&config);
         let backend = meta.get("nested-backend").expect("nested branch cluster");
+        assert_eq!(
+            backend.endpoint_source,
+            "chain:main/filter:grpc_detection/branch:outer_grpc/chain:outer_branch/filter:grpc_detection/branch:inner_grpc/chain:inner_branch/filter:load_balancer"
+        );
+        assert_eq!(backend.routed_definitions.len(), 1);
+        let route = backend.routed_definitions.first().expect("one routed declaration");
+        assert_eq!(route.source, backend.endpoint_source);
+        assert_eq!(route.endpoints, backend.endpoints);
         assert_eq!(
             backend.endpoints,
             vec!["127.0.0.1:9400".to_owned()],
@@ -535,6 +581,8 @@ filter_chains:
             ClusterMeta {
                 name: "test".to_owned(),
                 endpoints: vec!["127.0.0.1:9000".to_owned()],
+                endpoint_source: "top_level".to_owned(),
+                routed_definitions: Vec::new(),
             },
         );
         let store = new_cluster_meta_store(map);
@@ -557,6 +605,8 @@ filter_chains:
             ClusterMeta {
                 name: "new".to_owned(),
                 endpoints: vec!["127.0.0.1:9999".to_owned()],
+                endpoint_source: "top_level".to_owned(),
+                routed_definitions: Vec::new(),
             },
         );
         store.store(Arc::new(updated));
@@ -736,6 +786,8 @@ steps:
         let original = ClusterMeta {
             name: "test".to_owned(),
             endpoints: vec!["127.0.0.1:9000".to_owned()],
+            endpoint_source: "top_level".to_owned(),
+            routed_definitions: Vec::new(),
         };
         let cloned = original.clone();
         assert_eq!(original.name, cloned.name);
@@ -747,6 +799,8 @@ steps:
         let meta = ClusterMeta {
             name: "debug-test".to_owned(),
             endpoints: vec!["127.0.0.1:9000".to_owned()],
+            endpoint_source: "top_level".to_owned(),
+            routed_definitions: Vec::new(),
         };
         let debug_str = format!("{:?}", meta);
         assert!(debug_str.contains("ClusterMeta"));
