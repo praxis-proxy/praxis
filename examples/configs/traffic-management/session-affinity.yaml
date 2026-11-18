@@ -2,7 +2,9 @@
 #
 # Hashes a request header to pin a user's requests to one backend.
 # Falls back to URI path when the header is absent. Adding or
-# removing a backend re-hashes ~1/N of traffic.
+# removing a backend can remap many keys because this strategy uses
+# weighted modulo hashing. Use ring_hash or maglev when endpoint
+# changes should disrupt as few sessions as possible.
 #
 # Usage:
 #   cargo run -p praxis-proxy -- -c examples/configs/traffic-management/session-affinity.yaml

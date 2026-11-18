@@ -1,28 +1,12 @@
 # Path Rewriting
 #
-# Rewrite request paths before forwarding to upstream.
+# Rewrite selected request paths after routing and before forwarding.
 #
-# Rewrite pipeline (per request):
+# Each request takes one of these mutually exclusive rewrite paths:
 #
-#   Incoming path
-#        |
-#        v
-#   +---------------------+
-#   | strip_prefix        |  /api/v1/users -> /users
-#   +---------------------+
-#        |
-#        v
-#   +---------------------+
-#   | add_prefix          |  (if set) /users -> /svc/users
-#   +---------------------+
-#        |
-#        v
-#   +---------------------+
-#   | replace (regex)     |  /old/resource -> /new/resource
-#   +---------------------+
-#        |
-#        v
-#   Rewritten path (used by router)
+#   /api/v1/users -> strip_prefix -> /users
+#   /old/resource -> regex replace -> /new/resource
+#   /items        -> add_prefix   -> /svc/items
 #
 # Usage:
 #   cargo run -p praxis-proxy -- -c examples/configs/transformation/path-rewriting.yaml
@@ -37,10 +21,8 @@
 # rewrites /old/... to /new/... via regex, and the third
 # prepends /svc to /items paths.
 #
-# NOTE: The router checks rewritten_path before the original
-# URI, so "rewrite then route" pipelines work: place a rewrite
-# filter before the router and the router will match against
-# the rewritten path.
+# The router in this example runs before these rewrites. Place a
+# rewrite filter before the router to route on the rewritten path.
 #
 # If both path_rewrite and url_rewrite (or two path_rewrite
 # filters) appear in the same pipeline, only the last one's

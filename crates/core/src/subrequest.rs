@@ -46,7 +46,7 @@ mod tests;
 pub use client::{SubRequestClient, record_http_client_status};
 pub use internals::{SubRequestConnector, SubRequestConnectorOptions};
 pub use types::{
-    DEPTH_HEADER, FrameworkHeaders, StreamLimits, StreamingSubResponse, SubRequest, SubRequestError, SubResponse,
-    SubResponseBody, UrlSubRequestError,
+    DEPTH_HEADER, FrameworkHeaders, RequestProgress, StreamLimits, StreamingSubResponse, SubRequest, SubRequestError,
+    SubResponse, SubResponseBody, UrlSubRequestError,
 };
 pub use upload::UploadControl;

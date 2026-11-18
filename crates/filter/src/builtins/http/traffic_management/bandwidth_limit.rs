@@ -701,6 +701,7 @@ mod tests {
             local_addr: "127.0.0.1:443",
             sni: None,
             upstream_addr: None,
+            lb_selection: None,
             cluster: None,
             health_registry: None,
             kv_stores: None,

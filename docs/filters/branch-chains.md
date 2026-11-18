@@ -461,10 +461,13 @@ branch must produce a response: selecting an
 upstream inside a nested terminal branch fails
 closed with a 500.
 
-**Same-type result sharing**: two instances of the
-same filter type in a pipeline share the same
-`filter_results` key. The second instance's results
-overwrite the first's.
+**Results from pre-request hooks**: `on_result.filter` uses the filter
+type name, but results published by head or pre-read body hooks are held
+for the instance that published them. Each instance receives only its
+own staged results before its request hook and branches run. This also
+applies when an instance publishes no result or its hook is skipped.
+Promoted headers and flat metadata remain shared request values, so
+later writes to those values still take precedence.
 
 ## Configuration Reference
 

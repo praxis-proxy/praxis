@@ -529,6 +529,7 @@ mod tests {
             .collect();
         FilterPipeline {
             body_capabilities: BodyCapabilities::default(),
+            has_request_completion_observer: false,
             compression: None,
             filters,
             record_filter_duration_metrics: false,
@@ -564,6 +565,7 @@ mod tests {
             local_addr: "0.0.0.0:8080",
             sni: None,
             upstream_addr: Some(std::borrow::Cow::Borrowed("10.0.0.1:80")),
+            lb_selection: None,
             cluster: None,
             health_registry: None,
             kv_stores: None,

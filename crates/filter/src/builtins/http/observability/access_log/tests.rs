@@ -23,6 +23,78 @@ fn default_filter() -> AccessLogFilter {
     }
 }
 
+/// Exercise interim heads, final headers, and EOS on one context.
+async fn exercise_interim_and_final(filter: &AccessLogFilter) {
+    let request = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut interim = [crate::test_utils::make_response(), crate::test_utils::make_response()];
+    interim[0].status = http::StatusCode::CONTINUE;
+    interim[1].status = http::StatusCode::EARLY_HINTS;
+    let mut final_response = crate::test_utils::make_response();
+    let mut ctx = crate::test_utils::make_filter_context(&request);
+    ctx.current_filter_id = Some(7);
+    for response in &mut interim {
+        ctx.response_header = Some(response);
+        drop(filter.on_response(&mut ctx).await.unwrap());
+        ctx.response_header = None;
+        assert!(ctx.get_filter_state::<AccessLogState>().is_none());
+        assert!(!access_record_already_emitted(&ctx));
+    }
+    ctx.response_header = Some(&mut final_response);
+    drop(filter.on_response(&mut ctx).await.unwrap());
+    ctx.response_header = None;
+    assert_eq!(
+        ctx.get_filter_state::<AccessLogState>().map(|state| state.status),
+        Some(200)
+    );
+    ctx.response_body_bytes = 3;
+    drop(filter.on_response_body(&mut ctx, &mut None, true).unwrap());
+    assert!(access_record_already_emitted(&ctx));
+}
+
+/// Verify that a 101 upgrade still uses the final bodyless path.
+async fn assert_upgrade_remains_final(filter: &AccessLogFilter) {
+    let request = crate::test_utils::make_request(http::Method::GET, "/upgrade");
+    let mut response = crate::test_utils::make_response();
+    response.status = http::StatusCode::SWITCHING_PROTOCOLS;
+    let mut ctx = crate::test_utils::make_filter_context(&request);
+    ctx.current_filter_id = Some(8);
+    ctx.response_header = Some(&mut response);
+    drop(filter.on_response(&mut ctx).await.unwrap());
+    assert_eq!(
+        ctx.get_filter_state::<AccessLogState>().map(|state| state.status),
+        Some(101)
+    );
+}
+
+/// Read exactly one direct-sink NDJSON record within a bounded async wait.
+async fn read_single_record(path: &std::path::Path) -> serde_json::Value {
+    for _ in 0..50 {
+        let contents = std::fs::read_to_string(path).unwrap_or_default();
+        if contents.lines().count() == 1 {
+            return serde_json::from_str(contents.lines().next().unwrap()).unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("one final record was not written");
+}
+
+#[tokio::test]
+async fn access_log_ignores_early_hints_until_final_response() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("early-hints.ndjson");
+    let config: serde_yaml::Value = serde_yaml::from_str(&format!(
+        "fields: [status, response_body_bytes]\nsink:\n  type: file\n  path: {}",
+        path.display(),
+    ))
+    .unwrap();
+    let filter = test_filter(&config);
+    exercise_interim_and_final(&filter).await;
+    let record = read_single_record(&path).await;
+    assert_eq!(record["status"], "200");
+    assert_eq!(record["response_body_bytes"], "3");
+    assert_upgrade_remains_final(&filter).await;
+}
+
 #[test]
 fn from_config_defaults_to_log_all() {
     let config = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
@@ -347,7 +419,9 @@ fn render_text_template_sanitizes_field_values() {
     let parts = vec![TemplatePart::Field(FieldToken::Metadata("llm.model".to_owned()))];
     let req = crate::test_utils::make_request(http::Method::GET, "/");
     let mut ctx = crate::test_utils::make_filter_context(&req);
-    ctx.set_metadata("llm.model", "gpt\ninjected 200");
+    ctx.filter_metadata
+        .insert("llm.model", "gpt\ninjected 200")
+        .expect("entry must fit in the filter's metadata");
     let line = render_text_template(&parts, &ctx, 200, None, 0);
     assert!(
         !line.contains('\n'),
@@ -364,7 +438,9 @@ fn render_text_template_escapes_quotes_and_backslashes() {
     ];
     let req = crate::test_utils::make_request(http::Method::GET, "/");
     let mut ctx = crate::test_utils::make_filter_context(&req);
-    ctx.set_metadata("llm.model", r#"gpt" status="200\"#);
+    ctx.filter_metadata
+        .insert("llm.model", r#"gpt" status="200\"#)
+        .expect("entry must fit in the filter's metadata");
     let line = render_text_template(&parts, &ctx, 200, None, 0);
     assert_eq!(
         line, r#"model="gpt\" status=\"200\\""#,
@@ -425,7 +501,9 @@ fn render_text_template_matches_json_projection_for_every_field() {
     ctx.client_addr = Some("203.0.113.7".parse().unwrap());
     ctx.request_body_bytes = 12;
     ctx.response_body_bytes = 34;
-    ctx.set_metadata("llm.model", "gpt-4o");
+    ctx.filter_metadata
+        .insert("llm.model", "gpt-4o")
+        .expect("entry must fit in the filter's metadata");
     let mut trailers = http::HeaderMap::new();
     let _prev = trailers.insert("grpc-status", http::HeaderValue::from_static("5"));
     let _prev = trailers.insert("grpc-message", http::HeaderValue::from_static("no%20such%20user"));
@@ -458,7 +536,9 @@ fn resolve_field_borrows_values_held_by_the_request() {
     let mut req = crate::test_utils::make_request(http::Method::GET, "/api");
     req.headers.insert("user-agent", "curl/8".parse().unwrap());
     let mut ctx = crate::test_utils::make_filter_context(&req);
-    ctx.set_metadata("llm.model", "gpt-4o");
+    ctx.filter_metadata
+        .insert("llm.model", "gpt-4o")
+        .expect("entry must fit in the filter's metadata");
 
     for (field, expected) in [
         (FieldToken::Method, "GET"),
@@ -718,7 +798,9 @@ fn build_record_emits_filter_metadata() {
     let fields = [FieldToken::Metadata("llm.model".to_owned())];
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat/completions");
     let mut ctx = crate::test_utils::make_filter_context(&req);
-    ctx.set_metadata("llm.model", "gpt-4o");
+    ctx.filter_metadata
+        .insert("llm.model", "gpt-4o")
+        .expect("entry must fit in the filter's metadata");
 
     let record = build_record_from_fields(&fields, &ctx, 200, None, 0);
     assert_eq!(record.get("metadata.llm.model"), Some(&"gpt-4o".to_owned()));

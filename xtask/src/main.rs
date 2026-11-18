@@ -77,7 +77,7 @@ enum Command {
     #[cfg(feature = "dev")]
     Benchmark(Box<benchmark::Args>),
 
-    /// Run the Kubernetes rollout acceptance suite in KIND.
+    /// Report the temporary suspension of KIND rollout acceptance.
     #[cfg(feature = "dev")]
     Rollout(Box<praxis_tests_rollout::Args>),
 
@@ -136,11 +136,13 @@ fn main() {
         #[cfg(feature = "dev")]
         Command::Benchmark(args) => benchmark::run(*args),
         #[cfg(feature = "dev")]
-        Command::Rollout(args) => {
-            if let Err(error) = praxis_tests_rollout::run(&args) {
-                eprintln!("rollout failed: {error}");
-                std::process::exit(1);
-            }
+        Command::Rollout(_) => {
+            // Four-node rootless KIND exhausts the shared inotify instance budget.
+            // Move this suite to https://github.com/praxis-proxy/gateway-controller before re-enabling.
+            eprintln!(
+                "SKIPPED: KIND rollout tests are disabled due to shared inotify instance exhaustion; \
+                 pending migration to https://github.com/praxis-proxy/gateway-controller"
+            );
         },
         Command::Features(args) => features::run(&args),
         Command::Fips(args) => fips::run(args),

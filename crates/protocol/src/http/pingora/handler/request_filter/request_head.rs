@@ -82,11 +82,6 @@ pub(super) async fn prepare(
 /// keeps the large request on the caller's frame; the cold rejection and error
 /// paths clone it into the snapshot.
 #[cfg(feature = "pingora")]
-#[expect(
-    clippy::large_stack_frames,
-    reason = "embeds the filter-context future, like the request-phase execute and pre_read_body; \
-              the head phase does strictly less work than pre-read"
-)]
 pub(super) async fn execute(
     pipeline: &FilterPipeline,
     session: &mut Session,
@@ -199,6 +194,7 @@ pub(in crate::http) async fn run_head_filters(
 #[cfg(feature = "pingora")]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
+    clippy::expect_used,
     clippy::unwrap_used,
     clippy::indexing_slicing,
     clippy::significant_drop_tightening,
@@ -235,7 +231,9 @@ mod tests {
         }
 
         async fn on_request_head(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-            ctx.set_metadata("head_key", "head_value");
+            ctx.filter_metadata
+                .insert("head_key", "head_value")
+                .expect("entry must fit in the filter's metadata");
             ctx.pre_read_mutations.push(TrustedHeaderMutation::Set(
                 HeaderName::from_static("x-praxis-head"),
                 HeaderValue::from_static("classified"),
@@ -286,7 +284,9 @@ mod tests {
         async fn on_request_head(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
             // Publish a fact before failing, so the closed-failure test can assert
             // it still round-trips to ctx for the 500's fallback access record.
-            ctx.set_metadata("head_key", "head_value");
+            ctx.filter_metadata
+                .insert("head_key", "head_value")
+                .expect("entry must fit in the filter's metadata");
             Err(FilterError::from("head hook failed"))
         }
     }
@@ -304,7 +304,7 @@ mod tests {
 
         assert!(matches!(outcome, RequestHeadOutcome::Continue), "head filter continues");
         assert_eq!(
-            ctx.filter_metadata.get("head_key").map(String::as_str),
+            ctx.filter_metadata.get("head_key"),
             Some("head_value"),
             "head-published metadata must round-trip onto ctx for pre-read and the request phase"
         );
@@ -355,7 +355,7 @@ mod tests {
             "a closed head failure must propagate so the caller returns 500"
         );
         assert_eq!(
-            ctx.filter_metadata.get("head_key").map(String::as_str),
+            ctx.filter_metadata.get("head_key"),
             Some("head_value"),
             "head-published facts must still round-trip to ctx on a closed-failure error, \
              so the 500's fallback access record sees them"

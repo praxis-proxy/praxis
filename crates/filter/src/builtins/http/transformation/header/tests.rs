@@ -9,12 +9,24 @@ use super::{
 };
 use crate::filter::HttpFilter as _;
 
+/// Render the pending operation log without collapsing distinct header fields.
+fn queued(ctx: &crate::HttpFilterContext<'_>) -> Vec<String> {
+    ctx.request_header_mutations
+        .iter()
+        .map(|mutation| match mutation {
+            crate::TrustedHeaderMutation::Remove(name) => format!("remove:{name}"),
+            crate::TrustedHeaderMutation::Set(name, value) => format!("set:{name}:{}", value.to_str().unwrap()),
+            crate::TrustedHeaderMutation::Add(name, value) => format!("add:{name}:{value}"),
+        })
+        .collect()
+}
+
 // -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
 
 #[tokio::test]
-async fn request_add_populates_extra_headers() {
+async fn request_add_populates_ordered_log() {
     let filter = make_header_filter(
         r#"request_add:
   - name: X-Forwarded-By
@@ -23,14 +35,8 @@ async fn request_add_populates_extra_headers() {
     let req = crate::test_utils::make_request(http::Method::GET, "/");
     let mut ctx = crate::test_utils::make_filter_context(&req);
     drop(filter.on_request(&mut ctx).await.unwrap());
-    assert_eq!(
-        ctx.extra_request_headers.len(),
-        1,
-        "should add exactly one request header"
-    );
-    let (name, value) = &ctx.extra_request_headers[0];
-    assert_eq!(name, "x-forwarded-by", "header name should match");
-    assert_eq!(value, "praxis", "header value should match");
+    assert_eq!(queued(&ctx), ["add:x-forwarded-by:praxis"]);
+    assert!(ctx.extra_request_headers.is_empty());
 }
 
 #[tokio::test]
@@ -266,14 +272,7 @@ async fn request_set_populates_headers_to_set() {
     let req = crate::test_utils::make_request(http::Method::GET, "/");
     let mut ctx = crate::test_utils::make_filter_context(&req);
     drop(filter.on_request(&mut ctx).await.unwrap());
-    assert_eq!(
-        ctx.request_headers_to_set.len(),
-        1,
-        "should queue exactly one header set operation"
-    );
-    let (name, value) = &ctx.request_headers_to_set[0];
-    assert_eq!(name.as_str(), "x-custom", "set header name should match");
-    assert_eq!(value.to_str().unwrap(), "overwritten", "set header value should match");
+    assert_eq!(queued(&ctx), ["set:x-custom:overwritten"]);
 }
 
 #[tokio::test]
@@ -285,16 +284,7 @@ async fn request_remove_populates_headers_to_remove() {
     let req = crate::test_utils::make_request(http::Method::GET, "/");
     let mut ctx = crate::test_utils::make_filter_context(&req);
     drop(filter.on_request(&mut ctx).await.unwrap());
-    assert_eq!(
-        ctx.request_headers_to_remove.len(),
-        1,
-        "should queue exactly one header remove operation"
-    );
-    assert_eq!(
-        ctx.request_headers_to_remove[0].as_str(),
-        "x-internal",
-        "remove header name should match"
-    );
+    assert_eq!(queued(&ctx), ["remove:x-internal"]);
 }
 
 #[tokio::test]
@@ -309,18 +299,7 @@ request_remove:
     let req = crate::test_utils::make_request(http::Method::GET, "/");
     let mut ctx = crate::test_utils::make_filter_context(&req);
     drop(filter.on_request(&mut ctx).await.unwrap());
-    assert_eq!(ctx.request_headers_to_remove.len(), 1, "should queue one remove");
-    assert_eq!(ctx.request_headers_to_set.len(), 1, "should queue one set");
-    assert_eq!(
-        ctx.request_headers_to_remove[0].as_str(),
-        "x-unwanted",
-        "remove target should be x-unwanted"
-    );
-    assert_eq!(
-        ctx.request_headers_to_set[0].0.as_str(),
-        "x-replaced",
-        "set target should be x-replaced"
-    );
+    assert_eq!(queued(&ctx), ["remove:x-unwanted", "set:x-replaced:new-value"]);
 }
 
 #[tokio::test]
@@ -336,8 +315,7 @@ request_add:
     let req = crate::test_utils::make_request(http::Method::GET, "/");
     let mut ctx = crate::test_utils::make_filter_context(&req);
     drop(filter.on_request(&mut ctx).await.unwrap());
-    assert_eq!(ctx.request_headers_to_set.len(), 1, "should queue one set");
-    assert_eq!(ctx.extra_request_headers.len(), 1, "should queue one add");
+    assert_eq!(queued(&ctx), ["set:x-mode:override", "add:x-extra:appended"]);
 }
 
 #[tokio::test]
@@ -353,11 +331,7 @@ async fn request_remove_nonexistent_continues() {
         matches!(action, crate::FilterAction::Continue),
         "removing nonexistent header should still continue"
     );
-    assert_eq!(
-        ctx.request_headers_to_remove.len(),
-        1,
-        "removal should still be queued for the protocol layer"
-    );
+    assert_eq!(queued(&ctx), ["remove:x-nonexistent"]);
 }
 
 #[test]
@@ -405,7 +379,7 @@ async fn request_set_multiple_headers() {
     let req = crate::test_utils::make_request(http::Method::GET, "/");
     let mut ctx = crate::test_utils::make_filter_context(&req);
     drop(filter.on_request(&mut ctx).await.unwrap());
-    assert_eq!(ctx.request_headers_to_set.len(), 2, "should queue two set operations");
+    assert_eq!(queued(&ctx), ["set:x-first:one", "set:x-second:two"]);
 }
 
 #[tokio::test]
@@ -418,11 +392,7 @@ async fn request_remove_multiple_headers() {
     let req = crate::test_utils::make_request(http::Method::GET, "/");
     let mut ctx = crate::test_utils::make_filter_context(&req);
     drop(filter.on_request(&mut ctx).await.unwrap());
-    assert_eq!(
-        ctx.request_headers_to_remove.len(),
-        2,
-        "should queue two remove operations"
-    );
+    assert_eq!(queued(&ctx), ["remove:x-first", "remove:x-second"]);
 }
 
 #[tokio::test]
@@ -440,9 +410,10 @@ request_remove:
     let req = crate::test_utils::make_request(http::Method::GET, "/");
     let mut ctx = crate::test_utils::make_filter_context(&req);
     drop(filter.on_request(&mut ctx).await.unwrap());
-    assert_eq!(ctx.extra_request_headers.len(), 1, "should add one header");
-    assert_eq!(ctx.request_headers_to_set.len(), 1, "should set one header");
-    assert_eq!(ctx.request_headers_to_remove.len(), 1, "should remove one header");
+    assert_eq!(
+        queued(&ctx),
+        ["remove:x-removed", "set:x-set:overridden", "add:x-added:new"]
+    );
 }
 
 #[tokio::test]
@@ -455,12 +426,7 @@ async fn request_set_empty_value() {
     let req = crate::test_utils::make_request(http::Method::GET, "/");
     let mut ctx = crate::test_utils::make_filter_context(&req);
     drop(filter.on_request(&mut ctx).await.unwrap());
-    assert_eq!(ctx.request_headers_to_set.len(), 1, "should accept empty header value");
-    assert_eq!(
-        ctx.request_headers_to_set[0].1.to_str().unwrap(),
-        "",
-        "empty value should be preserved"
-    );
+    assert_eq!(queued(&ctx), ["set:x-empty:"]);
 }
 
 #[tokio::test]
@@ -470,18 +436,11 @@ async fn from_config_empty_accepts_request_set_and_remove() {
     let req = crate::test_utils::make_request(http::Method::GET, "/");
     let mut ctx = crate::test_utils::make_filter_context(&req);
     drop(filter.on_request(&mut ctx).await.unwrap());
-    assert!(
-        ctx.request_headers_to_set.is_empty(),
-        "empty config should produce no set ops"
-    );
-    assert!(
-        ctx.request_headers_to_remove.is_empty(),
-        "empty config should produce no remove ops"
-    );
+    assert!(queued(&ctx).is_empty(), "empty config queues no operations");
 }
 
 #[tokio::test]
-async fn request_add_stacks_with_existing_header() {
+async fn request_add_queues_after_existing_header() {
     let filter = make_header_filter(
         r#"request_add:
   - name: x-trace-id
@@ -492,29 +451,11 @@ async fn request_add_stacks_with_existing_header() {
         .insert("x-trace-id", http::HeaderValue::from_static("hop-1"));
     let mut ctx = crate::test_utils::make_filter_context(&req);
     drop(filter.on_request(&mut ctx).await.unwrap());
-    assert!(
-        ctx.extra_request_headers.is_empty(),
-        "stacking should use request_headers_to_set, not extra_request_headers"
-    );
-    assert_eq!(
-        ctx.request_headers_to_set.len(),
-        1,
-        "should produce exactly one set operation for the combined value"
-    );
-    assert_eq!(
-        ctx.request_headers_to_set[0].0.as_str(),
-        "x-trace-id",
-        "set header name should match"
-    );
-    assert_eq!(
-        ctx.request_headers_to_set[0].1.to_str().unwrap(),
-        "hop-1,hop-2",
-        "stacked value should be existing,new with comma separator"
-    );
+    assert_eq!(queued(&ctx), ["add:x-trace-id:hop-2"]);
 }
 
 #[tokio::test]
-async fn request_add_stacks_existing_but_not_fresh() {
+async fn request_add_queues_existing_and_fresh_fields() {
     let filter = make_header_filter(
         r#"request_add:
   - name: x-existing
@@ -527,20 +468,11 @@ async fn request_add_stacks_existing_but_not_fresh() {
         .insert("x-existing", http::HeaderValue::from_static("original"));
     let mut ctx = crate::test_utils::make_filter_context(&req);
     drop(filter.on_request(&mut ctx).await.unwrap());
-    assert_eq!(
-        ctx.request_headers_to_set.len(),
-        1,
-        "only the stacked header should be in request_headers_to_set"
-    );
-    assert_eq!(
-        ctx.request_headers_to_set[0].1.to_str().unwrap(),
-        "original,appended",
-        "existing header should be comma-combined"
-    );
+    assert_eq!(queued(&ctx), ["add:x-existing:appended", "add:x-fresh:brand-new"]);
 }
 
 #[tokio::test]
-async fn request_add_fresh_header_uses_extra_headers() {
+async fn request_add_fresh_header_uses_ordered_log() {
     let filter = make_header_filter(
         r#"request_add:
   - name: x-fresh
@@ -549,13 +481,7 @@ async fn request_add_fresh_header_uses_extra_headers() {
     let req = crate::test_utils::make_request(http::Method::GET, "/");
     let mut ctx = crate::test_utils::make_filter_context(&req);
     drop(filter.on_request(&mut ctx).await.unwrap());
-    assert!(
-        ctx.request_headers_to_set.is_empty(),
-        "non-existing header should not stack"
-    );
-    assert_eq!(ctx.extra_request_headers.len(), 1, "should go to extra_request_headers");
-    assert_eq!(ctx.extra_request_headers[0].0, "x-fresh", "header name should match");
-    assert_eq!(ctx.extra_request_headers[0].1, "brand-new", "header value should match");
+    assert_eq!(queued(&ctx), ["add:x-fresh:brand-new"]);
 }
 
 #[tokio::test]
@@ -571,25 +497,12 @@ request_add:
     req.headers.insert("x-user", http::HeaderValue::from_static("admin"));
     let mut ctx = crate::test_utils::make_filter_context(&req);
     drop(filter.on_request(&mut ctx).await.map_err(|e| e.to_string())?);
-    assert!(
-        !ctx.request_headers_to_set.iter().any(|(n, _)| n == "x-user"),
-        "removed header must not be re-set with the client value"
-    );
-    assert!(
-        ctx.request_headers_to_remove.iter().any(|n| n == "x-user"),
-        "client header should still be removed"
-    );
-    assert!(
-        ctx.extra_request_headers
-            .iter()
-            .any(|(n, v)| n == "x-user" && v == "anon"),
-        "added value should be appended after removal"
-    );
+    assert_eq!(queued(&ctx), ["remove:x-user", "add:x-user:anon"]);
     Ok(())
 }
 
 #[tokio::test]
-async fn request_add_joins_onto_request_set_value() -> Result<(), Box<dyn std::error::Error>> {
+async fn request_add_follows_request_set_value() -> Result<(), Box<dyn std::error::Error>> {
     let filter = make_header_filter(
         r#"request_set:
   - name: x-a
@@ -602,22 +515,12 @@ request_add:
     req.headers.insert("x-a", http::HeaderValue::from_static("client"));
     let mut ctx = crate::test_utils::make_filter_context(&req);
     drop(filter.on_request(&mut ctx).await.map_err(|e| e.to_string())?);
-    let sets: Vec<&str> = ctx
-        .request_headers_to_set
-        .iter()
-        .filter(|(n, _)| n == "x-a")
-        .map(|(_, v)| v.to_str())
-        .collect::<Result<_, _>>()?;
-    assert_eq!(sets, vec!["proxy,extra"], "should queue exactly one combined set");
-    assert!(
-        ctx.extra_request_headers.is_empty(),
-        "should not append a separate header"
-    );
+    assert_eq!(queued(&ctx), ["set:x-a:proxy", "add:x-a:extra"]);
     Ok(())
 }
 
 #[tokio::test]
-async fn request_add_non_visible_ascii_existing_falls_back() {
+async fn request_add_queues_after_opaque_existing() {
     let filter = make_header_filter(
         r#"request_add:
   - name: x-opaque
@@ -628,15 +531,7 @@ async fn request_add_non_visible_ascii_existing_falls_back() {
         .insert("x-opaque", http::HeaderValue::from_bytes(b"\x80\x81binary").unwrap());
     let mut ctx = crate::test_utils::make_filter_context(&req);
     drop(filter.on_request(&mut ctx).await.unwrap());
-    assert!(
-        ctx.request_headers_to_set.is_empty(),
-        "non-visible-ASCII existing value should prevent stacking"
-    );
-    assert_eq!(
-        ctx.extra_request_headers.len(),
-        1,
-        "should fall back to extra_request_headers when existing value is not valid str"
-    );
+    assert_eq!(queued(&ctx), ["add:x-opaque:appended"]);
 }
 
 #[tokio::test]
@@ -653,24 +548,11 @@ async fn request_add_preserves_multi_value_headers() {
         .append("cache-control", http::HeaderValue::from_static("no-store"));
     let mut ctx = crate::test_utils::make_filter_context(&req);
     drop(filter.on_request(&mut ctx).await.unwrap());
-    assert!(
-        ctx.extra_request_headers.is_empty(),
-        "stacking should use request_headers_to_set"
-    );
-    assert_eq!(
-        ctx.request_headers_to_set.len(),
-        1,
-        "should produce exactly one set operation for the combined value"
-    );
-    assert_eq!(
-        ctx.request_headers_to_set[0].1.to_str().unwrap(),
-        "no-cache,no-store,must-revalidate",
-        "all existing values should be preserved and new value appended"
-    );
+    assert_eq!(queued(&ctx), ["add:cache-control:must-revalidate"]);
 }
 
 #[tokio::test]
-async fn request_add_multi_value_with_non_str_falls_back() {
+async fn request_add_queues_after_mixed_existing() {
     let filter = make_header_filter(
         r#"request_add:
   - name: x-multi
@@ -682,19 +564,11 @@ async fn request_add_multi_value_with_non_str_falls_back() {
         .append("x-multi", http::HeaderValue::from_bytes(b"\x80binary").unwrap());
     let mut ctx = crate::test_utils::make_filter_context(&req);
     drop(filter.on_request(&mut ctx).await.unwrap());
-    assert!(
-        ctx.request_headers_to_set.is_empty(),
-        "non-str value in multi-value set should prevent stacking"
-    );
-    assert_eq!(
-        ctx.extra_request_headers.len(),
-        1,
-        "should fall back to extra_request_headers"
-    );
+    assert_eq!(queued(&ctx), ["add:x-multi:appended"]);
 }
 
 #[tokio::test]
-async fn request_add_set_order_preserved_with_stacking() {
+async fn request_add_set_order_preserved() {
     let filter = make_header_filter(
         r#"request_set:
   - name: x-mode
@@ -707,21 +581,7 @@ request_add:
     req.headers.insert("x-trace", http::HeaderValue::from_static("first"));
     let mut ctx = crate::test_utils::make_filter_context(&req);
     drop(filter.on_request(&mut ctx).await.unwrap());
-    assert_eq!(
-        ctx.request_headers_to_set.len(),
-        2,
-        "should have one set and one stacked add"
-    );
-    assert_eq!(
-        ctx.request_headers_to_set[0].0.as_str(),
-        "x-mode",
-        "set operation should come first (set runs before add)"
-    );
-    assert_eq!(
-        ctx.request_headers_to_set[1].1.to_str().unwrap(),
-        "first,second",
-        "stacked add should come second with combined value"
-    );
+    assert_eq!(queued(&ctx), ["set:x-mode:override", "add:x-trace:second"]);
 }
 
 #[test]

@@ -53,6 +53,15 @@ const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(100); // 100 ms
 /// How long a management client may take to send a request's headers.
 const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(5); // 5 s
 
+/// Total time a management write may spend receiving its body. This is
+/// independent of the header timer and route-specific byte caps.
+#[cfg(not(test))]
+const BODY_READ_TIMEOUT: Duration = Duration::from_secs(30); // 30 s
+
+/// Shorter deadline for socket regressions exercising the same read path.
+#[cfg(test)]
+const BODY_READ_TIMEOUT: Duration = Duration::from_secs(2); // 2 s
+
 // -----------------------------------------------------------------------------
 // Runtime Registration
 // -----------------------------------------------------------------------------
@@ -353,20 +362,27 @@ impl AdminRequest for HyperAdminRequest {
 
     /// Read the request body up to `limit` bytes.
     async fn read_body(&mut self, limit: usize) -> Result<Vec<u8>, BodyReadError> {
-        let mut buf = Vec::new();
+        tokio::time::timeout(BODY_READ_TIMEOUT, async {
+            let mut buf = Vec::new();
 
-        while let Some(frame) = self.body.frame().await {
-            let frame = frame.map_err(|err| BodyReadError::Io(err.to_string()))?;
-            let Ok(chunk) = frame.into_data() else {
-                continue;
-            };
-            if buf.len().saturating_add(chunk.len()) > limit {
-                return Err(BodyReadError::TooLarge);
+            while let Some(frame) = self.body.frame().await {
+                let frame = frame.map_err(|err| BodyReadError::Io(err.to_string()))?;
+                let Ok(chunk) = frame.into_data() else {
+                    continue;
+                };
+                if buf.len().saturating_add(chunk.len()) > limit {
+                    return Err(BodyReadError::TooLarge);
+                }
+                buf.extend_from_slice(&chunk);
             }
-            buf.extend_from_slice(&chunk);
-        }
 
-        Ok(buf)
+            Ok(buf)
+        })
+        .await
+        .map_err(|elapsed| {
+            debug!(error = %elapsed, "management request body read timed out");
+            BodyReadError::TimedOut
+        })?
     }
 }
 
@@ -412,6 +428,7 @@ mod tests {
         server::ServerRuntime as _,
     };
     use tokio::sync::oneshot;
+    use tracing_subscriber::{EnvFilter, layer::SubscriberExt as _, reload};
 
     use super::*;
     use crate::http::health::{ProcessVersionInfo, StatsAdminState, new_cluster_meta_store, new_listener_meta_store};
@@ -641,6 +658,186 @@ mod tests {
     }
 
     #[test]
+    fn stalled_admin_put_body_times_out() {
+        let (kv_addr, registry, kv_running) = kv_admin();
+        let (log_addr, state, log_running) = log_admin();
+
+        for (addr, path) in [(&kv_addr, "/api/kv/test/color"), (&log_addr, "/api/log-level")] {
+            let mut stream = connect(addr);
+            stream.write_all(&put_open_head(path, 100)).unwrap();
+            stream.write_all(b"x").unwrap();
+            let started = Instant::now();
+
+            let reply = read_reply(&mut stream);
+
+            assert_eq!(reply.status, 408, "{path} must time out an open body");
+            assert!(
+                reply.head.contains("connection: close"),
+                "{path} must close after timeout"
+            );
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "{path} must release its socket promptly"
+            );
+        }
+        assert_eq!(registry.get("test").unwrap().get("color").as_deref(), Some("blue"));
+        assert!(
+            state.snapshot().overlays.is_empty(),
+            "a partial log-level PUT must not apply"
+        );
+
+        let started = Instant::now();
+        drop(kv_running);
+        drop(log_running);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "timed-out management tasks must not hold shutdown"
+        );
+    }
+
+    #[test]
+    fn slow_trickle_admin_put_body_has_total_deadline() {
+        let (kv_addr, registry, _kv_running) = kv_admin();
+        let (log_addr, state, _log_running) = log_admin();
+
+        for (addr, path) in [(&kv_addr, "/api/kv/test/color"), (&log_addr, "/api/log-level")] {
+            assert_trickle_times_out(addr, path);
+        }
+        assert_eq!(registry.get("test").unwrap().get("color").as_deref(), Some("blue"));
+        assert!(
+            state.snapshot().overlays.is_empty(),
+            "a trickled log-level PUT must not apply"
+        );
+    }
+
+    #[test]
+    fn fragmented_admin_put_body_completes_within_deadline() {
+        let (kv_addr, registry, _kv_running) = kv_admin();
+        let (log_addr, state, _log_running) = log_admin();
+        let kv_body = vec![b'x'; 1_048_576]; // 1 MiB
+        let mut log_body = br#"{"level":"debug","duration_secs":60}"#.to_vec();
+        log_body.resize(16_384, b' '); // 16 KiB
+
+        let chunked = request(
+            &kv_addr,
+            b"PUT /api/kv/test/color HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n3\r\nred\r\n0\r\nx-test: yes\r\n\r\n",
+        );
+        assert_eq!(chunked.status, 200, "chunked admin writes with trailers must complete");
+
+        for (addr, path, body) in [
+            (&kv_addr, "/api/kv/test/color", kv_body.as_slice()),
+            (&log_addr, "/api/log-level", log_body.as_slice()),
+        ] {
+            assert_fragmented_put_succeeds(addr, path, body);
+        }
+        assert_eq!(
+            registry.get("test").unwrap().get("color").as_deref(),
+            Some(String::from_utf8(kv_body).unwrap().as_str())
+        );
+        assert_eq!(
+            state.snapshot().overlays.len(),
+            1,
+            "a complete log-level PUT must apply"
+        );
+    }
+
+    /// Send a body slowly enough to distinguish a total deadline from a per-frame timer.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the dedicated blocking socket writer must keep trickling while the test thread reads the response"
+    )]
+    fn assert_trickle_times_out(addr: &str, path: &str) {
+        let mut stream = connect(addr);
+        stream.write_all(&put_open_head(path, 100)).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let started = Instant::now();
+        let mut writer = stream.try_clone().unwrap();
+        let reply = thread::scope(|scope| {
+            scope.spawn(move || {
+                // A per-frame timer cannot fire during this continuing body.
+                for _ in 0..60 {
+                    if writer.write_all(b"x").is_err() {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                }
+            });
+            read_reply(&mut stream)
+        });
+        assert_eq!(reply.status, 408, "{path} must use one total body budget");
+        assert!(reply.head.contains("connection: close"), "{path} must close on timeout");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{path} must finish near that budget"
+        );
+    }
+
+    /// A split body still completes before the total deadline.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "this blocking socket test deliberately pauses between two writes"
+    )]
+    fn assert_fragmented_put_succeeds(addr: &str, path: &str, body: &[u8]) {
+        let mut stream = connect(addr);
+        stream.write_all(&put_head(path, body.len())).unwrap();
+        let middle = body.len() / 2;
+        stream.write_all(&body[..middle]).unwrap();
+        thread::sleep(Duration::from_millis(20));
+        stream.write_all(&body[middle..]).unwrap();
+        let reply = read_reply(&mut stream);
+        assert_eq!(reply.status, 200, "{path} must accept a timely fragmented body");
+    }
+
+    #[test]
+    fn admin_put_body_error_contract_is_preserved() {
+        let (kv_addr, registry, _kv_running) = kv_admin();
+        let (log_addr, state, _log_running) = log_admin();
+
+        for (addr, path, limit) in [
+            (&kv_addr, "/api/kv/test/color", 1_048_576_usize),
+            (&log_addr, "/api/log-level", 16_384_usize),
+        ] {
+            let body = vec![b'x'; limit.saturating_add(1)];
+            let reply = request(addr, &put_admin(path, &body));
+
+            assert_eq!(reply.status, 413, "{path} must retain its byte limit");
+        }
+        assert_eq!(registry.get("test").unwrap().get("color").as_deref(), Some("blue"));
+        assert!(
+            state.snapshot().overlays.is_empty(),
+            "oversized log-level PUT must not apply"
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_put_transport_errors_keep_existing_statuses() {
+        let registry = KvStoreRegistry::new();
+        registry.get_or_create_memory("test").set("color", Arc::from("blue"));
+        let (layer, handle) = reload::Layer::new(EnvFilter::new("info"));
+        let _ = Box::leak(Box::new(tracing_subscriber::registry().with(layer)));
+        let state = praxis_core::logging::LogLevelState::new("info".to_owned(), handle);
+        let service = PingoraAdminService::from_options(
+            "127.0.0.1:0",
+            AdminEndpointOptions {
+                kv_registry: Some(registry.clone()),
+                log_level: Some(Arc::clone(&state)),
+                ..AdminEndpointOptions::default()
+            },
+        );
+
+        for (path, expected) in [("/api/kv/test/color", 502), ("/api/log-level", 500)] {
+            let mut req = FailedBodyRequest::new(path);
+            let response = service.respond(&mut req).await;
+            assert_eq!(response.status().as_u16(), expected, "{path} retains its Io mapping");
+        }
+        assert_eq!(registry.get("test").unwrap().get("color").as_deref(), Some("blue"));
+        assert!(
+            state.snapshot().overlays.is_empty(),
+            "failed reads cannot mutate log-level state"
+        );
+    }
+
+    #[test]
     fn loopback_listeners_reject_a_non_loopback_host_with_421() {
         let (admin_addr, _registry, _admin) = kv_admin();
         let metrics_addr = free_addr();
@@ -712,6 +909,44 @@ mod tests {
         thread: Option<thread::JoinHandle<()>>,
     }
 
+    /// An enabled PUT whose transport fails before its body completes.
+    struct FailedBodyRequest {
+        /// Request headers containing a valid local Host.
+        headers: HeaderMap,
+        /// Request target.
+        uri: Uri,
+    }
+
+    impl FailedBodyRequest {
+        /// Build a failed-body PUT to `path`.
+        fn new(path: &str) -> Self {
+            let mut headers = HeaderMap::new();
+            headers.insert(http::header::HOST, http::HeaderValue::from_static("localhost"));
+            Self {
+                headers,
+                uri: path.parse().unwrap(),
+            }
+        }
+    }
+
+    impl AdminRequest for FailedBodyRequest {
+        fn method(&self) -> &Method {
+            &Method::PUT
+        }
+
+        fn uri(&self) -> &Uri {
+            &self.uri
+        }
+
+        fn headers(&self) -> &HeaderMap {
+            &self.headers
+        }
+
+        async fn read_body(&mut self, _limit: usize) -> Result<Vec<u8>, BodyReadError> {
+            Err(BodyReadError::Io("connection closed".to_owned()))
+        }
+    }
+
     impl Drop for Running {
         fn drop(&mut self) {
             if let Some(stop) = self.stop.take() {
@@ -780,6 +1015,39 @@ mod tests {
         (addr, registry, start(runtime))
     }
 
+    /// Start a log-level admin listener with a live reload handle.
+    fn log_admin() -> (String, Arc<praxis_core::logging::LogLevelState>, Running) {
+        let (layer, handle) = reload::Layer::new(EnvFilter::new("info"));
+        let _ = Box::leak(Box::new(tracing_subscriber::registry().with(layer)));
+        let state = praxis_core::logging::LogLevelState::new("info".to_owned(), handle);
+        let addr = free_addr();
+        let options = AdminEndpointOptions {
+            log_level: Some(Arc::clone(&state)),
+            ..AdminEndpointOptions::default()
+        };
+        let mut runtime = empty_runtime();
+        add_admin_api(&mut runtime, &addr, options);
+        (addr, state, start(runtime))
+    }
+
+    /// A raw PUT head that closes the connection once answered.
+    fn put_head(path: &str, len: usize) -> Vec<u8> {
+        format!("PUT {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n")
+            .into_bytes()
+    }
+
+    /// A raw PUT head whose connection stays open unless the server closes it.
+    fn put_open_head(path: &str, len: usize) -> Vec<u8> {
+        format!("PUT {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {len}\r\n\r\n").into_bytes()
+    }
+
+    /// A complete raw PUT to either admin write route.
+    fn put_admin(path: &str, body: &[u8]) -> Vec<u8> {
+        let mut raw = put_head(path, body.len());
+        raw.extend_from_slice(body);
+        raw
+    }
+
     /// A raw `PUT` of `body` to `path` with a loopback `Host`.
     fn put_kv(path: &str, body: &[u8]) -> Vec<u8> {
         let len = body.len();
@@ -794,6 +1062,11 @@ mod tests {
     fn request(addr: &str, raw: &[u8]) -> Reply {
         let mut stream = connect(addr);
         stream.write_all(raw).unwrap();
+        read_reply(&mut stream)
+    }
+
+    /// Read a response and its connection close from an existing socket.
+    fn read_reply(stream: &mut StdTcpStream) -> Reply {
         let mut response = Vec::new();
         stream.read_to_end(&mut response).unwrap();
 

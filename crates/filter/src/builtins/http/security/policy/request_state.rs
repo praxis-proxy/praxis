@@ -30,8 +30,8 @@ pub(super) struct RequestState {
     pub(super) identity: Option<IdentityPayload>,
     /// The model of an admitted inference request.
     pub(super) inference_model: Option<String>,
-    /// Whether the admitted inference response was identified as an event stream.
-    pub(super) streamed_inference_response: bool,
+    /// Representation selected from this instance's final response head.
+    pub(super) inference_response_kind: InferenceResponseKind,
     /// Upstream response headers captured after this filter's header-phase work.
     pub(super) response_headers: HashMap<String, String>,
     /// Upstream response status captured with [`Self::response_headers`].
@@ -44,6 +44,20 @@ pub(super) struct RequestState {
     pub(super) limits: LimitStages,
     /// The context table between hook invocations.
     table: TableSlot,
+}
+
+/// The admitted inference response representation known after a final head.
+#[derive(Clone, Copy, Default, Eq, PartialEq)]
+pub(super) enum InferenceResponseKind {
+    /// No final response head has been seen.
+    #[default]
+    Undetermined,
+    /// The final head identifies an event stream.
+    Streamed,
+    /// A body-bearing successful response declares a JSON representation.
+    DeclaredJson,
+    /// The final head is outside either inspected representation.
+    Other,
 }
 
 /// Metadata-only inference response dispatch lifecycle.

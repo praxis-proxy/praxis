@@ -6,7 +6,7 @@
 use std::{
     io::{Read as _, Write as _},
     net::TcpStream,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use praxis_core::config::Config;
@@ -21,6 +21,9 @@ fn tcp_connections_total_increments_on_each_connection() {
     let backend_port = start_tcp_tagged_backend("counter-test");
     let proxy_port = free_port();
     let admin_port = free_port();
+    let listener = format!("tcp-counter-{proxy_port}");
+    let proxy_addr = format!("127.0.0.1:{proxy_port}");
+    let admin_addr = format!("127.0.0.1:{admin_port}");
 
     let yaml = format!(
         r#"
@@ -31,7 +34,7 @@ insecure_options:
   allow_private_upstreams: true
 
 listeners:
-  - name: tcp-counter-test
+  - name: {listener}
     address: "127.0.0.1:{proxy_port}"
     protocol: tcp
     upstream: "127.0.0.1:{backend_port}"
@@ -40,45 +43,71 @@ listeners:
 
     let config = Config::from_yaml(&yaml).unwrap();
     let _proxy = start_full_proxy(&config);
-    wait_for_tcp(&format!("127.0.0.1:{proxy_port}"));
-    wait_for_tcp(&format!("127.0.0.1:{admin_port}"));
+    wait_for_tcp(&admin_addr);
 
-    for i in 0..3 {
-        let mut stream =
-            TcpStream::connect(format!("127.0.0.1:{proxy_port}")).unwrap_or_else(|e| panic!("connect {i}: {e}"));
-        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-        stream.set_write_timeout(Some(Duration::from_secs(2))).unwrap();
-        stream.write_all(b"ping").expect("write");
-        stream.shutdown(std::net::Shutdown::Write).expect("shutdown");
-        let mut buf = Vec::new();
-        stream.read_to_end(&mut buf).expect("read");
+    exchange(connect_when_ready(&proxy_addr));
+    let baseline = listener_count(&admin_addr, &listener);
+    let expected = baseline.checked_add(3).expect("three connections fit the counter");
+
+    for _ in 0..3 {
+        exchange(TcpStream::connect(&proxy_addr).expect("connect to TCP listener"));
     }
 
-    std::thread::sleep(Duration::from_millis(100));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let count = listener_count(&admin_addr, &listener);
+        if count == expected {
+            break;
+        }
+        assert!(count < expected, "counter overshot exact delta: {baseline} -> {count}");
+        assert!(
+            Instant::now() < deadline,
+            "counter did not reach exact delta: {baseline} -> {count}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
 
-    let (status, body) = http_get(&format!("127.0.0.1:{admin_port}"), "/metrics", None);
+fn connect_when_ready(proxy_addr: &str) -> TcpStream {
+    let address = proxy_addr.parse().expect("TCP listener socket address");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match TcpStream::connect_timeout(&address, Duration::from_millis(250)) {
+            Ok(stream) => return stream,
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(25));
+            },
+            Err(error) => panic!("TCP listener did not become ready: {error}"),
+        }
+    }
+}
+
+fn exchange(mut stream: TcpStream) {
+    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    stream.set_write_timeout(Some(Duration::from_secs(2))).unwrap();
+    stream.write_all(b"ping").expect("write ping");
+    stream.shutdown(std::net::Shutdown::Write).expect("shutdown write half");
+    let mut echo = Vec::new();
+    stream.read_to_end(&mut echo).expect("read tagged echo");
+    assert_eq!(
+        echo, b"counter-test:ping",
+        "exchange must complete through tagged backend"
+    );
+}
+
+fn listener_count(admin_addr: &str, listener: &str) -> u64 {
+    let (status, body) = http_get(admin_addr, "/metrics", None);
     assert_eq!(status, 200, "/metrics should return 200");
-    assert!(
-        body.contains("praxis_tcp_connections_total"),
-        "/metrics should contain praxis_tcp_connections_total: {body}"
-    );
-    assert!(
-        body.contains("listener=\"tcp-counter-test\""),
-        "/metrics should contain listener=tcp-counter-test label: {body}"
-    );
-
     let count_line = body
         .lines()
-        .find(|l| l.contains("praxis_tcp_connections_total") && l.contains("tcp-counter-test") && !l.starts_with('#'))
-        .expect("should find counter line");
-    let count: f64 = count_line
+        .find(|line| {
+            line.starts_with("praxis_tcp_connections_total{") && line.contains(&format!("listener=\"{listener}\""))
+        })
+        .unwrap_or_else(|| panic!("missing listener counter for {listener}: {body}"));
+    count_line
         .split_whitespace()
         .last()
         .expect("counter should have a value")
         .parse()
-        .expect("counter value should parse as f64");
-    assert!(
-        count >= 3.0,
-        "counter should be at least 3 after 3 connections, got: {count}"
-    );
+        .expect("counter value should parse as u64")
 }
