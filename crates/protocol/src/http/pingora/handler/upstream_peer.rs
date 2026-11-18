@@ -199,8 +199,11 @@ pub(in crate::http) async fn prepare_attempt(ctx: &mut PingoraRequestCtx) -> Res
     // it stood then, and would otherwise outlast it.
     if let Some(deadline) = ctx.extensions.get::<praxis_core::grpc::GrpcDeadline>().copied()
         && let Some(upstream) = ctx.upstream_for_retry.as_mut()
+        && let Some(remaining) = deadline.remaining()
     {
-        apply_grpc_deadline(deadline, upstream);
+        apply_grpc_deadline(remaining, upstream);
+        #[cfg(feature = "pingora")]
+        ctx.extensions.insert(GrpcDeadlineAttemptBudget(remaining));
     }
 
     let upstream = ctx.upstream_for_retry.as_ref().ok_or_else(|| {
@@ -242,16 +245,18 @@ fn reselected_endpoint_index(health: Option<&praxis_core::health::ClusterHealthS
 /// `upstream_peer` runs once per attempt against the same absolute
 /// instant, each retry gets a smaller budget rather than restarting the
 /// client's clock.
-fn apply_grpc_deadline(deadline: praxis_core::grpc::GrpcDeadline, upstream: &mut Upstream) {
-    let Some(remaining) = deadline.remaining() else {
-        return;
-    };
+fn apply_grpc_deadline(remaining: std::time::Duration, upstream: &mut Upstream) {
     let opts = Arc::make_mut(&mut upstream.connection);
     opts.connection_timeout = Some(shorter(opts.connection_timeout, remaining));
     opts.total_connection_timeout = Some(shorter(opts.total_connection_timeout, remaining));
     opts.read_timeout = Some(shorter(opts.read_timeout, remaining));
     opts.write_timeout = Some(shorter(opts.write_timeout, remaining));
 }
+
+/// The absolute deadline's remaining budget when this attempt selected its
+/// upstream. A phase timeout equal to this budget was capped by gRPC.
+#[cfg(feature = "pingora")]
+pub(in crate::http) struct GrpcDeadlineAttemptBudget(pub(in crate::http) std::time::Duration);
 
 /// The shorter of a configured timeout and the remaining deadline.
 fn shorter(configured: Option<std::time::Duration>, remaining: std::time::Duration) -> std::time::Duration {
@@ -396,6 +401,23 @@ mod tests {
     use praxis_tls::{CachedClusterTls, ClusterTls};
 
     use super::*;
+
+    #[test]
+    fn grpc_deadline_caps_each_phase_and_preserves_shorter_limits() {
+        let mut upstream = make_upstream("127.0.0.1:9090");
+        let opts = Arc::make_mut(&mut upstream.connection);
+        opts.connection_timeout = Some(std::time::Duration::from_millis(10));
+        opts.total_connection_timeout = Some(std::time::Duration::from_secs(1));
+        opts.read_timeout = Some(std::time::Duration::from_millis(10));
+        let budget = std::time::Duration::from_millis(100);
+        apply_grpc_deadline(budget, &mut upstream);
+        let opts = &upstream.connection;
+
+        assert_eq!(opts.connection_timeout, Some(std::time::Duration::from_millis(10)));
+        assert_eq!(opts.total_connection_timeout, Some(budget));
+        assert_eq!(opts.read_timeout, Some(std::time::Duration::from_millis(10)));
+        assert_eq!(opts.write_timeout, Some(budget));
+    }
 
     /// The downstream `Host` every load-balanced test request carries.
     const CLIENT_HOST: &str = "client.example.com";
