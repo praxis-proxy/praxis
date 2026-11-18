@@ -847,14 +847,12 @@ mod continuous_tests {
                 worker_runtime().block_on(async {
                     for index in 1..=rejections {
                         let (stream, _) = listener.accept().expect("accept GOAWAY connection");
-                        stream.set_nonblocking(true).expect("nonblocking stream");
-                        let stream = tokio::net::TcpStream::from_std(stream).expect("Tokio stream");
-                        let mut connection = h2::server::handshake(stream).await.expect("handshake");
-                        connection.abrupt_shutdown(h2::Reason::NO_ERROR);
-                        if index == 2 {
-                            server_stop.store(true, Ordering::SeqCst);
-                        }
-                        let _ = connection.accept().await;
+                        tokio::time::timeout(
+                            IO_TIMEOUT,
+                            reject_unprocessed_http2_request(stream, (index == 2).then_some(server_stop.as_ref())),
+                        )
+                        .await
+                        .expect("request must start before GOAWAY");
                     }
                     if rejections == 1 {
                         let (stream, _) = listener.accept().expect("accept replay");
@@ -890,6 +888,62 @@ mod continuous_tests {
                 "each logical request permits only one safe replay"
             );
         }
+    }
+
+    /// Wait for a request without processing it before sending last-stream-ID zero.
+    async fn reject_unprocessed_http2_request(stream: TcpStream, stop: Option<&AtomicBool>) {
+        use tokio::io::AsyncReadExt as _;
+
+        stream.set_nonblocking(true).expect("nonblocking stream");
+        let mut stream = tokio::net::TcpStream::from_std(stream).expect("Tokio stream");
+        let mut preface = [0_u8; 24];
+        stream.read_exact(&mut preface).await.expect("client preface");
+        assert_eq!(&preface, b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
+        write_http2_test_frame(&mut stream, &[0, 0, 0, 4, 0, 0, 0, 0, 0]).await;
+        loop {
+            let header = read_http2_test_frame(&mut stream).await;
+            if header[3] == 1 {
+                assert_eq!(&header[5..], &[0, 0, 0, 1], "first request is unprocessed");
+                break;
+            }
+            if header[3] == 4 && header[4] == 0 {
+                write_http2_test_frame(&mut stream, &[0, 0, 0, 4, 1, 0, 0, 0, 0]).await;
+            }
+        }
+        if let Some(stop) = stop {
+            stop.store(true, Ordering::SeqCst);
+        }
+        write_http2_test_frame(&mut stream, &[0, 0, 8, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).await;
+        drain_http2_test_peer(&mut stream).await;
+    }
+
+    /// Drain pending client frames so closing after GOAWAY cannot cause a TCP reset.
+    async fn drain_http2_test_peer(stream: &mut tokio::net::TcpStream) {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        stream.shutdown().await.expect("GOAWAY write shutdown");
+        let mut buffer = [0_u8; 512];
+        while stream.read(&mut buffer).await.expect("drain client frames") != 0 {}
+    }
+
+    /// Flush one complete test frame before the peer can observe connection closure.
+    async fn write_http2_test_frame(stream: &mut tokio::net::TcpStream, frame: &[u8]) {
+        use tokio::io::AsyncWriteExt as _;
+
+        stream.write_all(frame).await.expect("HTTP/2 test frame");
+    }
+
+    /// Read one bounded frame from the trusted test client's health request.
+    async fn read_http2_test_frame(stream: &mut tokio::net::TcpStream) -> [u8; 9] {
+        use tokio::io::AsyncReadExt as _;
+
+        let mut header = [0_u8; 9];
+        stream.read_exact(&mut header).await.expect("HTTP/2 frame header");
+        let length = u32::from_be_bytes([0, header[0], header[1], header[2]]);
+        assert!(length <= 16_384, "test client uses the default frame size");
+        let mut payload = vec![0_u8; usize::try_from(length).expect("frame size fits usize")];
+        stream.read_exact(&mut payload).await.expect("HTTP/2 frame payload");
+        header
     }
 
     #[test]
