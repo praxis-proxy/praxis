@@ -748,12 +748,35 @@ async fn tls_probe_exchange(
         Err(error) => return classify_tls_probe_error(&error, Vec::new()),
     };
     if let Err(error) = tokio::io::AsyncWriteExt::write_all(&mut tls, data).await {
-        return classify_tls_probe_error(&error, Vec::new());
+        return Box::pin(alert_after_write_failure(&mut tls, &error)).await;
     }
     if let Err(error) = tokio::io::AsyncWriteExt::shutdown(&mut tls).await {
-        return classify_tls_probe_error(&error, Vec::new());
+        return Box::pin(alert_after_write_failure(&mut tls, &error)).await;
     }
     Box::pin(read_tls_probe(&mut tls, observed)).await
+}
+
+/// Classify a failed write, preferring an alert the peer sent before closing.
+///
+/// In TLS 1.3 the client finishes its handshake before the server verifies
+/// the client certificate, so a rejecting server may send its alert and close
+/// while the probe is still writing. The write then fails with a reset or
+/// broken pipe, and the alert is still waiting to be read.
+async fn alert_after_write_failure(
+    stream: &mut tokio_rustls::client::TlsStream<AsyncTcpStream>,
+    error: &std::io::Error,
+) -> TlsProbeOutcome {
+    let transport = matches!(
+        error.kind(),
+        std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+    );
+    if transport {
+        let pending = Box::pin(read_tls_probe(stream, &mut Vec::new())).await;
+        if matches!(pending, TlsProbeOutcome::PeerAlert(_)) {
+            return pending;
+        }
+    }
+    classify_tls_probe_error(error, Vec::new())
 }
 
 /// Retain a small bounded application response and its final read outcome.
