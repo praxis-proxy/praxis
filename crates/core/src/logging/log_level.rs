@@ -827,41 +827,34 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn overlay_auto_reverts_after_duration() {
-        let state = shared_test_state();
-        {
-            let _lock = OVERLAY_TEST_LOCK
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            reset_overlays(&state);
-
-            state
-                .apply_put(&PutLogLevelRequest {
-                    level: "trace".to_owned(),
-                    module: Some("praxis_filter".to_owned()),
-                    duration_secs: Some(10),
-                })
-                .expect("module overlay");
-            let snap = state.snapshot();
-            assert!(
-                snap.effective_directive.contains("praxis_filter=trace"),
-                "overlay should be active: {snap:?}"
-            );
-        }
-
-        tokio::time::advance(Duration::from_secs(10)).await;
-        tokio::task::yield_now().await;
-
-        let _lock = OVERLAY_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let snap = state.snapshot();
+        let (layer, handle) = reload::Layer::new(EnvFilter::new("info"));
+        let _subscriber = tracing_subscriber::registry().with(layer);
+        let state = LogLevelState::new("info".to_owned(), handle);
+        state
+            .apply_put(&PutLogLevelRequest {
+                level: "trace".to_owned(),
+                module: Some("praxis_filter".to_owned()),
+                duration_secs: Some(10),
+            })
+            .expect("module overlay");
         assert!(
-            snap.overlays.is_empty(),
-            "overlay should revert after duration: {snap:?}"
+            !state.snapshot().overlays.is_empty(),
+            "the overlay must be installed before its deadline"
         );
-        assert_eq!(snap.effective_directive, "info");
+        tokio::time::advance(Duration::from_secs(10)).await;
+        for _ in 0..100 {
+            if state.snapshot().overlays.is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let snapshot = state.snapshot();
+        assert!(
+            snapshot.overlays.is_empty(),
+            "revert must run after its installation deadline, even with a delayed first poll: {snapshot:?}"
+        );
+        assert_eq!(snapshot.effective_directive, "info", "expiry must restore the baseline");
     }
-
     #[test]
     fn log_level_error_display() {
         let bad_request = LogLevelError::BadRequest("invalid input".to_owned());

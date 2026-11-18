@@ -279,14 +279,12 @@ pub(crate) fn reload_pipelines(
         Some(log_level) => log_level.refresh_baseline_with(new_config, publish)?,
         None => publish()?,
     };
-    // Reloads execute serially on the config watcher. Keep gauge reconciliation
-    // here, outside publication, rather than on cancellable generation workers:
-    // a later reload cannot skip pending removals or overtake an older seed.
+    // Reloads serialize removals here. As at startup, the probe loops own current
+    // counts: seeding after activation could overwrite a newer probe result.
     praxis_protocol::http::metrics::clear_stale_upstream_health_gauges(
         health_checked_cluster_names(old_config),
         health_checked_cluster_names(new_config),
     );
-    praxis_protocol::http::metrics::seed_upstream_health_gauges(&health_registry);
     drop(retired);
     if carried > 0 {
         info!(
@@ -840,15 +838,30 @@ mod tests {
             HashMap::from([("web".to_owned(), Arc::new(pipeline))]),
         ))));
         let retention = target.retain_pipelines();
-        let worker = std::thread::spawn(move || drop(retention));
-        target.stop();
-        entered.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
-        assert!(
-            target.with_live(|_| Ok(())).is_err(),
-            "revocation precedes slow destruction"
-        );
-        release.send(()).unwrap();
+        let (watcher_exit, watcher_wait) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let _exit = watcher_wait.recv();
+            drop(retention);
+        });
+        let stopping = Arc::clone(&target);
+        let (stopped, completed) = std::sync::mpsc::channel();
+        let stop_worker = std::thread::spawn(move || {
+            stopping.stop();
+            let _completed = stopped.send(());
+        });
+        let stop_result = completed.recv_timeout(std::time::Duration::from_secs(5));
+        let _exiting = watcher_exit.send(());
+        let drop_result = entered.recv_timeout(std::time::Duration::from_secs(5));
+        let revoked = target.0.try_lock().is_ok_and(|live| live.is_none());
+        let _released = release.send(());
         worker.join().unwrap();
+        stop_worker.join().unwrap();
+        assert!(
+            stop_result.is_ok(),
+            "revocation must complete before releasing the blocked destructor"
+        );
+        assert!(drop_result.is_ok(), "the watcher must reach the blocked destructor");
+        assert!(revoked, "revocation must precede slow destruction");
     }
 
     impl PipelineExtension for ReloadMarker {

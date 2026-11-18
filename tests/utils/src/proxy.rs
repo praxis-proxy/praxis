@@ -1307,7 +1307,7 @@ pub fn registry_with(name: &str, make: fn() -> Box<dyn HttpFilter>) -> FilterReg
 mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt as _;
-    use std::{net::TcpListener, sync::mpsc::RecvTimeoutError};
+    use std::sync::mpsc::RecvTimeoutError;
 
     use super::*;
 
@@ -1653,6 +1653,23 @@ insecure_options:
         assert_eq!(std::fs::read(sentinel).expect("child completion sentinel"), b"returned");
     }
 
+    /// Stop and reap the probe endpoint on success and during assertion unwinding.
+    struct ProbeEndpoint {
+        /// Cancel its nonblocking accept loop.
+        stop: Arc<AtomicBool>,
+        /// Thread owned until the fixture drops.
+        thread: Option<JoinHandle<()>>,
+    }
+
+    impl Drop for ProbeEndpoint {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Release);
+            if let Some(thread) = self.thread.take() {
+                join_bounded(thread, "health fixture", "probe endpoint");
+            }
+        }
+    }
+
     #[test]
     #[expect(
         clippy::too_many_lines,
@@ -1660,7 +1677,7 @@ insecure_options:
     )]
     fn health_probes_stop_with_proxy_guard() {
         for _ in 0..2 {
-            let listener = TcpListener::bind("127.0.0.1:0").expect("health listener");
+            let (listener, _) = crate::net::port::bind_unique_port();
             listener.set_nonblocking(true).expect("nonblocking listener");
             let health_addr = listener.local_addr().expect("health address");
             let (sender, receiver) = mpsc::channel();
@@ -1680,6 +1697,10 @@ insecure_options:
                     }
                 }
             });
+            let _endpoint = ProbeEndpoint {
+                stop,
+                thread: Some(endpoint),
+            };
             let proxy_port = crate::net::free_port();
             let yaml = format!(
                 r#"
@@ -1716,7 +1737,14 @@ insecure_options:
             let failed = std::panic::catch_unwind(|| {
                 start_full_proxy_with_overload(&config, |_signal| panic!("configuration failure"));
             });
-            assert!(failed.is_err(), "configuration panic must propagate");
+            assert_eq!(
+                failed
+                    .expect_err("configurator must panic")
+                    .downcast_ref::<&str>()
+                    .copied(),
+                Some("configuration failure"),
+                "the configurator must cause the expected panic"
+            );
             assert_eq!(
                 receiver.recv_timeout(Duration::from_millis(350)),
                 Err(RecvTimeoutError::Timeout),
@@ -1735,8 +1763,6 @@ insecure_options:
                 Err(RecvTimeoutError::Timeout),
                 "cancelled health runtime must stop probing"
             );
-            stop.store(true, Ordering::Release);
-            endpoint.join().expect("health endpoint");
         }
         let empty = Config::from_yaml(&simple_proxy_yaml(crate::net::free_port(), 1)).expect("plain config");
         let registry = build_health_registry(&empty.clusters);

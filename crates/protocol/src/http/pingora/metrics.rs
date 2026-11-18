@@ -938,8 +938,8 @@ pub fn clear_stale_upstream_health_gauges<'a, P: IntoIterator<Item = &'a str>, C
 
 /// Publish current healthy/total gauges for every cluster in a health registry.
 ///
-/// Called on reload so scrapes reflect the new registry immediately instead of
-/// waiting for the first probe round.
+/// Seed only before activating probes. Running probe loops own their gauge
+/// updates; a concurrent optimistic seed could overwrite a newer probe result.
 pub fn seed_upstream_health_gauges(registry: &praxis_core::health::HealthRegistry) {
     if !is_recorder_installed() {
         return;
