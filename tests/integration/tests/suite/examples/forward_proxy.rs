@@ -302,6 +302,57 @@ fn response_header_edits_reach_the_tunnel_200() {
     tunnel.stream.shutdown(Shutdown::Both).unwrap();
 }
 
+#[test]
+fn allowlist_example_releases_a_connection_whose_client_stopped_reading() {
+    within(TRANSFER_DEADLINE, || {
+        let (destination, port) = praxis_test_utils::bind_unique_port();
+        let destination = std::thread::spawn(move || {
+            let (stream, _peer) = destination.accept().unwrap();
+            let mut stream = bounded(stream);
+            let chunk = vec![b'd'; 65_536]; // 64 KiB
+            while stream.write_all(&chunk).is_ok() {}
+        });
+        let yaml = allowlist_example_yaml(port, "")
+            .replacen("idle_timeout_ms: 120000", "idle_timeout_ms: 500", 1)
+            .replacen(
+                "filter_chains: [egress]\n",
+                "filter_chains: [egress]\n    max_connections: 1\n",
+                1,
+            );
+        assert!(
+            yaml.contains("idle_timeout_ms: 500"),
+            "the idle timeout should be patched"
+        );
+        assert!(
+            yaml.contains("max_connections: 1"),
+            "the listener should admit one connection"
+        );
+        let proxy = start_example(&yaml);
+
+        let stalled = connect_tunnel(proxy.addr(), &format!("localhost:{port}"));
+        assert_eq!(stalled.status, 200, "the first CONNECT should open a tunnel");
+        std::thread::sleep(Duration::from_millis(200));
+
+        let while_open = connect_tunnel(proxy.addr(), "other.example.org:443");
+        assert_eq!(
+            while_open.status, 503,
+            "the open tunnel should hold the listener's only connection slot"
+        );
+
+        std::thread::sleep(Duration::from_secs(3));
+        let after_idle = connect_tunnel(proxy.addr(), "other.example.org:443");
+        assert_eq!(
+            after_idle.status, 403,
+            "a tunnel closed at its idle timeout must release the connection slot while its client \
+             still is not reading, but a CONNECT got {}",
+            after_idle.status
+        );
+
+        drop(stalled);
+        destination.join().unwrap();
+    });
+}
+
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
