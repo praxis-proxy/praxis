@@ -408,6 +408,36 @@ async fn refuse_filter_success(session: &mut Session, ctx: &mut PingoraRequestCt
     send_rejection_for(session, Rejection::status(CONNECT_SUCCESS_REFUSED), ctx).await;
 }
 
+/// Refuse a terminal answer to a CONNECT that the response filters made a 2xx.
+///
+/// The request-phase check ([`success_answer`]) cannot see a response filter
+/// rewrite a 4xx answer to a 2xx, or reject with one. Either would claim a
+/// tunnel no one opened (see [`CONNECT_SUCCESS_REFUSED`]), so the outcome is
+/// replaced by a rejection. Anything else, and any other method, passes
+/// through.
+pub(in crate::http) fn refuse_unopened_tunnel(
+    ctx: &mut PingoraRequestCtx,
+    outcome: Result<praxis_filter::Response, Rejection>,
+) -> Result<praxis_filter::Response, Rejection> {
+    let is_connect = ctx
+        .request_snapshot
+        .as_ref()
+        .is_some_and(|request| request.method == http::Method::CONNECT);
+    let status = match &outcome {
+        Ok(response) => response.status.as_u16(),
+        Err(rejection) => rejection.status,
+    };
+    if !is_connect || !is_success(status) {
+        return outcome;
+    }
+    warn!(
+        status,
+        "response filter made a CONNECT terminal answer a 2xx, which would claim an unopened tunnel"
+    );
+    ctx.stamp_error_type(ERROR_TYPE_INTERNAL);
+    Err(Rejection::status(CONNECT_SUCCESS_REFUSED))
+}
+
 /// Answer the CONNECT with a filter's rejection.
 async fn refuse_connect(session: &mut Session, ctx: &mut PingoraRequestCtx, rejection: Rejection) {
     ctx.stamp_error_type(ERROR_TYPE_FILTER_REJECT);
@@ -1179,6 +1209,48 @@ allow_destinations:
     }
 
     #[tokio::test]
+    async fn terminal_answer_rewritten_to_a_success_by_a_response_filter_is_refused() {
+        let response = Box::pin(handle_raw(
+            &test_pipeline(|| Box::new(ResponseHook::AnswerThenRewrite(http::StatusCode::OK))),
+            "CONNECT allowed.invalid:443 HTTP/1.1\r\nHost: allowed.invalid:443\r\n\r\n",
+        ))
+        .await;
+        assert_eq!(
+            status_of(&response),
+            CONNECT_SUCCESS_REFUSED,
+            "a 2xx here would claim a tunnel no one opened: {response}"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_answer_rejected_with_a_success_by_a_response_filter_is_refused() {
+        let response = Box::pin(handle_raw(
+            &test_pipeline(|| Box::new(ResponseHook::AnswerThenReject(200))),
+            "CONNECT allowed.invalid:443 HTTP/1.1\r\nHost: allowed.invalid:443\r\n\r\n",
+        ))
+        .await;
+        assert_eq!(
+            status_of(&response),
+            CONNECT_SUCCESS_REFUSED,
+            "a 2xx rejection here would claim a tunnel no one opened: {response}"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_answer_left_alone_by_the_response_filters_is_sent_as_is() {
+        let response = Box::pin(handle_raw(
+            &test_pipeline(|| Box::new(ResponseHook::AnswerThenRewrite(http::StatusCode::NOT_FOUND))),
+            "CONNECT allowed.invalid:443 HTTP/1.1\r\nHost: allowed.invalid:443\r\n\r\n",
+        ))
+        .await;
+        assert_eq!(
+            status_of(&response),
+            404,
+            "a non-2xx rewrite of a terminal answer is not touched: {response}"
+        );
+    }
+
+    #[tokio::test]
     async fn response_success_rejection_is_answered_with_502() {
         // A 2xx rejection would claim the tunnel it refuses.
         let (response, ctx) = Box::pin(connect_to_loopback(&test_pipeline(|| {
@@ -1276,6 +1348,14 @@ allow_destinations:
 
         /// Rewrite the response status.
         Rewrite(http::StatusCode),
+
+        /// Answer the CONNECT with a 403 terminal response, then rewrite
+        /// its status in the response phase.
+        AnswerThenRewrite(http::StatusCode),
+
+        /// Answer the CONNECT with a 403 terminal response, then reject it
+        /// with this status in the response phase.
+        AnswerThenReject(u16),
     }
 
     #[async_trait::async_trait]
@@ -1288,7 +1368,12 @@ allow_destinations:
             &self,
             _ctx: &mut praxis_filter::HttpFilterContext<'_>,
         ) -> Result<FilterAction, praxis_filter::FilterError> {
-            Ok(FilterAction::Continue)
+            match self {
+                Self::AnswerThenRewrite(_) | Self::AnswerThenReject(_) => Ok(FilterAction::TerminalResponse(Box::new(
+                    praxis_filter::TerminalResponse::new(403),
+                ))),
+                Self::Reject(_) | Self::Fail | Self::Rewrite(_) => Ok(FilterAction::Continue),
+            }
         }
 
         async fn on_response(
@@ -1296,9 +1381,11 @@ allow_destinations:
             ctx: &mut praxis_filter::HttpFilterContext<'_>,
         ) -> Result<FilterAction, praxis_filter::FilterError> {
             match self {
-                Self::Reject(status) => Ok(FilterAction::Reject(Rejection::status(*status))),
+                Self::Reject(status) | Self::AnswerThenReject(status) => {
+                    Ok(FilterAction::Reject(Rejection::status(*status)))
+                },
                 Self::Fail => Err("response hook failed".into()),
-                Self::Rewrite(status) => {
+                Self::Rewrite(status) | Self::AnswerThenRewrite(status) => {
                     if let Some(response) = ctx.response_header.as_mut() {
                         response.status = *status;
                     }
