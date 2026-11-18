@@ -60,6 +60,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   rollouts, config reloads, TLS rotation, node drain, and upstream failure
   under continuous HTTP/1.1, HTTP/2, and HTTPS traffic.
 
+- Fuzz testing (`tests/fuzz`, `make fuzz`/`fuzz-build`): a differential
+  fuzz target checks the SIMD-accelerated JSON string-delimiter scanner
+  (`json_ops::simd_scan`, the workspace's only `unsafe` code) against its
+  scalar fallback on arbitrary input. Runs nightly on a bounded schedule
+  (`.github/workflows/fuzz.yaml`).
+
 ### Changed
 
 - Update the policy engine from PPE 0.6.0 to 0.7.0, including Limitador

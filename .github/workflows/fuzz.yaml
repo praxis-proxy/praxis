@@ -1,0 +1,105 @@
+name: Fuzz
+
+# ------------------------------------------------------------------------------
+# Workflow Settings
+# ------------------------------------------------------------------------------
+#
+# Bounded nightly run: FUZZ_DURATION (make's default, 120s) per target, not an
+# open-ended search. A crash here should be turned into a regression test in
+# the target's own crate (see issue #1392).
+#
+# A PR that touches the code a fuzz target calls into only gets a build check
+# (`make fuzz-build`), not a fuzz run: tests/fuzz is excluded from the main
+# workspace, so nothing else compiles it, and a signature change there would
+# otherwise go unnoticed until the next nightly run.
+
+on:
+  schedule:
+    - cron: "52 2 * * *"
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - "tests/fuzz/**"
+      - "crates/filter/src/json_ops/**"
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # -----------------------------------------------------------------
+  # Fuzz
+  # -----------------------------------------------------------------
+
+  fuzz:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust
+        uses: praxis-proxy/conventions/.github/actions/setup-rust-lint@2a0d28ddd3690ed73347ddbe59d08dac02f604ce # v0.5.0
+        with:
+          cache-suffix: fuzz
+
+      - name: Install cargo-fuzz
+        # setup-rust-lint's rust-cache also restores ~/.cargo/bin, so the
+        # binary may already be present. Install only when it is absent;
+        # otherwise `cargo install` aborts with "binary already exists".
+        run: command -v cargo-fuzz > /dev/null || cargo install cargo-fuzz --version 0.13.2 --locked
+
+      - name: Run fuzz targets
+        run: make fuzz
+
+      # shortcut: a failed scheduled run only surfaces as a red check on this
+      # workflow, nobody is paged. Upgrade to opening an issue with the
+      # praxis-bot-app token (see AGENTS.md's CI Workflows note) once that is
+      # worth the added complexity.
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-artifacts
+          path: tests/fuzz/artifacts/
+          if-no-files-found: ignore
+
+  # -----------------------------------------------------------------
+  # Fuzz build check (PRs only)
+  # -----------------------------------------------------------------
+  #
+  # Proves every fuzz target still compiles against its target code without
+  # spending a fuzzing budget; the nightly `fuzz` job above does the actual
+  # fuzzing.
+
+  fuzz-build:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust
+        uses: praxis-proxy/conventions/.github/actions/setup-rust-lint@2a0d28ddd3690ed73347ddbe59d08dac02f604ce # v0.5.0
+        with:
+          cache-suffix: fuzz
+
+      - name: Install cargo-fuzz
+        run: command -v cargo-fuzz > /dev/null || cargo install cargo-fuzz --version 0.13.2 --locked
+
+      - name: Build fuzz targets
+        run: make fuzz-build

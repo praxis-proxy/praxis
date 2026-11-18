@@ -59,3 +59,15 @@ pub use builder::{JsonOps, JsonOpsBuilder, JsonRewrite, JsonValue};
 pub use error::JsonError;
 pub use ops::ExtractDest;
 pub use store::{HttpJsonStore, JsonOpStore, MapStore};
+
+// -----------------------------------------------------------------------------
+// Fuzzing-only exports
+// -----------------------------------------------------------------------------
+
+// `cargo fuzz` compiles the whole dependency graph with `--cfg fuzzing`,
+// which widens `find_json_string_delim`'s own visibility to `pub` (see
+// `simd_scan.rs`); this re-export exists only in that build and carries no
+// cost or surface in a normal one. `fuzz_simd_scan` calls it directly and
+// checks it against an inlined scalar oracle.
+#[cfg(fuzzing)]
+pub use simd_scan::find_json_string_delim;
