@@ -82,6 +82,7 @@ pub(super) fn build_sub_filter_context<'a>(
         request_body_mode: pipeline.body_capabilities().request_body_mode,
         request_headers_to_remove: Vec::new(),
         request_headers_to_set: Vec::new(),
+        request_header_mutations: Vec::new(),
         request_start: runtime.request_start,
         response_body_bytes: 0,
         response_body_mode: pipeline.body_capabilities().response_body_mode,

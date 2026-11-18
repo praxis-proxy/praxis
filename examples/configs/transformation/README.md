@@ -14,7 +14,7 @@ Transformation filters modify requests and responses in flight, rewriting URLs, 
 
 **Path Rewrite**: Rewrites request paths using prefix replacement or regex substitution.
 
-**URL Rewrite**: Modifies the full request URL (scheme, host, port, path, query).
+**URL Rewrite**: Rewrites the request path and query. Routing and forwarding select the upstream host and scheme.
 
 **Header Manipulation**: Adds, removes, or replaces request and response headers.
 

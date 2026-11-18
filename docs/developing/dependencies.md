@@ -46,20 +46,34 @@ them on every pull request.
 Accepted, documented advisory exceptions carry a
 reason each. cargo-deny ignores live in [deny.toml];
 cargo-audit ignores live in [.cargo/audit.toml]. The
-lists overlap but are not identical (see the `lru`
-note below):
+two tools use the same exception list. `deny.toml`
+gates both unmaintained and unsound advisories:
 
-- `RUSTSEC-2025-0134` (`rustls-pemfile`,
+- `RUSTSEC-2025-0134` (`rustls-pemfile` 2.2.0,
   unmaintained): transitive via the Pingora fork's
-  `pingora-rustls` only; `praxis-tls` migrated to
-  the `rustls::pki_types` PEM iterators.
-- `RUSTSEC-2026-0253` (`lru`, unsound `pop()` panic
-  safety): transitive via the Pingora fork. Ignored
-  only in [.cargo/audit.toml]; `deny.toml`'s
-  `unmaintained = "all"` does not gate `unsound`
-  advisories, so a cargo-deny ignore would be
-  unused. Tracked until a fixed release is available.
+  `pingora-rustls` and `rustls-native-certs` 0.7.
+- `RUSTSEC-2024-0436` (`paste` 1.0.15,
+  unmaintained): a compile-time macro dependency of
+  `cel` 0.12, pulled in by `limitador` for the Policy
+  rate limiter.
+- [RUSTSEC-2026-0543] (`chrono` 0.4.45, unmaintained):
+  used directly for timestamps and transitively by
+  Policy, the Pingora fork, and benchmark tooling.
+- [RUSTSEC-2026-0555] (`chrono-tz` 0.10.4, unmaintained):
+  transitive through Policy's CEL and OPA engines
+  (`cel` and `regorus`).
 
+The chrono advisories cover every version and have no
+patched release. These exceptions accept the maintenance
+risk while preserving the existing features; they do not
+resolve it. Migrate direct chrono users to a maintained
+crate such as `jiff` or `time`, and remove the exceptions
+when the transitive dependencies have migrated too.
+Only these advisory IDs are excepted; vulnerability and
+unsoundness checks remain enabled.
+
+[RUSTSEC-2026-0543]: https://rustsec.org/advisories/RUSTSEC-2026-0543
+[RUSTSEC-2026-0555]: https://rustsec.org/advisories/RUSTSEC-2026-0555
 [RustSec advisory database]: https://rustsec.org/
 [deny.toml]: ../../deny.toml
 [.cargo/audit.toml]: ../../.cargo/audit.toml

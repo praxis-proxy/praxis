@@ -125,7 +125,8 @@ start with [policy enforcement with the Praxis Policy Engine (PPE)](security/pol
 **Build-level guarantees:**
 
 - `unsafe_code = "deny"` in workspace lints
-- Rustls (no OpenSSL, no C FFI in the TLS path)
+- Rustls as the TLS protocol engine, with the system OpenSSL
+  library as its cryptographic provider
 - Supply chain auditing via `cargo audit` and
   `cargo deny`
 - Root execution rejected by default

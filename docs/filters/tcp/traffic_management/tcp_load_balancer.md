@@ -29,7 +29,7 @@ If all endpoints are unhealthy, the filter enters panic mode and routes to all e
 | `clusters[].connection_timeout_ms` | integer | no | TCP connection timeout in milliseconds. Applies to the TCP handshake only (before TLS). When exceeded, the connection attempt fails and the load balancer may retry on the next endpoint. `None` (the default) uses Pingora's built-in timeout. |
 | `clusters[].endpoints` | (`Simple` \| `Weighted`)[] | no | List of endpoints for the cluster. Each entry is either a plain `"host:port"` string or a `{ address, weight }` object. May be omitted only on an inline load-balancer cluster that shares its name with a top-level cluster: the endpoints are then filled in from that declaration during validation. Anywhere else an empty list is rejected. |
 | `clusters[].endpoints[].address` | string | yes | Socket address as `host:port`. |
-| `clusters[].endpoints[].weight` | integer | no | Relative forwarding weight. Higher values receive proportionally more traffic. Defaults to 1. |
+| `clusters[].endpoints[].weight` | integer | no | Relative forwarding weight. Its effect depends on the load-balancing strategy; it does not always produce proportional traffic. Defaults to 1. |
 | `clusters[].endpoints[].metadata` | object<string, string> | no | Arbitrary key-value metadata for subset-based load balancing. |
 | `clusters[].endpoints[].priority` | integer | no | Priority tier (0 = primary, 1 = first failover, etc.). |
 | `clusters[].endpoints[].zone` | string | no | Locality zone identifier for zone-aware routing. |

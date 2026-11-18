@@ -4,7 +4,7 @@
 //! Thread-safe session-to-endpoint mapping with sliding TTL and bounded capacity.
 
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, HashSet, VecDeque},
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -103,8 +103,9 @@ impl SessionStore {
     /// Returns `None` if not found or expired. Expired entries are removed lazily,
     /// re-checking expiry under the shard lock so a binding refreshed by a
     /// concurrent `put` between the check and the removal survives.
-    /// On hit, updates `last_accessed` for LRU tracking. On miss, triggers an
-    /// opportunistic sweep if more than `ttl / 2` has elapsed since the last one.
+    /// On hit, updates `last_accessed` for LRU tracking. An expired hit
+    /// triggers an opportunistic sweep; a key absent from the map returns
+    /// immediately.
     pub(super) fn get(&self, key: &str) -> Option<Arc<str>> {
         let mut entry = self.map.get_mut(key)?;
         let now = Instant::now();
@@ -328,41 +329,126 @@ impl SessionStore {
 // SessionStoreRegistry
 // -----------------------------------------------------------------------------
 
+/// Store identity includes the effective bounds, so distinct listener
+/// configurations cannot replace one another's bindings.
+#[derive(Clone, Eq, Hash, PartialEq)]
+struct StoreKey {
+    /// Configured cluster name.
+    cluster: Arc<str>,
+    /// Maximum stored sessions.
+    max_entries: u64,
+    /// Sliding session lifetime.
+    ttl: Duration,
+    /// Eviction rule.
+    eviction: u8,
+}
+
+/// Mutable generation data guarded as one unit for atomic first admission.
+#[derive(Default)]
+struct RegistryState {
+    /// Stores carried from the previous generation or created for this one.
+    stores: HashMap<StoreKey, Arc<SessionStore>>,
+    /// Keys bound to filters in this candidate generation.
+    used: HashSet<StoreKey>,
+}
+
 /// Registry of per-cluster session stores, shared across pipeline reloads.
 ///
-/// Interior-mutable so one process-wide registry (created at startup and
-/// injected into every rebuilt pipeline) can adopt stores on demand: session
-/// bindings then survive config hot reloads.
+/// A candidate generation copies its predecessor's stores, binds filters to
+/// exact-bound Arcs, then publishes only the keys those filters used after
+/// the complete reload has passed its last fallible step.
 pub struct SessionStoreRegistry {
-    /// Per-cluster session stores keyed by cluster name.
-    stores: DashMap<Arc<str>, Arc<SessionStore>>,
+    /// Per-generation store set and binding marks.
+    state: Mutex<RegistryState>,
 }
 
 impl SessionStoreRegistry {
     /// Create a new empty registry.
     #[must_use]
     pub fn new() -> Self {
-        Self { stores: DashMap::new() }
+        Self {
+            state: Mutex::new(RegistryState::default()),
+        }
     }
 
-    /// Insert a store for a cluster.
-    pub fn insert(&self, cluster: Arc<str>, store: Arc<SessionStore>) {
-        self.stores.insert(cluster, store);
-    }
-
-    /// Get the session store for a cluster.
+    /// Copy strong store references into an isolated candidate generation.
+    /// Building into this copy cannot change the live registry if validation
+    /// or the final logging-baseline update fails.
     #[must_use]
-    pub fn get(&self, cluster: &str) -> Option<Arc<SessionStore>> {
-        self.stores.get(cluster).map(|entry| Arc::clone(entry.value()))
+    pub fn candidate(&self) -> Self {
+        let state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        Self {
+            state: Mutex::new(RegistryState {
+                stores: state.stores.clone(),
+                used: HashSet::new(),
+            }),
+        }
     }
 
-    /// Get the store for a cluster, creating (or replacing) it so it matches
-    /// the given bounds.
+    /// Discard stores this pipeline did not bind, including their strong Arcs.
     ///
-    /// An existing store is reused only when its bounds equal the requested
-    /// ones; a config reload that changes `max_entries`, `ttl`, or the
-    /// eviction policy gets a fresh store (dropping that cluster's bindings)
-    /// rather than silently keeping stale limits.
+    /// A listener retains this isolated registry while serving old pipelines,
+    /// so it must not keep another listener's retired stores alive.
+    pub fn prune_unused(&self) {
+        let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let used = state.used.clone();
+        state.stores.retain(|key, _| used.contains(key));
+    }
+
+    /// Number of distinct store configurations retained by this registry.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .stores
+            .len()
+    }
+
+    /// Publish exactly the stores bound by a validated candidate generation.
+    ///
+    /// The candidate still holds its Arcs for new pipelines. Old pipelines
+    /// retain their own Arcs until their in-flight requests finish.
+    pub fn publish(&self, candidate: &Self) {
+        let mut candidate_state = candidate
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let used = candidate_state.used.clone();
+        candidate_state.stores.retain(|key, _| used.contains(key));
+        let published = candidate_state.stores.clone();
+        drop(candidate_state);
+        *self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = RegistryState {
+            stores: published,
+            used,
+        };
+    }
+
+    /// Carry stores still owned by a listener whose old pipeline remains bound.
+    ///
+    /// The source registry is a fixed generation, so retaining its used keys
+    /// cannot accumulate metadata from arbitrarily many retired reloads.
+    pub fn retain_used_from(&self, source: &Self) {
+        let source_state = source.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let retained: Vec<_> = source_state
+            .used
+            .iter()
+            .filter_map(|key| {
+                source_state
+                    .stores
+                    .get(key)
+                    .map(|store| (key.clone(), Arc::clone(store)))
+            })
+            .collect();
+        drop(source_state);
+        let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (key, store) in retained {
+            state.used.insert(key.clone());
+            state.stores.entry(key).or_insert(store);
+        }
+    }
+
+    /// Atomically bind one exact configuration within this generation.
     #[must_use]
     pub(super) fn get_or_create(
         &self,
@@ -371,21 +457,33 @@ impl SessionStoreRegistry {
         ttl: Duration,
         eviction: EvictionPolicy,
     ) -> Arc<SessionStore> {
-        if let Some(existing) = self.stores.get(cluster) {
-            let store = existing.value();
-            if store.max_entries == max_entries && store.ttl == ttl && store.eviction == eviction {
-                return Arc::clone(store);
-            }
-        }
-        let created = Arc::new(SessionStore::new(max_entries, ttl, eviction));
-        self.stores.insert(Arc::from(cluster), Arc::clone(&created));
-        created
+        let key = StoreKey {
+            cluster: Arc::from(cluster),
+            max_entries,
+            ttl,
+            eviction: match eviction {
+                EvictionPolicy::Lru => 0,
+                EvictionPolicy::Ttl => 1,
+            },
+        };
+        let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.used.insert(key.clone());
+        Arc::clone(
+            state
+                .stores
+                .entry(key)
+                .or_insert_with(|| Arc::new(SessionStore::new(max_entries, ttl, eviction))),
+        )
     }
 
     /// Whether the registry contains any stores.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.stores.is_empty()
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .stores
+            .is_empty()
     }
 }
 
@@ -486,10 +584,11 @@ mod tests {
     #[test]
     fn registry_stores_and_retrieves() {
         let reg = SessionStoreRegistry::new();
-        let store = Arc::new(SessionStore::new(100, Duration::from_secs(60), EvictionPolicy::Lru));
-        reg.insert("cluster-a".into(), store);
-        assert!(reg.get("cluster-a").is_some());
-        assert!(reg.get("cluster-b").is_none());
+        let store = reg.get_or_create("cluster-a", 100, Duration::from_secs(60), EvictionPolicy::Lru);
+        let same = reg.get_or_create("cluster-a", 100, Duration::from_secs(60), EvictionPolicy::Lru);
+        let other = reg.get_or_create("cluster-b", 100, Duration::from_secs(60), EvictionPolicy::Lru);
+        assert!(Arc::ptr_eq(&store, &same));
+        assert!(!Arc::ptr_eq(&store, &other));
     }
 
     #[test]

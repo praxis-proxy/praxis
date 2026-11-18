@@ -1182,6 +1182,127 @@ async fn context_headers_pending_mutation_flows_into_apl() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// entity-less response fallback — stamp_operator_context
+// ---------------------------------------------------------------------------
+
+/// Identity-only policy (authentication plus a response half, no request
+/// authorization and no entity route). The response half is run with no
+/// admitted identity in filter state, so `response_extensions` takes the
+/// entity-less fallback. The post rules read `meta.tags`,
+/// `meta.properties.region`, and `agent.agent_id`. Dropping
+/// `stamp_operator_context` from that fallback makes the allow case deny
+/// with `tags_missing`.
+#[expect(clippy::too_many_lines, reason = "test fixture: the YAML literal is the bulk")]
+fn write_entity_less_response_config() -> (TempDir, String) {
+    let dir = TempDir::new().expect("create tempdir");
+    let cfg_path = dir.path().join("cpex.yaml");
+    let yaml = format!(
+        r#"plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "{TEST_ISSUER}"
+          audiences: ["{TEST_AUDIENCE}"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "{TEST_SECRET}"
+          leeway_seconds: 60
+      claim_mapper: standard
+global:
+  authentication:
+    - jwt-user
+  authorization:
+    post_invocation:
+      - "!(meta.tags contains 'regulated'): deny('operator tags missing on the response half', 'tags_missing')"
+      - "!(meta.properties.region == 'us-east-1'): deny('operator region missing on the response half', 'region_missing')"
+      - "!(agent.agent_id == 'planner-v2'): deny('mapped header missing on the response half', 'agent_id_missing')"
+"#
+    );
+    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
+    (dir, cfg_path.to_str().expect("utf8 path").to_owned())
+}
+
+fn regulated_context() -> ContextMetaConfig {
+    ContextMetaConfig {
+        tags: vec!["regulated".to_owned()],
+        properties: HashMap::from([("region".to_owned(), "us-east-1".to_owned())]),
+        ..Default::default()
+    }
+}
+
+fn agent_id_header() -> HashMap<ContextField, String> {
+    HashMap::from([(ContextField::AgentAgentId, "x-ext-agent-id".to_owned())])
+}
+
+/// Admit through the identity gate, clear the identity `admitted_identity`
+/// reads, then run the response half on the entity-less fallback.
+async fn respond_without_stashed_identity(filter: &PolicyFilter) -> FilterAction {
+    let mut req = request_for_alice();
+    req.headers
+        .insert("x-ext-agent-id", HeaderValue::from_static("planner-v2"));
+    let mut ctx = make_filter_context(&req);
+    let admitted = filter.on_request(&mut ctx).await.expect("request phase ran");
+    assert!(
+        matches!(admitted, FilterAction::Continue),
+        "the identity gate must admit alice; got {admitted:?}",
+    );
+    super::request_state::state_mut(&mut ctx).identity = None;
+    assert!(
+        super::request_state::state(&ctx).is_none_or(|state| state.identity.is_none()),
+        "the response half must see no admitted identity",
+    );
+    let mut response = crate::test_utils::make_response();
+    ctx.response_header = Some(&mut response);
+    filter.on_response(&mut ctx).await.expect("response phase ran")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn entity_less_response_keeps_operator_context() {
+    let (_dir, path) = write_entity_less_response_config();
+    let filter = build_filter_with_context(path, agent_id_header(), regulated_context());
+    assert_eq!(
+        filter.derived_shape(),
+        (false, false),
+        "a post-only global policy is identity-only; the response half must use the entity-less fallback",
+    );
+
+    let action = respond_without_stashed_identity(&filter).await;
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "stamped tags, region, and agent.agent_id must satisfy the response rules; got {action:?}",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn entity_less_response_denies_without_regulated_tag() {
+    let (_dir, path) = write_entity_less_response_config();
+    let filter = build_filter_with_context(
+        path,
+        agent_id_header(),
+        ContextMetaConfig {
+            properties: HashMap::from([("region".to_owned(), "us-east-1".to_owned())]),
+            ..Default::default()
+        },
+    );
+
+    let action = respond_without_stashed_identity(&filter).await;
+    let FilterAction::Reject(rejection) = action else {
+        panic!("without the regulated tag the response rule must deny; got {action:?}");
+    };
+    assert!(
+        has_header(&rejection, "x-policy-violation", "tags_missing"),
+        "the deny must report tags_missing; got {:?}",
+        rejection.headers,
+    );
+}
+
 /// Write a policy document selecting the Valkey-backed session store via a
 /// flat `global.session_store` block. The `valkey` factory connects
 /// lazily (the pool dials on first request), so this config loads
@@ -3001,7 +3122,7 @@ fn build_response_content_for_method_prefers_structured_content() {
         "corr-1",
         &super::json_rpc::ParsedEnvelope::parse(&body),
     );
-    assert_eq!(parts.len(), 1);
+    assert_eq!(parts.len(), 2);
     match &parts[0] {
         ContentPart::ToolResult { content } => {
             assert!(content.is_error);
@@ -3009,6 +3130,7 @@ fn build_response_content_for_method_prefers_structured_content() {
         },
         other => panic!("expected ToolResult; got {other:?}"),
     }
+    assert!(matches!(&parts[1], ContentPart::Text { text } if text == "ignored"));
 }
 
 #[test]
@@ -3650,6 +3772,114 @@ impl HookHandler<CmfHook> for StubPlugin {
         _ctx: &mut PluginContext,
     ) -> PluginResult<MessagePayload> {
         PluginResult::allow()
+    }
+}
+
+/// Host scanner that examines both selected tool data and parallel CMF text.
+struct WholeMessageScanner {
+    cfg: PluginConfig,
+    observed: Arc<Mutex<Vec<String>>>,
+}
+
+impl Plugin for WholeMessageScanner {
+    fn config(&self) -> &PluginConfig {
+        &self.cfg
+    }
+}
+
+impl HookHandler<CmfHook> for WholeMessageScanner {
+    async fn handle(
+        &self,
+        payload: &MessagePayload,
+        _extensions: &Extensions,
+        _ctx: &mut PluginContext,
+    ) -> PluginResult<MessagePayload> {
+        use ppe::praxis_policy_core::cmf::ContentPart;
+
+        let observed = payload
+            .message
+            .content
+            .iter()
+            .filter_map(|part| match part {
+                ContentPart::ToolResult { content } => Some(content.content.to_string()),
+                ContentPart::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.observed
+            .lock()
+            .expect("scanner observations")
+            .push(observed.clone());
+        if observed.contains("SENTINEL") {
+            return PluginResult::deny(ppe::praxis_policy_core::error::PluginViolation::new(
+                "tool.text_withheld",
+                "tool output contains a forbidden marker",
+            ));
+        }
+        PluginResult::allow()
+    }
+}
+
+/// Factory for the whole-message tool response scanner.
+struct WholeMessageScannerFactory {
+    observed: Arc<Mutex<Vec<String>>>,
+}
+
+impl PluginFactory for WholeMessageScannerFactory {
+    fn create(&self, config: &PluginConfig) -> Result<PluginInstance, Box<PluginError>> {
+        let plugin = Arc::new(WholeMessageScanner {
+            cfg: config.clone(),
+            observed: Arc::clone(&self.observed),
+        });
+        let adapter: Arc<dyn AnyHookHandler> = Arc::new(TypedHandlerAdapter::<CmfHook, _>::new(Arc::clone(&plugin)));
+        Ok(PluginInstance {
+            plugin,
+            handlers: vec![("cmf.tool_post_invoke", adapter)],
+        })
+    }
+}
+
+/// Host plugin that accepts a real CMF payload mutation on either LLM hook.
+struct InferencePayloadMutator {
+    cfg: PluginConfig,
+}
+
+impl Plugin for InferencePayloadMutator {
+    fn config(&self) -> &PluginConfig {
+        &self.cfg
+    }
+}
+
+impl HookHandler<CmfHook> for InferencePayloadMutator {
+    async fn handle(
+        &self,
+        payload: &MessagePayload,
+        _extensions: &Extensions,
+        _ctx: &mut PluginContext,
+    ) -> PluginResult<MessagePayload> {
+        let mut updated = payload.clone();
+        updated
+            .message
+            .content
+            .push(ppe::praxis_policy_core::cmf::ContentPart::Text {
+                text: "accepted test mutation".to_owned(),
+            });
+        PluginResult::modify_payload(updated)
+    }
+}
+
+/// Factory serving the same mutation on input and output hooks.
+struct InferencePayloadMutatorFactory;
+
+impl PluginFactory for InferencePayloadMutatorFactory {
+    fn create(&self, config: &PluginConfig) -> Result<PluginInstance, Box<PluginError>> {
+        let plugin = Arc::new(InferencePayloadMutator { cfg: config.clone() });
+        let adapter: Arc<dyn AnyHookHandler> = Arc::new(TypedHandlerAdapter::<CmfHook, _>::new(Arc::clone(&plugin)));
+        Ok(PluginInstance {
+            plugin,
+            handlers: vec![("cmf.llm_input", Arc::clone(&adapter)), ("cmf.llm_output", adapter)],
+        })
     }
 }
 
@@ -4910,6 +5140,98 @@ routes:
     (dir, cfg_path.to_str().expect("utf8 path").to_owned())
 }
 
+/// Write an inference policy with the requested output rule.
+fn write_llm_output_rule(rule: &str) -> (TempDir, String) {
+    let (dir, path) = write_llm_post_config();
+    let original = std::fs::read_to_string(&path).expect("read inference policy");
+    let updated = original.replace(
+        "completion.tokens.total > 100: deny('completion too long', 'completion_too_long')",
+        rule,
+    );
+    std::fs::write(&path, updated).expect("write inference policy");
+    (dir, path)
+}
+
+/// Result of both policy response phases for one admitted inference request.
+struct InferenceResponseResult {
+    /// The head-phase action, including an early rejection when present.
+    head: FilterAction,
+    /// The bytes after the body hook, if it ran.
+    body: Option<bytes::Bytes>,
+    /// Metadata-only output returned to a host filter.
+    output: Option<PolicyResponseOutput>,
+}
+
+/// Run a response with adapter-like body context after admitting the request.
+async fn evaluate_inference_response(
+    filter: &PolicyFilter,
+    mut response: crate::context::Response,
+    upstream: &[u8],
+    host: Option<PolicyResponseContext>,
+) -> InferenceResponseResult {
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    admit_inference(filter, &mut ctx).await;
+    if let Some(host) = host {
+        ctx.extensions.insert(host);
+    }
+    ctx.response_header = Some(&mut response);
+    let head = filter.on_response(&mut ctx).await.expect("response head policy");
+    ctx.response_header = None;
+    let body = (!matches!(head, FilterAction::Reject(_)))
+        .then(|| apply_inference_response_body(filter, &mut ctx, upstream))
+        .flatten();
+    InferenceResponseResult {
+        head,
+        body,
+        output: ctx.extensions.get::<PolicyResponseOutput>().cloned(),
+    }
+}
+
+/// Evaluate a buffered body after the final head has left the filter context.
+fn apply_inference_response_body(
+    filter: &PolicyFilter,
+    ctx: &mut crate::HttpFilterContext<'_>,
+    upstream: &[u8],
+) -> Option<bytes::Bytes> {
+    let mut body = Some(bytes::Bytes::copy_from_slice(upstream));
+    let action = filter
+        .on_response_body(ctx, &mut body, true)
+        .expect("response body policy");
+    assert!(matches!(action, FilterAction::Continue), "body action: {action:?}");
+    body
+}
+
+/// Build a final JSON response head for policy boundary tests.
+fn json_response() -> crate::context::Response {
+    let mut response = crate::test_utils::make_response();
+    response
+        .headers
+        .insert("content-type", HeaderValue::from_static("application/json"));
+    response
+}
+
+/// Require a denied completion to suppress the upstream sentinel.
+async fn assert_json_completion_withheld(filter: &PolicyFilter, upstream: &[u8]) {
+    let result = evaluate_inference_response(filter, json_response(), upstream, None).await;
+    let served = result.body.expect("body hook ran");
+    assert!(
+        !served.windows(8).any(|part| part == b"SENTINEL"),
+        "uninspected bytes escaped"
+    );
+    assert_eq!(served.len(), upstream.len(), "committed response length remains valid");
+}
+
+/// Require clean JSON to retain its original bytes.
+async fn assert_json_completion_unchanged(filter: &PolicyFilter, upstream: &[u8]) {
+    let result = evaluate_inference_response(filter, json_response(), upstream, None).await;
+    assert_eq!(
+        result.body.as_deref(),
+        Some(upstream),
+        "clean JSON keeps original bytes"
+    );
+}
+
 /// Write an inference response policy whose decision depends on the request path.
 fn write_llm_http_response_config() -> (TempDir, String) {
     let (dir, path) = write_llm_post_config();
@@ -5652,21 +5974,19 @@ async fn inference_round_trip(
 ) -> bytes::Bytes {
     let req = request_for_alice();
     let mut ctx = make_filter_context(&req);
-    let mut request = Some(bytes::Bytes::from_static(request_body.as_bytes()));
-    let action = filter
-        .on_request_body(&mut ctx, &mut request, true)
-        .await
-        .expect("request phase ran");
-    assert!(
-        matches!(action, FilterAction::BodyDone),
-        "the request half must admit before the response half is meaningful; got {action:?}",
-    );
+    admit_inference_payload(filter, &mut ctx, request_body).await;
 
     let mut response = crate::test_utils::make_response();
     response
         .headers
         .insert("content-type", HeaderValue::from_static(content_type));
     ctx.response_header = Some(&mut response);
+    let head_action = filter.on_response(&mut ctx).await.expect("response head phase ran");
+    assert!(
+        matches!(head_action, FilterAction::Continue),
+        "response head action: {head_action:?}"
+    );
+    ctx.response_header = None;
 
     let mut body = Some(bytes::Bytes::from_static(response_body.as_bytes()));
     drop(
@@ -5675,6 +5995,23 @@ async fn inference_round_trip(
             .expect("response phase ran"),
     );
     body.expect("response body")
+}
+
+/// Admit the caller's inference payload before response-phase assertions.
+async fn admit_inference_payload(
+    filter: &PolicyFilter,
+    ctx: &mut crate::HttpFilterContext<'_>,
+    request_body: &'static str,
+) {
+    let mut request = Some(bytes::Bytes::from_static(request_body.as_bytes()));
+    let action = filter
+        .on_request_body(ctx, &mut request, true)
+        .await
+        .expect("request phase ran");
+    assert!(
+        matches!(action, FilterAction::BodyDone),
+        "the request half must admit before the response half is meaningful; got {action:?}",
+    );
 }
 
 #[test]
@@ -5771,6 +6108,52 @@ async fn a_field_mutator_leaves_an_inference_response_untouched() {
         body,
         bytes::Bytes::from_static(WITHIN_BUDGET_RESPONSE.as_bytes()),
         "the client must receive the upstream body, not a partial redaction",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn allowed_inference_without_mutation_does_not_warn() {
+    let (_dir, path) = write_llm_post_only_config();
+    let filter = build_read_write_filter(path);
+    let body = inference_round_trip(
+        &filter,
+        r#"{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}"#,
+        WITHIN_BUDGET_RESPONSE,
+        "application/json",
+    )
+    .await;
+    assert_eq!(
+        body,
+        bytes::Bytes::from_static(WITHIN_BUDGET_RESPONSE.as_bytes()),
+        "clean response is unchanged"
+    );
+    assert_eq!(
+        filter.mutation_warning_flags(),
+        (false, false),
+        "no CMF payload changed"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn accepted_inference_payload_mutation_sets_both_warning_flags() {
+    let (_dir, path) = write_inference_payload_mutator_config();
+    let filter = build_read_write_filter(path);
+    let body = inference_round_trip(
+        &filter,
+        r#"{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}"#,
+        WITHIN_BUDGET_RESPONSE,
+        "application/json",
+    )
+    .await;
+    assert_eq!(
+        body,
+        bytes::Bytes::from_static(WITHIN_BUDGET_RESPONSE.as_bytes()),
+        "unsupported rewrite keeps wire bytes"
+    );
+    assert_eq!(
+        filter.mutation_warning_flags(),
+        (true, true),
+        "both CMF mutations were accepted"
     );
 }
 
@@ -5943,6 +6326,225 @@ async fn a_body_past_the_inference_ceiling_is_rejected() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn malformed_json_completion_runs_output_denial() {
+    let (_dir, path) = write_llm_output_rule("authenticated: deny('withheld', 'output_withheld')");
+    let filter = build_read_write_filter(path);
+    for upstream in [
+        &br#"{"choices":[{"message":{"content":"SENTINEL"}}]}"#[..],
+        &br#"["SENTINEL", "more content to fit a denial envelope"]"#[..],
+        &br#""SENTINEL with enough content to fit a denial envelope""#[..],
+        &br#"{"choices":["SENTINEL"],"broken": "unfinished""#[..],
+    ] {
+        assert_json_completion_withheld(&filter, upstream).await;
+    }
+    let (_dir, path) = write_llm_output_rule("result == 'SENTINEL': deny('withheld', 'output_withheld')");
+    let filter = build_read_write_filter(path);
+    let clean = br#"{"choices":[{"message":{"content":"clean"}}]}"#;
+    assert_json_completion_unchanged(&filter, clean).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn non_json_inference_response_contract_is_preserved() {
+    let (_dir, path) = write_llm_output_rule("authenticated: deny('withheld', 'output_withheld')");
+    let filter = build_read_write_filter(path);
+    assert_nonjson_status_controls(&filter).await;
+    assert_empty_json_and_error_status(&filter).await;
+    assert_host_nonobject_fallback().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn declared_json_media_types_fail_closed_for_unreadable_completions() {
+    let (_dir, path) = write_llm_output_rule("authenticated: deny('withheld', 'output_withheld')");
+    let filter = build_read_write_filter(path);
+    let malformed = b"{\"choices\":[{\"message\":{\"content\":\"SENTINEL with enough room for a fitted denial envelope\"}}],\"broken\":";
+    for (content_type, declared_json) in [
+        ("application/json", true),
+        ("APPLICATION/JSON; charset=utf-8", true),
+        ("application/problem+json", true),
+        ("Application/Vnd.Example+Json; version=1", true),
+        ("application/json-seq", false),
+        ("application/vnd.example+json-suffix", false),
+        ("text/json", false),
+        ("audio/mpeg", false),
+    ] {
+        let response = response_with_content_type(content_type);
+        let result = evaluate_inference_response(&filter, response, malformed, None).await;
+        assert!(matches!(result.head, FilterAction::Continue), "{content_type}");
+        let served = result.body.expect("body hook ran");
+        if declared_json {
+            assert_ne!(served.as_ref(), malformed.as_slice(), "{content_type} must fail closed");
+            assert!(!served.windows(8).any(|part| part == b"SENTINEL"), "{content_type}");
+        } else {
+            assert_eq!(
+                served.as_ref(),
+                malformed.as_slice(),
+                "{content_type} is outside declared JSON"
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn object_completions_are_inspected_even_without_declared_json() {
+    let (_dir, path) = write_llm_output_rule("authenticated: deny('withheld', 'output_withheld')");
+    let filter = build_read_write_filter(path);
+    let upstream = br#"{"choices":[{"message":{"content":"SENTINEL with enough room for a fitted denial envelope"}}]}"#;
+    for content_type in ["application/problem+json", "text/plain", "audio/mpeg"] {
+        let response = response_with_content_type(content_type);
+        let result = evaluate_inference_response(&filter, response, upstream, None).await;
+        let served = result.body.expect("body hook ran");
+        assert!(!served.windows(8).any(|part| part == b"SENTINEL"), "{content_type}");
+    }
+}
+
+/// Build a successful response advertising one static media type.
+fn response_with_content_type(content_type: &'static str) -> crate::context::Response {
+    let mut response = crate::test_utils::make_response();
+    response
+        .headers
+        .insert("content-type", HeaderValue::from_static(content_type));
+    response
+}
+
+/// Preserve media types, provider errors, and empty/bodyless response bytes.
+async fn assert_nonjson_status_controls(filter: &PolicyFilter) {
+    for (status, content_type, upstream) in [
+        (http::StatusCode::OK, "audio/mpeg", &b"binary\0SENTINEL"[..]),
+        (
+            http::StatusCode::BAD_GATEWAY,
+            "application/json",
+            &b"[\"provider error\"]"[..],
+        ),
+        (http::StatusCode::OK, "application/json", &b""[..]),
+        (http::StatusCode::NO_CONTENT, "application/json", &b""[..]),
+        (http::StatusCode::NOT_MODIFIED, "application/json", &b""[..]),
+    ] {
+        let mut response = crate::test_utils::make_response();
+        response.status = status;
+        response
+            .headers
+            .insert("content-type", HeaderValue::from_str(content_type).expect("media type"));
+        let result = evaluate_inference_response(filter, response, upstream, None).await;
+        assert_eq!(
+            result.body.as_deref(),
+            Some(upstream),
+            "{status} {content_type} remains intact"
+        );
+    }
+}
+
+/// Preserve a declared zero-length result while still evaluating error objects.
+async fn assert_empty_json_and_error_status(filter: &PolicyFilter) {
+    let mut response = json_response();
+    response.headers.insert("content-length", HeaderValue::from_static("0"));
+    let result = evaluate_inference_response(filter, response, b"", None).await;
+    assert!(matches!(result.head, FilterAction::Continue));
+    assert_eq!(result.body.as_deref(), Some(&b""[..]));
+    let mut response = json_response();
+    response.status = http::StatusCode::BAD_GATEWAY;
+    let upstream = br#"{"error":"provider error with enough room for a fitted policy denial"}"#;
+    let result = evaluate_inference_response(filter, response, upstream, None).await;
+    assert_ne!(
+        result.body.as_deref(),
+        Some(upstream.as_slice()),
+        "object-shaped errors still run post policy",
+    );
+}
+
+/// A trusted host keeps metadata-only output for a non-object body.
+async fn assert_host_nonobject_fallback() {
+    let (_dir, path) = write_llm_response_context_config(true);
+    let filter = build_read_write_filter(path);
+    let result = evaluate_inference_response(
+        &filter,
+        json_response(),
+        b"[\"provider-shaped but non-object\"]",
+        Some(PolicyResponseContext::default()),
+    )
+    .await;
+    assert_eq!(
+        result
+            .output
+            .as_ref()
+            .and_then(PolicyResponseOutput::violation)
+            .map(|item| item.code.as_str()),
+        Some("metadata_denied"),
+        "non-object host context must publish its metadata denial",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn head_response_preserves_metadata_only_behavior() {
+    let (_dir, path) = write_llm_response_context_config(false);
+    let filter = build_read_write_filter(path);
+    let mut req = request_for_alice();
+    req.method = Method::HEAD;
+    let mut ctx = make_filter_context(&req);
+    admit_inference(&filter, &mut ctx).await;
+    ctx.extensions.insert(PolicyResponseContext::default());
+    let mut response = crate::test_utils::make_response();
+    response
+        .headers
+        .insert("content-type", HeaderValue::from_static("application/json"));
+    response
+        .headers
+        .insert("content-encoding", HeaderValue::from_static("gzip"));
+    ctx.response_header = Some(&mut response);
+    let action = filter.on_response(&mut ctx).await.expect("HEAD response policy");
+    assert!(matches!(action, FilterAction::Continue), "HEAD has no body to inspect");
+    assert!(
+        ctx.extensions.get::<PolicyResponseOutput>().is_some(),
+        "metadata publishes at the head"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn responses_output_text_reaches_completion_policy() {
+    let (_dir, path) = write_llm_output_rule(
+        r#"result == 'cleanSENTINEL' | result == '{\"query\":\"SENTINEL\"}': deny('withheld', 'output_withheld')"#,
+    );
+    let filter = build_read_write_filter(path);
+    for output in [
+        json!([
+            {"type":"message","content":[{"type":"output_text","text":"clean"}]},
+            {"type":"message","content":[{"type":"output_text","text":"SENTINEL"}]}
+        ]),
+        json!([
+            {"type":"message","content":[{"type":"output_image","text":"ignored"}]},
+            {"type":"function_call","name":"lookup","arguments":"{\"query\":\"SENTINEL\"}"}
+        ]),
+    ] {
+        let upstream = json!({"id":"resp_1","output":output,"metadata":{"benign":true}}).to_string();
+        assert_json_completion_withheld(&filter, upstream.as_bytes()).await;
+    }
+    let clean = json!({"output":[{"type":"message","content":[{"type":"output_image","text":"ignored"}]}]}).to_string();
+    assert_json_completion_unchanged(&filter, clean.as_bytes()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn chat_tool_arguments_reach_completion_policy() {
+    let (_dir, path) =
+        write_llm_output_rule("result == 'cleanSENTINEL' | result == 'SENTINEL': deny('withheld', 'output_withheld')");
+    let filter = build_read_write_filter(path);
+    for body in [
+        json!({"choices":[
+            {"message":{"content":"clean"}},
+            {"message":{"tool_calls":[{"function":{"name":"lookup","arguments":"SENTINEL"}}]}}
+        ]}),
+        json!({"choices":[{"message":{"function_call":{"name":"lookup","arguments":"SENTINEL"}}}]}),
+        json!({"choices":[{"text":"SENTINEL"}]}),
+        json!({"content":[{"type":"text","text":"SENTINEL"}]}),
+    ] {
+        let upstream = body.to_string();
+        assert_json_completion_withheld(&filter, upstream.as_bytes()).await;
+    }
+    let clean =
+        json!({"choices":[{"message":{"content":null,"tool_calls":[{"function":{"name":"f","arguments":"{}"}}]}}]})
+            .to_string();
+    assert_json_completion_unchanged(&filter, clean.as_bytes()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_content_encoded_completion_fails_closed() {
     let (_dir, path) = write_llm_post_config();
     let filter = build_read_write_filter(path);
@@ -5960,18 +6562,233 @@ async fn a_content_encoded_completion_fails_closed() {
         .insert("content-encoding", HeaderValue::from_static("gzip"));
     ctx.response_header = Some(&mut response);
 
-    let mut body = Some(bytes::Bytes::from_static(WITHIN_BUDGET_RESPONSE.as_bytes()));
-    drop(
-        filter
-            .on_response_body(&mut ctx, &mut body, true)
-            .expect("response phase ran"),
-    );
-
-    let served = body.expect("response body");
-    let parsed: serde_json::Value = serde_json::from_slice(&served).expect("deny body is JSON");
+    let action = filter.on_response(&mut ctx).await.expect("response head policy");
+    let FilterAction::Reject(rejection) = action else {
+        panic!("encoded declared JSON must be rejected before head commit; got {action:?}");
+    };
+    let parsed: serde_json::Value =
+        serde_json::from_slice(rejection.body.as_deref().expect("deny body")).expect("deny body is JSON");
     assert_eq!(
         parsed["error"]["code"], "llm.response_unreadable",
-        "an encoded completion must not skip the response-phase policy; got {served:?}",
+        "an encoded completion must be rejected at the head; got {:?}",
+        rejection.body,
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn all_declared_json_encoding_fields_are_checked_at_final_head() {
+    let (_dir, path) = write_llm_output_rule("authenticated: deny('withheld', 'output_withheld')");
+    let filter = build_read_write_filter(path);
+    assert_ascii_encoding_cases(&filter).await;
+    let unreadable = HeaderValue::from_bytes(&[0xFF]).expect("obs-text header value");
+    assert_encoding_case(&filter, vec![unreadable.clone()], true).await;
+    assert_encoding_case(
+        &filter,
+        vec![unreadable.clone(), HeaderValue::from_static("gzip")],
+        true,
+    )
+    .await;
+    assert_encoding_case(&filter, vec![HeaderValue::from_static("gzip"), unreadable], true).await;
+    assert_encoded_binary_response_allowed(&filter).await;
+}
+
+/// Exercise missing, identity, mixed and ambiguous ASCII encoding fields.
+async fn assert_ascii_encoding_cases(filter: &PolicyFilter) {
+    for (values, rejected) in [
+        (&[][..], false),
+        (&["identity"][..], false),
+        (&["identity", "IDENTITY"][..], false),
+        (&["identity, identity"][..], false),
+        (&["gzip"][..], true),
+        (&["identity,gzip"][..], true),
+        (&["identity", "gzip"][..], true),
+        (&["gzip", "identity"][..], true),
+        (&[""][..], true),
+        (&["identity,"][..], true),
+    ] {
+        let fields = values
+            .iter()
+            .map(|value| HeaderValue::from_str(value).expect("encoding"))
+            .collect();
+        assert_encoding_case(filter, fields, rejected).await;
+    }
+}
+
+/// Check each Content-Encoding field at the head, including host-context precedence.
+async fn assert_encoding_case(filter: &PolicyFilter, values: Vec<HeaderValue>, rejected: bool) {
+    let mut response = json_response();
+    response
+        .headers
+        .insert("content-type", HeaderValue::from_static("application/problem+json"));
+    for value in values {
+        response.headers.append(http::header::CONTENT_ENCODING, value);
+    }
+    let result = evaluate_inference_response(
+        filter,
+        response,
+        WITHIN_BUDGET_RESPONSE.as_bytes(),
+        Some(PolicyResponseContext::default()),
+    )
+    .await;
+    assert_eq!(matches!(result.head, FilterAction::Reject(_)), rejected);
+    if rejected {
+        assert!(result.output.is_none(), "head rejection precedes host publication");
+    }
+}
+
+/// Encoded binary output remains outside the declared JSON contract.
+async fn assert_encoded_binary_response_allowed(filter: &PolicyFilter) {
+    let mut response = crate::test_utils::make_response();
+    response
+        .headers
+        .insert("content-type", HeaderValue::from_static("audio/mpeg"));
+    response
+        .headers
+        .insert("content-encoding", HeaderValue::from_static("gzip"));
+    let result = evaluate_inference_response(filter, response, b"opaque", None).await;
+    assert!(
+        matches!(result.head, FilterAction::Continue),
+        "encoded binary remains supported"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn early_hints_sse_does_not_release_json_policy_body() {
+    let (_dir, path) = write_llm_output_rule("result == 'SENTINEL': deny('withheld', 'output_withheld')");
+    let filter = build_read_write_filter(path);
+    for (with_host, forbidden) in [(false, true), (true, true), (false, false), (true, false)] {
+        assert_early_hints_json_case(&filter, with_host, forbidden).await;
+    }
+}
+
+/// Run 103 SSE followed by a final JSON head on one admitted request.
+async fn assert_early_hints_json_case(filter: &PolicyFilter, with_host: bool, forbidden: bool) {
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    admit_inference(filter, &mut ctx).await;
+    if with_host {
+        ctx.extensions.insert(PolicyResponseContext::default());
+    }
+    let mut early = sse_response(http::StatusCode::EARLY_HINTS);
+    ctx.response_header = Some(&mut early);
+    assert!(matches!(filter.on_response(&mut ctx).await, Ok(FilterAction::Continue)));
+    let mut final_head = json_response();
+    ctx.response_header = Some(&mut final_head);
+    assert!(matches!(filter.on_response(&mut ctx).await, Ok(FilterAction::Continue)));
+    ctx.response_header = None;
+    assert_json_body_after_hints(filter, &mut ctx, forbidden, with_host);
+}
+
+/// Require a split JSON response to stay buffered and receive its final decision.
+fn assert_json_body_after_hints(
+    filter: &PolicyFilter,
+    ctx: &mut crate::HttpFilterContext<'_>,
+    forbidden: bool,
+    with_host: bool,
+) {
+    let answer = if forbidden { "SENTINEL" } else { "clean" };
+    let upstream = json!({"choices":[{"message":{"content":answer}}]}).to_string();
+    let mut first = Some(bytes::Bytes::copy_from_slice(&upstream.as_bytes()[..12]));
+    let first_action = filter.on_response_body(ctx, &mut first, false).expect("first chunk");
+    assert!(
+        matches!(first_action, FilterAction::Continue),
+        "JSON first chunk stays buffered"
+    );
+    let mut complete = Some(bytes::Bytes::copy_from_slice(upstream.as_bytes()));
+    let eof_action = filter.on_response_body(ctx, &mut complete, true).expect("JSON EOF");
+    assert!(matches!(eof_action, FilterAction::Continue));
+    let served = complete.expect("served body");
+    assert_json_after_hints_content(&served, &upstream, forbidden);
+    assert_eq!(ctx.extensions.get::<PolicyResponseOutput>().is_some(), with_host);
+}
+
+/// Check either sentinel suppression or exact clean-body preservation.
+fn assert_json_after_hints_content(served: &bytes::Bytes, upstream: &str, forbidden: bool) {
+    if forbidden {
+        assert!(
+            !served.windows(8).any(|part| part == b"SENTINEL"),
+            "forbidden text escaped"
+        );
+    } else {
+        assert_eq!(
+            served.as_ref(),
+            upstream.as_bytes(),
+            "clean output remains byte-identical"
+        );
+    }
+}
+
+/// Build an SSE head with a caller-selected status.
+fn sse_response(status: http::StatusCode) -> crate::context::Response {
+    let mut response = crate::test_utils::make_response();
+    response.status = status;
+    response
+        .headers
+        .insert("content-type", HeaderValue::from_static("text/event-stream"));
+    response
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn final_sse_policy_classification_ignores_early_hints() {
+    let (_dir, path) = write_llm_response_context_config(false);
+    let filter = build_read_write_filter(path);
+    assert_final_sse_after_hints(&filter).await;
+    assert_upgrade_keeps_existing_hook_behavior(&filter).await;
+}
+
+/// Multiple informational JSON heads do not prevent final SSE release.
+async fn assert_final_sse_after_hints(filter: &PolicyFilter) {
+    let mut early_heads = [json_response(), json_response()];
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    admit_inference(filter, &mut ctx).await;
+    ctx.extensions.insert(PolicyResponseContext::default());
+    for early in &mut early_heads {
+        early.status = http::StatusCode::EARLY_HINTS;
+        ctx.response_header = Some(early);
+        assert!(matches!(filter.on_response(&mut ctx).await, Ok(FilterAction::Continue)));
+        ctx.response_header = None;
+    }
+    let mut final_head = sse_response(http::StatusCode::OK);
+    ctx.response_header = Some(&mut final_head);
+    assert!(matches!(filter.on_response(&mut ctx).await, Ok(FilterAction::Continue)));
+    ctx.response_header = None;
+    assert_sse_stream_body(filter, &mut ctx);
+}
+
+/// A genuine final SSE response releases chunks and publishes host output at EOF.
+fn assert_sse_stream_body(filter: &PolicyFilter, ctx: &mut crate::HttpFilterContext<'_>) {
+    let mut first = Some(bytes::Bytes::from_static(b"data: hello\n\n"));
+    let first_action = filter.on_response_body(ctx, &mut first, false).expect("SSE chunk");
+    assert!(
+        matches!(first_action, FilterAction::Release),
+        "final SSE must release its chunks"
+    );
+    assert!(ctx.extensions.get::<PolicyResponseOutput>().is_none());
+    let mut eof = Some(bytes::Bytes::from_static(b"data: [DONE]\n\n"));
+    let eof_action = filter.on_response_body(ctx, &mut eof, true).expect("SSE EOF");
+    assert!(matches!(eof_action, FilterAction::Continue));
+    assert!(
+        ctx.extensions.get::<PolicyResponseOutput>().is_some(),
+        "host metadata output at EOF"
+    );
+}
+
+/// A 101 protocol switch remains terminal without a new metadata invocation.
+async fn assert_upgrade_keeps_existing_hook_behavior(filter: &PolicyFilter) {
+    let req = request_for_alice();
+    let mut upgrade_ctx = make_filter_context(&req);
+    admit_inference(filter, &mut upgrade_ctx).await;
+    upgrade_ctx.extensions.insert(PolicyResponseContext::default());
+    let mut upgrade = sse_response(http::StatusCode::SWITCHING_PROTOCOLS);
+    upgrade_ctx.response_header = Some(&mut upgrade);
+    assert!(matches!(
+        filter.on_response(&mut upgrade_ctx).await,
+        Ok(FilterAction::Continue)
+    ));
+    assert!(
+        upgrade_ctx.extensions.get::<PolicyResponseOutput>().is_none(),
+        "101 retains its hook behavior"
     );
 }
 
@@ -6031,6 +6848,8 @@ async fn a_streamed_response_releases_the_buffer_on_the_first_chunk() {
         .headers
         .insert("content-type", HeaderValue::from_static("text/event-stream"));
     ctx.response_header = Some(&mut response);
+    assert!(matches!(filter.on_response(&mut ctx).await, Ok(FilterAction::Continue)));
+    ctx.response_header = None;
 
     let mut first = Some(bytes::Bytes::from_static(b"data: {\"delta\":\"hi\"}\n\n"));
     let action = filter
@@ -6467,7 +7286,7 @@ async fn a_non_json_response_body_passes_through() {
         &filter,
         r#"{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}"#,
         NON_JSON_RESPONSE,
-        "application/json",
+        "text/plain; charset=utf-8",
     )
     .await;
     assert_eq!(body, bytes::Bytes::from_static(NON_JSON_RESPONSE.as_bytes()));
@@ -6996,6 +7815,243 @@ fn write_tool_post_only_config() -> (TempDir, String) {
         - "authenticated: deny('results are withheld', 'result_withheld')"
 "#,
     )
+}
+
+/// Write a tool response route invoking a registered whole-message scanner.
+fn write_tool_scanner_config() -> (TempDir, String, Arc<Mutex<Vec<String>>>) {
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let factory_observed = Arc::clone(&observed);
+    register_policy_plugin_factory(
+        "test/whole-message-scanner",
+        Arc::new(move || {
+            Box::new(WholeMessageScannerFactory {
+                observed: Arc::clone(&factory_observed),
+            })
+        }),
+    );
+    let (dir, path) = write_entity_config_with_routes(
+        "routes:\n  - tool: echo\n    authorization:\n      post_invocation:\n        - \"run(whole-message-scanner)\"\n",
+    );
+    let original = std::fs::read_to_string(&path).expect("read tool policy");
+    let declaration = "  - name: whole-message-scanner\n    kind: test/whole-message-scanner\n    hooks:\n      - cmf.tool_post_invoke\n    mode: sequential\n    on_error: fail\n";
+    std::fs::write(&path, original.replace("global:\n", &format!("{declaration}global:\n")))
+        .expect("write scanner policy");
+    (dir, path, observed)
+}
+
+/// Write an LLM route whose hook plugin modifies the CMF payload twice.
+fn write_inference_payload_mutator_config() -> (TempDir, String) {
+    register_policy_plugin_factory(
+        "test/inference-payload-mutator",
+        Arc::new(|| Box::new(InferencePayloadMutatorFactory)),
+    );
+    let (dir, path) = write_entity_config_with_routes(
+        "routes:\n  - llm: \"*\"\n    authorization:\n      pre_invocation:\n        - \"run(inference-payload-mutator)\"\n      post_invocation:\n        - \"run(inference-payload-mutator)\"\n",
+    );
+    let original = std::fs::read_to_string(&path).expect("read LLM policy");
+    let declaration = "  - name: inference-payload-mutator\n    kind: test/inference-payload-mutator\n    hooks:\n      - cmf.llm_input\n      - cmf.llm_output\n    mode: sequential\n    on_error: fail\n";
+    std::fs::write(&path, original.replace("global:\n", &format!("{declaration}global:\n")))
+        .expect("write LLM mutator policy");
+    (dir, path)
+}
+
+/// Admit a classified tool request and evaluate its response body.
+async fn scan_tool_response(filter: &PolicyFilter, upstream: &[u8]) -> bytes::Bytes {
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
+    let mut request = Some(bytes::Bytes::from_static(
+        br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#,
+    ));
+    let action = filter
+        .on_request_body(&mut ctx, &mut request, true)
+        .await
+        .expect("tool admission");
+    assert!(matches!(action, FilterAction::BodyDone), "tool request was admitted");
+    let mut body = Some(bytes::Bytes::copy_from_slice(upstream));
+    let action = filter
+        .on_response_body(&mut ctx, &mut body, true)
+        .expect("tool response policy");
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "tool response policy completed"
+    );
+    body.expect("response body")
+}
+
+/// Admit a classified tool request and return the bytes sent upstream.
+async fn forward_tool_request(filter: &PolicyFilter, upstream: &[u8]) -> bytes::Bytes {
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
+    let mut body = Some(bytes::Bytes::copy_from_slice(upstream));
+    let action = filter
+        .on_request_body(&mut ctx, &mut body, true)
+        .await
+        .expect("tool admission");
+    assert!(matches!(action, FilterAction::BodyDone), "tool request was admitted");
+    body.expect("forwarded request body")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mcp_request_rewrite_requires_payload_mutation() {
+    let (_allow_dir, allow_path) = write_entity_config_with_routes(
+        "routes:\n  - tool: echo\n    authorization:\n      pre_invocation:\n        - \"require(authenticated)\"\n",
+    );
+    let original = br#"{ "jsonrpc" : "2.0", "id": 1, "method":"tools/call", "trace":"keep",
+      "params": { "name":"echo", "arguments": {"note":"clean"}, "extra":"keep" } }"#;
+    let forwarded = forward_tool_request(&build_read_write_filter(allow_path), original).await;
+    assert_eq!(
+        forwarded.as_ref(),
+        original,
+        "allowed request keeps whitespace and unknown fields"
+    );
+
+    let (_mask_dir, mask_path) =
+        write_entity_config_with_routes("routes:\n  - tool: echo\n    args:\n      ssn: \"str | mask(2)\"\n");
+    assert_masked_tool_request_rewrites(&build_read_write_filter(mask_path)).await;
+}
+
+/// A field mutation still updates the forwarded arguments and keeps siblings.
+async fn assert_masked_tool_request_rewrites(filter: &PolicyFilter) {
+    let original = br#"{ "jsonrpc":"2.0", "id":1, "method":"tools/call", "trace":"keep",
+      "params":{"name":"echo","arguments":{"ssn":"123-45-6789","note":"clean"}} }"#;
+    let forwarded = forward_tool_request(filter, original).await;
+    let parsed: serde_json::Value = serde_json::from_slice(&forwarded).expect("rewritten tool request");
+    assert_ne!(
+        parsed["params"]["arguments"]["ssn"], "123-45-6789",
+        "mask changed the secret"
+    );
+    assert_eq!(parsed["params"]["arguments"]["note"], "clean", "unrelated args survive");
+    assert_eq!(parsed["trace"], "keep", "unknown top-level fields survive");
+    assert!(
+        !forwarded.windows(11).any(|part| part == b"123-45-6789"),
+        "secret is absent upstream"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dual_representation_tool_text_reaches_post_policy() {
+    let (_dir, path, observed) = write_tool_scanner_config();
+    let filter = build_read_write_filter(path);
+    assert_scanner_denies_all_representations(&filter).await;
+    assert_scanner_preserves_clean_and_error(&filter).await;
+    assert_scanner_observed_each_text_source(&observed);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mcp_result_mutation_rewrites_and_growth_fails_closed() {
+    let (_mask_dir, mask_path) = write_tool_result_pipeline_config();
+    assert_masked_tool_result_rewrites(&build_read_write_filter(mask_path)).await;
+    let (_redact_dir, redact_path) =
+        write_entity_config_with_routes("routes:\n  - tool: echo\n    result:\n      secret: \"str | redact\"\n");
+    assert_growing_tool_result_fails_closed(&build_read_write_filter(redact_path)).await;
+}
+
+/// A real result mutation is returned at the committed response length.
+async fn assert_masked_tool_result_rewrites(filter: &PolicyFilter) {
+    let upstream = json!({"jsonrpc":"2.0","id":1,"result":{"structuredContent":{
+        "ssn":"123-45-6789","note":"unchanged","padding":"x".repeat(512)
+    }}})
+    .to_string();
+    let served = scan_tool_response(filter, upstream.as_bytes()).await;
+    let parsed: serde_json::Value = serde_json::from_slice(&served).expect("rewritten JSON-RPC response");
+    assert_eq!(served.len(), upstream.len(), "committed length is preserved");
+    assert_masked_tool_result_value(&parsed, &served);
+}
+
+/// The selected structured result changed while its sibling data survived.
+fn assert_masked_tool_result_value(parsed: &serde_json::Value, served: &[u8]) {
+    assert_ne!(
+        parsed["result"]["structuredContent"]["ssn"], "123-45-6789",
+        "mask changed the secret"
+    );
+    assert_eq!(
+        parsed["result"]["structuredContent"]["note"], "unchanged",
+        "unrelated result survives"
+    );
+    assert!(
+        !served.windows(11).any(|part| part == b"123-45-6789"),
+        "secret is absent downstream"
+    );
+}
+
+/// A growing result mutation emits a fitted error, never partial output.
+async fn assert_growing_tool_result_fails_closed(filter: &PolicyFilter) {
+    let upstream = json!({"jsonrpc":"2.0","id":1,"result":{"structuredContent":{
+        "secret":"s","padding":"x".repeat(512)
+    }}})
+    .to_string();
+    let served = scan_tool_response(filter, upstream.as_bytes()).await;
+    let parsed: serde_json::Value = serde_json::from_slice(&served).expect("fitted JSON-RPC error");
+    assert_eq!(served.len(), upstream.len(), "committed length is preserved");
+    assert_eq!(
+        parsed["error"]["data"]["violation"], "gateway.response_rewrite_overflow",
+        "a rewrite that grows past the committed length fails closed"
+    );
+    assert!(parsed.get("result").is_none(), "upstream result is withheld");
+}
+
+/// A scanner denial removes forbidden text from either representation.
+async fn assert_scanner_denies_all_representations(filter: &PolicyFilter) {
+    let pad = "padding".repeat(64);
+    for result in [
+        json!({"structuredContent":{"text":"clean"},"content":[
+            {"type":"text","text":pad},{"type":"text","text":"SENTINEL"}]}),
+        json!({"structuredContent":{"text":"SENTINEL"},"content":[{"type":"text","text":pad}]}),
+        json!({"content":[{"type":"text","text":"SENTINEL"},{"type":"text","text":pad}]}),
+    ] {
+        let upstream = json!({"jsonrpc":"2.0","id":1,"result":result}).to_string();
+        let served = scan_tool_response(filter, upstream.as_bytes()).await;
+        assert!(
+            !served.windows(8).any(|part| part == b"SENTINEL"),
+            "scanner denial must hide text"
+        );
+        assert!(served.len() == upstream.len(), "committed length is preserved");
+    }
+}
+
+/// Clean dual representations and valid JSON-RPC errors retain original bytes.
+async fn assert_scanner_preserves_clean_and_error(filter: &PolicyFilter) {
+    let clean = json!({"jsonrpc":"2.0","id":1,"result":{
+        "structuredContent":{"ssn":"clean"},
+        "content":[{"type":"text","text":"clean summary"},
+                   {"type":"image","data":"opaque-binary"},
+                   {"type":"resource_link","uri":"file:///safe"}]
+    }})
+    .to_string();
+    let served = scan_tool_response(filter, clean.as_bytes()).await;
+    assert_eq!(
+        served.as_ref(),
+        clean.as_bytes(),
+        "clean dual representation keeps every block"
+    );
+    let error = br#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"upstream"}}"#;
+    let served = scan_tool_response(filter, error).await;
+    assert_eq!(served.as_ref(), error, "valid JSON-RPC errors pass unchanged");
+}
+
+/// The host scanner receives structured and secondary text once per success.
+fn assert_scanner_observed_each_text_source(observed: &Arc<Mutex<Vec<String>>>) {
+    let observed = observed.lock().expect("scanner observations");
+    assert_eq!(observed.len(), 4, "the error response does not invoke the scanner");
+    assert!(
+        observed[0].contains("SENTINEL"),
+        "secondary text reached the whole-message scanner"
+    );
+    assert!(observed[1].contains("SENTINEL"), "structured data reached the scanner");
+    assert!(observed[2].contains("SENTINEL"), "fallback text reached the scanner");
+    drop(observed);
 }
 
 /// Write an `echo` tool route with only a `result:` field pipeline.
@@ -7567,7 +8623,7 @@ async fn malformed_classified_tool_response_returns_filter_error_without_partial
 )]
 async fn uninspectable_tool_response_is_error_but_empty_results_and_valid_errors_pass() {
     // An admitting post hook isolates envelope validation from result rewriting.
-    // The masking fixture intentionally canonicalizes content arrays and can grow them.
+    // With no mutator, even an empty or mixed content array keeps its wire bytes.
     let (_dir, path) = write_entity_config_with_routes(
         r#"routes:
   - tool: echo
@@ -7616,24 +8672,25 @@ async fn uninspectable_tool_response_is_error_but_empty_results_and_valid_errors
         serde_json::json!({"jsonrpc":"2.0","id":1,"result":null}),
         serde_json::json!({"jsonrpc":"2.0","id":1,"result":{}}),
         serde_json::json!({"jsonrpc":"2.0","id":1,"result":{"content":[]}}),
+        serde_json::json!({"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"answer":42},"content":[
+            {"type":"text","text":"clean summary"},
+            {"type":"image","data":"opaque-binary"},
+            {"type":"resource_link","uri":"file:///safe"}
+        ]}}),
     ] {
-        // Response hooks canonicalize a content array even without a mutator.
-        // Supply room for that existing representation and preserve its length.
-        let mut original = serde_json::to_vec(&value).unwrap();
-        original.resize(512, b' ');
-        let mut body = Some(bytes::Bytes::from(original));
-        assert!(matches!(
-            filter.on_response_body(&mut ctx, &mut body, true).unwrap(),
-            FilterAction::Continue
-        ));
-        assert_eq!(body.as_ref().unwrap().len(), 512);
-        let actual: serde_json::Value = serde_json::from_slice(body.as_deref().unwrap()).unwrap();
-        let expected = if value.pointer("/result/content").is_some() {
-            serde_json::json!({"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"null"}]}})
-        } else {
-            value
-        };
-        assert_eq!(actual, expected);
+        for padded in [false, true] {
+            let mut original = serde_json::to_vec(&value).unwrap();
+            if padded {
+                original.resize(512, b' ');
+            }
+            let original = bytes::Bytes::from(original);
+            let mut body = Some(original.clone());
+            assert!(matches!(
+                filter.on_response_body(&mut ctx, &mut body, true).unwrap(),
+                FilterAction::Continue
+            ));
+            assert_eq!(body, Some(original));
+        }
     }
     let mut empty = Some(bytes::Bytes::new());
     assert!(matches!(

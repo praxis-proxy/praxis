@@ -1859,6 +1859,11 @@ impl HttpFilter for AccessLogFilter {
             return Ok(FilterAction::Continue);
         };
         let status = resp.status.as_u16();
+        // An informational head has no body, but does not finish the
+        // exchange. Keep the existing final 101 upgrade behavior.
+        if resp.status.is_informational() && resp.status != http::StatusCode::SWITCHING_PROTOCOLS {
+            return Ok(FilterAction::Continue);
+        }
         let bodyless = Self::is_bodyless(resp.status, &ctx.request.method);
         let response_headers = self.needs_response_headers.then(|| resp.headers.clone());
 

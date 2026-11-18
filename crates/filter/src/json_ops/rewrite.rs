@@ -477,7 +477,7 @@ fn rewrite_object(
 
     let mut emitted_any = false;
     let mut seen_input_member = false;
-    let mut satisfied_add_keys: Vec<&str> = Vec::new();
+    let mut present_add_keys: Vec<&str> = Vec::new();
 
     loop {
         skip_ws(input, i);
@@ -514,8 +514,8 @@ fn rewrite_object(
                 op_set,
                 session,
             )?;
-            if op.kind == OpKind::Add && resolve_payload(op_idx, op, session).is_some() {
-                satisfied_add_keys.push(op.tokens.last().map_or("", String::as_str));
+            if op.kind == OpKind::Add {
+                present_add_keys.push(op.tokens.last().map_or("", String::as_str));
             }
             session.path.pop();
             continue;
@@ -535,13 +535,7 @@ fn rewrite_object(
         }
     }
 
-    inject_object_adds(
-        op_set,
-        &satisfied_add_keys,
-        out.as_deref_mut(),
-        &mut emitted_any,
-        session,
-    );
+    inject_object_adds(op_set, &present_add_keys, out.as_deref_mut(), &mut emitted_any, session);
     if let Some(out) = out.as_mut() {
         out.push(b'}');
     }
@@ -584,10 +578,10 @@ fn apply_object_mutate(
     }
 }
 
-/// Emit unsatisfied object `add` ops at `session.path` in config order.
+/// Emit object `add` ops whose target was absent at `session.path`.
 fn inject_object_adds(
     op_set: &CompiledOpSet,
-    satisfied: &[&str],
+    present: &[&str],
     out: Option<&mut Vec<u8>>,
     emitted_any: &mut bool,
     session: &mut RewriteSession,
@@ -602,7 +596,7 @@ fn inject_object_adds(
         let Some(last) = op.tokens.last() else {
             continue;
         };
-        if last == "-" || satisfied.contains(&last.as_str()) {
+        if last == "-" || present.contains(&last.as_str()) {
             continue;
         }
         let Some(op_idx) = u32::try_from(idx).ok() else {

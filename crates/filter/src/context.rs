@@ -338,6 +338,11 @@ pub struct HttpFilterContext<'a> {
     /// Headers to set (overwrite) on the upstream request.
     pub request_headers_to_set: Vec<(HeaderName, http::header::HeaderValue)>,
 
+    /// Ordered request-phase mutations from the headers filter. These retain
+    /// field boundaries and execution order across successive filter instances.
+    /// Generic extra headers still replace values after this log is replayed.
+    pub request_header_mutations: Vec<TrustedHeaderMutation>,
+
     /// Durable per-request metadata that persists across all
     /// Pingora lifecycle phases (request, request-body, response,
     /// response-body, logging). Unlike [`filter_results`] which
@@ -392,9 +397,11 @@ pub struct HttpFilterContext<'a> {
     /// Filter result map: `filter_name` -> result entries.
     ///
     /// Filters write string key-value pairs here during
-    /// `on_request` or `on_response`. The pipeline executor
-    /// reads these to evaluate branch conditions. Cleared
-    /// after branch evaluation at each filter.
+    /// request or response hooks. The pipeline executor reads these to
+    /// evaluate branch conditions and clears them after each host's branch
+    /// evaluation. Head and pre-read body results are staged by filter
+    /// instance and restored only for that instance's request hook, while
+    /// branch conditions continue to use the public filter type key.
     pub filter_results: HashMap<&'static str, FilterResultSet>,
 
     /// Typed per-filter state that persists across all lifecycle
@@ -1038,18 +1045,22 @@ impl HttpFilterContext<'_> {
         Box::pin(client.send_streaming(peer, request, timeout, limits, fw)).await
     }
 
-    /// Upgrade the request body delivery mode for this request.
+    /// Request buffered delivery of this request's body.
     ///
-    /// Merges `mode` into the current mode using ratchet-up
-    /// semantics: `StreamBuffer > SizeLimit > Stream`. A mode
-    /// can only be upgraded, never downgraded.
+    /// Only [`BodyMode::StreamBuffer`] promotes delivery; multiple buffer
+    /// requests use the largest limit. The listener's body ceiling remains
+    /// the hard cap. Passing [`BodyMode::SizeLimit`] does not install an
+    /// independent filter-specific transfer limit.
     pub fn set_request_body_mode(&mut self, mode: BodyMode) {
         merge_body_mode(&mut self.request_body_mode, mode);
     }
 
-    /// Upgrade the response body delivery mode for this request.
+    /// Request buffered delivery of this request's response body.
     ///
-    /// Same ratchet-up semantics as [`set_request_body_mode`].
+    /// Only [`BodyMode::StreamBuffer`] promotes delivery; multiple buffer
+    /// requests use the largest limit. The listener's body ceiling remains
+    /// the hard cap. Passing [`BodyMode::SizeLimit`] does not install an
+    /// independent filter-specific transfer limit.
     ///
     /// [`set_request_body_mode`]: Self::set_request_body_mode
     pub fn set_response_body_mode(&mut self, mode: BodyMode) {
@@ -1168,7 +1179,9 @@ impl HttpFilterContext<'_> {
     ///
     /// Returns a tri-state [`PendingHeaderResult`] so callers can
     /// distinguish "not mentioned" from "explicitly removed."
-    /// Applies mutations in HTTP order: remove → set → add.
+    /// Applies generic remove/set queues, then the headers filter's ordered
+    /// mutations. Generic extras accumulate for ambiguity checking, preserving
+    /// the pre-read phase's remove/set/add contract.
     ///
     /// Multiple distinct values are rejected as ambiguous. This is
     /// intentionally stricter than the normal pipeline's last-write-wins
@@ -1181,31 +1194,18 @@ impl HttpFilterContext<'_> {
     /// non-text bytes, or if the final state has multiple
     /// distinct values.
     pub fn pending_header_value(&self, name: &HeaderName) -> Result<PendingHeaderResult, String> {
-        // The pipeline normalizes pending mutations as remove → set → add:
-        // a remove clears any prior value, a set establishes a new one, and
-        // adds accumulate. When both remove and set are present for the same
-        // header, the set wins because it is applied after the remove.
-        let removed = self.request_headers_to_remove.iter().any(|n| n == name);
-        let set_value = find_last_set(&self.request_headers_to_set, name)?;
-        let extras = collect_extras(&self.extra_request_headers, name);
-
-        let mut all: Vec<String> = Vec::new();
-        if let Some(s) = set_value {
-            all.push(s);
-        }
-        all.extend(extras);
-
+        let (all, touched) = collect_pending_request_values(self, name);
         if all.is_empty() {
-            return Ok(if removed {
+            return Ok(if touched {
                 PendingHeaderResult::Removed
             } else {
                 PendingHeaderResult::Absent
             });
         }
-
-        match require_unique_value(all, name, "pending")? {
+        let text = all.into_iter().collect::<Result<Vec<_>, _>>()?;
+        match require_unique_value(text, name, "pending")? {
             Some(v) => Ok(PendingHeaderResult::Value(v)),
-            None => Ok(if removed {
+            None => Ok(if touched {
                 PendingHeaderResult::Removed
             } else {
                 PendingHeaderResult::Absent
@@ -1302,6 +1302,63 @@ impl HttpFilterContext<'_> {
 // Header Resolution Utilities
 // -----------------------------------------------------------------------------
 
+/// Collect pending text results, retaining errors until overwrites are resolved.
+fn collect_pending_request_values(
+    ctx: &HttpFilterContext<'_>,
+    name: &HeaderName,
+) -> (Vec<Result<String, String>>, bool) {
+    let removed = ctx.request_headers_to_remove.iter().any(|header| header == name);
+    let set = ctx
+        .request_headers_to_set
+        .iter()
+        .rev()
+        .find(|(header, _)| header == name);
+    let mut values = set.map_or_else(Vec::new, |(_, value)| vec![pending_header_text(value, name)]);
+    let ordered_touched = ctx
+        .request_header_mutations
+        .iter()
+        .any(|mutation| mutation.matches_header(name));
+    if values.is_empty() && !removed && ordered_touched {
+        values.extend(
+            ctx.request
+                .headers
+                .get_all(name)
+                .iter()
+                .map(|value| pending_header_text(value, name)),
+        );
+    }
+    replay_pending_request_values(&mut values, &ctx.request_header_mutations, name);
+    let extras = collect_extras(&ctx.extra_request_headers, name);
+    values.extend(extras.into_iter().map(Ok));
+    (values, removed || set.is_some() || ordered_touched)
+}
+
+/// Preserve the header-value text contract without rejecting overwritten values.
+fn pending_header_text(value: &http::HeaderValue, name: &HeaderName) -> Result<String, String> {
+    value
+        .to_str()
+        .map(str::to_owned)
+        .map_err(|_error| format!("pending header '{name}' contains non-text bytes"))
+}
+
+/// Replay matching mutations, retaining Add strings and strict Set validation.
+fn replay_pending_request_values(
+    values: &mut Vec<Result<String, String>>,
+    mutations: &[TrustedHeaderMutation],
+    name: &HeaderName,
+) {
+    for mutation in mutations.iter().filter(|mutation| mutation.matches_header(name)) {
+        match mutation {
+            TrustedHeaderMutation::Remove(_) => values.clear(),
+            TrustedHeaderMutation::Set(_, value) => {
+                values.clear();
+                values.push(pending_header_text(value, name));
+            },
+            TrustedHeaderMutation::Add(_, value) => values.push(Ok(value.clone())),
+        }
+    }
+}
+
 /// Walk the trusted mutation log forward and collect the effective values.
 ///
 /// Returns the surviving values plus whether any mutation *mentioned* `name`.
@@ -1338,22 +1395,6 @@ fn collect_trusted_values<'m>(
     Ok((values, touched))
 }
 
-/// Find the last matching set value for a header name.
-fn find_last_set(
-    headers_to_set: &[(HeaderName, http::header::HeaderValue)],
-    name: &HeaderName,
-) -> Result<Option<String>, String> {
-    for (n, v) in headers_to_set.iter().rev() {
-        if n == name {
-            let s = v
-                .to_str()
-                .map_err(|_err| format!("pending header '{name}' contains non-text bytes"))?;
-            return Ok(Some(s.to_owned()));
-        }
-    }
-    Ok(None)
-}
-
 /// Collect all matching extra header values for a header name.
 fn collect_extras(extras: &[(Cow<'_, str>, String)], name: &HeaderName) -> Vec<String> {
     let name_str = name.as_str();
@@ -1384,12 +1425,12 @@ fn require_unique_value(values: Vec<String>, name: &HeaderName, source: &str) ->
 // Effective Headers Overlay
 // -----------------------------------------------------------------------------
 
-/// Header view for pre-read body filters: the original request overlaid with
-/// trusted header mutations.
+/// Header view used by pre-read body conditions and trace initialization:
+/// the original request overlaid with pending and trusted pre-read mutations.
 ///
-/// Lookups resolve in last-writer-wins order: the current pass's grouped
-/// pending queues (via [`pending_header_value`]) first, then the ordered
-/// trusted log (prior passes and this pass, via
+/// Lookups resolve the grouped queues and ordered request mutations through
+/// [`pending_header_value`] first, then the ordered trusted pre-read log
+/// (prior passes and this pass, via
 /// [`resolve_trusted_header_state`]), and finally the original request. This
 /// mirrors what the request phase sees after the protocol layer merges the log
 /// into the request, so a body filter can be gated on a header an earlier
@@ -1449,18 +1490,58 @@ impl HeaderSource for EffectiveHeaders<'_, '_> {
 ///
 /// `None` means no queue mentioned it, so the trusted log decides.
 fn pending_presence(ctx: &HttpFilterContext<'_>, name: &HeaderName) -> Result<Option<bool>, ConditionError> {
+    let (values, touched) = collect_pending_presence_values(ctx, name);
+    if !values.is_empty() {
+        return require_unique_bytes(values.into_iter(), name).map(Some);
+    }
+    Ok(touched.then_some(false))
+}
+
+/// Collect surviving bytes, retaining generic extras for pre-read ambiguity checks.
+fn collect_pending_presence_values<'a>(ctx: &'a HttpFilterContext<'_>, name: &HeaderName) -> (Vec<&'a [u8]>, bool) {
     let set = find_last_set_bytes(&ctx.request_headers_to_set, name);
-    let extras = ctx
+    let removed = ctx.request_headers_to_remove.iter().any(|n| n == name);
+    let ordered_touched = ctx
+        .request_header_mutations
+        .iter()
+        .any(|mutation| mutation.matches_header(name));
+    let mut values: Vec<&[u8]> = set.into_iter().collect();
+    if values.is_empty() && !removed && ordered_touched {
+        values.extend(
+            ctx.request
+                .headers
+                .get_all(name)
+                .iter()
+                .map(http::HeaderValue::as_bytes),
+        );
+    }
+    replay_pending_presence_values(&mut values, &ctx.request_header_mutations, name);
+    let extras: Vec<_> = ctx
         .extra_request_headers
         .iter()
-        .filter(|(n, _)| n.eq_ignore_ascii_case(name.as_str()))
-        .map(|(_, v)| v.as_bytes());
-    let mut values = set.into_iter().chain(extras).peekable();
-    if values.peek().is_some() {
-        return require_unique_bytes(values, name).map(Some);
+        .filter(|(header, _)| header.eq_ignore_ascii_case(name.as_str()))
+        .map(|(_, value)| value.as_bytes())
+        .collect();
+    values.extend(extras);
+    (values, removed || set.is_some() || ordered_touched)
+}
+
+/// Replay ordered mutations while retaining byte references to opaque fields.
+fn replay_pending_presence_values<'a>(
+    values: &mut Vec<&'a [u8]>,
+    mutations: &'a [TrustedHeaderMutation],
+    name: &HeaderName,
+) {
+    for mutation in mutations.iter().filter(|mutation| mutation.matches_header(name)) {
+        match mutation {
+            TrustedHeaderMutation::Remove(_) => values.clear(),
+            TrustedHeaderMutation::Set(_, value) => {
+                values.clear();
+                values.push(value.as_bytes());
+            },
+            TrustedHeaderMutation::Add(_, value) => values.push(value.as_bytes()),
+        }
     }
-    let removed = ctx.request_headers_to_remove.iter().any(|n| n == name);
-    Ok(removed.then_some(false))
 }
 
 /// Raw bytes of the last pending `Set` for `name`, if any.
@@ -2584,6 +2665,46 @@ content-length: 0
     }
 
     #[test]
+    fn effective_headers_resolve_ordered_request_mutations() {
+        let mut request = crate::test_utils::make_request(Method::GET, "/");
+        request.headers.insert("x-gate", "client".parse().unwrap());
+        let mut ctx = crate::test_utils::make_filter_context(&request);
+        let name: HeaderName = "x-gate".parse().unwrap();
+        ctx.request_header_mutations
+            .push(TrustedHeaderMutation::Add(name.clone(), "extra".to_owned()));
+        assert!(ctx.pending_header_value(&name).unwrap_err().contains("ambiguous"));
+        drop(effective_value(&ctx, "x-gate").expect_err("distinct values must fail closed"));
+        ctx.request_header_mutations
+            .push(TrustedHeaderMutation::Set(name.clone(), "final".parse().unwrap()));
+        assert_eq!(
+            ctx.pending_header_value(&name).unwrap(),
+            PendingHeaderResult::Value("final".to_owned())
+        );
+        assert_eq!(effective_value(&ctx, "x-gate").unwrap().as_deref(), Some("final"));
+        ctx.request_header_mutations
+            .push(TrustedHeaderMutation::Remove(name.clone()));
+        assert_eq!(ctx.pending_header_value(&name).unwrap(), PendingHeaderResult::Removed);
+        assert_eq!(effective_value(&ctx, "x-gate").unwrap(), None);
+    }
+
+    #[test]
+    fn ordered_set_overwrites_opaque_original_before_text_lookup() {
+        let mut request = crate::test_utils::make_request(Method::GET, "/");
+        request
+            .headers
+            .insert("x-gate", http::HeaderValue::from_bytes(b"\x80opaque").unwrap());
+        let mut ctx = crate::test_utils::make_filter_context(&request);
+        let name: HeaderName = "x-gate".parse().unwrap();
+        ctx.request_header_mutations
+            .push(TrustedHeaderMutation::Set(name.clone(), "safe".parse().unwrap()));
+        assert_eq!(
+            ctx.pending_header_value(&name).unwrap(),
+            PendingHeaderResult::Value("safe".to_owned())
+        );
+        assert_eq!(effective_value(&ctx, "x-gate").unwrap().as_deref(), Some("safe"));
+    }
+
+    #[test]
     fn effective_headers_original_only() {
         let mut req = crate::test_utils::make_request(Method::GET, "/");
         req.headers.insert("x-gate", "on".parse().unwrap());
@@ -2712,13 +2833,16 @@ content-length: 0
     #[test]
     fn effective_headers_contains_mutated_value_that_is_not_text() {
         let req = crate::test_utils::make_request(Method::GET, "/");
-        let mut ctx = crate::test_utils::make_filter_context(&req);
         let opaque = || http::HeaderValue::from_bytes("José".as_bytes()).unwrap();
+        let mut ctx = crate::test_utils::make_filter_context(&req);
         ctx.request_headers_to_set.push(("x-user".parse().unwrap(), opaque()));
         ctx.prior_pre_read_mutations
             .push(TrustedHeaderMutation::Set("x-owner".parse().unwrap(), opaque()));
         assert!(
-            effective_value(&ctx, "x-user").is_err(),
+            matches!(
+                effective_value(&ctx, "x-user"),
+                Err(ConditionError::AmbiguousHeader { .. })
+            ),
             "a non-text pending value has no text form"
         );
         assert!(
@@ -2729,6 +2853,53 @@ content-length: 0
             effective_contains(&ctx, "x-owner").unwrap(),
             "a non-text trusted Set from a prior pass is still present"
         );
+    }
+
+    #[test]
+    fn effective_headers_ordered_opaque_set_can_be_overwritten_or_removed() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        let opaque = || http::HeaderValue::from_bytes("José".as_bytes()).unwrap();
+        let ordered: HeaderName = "x-ordered".parse().unwrap();
+        ctx.request_header_mutations
+            .push(TrustedHeaderMutation::Set(ordered.clone(), opaque()));
+        assert!(matches!(
+            effective_value(&ctx, "x-ordered"),
+            Err(ConditionError::AmbiguousHeader { .. })
+        ));
+        assert!(effective_contains(&ctx, "x-ordered").unwrap());
+        ctx.request_header_mutations
+            .push(TrustedHeaderMutation::Set(ordered.clone(), "safe".parse().unwrap()));
+        assert_eq!(effective_value(&ctx, "x-ordered").unwrap().as_deref(), Some("safe"));
+        ctx.request_header_mutations
+            .push(TrustedHeaderMutation::Remove(ordered));
+        assert_eq!(effective_value(&ctx, "x-ordered").unwrap(), None);
+        assert!(!effective_contains(&ctx, "x-ordered").unwrap());
+    }
+
+    #[test]
+    fn effective_headers_distinguish_opaque_original_from_add_strings() {
+        let mut req = crate::test_utils::make_request(Method::GET, "/");
+        req.headers
+            .insert("x-original", http::HeaderValue::from_bytes("José".as_bytes()).unwrap());
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.request_header_mutations.push(TrustedHeaderMutation::Add(
+            "x-original".parse().unwrap(),
+            "José".to_owned(),
+        ));
+        assert!(matches!(
+            effective_value(&ctx, "x-original"),
+            Err(ConditionError::AmbiguousHeader { .. })
+        ));
+        assert!(effective_contains(&ctx, "x-original").unwrap());
+        ctx.request_header_mutations.push(TrustedHeaderMutation::Add(
+            "x-string".parse().unwrap(),
+            "José".to_owned(),
+        ));
+        assert_eq!(effective_value(&ctx, "x-string").unwrap().as_deref(), Some("José"));
+        ctx.extra_request_headers
+            .push((Cow::Borrowed("x-extra"), "José".to_owned()));
+        assert_eq!(effective_value(&ctx, "x-extra").unwrap().as_deref(), Some("José"));
     }
 
     #[test]
@@ -2746,6 +2917,19 @@ content-length: 0
             ),
             "distinct pending values stay ambiguous for presence"
         );
+        drop(effective_value(&ctx, "x-gate").expect_err("distinct values must fail closed"));
+        ctx.request_headers_to_set.clear();
+        let name: HeaderName = "x-gate".parse().unwrap();
+        ctx.request_header_mutations
+            .push(TrustedHeaderMutation::Set(name.clone(), "a".parse().unwrap()));
+        assert!(matches!(
+            effective_contains(&ctx, "x-gate"),
+            Err(ConditionError::AmbiguousHeader { .. })
+        ));
+        drop(effective_value(&ctx, "x-gate").expect_err("distinct values must fail closed"));
+        ctx.request_header_mutations.push(TrustedHeaderMutation::Remove(name));
+        assert!(effective_contains(&ctx, "x-gate").unwrap());
+        assert_eq!(effective_value(&ctx, "x-gate").unwrap().as_deref(), Some("b"));
     }
 
     #[test]

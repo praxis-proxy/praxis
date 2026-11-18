@@ -9,7 +9,7 @@ use super::{
     super::OnInvalidBehavior,
     JsonRpcFilter,
     config::{BatchPolicy, DEFAULT_MAX_BATCH_SIZE, JsonRpcHeaders, MAX_BATCH_SIZE},
-    envelope::{JsonRpcIdKind, JsonRpcKind, parse_json_rpc_envelope},
+    envelope::{JsonRpcEnvelope, JsonRpcIdKind, JsonRpcKind, parse_json_rpc_envelope, parse_json_rpc_value},
 };
 use crate::{FilterAction, HttpFilter as _};
 
@@ -624,6 +624,202 @@ fn batch_too_large_error_includes_counts() {
     let msg = err.to_string();
     assert!(msg.contains("3"), "error should include actual batch size: got '{msg}'");
     assert!(msg.contains("1"), "error should include max batch size: got '{msg}'");
+}
+
+// -----------------------------------------------------------------------------
+// Byte and pre-parsed entry point contracts
+// -----------------------------------------------------------------------------
+
+fn assert_envelope_from_both(body: &str, config: &super::config::JsonRpcConfig, expected: Option<&JsonRpcEnvelope>) {
+    let value: serde_json::Value = serde_json::from_str(body).expect("fixture must be valid JSON");
+    assert_eq!(
+        parse_json_rpc_envelope(body.as_bytes(), config)
+            .expect("bytes should parse")
+            .as_ref(),
+        expected,
+        "byte entry point: {body}"
+    );
+    assert_eq!(
+        parse_json_rpc_value(&value, config)
+            .expect("Value should parse")
+            .as_ref(),
+        expected,
+        "Value entry point: {body}"
+    );
+}
+
+fn assert_error_from_both(body: &str, config: &super::config::JsonRpcConfig, expected: &str) {
+    let value: serde_json::Value = serde_json::from_str(body).expect("fixture must be valid JSON");
+    assert_eq!(
+        parse_json_rpc_envelope(body.as_bytes(), config)
+            .expect_err("bytes should fail")
+            .to_string(),
+        expected,
+        "byte entry point: {body}"
+    );
+    assert_eq!(
+        parse_json_rpc_value(&value, config)
+            .expect_err("Value should fail")
+            .to_string(),
+        expected,
+        "Value entry point: {body}"
+    );
+}
+
+#[test]
+fn envelope_entry_points_classify_notification() {
+    let config = make_config(BatchPolicy::Reject, OnInvalidBehavior::Continue);
+    let expected = JsonRpcEnvelope {
+        batch_len: None,
+        id: None,
+        id_kind: JsonRpcIdKind::Missing,
+        kind: JsonRpcKind::Notification,
+        method: Some("status".to_owned()),
+    };
+    assert_envelope_from_both(r#"{"jsonrpc":"2.0","method":"status"}"#, &config, Some(&expected));
+}
+
+#[test]
+fn envelope_entry_points_classify_response_ids() {
+    let config = make_config(BatchPolicy::Reject, OnInvalidBehavior::Continue);
+    for (body, expected) in [
+        (
+            r#"{"jsonrpc":"2.0","id":null,"error":{"code":-1}}"#,
+            JsonRpcEnvelope {
+                batch_len: None,
+                id: Some("null".to_owned()),
+                id_kind: JsonRpcIdKind::Null,
+                kind: JsonRpcKind::Response,
+                method: None,
+            },
+        ),
+        (
+            r#"{"jsonrpc":"2.0","id":2.5,"result":false,"method":"ignored"}"#,
+            JsonRpcEnvelope {
+                batch_len: None,
+                id: Some("2.5".to_owned()),
+                id_kind: JsonRpcIdKind::Number,
+                kind: JsonRpcKind::Response,
+                method: None,
+            },
+        ),
+    ] {
+        assert_envelope_from_both(body, &config, Some(&expected));
+    }
+}
+
+#[test]
+fn envelope_entry_points_select_first_valid_batch_message() {
+    let config = make_config_with_batch_limit(4);
+    let body = r#"[false,{"jsonrpc":"1.0","method":"old"},{"jsonrpc":"2.0","id":"chosen","method":"run"},{"jsonrpc":"2.0","method":"later"}]"#;
+    assert_envelope_from_both(
+        body,
+        &config,
+        Some(&JsonRpcEnvelope {
+            batch_len: Some(4),
+            id: Some("chosen".to_owned()),
+            id_kind: JsonRpcIdKind::String,
+            kind: JsonRpcKind::Batch,
+            method: Some("run".to_owned()),
+        }),
+    );
+}
+
+#[test]
+fn envelope_entry_points_enforce_batch_limits_before_selection() {
+    let config = make_config_with_batch_limit(2);
+    let body = r#"[{"jsonrpc":"2.0","method":"first","id":1},false,null]"#;
+    assert_error_from_both(body, &config, "batch size 3 exceeds maximum of 2");
+
+    let at_limit = r#"[false,{"jsonrpc":"2.0","method":"last","id":9}]"#;
+    assert_envelope_from_both(
+        at_limit,
+        &config,
+        Some(&JsonRpcEnvelope {
+            batch_len: Some(2),
+            id: Some("9".to_owned()),
+            id_kind: JsonRpcIdKind::Integer,
+            kind: JsonRpcKind::Batch,
+            method: Some("last".to_owned()),
+        }),
+    );
+}
+
+#[test]
+fn envelope_entry_points_reject_unsupported_and_empty_batches() {
+    let config = make_config(BatchPolicy::Reject, OnInvalidBehavior::Continue);
+    assert_error_from_both("[]", &config, "batch array is empty");
+    assert_error_from_both(
+        r#"[{"jsonrpc":"2.0","method":"run","id":1}]"#,
+        &config,
+        "batch requests not supported by current policy",
+    );
+}
+
+#[test]
+fn envelope_entry_points_handle_batches_without_valid_messages() {
+    let body = r#"[false,{"jsonrpc":"1.0","method":"old"},{"method":"missing version"}]"#;
+    let continue_config = make_config_with_batch_limit(3);
+    assert_envelope_from_both(body, &continue_config, None);
+
+    let reject_config = make_config(BatchPolicy::First, OnInvalidBehavior::Reject);
+    assert_error_from_both(body, &reject_config, "missing 'jsonrpc' field");
+}
+
+#[test]
+fn envelope_entry_points_report_invalid_rpc_errors() {
+    let config = make_config(BatchPolicy::Reject, OnInvalidBehavior::Continue);
+    for (body, error) in [
+        (
+            r#"{"jsonrpc":"1.0","method":"old"}"#,
+            "wrong jsonrpc version: '1.0', expected '2.0'",
+        ),
+        (
+            r#"{"jsonrpc":"2.0","id":1}"#,
+            "missing 'method' field for request/notification",
+        ),
+        (r#"{"jsonrpc":"2.0","method":3.5}"#, "'method' must be a string"),
+        (
+            r#"{"jsonrpc":"2.0","method":"run","id":true}"#,
+            "'id' must be string, number, or null",
+        ),
+    ] {
+        assert_error_from_both(body, &config, error);
+    }
+}
+
+#[test]
+fn envelope_entry_points_apply_non_rpc_policy() {
+    let config = make_config(BatchPolicy::Reject, OnInvalidBehavior::Continue);
+    for body in [
+        "null",
+        "42",
+        "true",
+        r#""plain text""#,
+        r#"{"method":"plain"}"#,
+        r#"{"jsonrpc":2}"#,
+    ] {
+        assert_envelope_from_both(body, &config, None);
+    }
+
+    let error_config = make_config(BatchPolicy::Reject, OnInvalidBehavior::Error);
+    assert_error_from_both("42", &error_config, "missing 'jsonrpc' field");
+    assert_error_from_both(r#"{"method":"plain"}"#, &error_config, "missing 'jsonrpc' field");
+}
+
+#[test]
+fn envelope_bytes_reject_malformed_json_before_non_rpc_policy() {
+    let config = make_config(BatchPolicy::Reject, OnInvalidBehavior::Continue);
+    for body in [
+        r#"{"jsonrpc":"2.0","method":"run"} trailing"#,
+        r#"{"jsonrpc":"2.0","method":"run""#,
+    ] {
+        let error = parse_json_rpc_envelope(body.as_bytes(), &config).expect_err("malformed JSON must fail");
+        assert!(
+            matches!(error, super::envelope::JsonRpcParseError::InvalidJson(_)),
+            "malformed JSON must be an InvalidJson error: {body}"
+        );
+    }
 }
 
 // -----------------------------------------------------------------------------

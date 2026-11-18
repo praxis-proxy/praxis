@@ -14,7 +14,10 @@ use std::{
     time::Duration,
 };
 
-use rcgen::{CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, KeyUsagePurpose, SanType};
+use rcgen::{
+    CertificateParams, DnType, DnValue, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, KeyUsagePurpose, SanType,
+    string::BmpString,
+};
 use rustls::{ClientConfig, pki_types::pem::PemObject as _};
 use tempfile::TempDir;
 use tokio::net::TcpStream as AsyncTcpStream;
@@ -310,6 +313,21 @@ impl TestCertificates {
     ///
     /// Panics if certificate generation or file I/O fails.
     pub fn generate_client_cert_with_org(&self, org: &str) -> ClientCert {
+        self.generate_client_cert_with_org_value(DnValue::Utf8String(org.to_owned()))
+    }
+
+    /// Generate a CA-signed client certificate whose O uses `BMPString` encoding.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `org` cannot be BMP encoded or certificate generation fails.
+    pub fn generate_client_cert_with_bmp_org(&self, org: &str) -> ClientCert {
+        let bmp = BmpString::try_from(org).expect("BMP organization");
+        self.generate_client_cert_with_org_value(DnValue::BmpString(bmp))
+    }
+
+    /// Sign and persist a client certificate carrying the supplied O value.
+    fn generate_client_cert_with_org_value(&self, org: DnValue) -> ClientCert {
         let issuer = Issuer::from_params(&self.ca_params, &self.ca_key);
         let client_key = KeyPair::generate().expect("client key generation");
         let mut client_params = CertificateParams::new(vec!["localhost".to_owned()]).expect("client cert params");
@@ -619,44 +637,168 @@ pub fn tls_send_recv(addr: &str, data: &[u8], client_config: &Arc<ClientConfig>)
     })
 }
 
-/// Attempt a TLS connection, send data, and return `true` if the
-/// connection is rejected at any stage (handshake, write, or empty
-/// response).
+/// Observable outcome of a TLS negative probe.
+#[derive(Debug)]
+pub enum TlsProbeOutcome {
+    /// The server sent a TLS alert before application bytes arrived.
+    PeerAlert(rustls::AlertDescription),
+    /// The client rejected the server certificate or name locally.
+    LocalTrustFailure(String),
+    /// TCP connection failed before any TLS exchange.
+    ConnectFailure(String),
+    /// A TLS connection reached the application layer, possibly with no bytes.
+    ApplicationData {
+        /// Protected bytes received before the connection ended.
+        bytes: Vec<u8>,
+        /// How the application exchange ended.
+        end: TlsProbeEnd,
+    },
+    /// TLS or transport failed without a peer alert or application bytes.
+    OtherFailure(String),
+    /// The full probe deadline elapsed.
+    Timeout,
+}
+
+/// How an application-layer TLS read ended.
+#[derive(Debug)]
+pub enum TlsProbeEnd {
+    /// Peer sent a clean TLS close.
+    CleanClose,
+    /// Peer sent an alert after application bytes.
+    PeerAlert(rustls::AlertDescription),
+    /// Peer closed the transport uncleanly or another I/O error occurred.
+    ReadFailure(String),
+}
+
+impl TlsProbeOutcome {
+    /// Whether the peer sent an alert that proves client-authentication refusal.
+    pub fn is_client_auth_alert(&self) -> bool {
+        matches!(
+            self,
+            Self::PeerAlert(
+                rustls::AlertDescription::CertificateRequired
+                    | rustls::AlertDescription::BadCertificate
+                    | rustls::AlertDescription::UnknownCA
+                    | rustls::AlertDescription::CertificateUnknown
+            )
+        )
+    }
+}
+
+/// Probe a verified TLS peer with an explicit server name and bounded lifetime.
 ///
-/// Used for negative mTLS tests where the server should refuse
-/// the connection (e.g. missing client certificate).
+/// Protected application bytes remain visible even if a later read fails.
 ///
 /// # Panics
 ///
 /// Panics if the tokio runtime cannot be created.
-pub fn tls_connection_rejected(addr: &str, data: &[u8], client_config: &Arc<ClientConfig>) -> bool {
+pub fn tls_negative_probe(
+    addr: &str,
+    server_name: &str,
+    data: &[u8],
+    client_config: &Arc<ClientConfig>,
+) -> TlsProbeOutcome {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("tokio runtime");
+    let server_name = rustls::pki_types::ServerName::try_from(server_name.to_owned()).expect("server name");
+    rt.block_on(Box::pin(tls_negative_probe_async(
+        addr,
+        server_name,
+        data,
+        Arc::clone(client_config),
+    )))
+}
 
-    rt.block_on(async {
-        let connector = tokio_rustls::TlsConnector::from(Arc::clone(client_config));
-        let server_name = rustls::pki_types::ServerName::try_from("localhost").expect("server name");
+/// Preserve bytes observed by an exchange that reaches its total deadline.
+async fn tls_negative_probe_async(
+    addr: &str,
+    server_name: rustls::pki_types::ServerName<'static>,
+    data: &[u8],
+    client_config: Arc<ClientConfig>,
+) -> TlsProbeOutcome {
+    let connector = tokio_rustls::TlsConnector::from(client_config);
+    let mut observed = Vec::new();
+    let exchange = Box::pin(tls_probe_exchange(addr, server_name, data, &connector, &mut observed));
+    match Box::pin(tokio::time::timeout(Duration::from_secs(5), exchange)).await {
+        Ok(outcome) => outcome,
+        Err(_) if observed.is_empty() => TlsProbeOutcome::Timeout,
+        Err(_) => TlsProbeOutcome::ApplicationData {
+            bytes: observed,
+            end: TlsProbeEnd::ReadFailure("TLS probe timed out".to_owned()),
+        },
+    }
+}
 
-        let Ok(tcp) = tokio::net::TcpStream::connect(addr).await else {
-            return true;
-        };
-        let Ok(mut tls) = connector.connect(server_name, tcp).await else {
-            return true;
-        };
+/// Connect, send one request, and read its protected response.
+async fn tls_probe_exchange(
+    addr: &str,
+    server_name: rustls::pki_types::ServerName<'static>,
+    data: &[u8],
+    connector: &tokio_rustls::TlsConnector,
+    observed: &mut Vec<u8>,
+) -> TlsProbeOutcome {
+    let tcp = match tokio::net::TcpStream::connect(addr).await {
+        Ok(tcp) => tcp,
+        Err(error) => return TlsProbeOutcome::ConnectFailure(error.to_string()),
+    };
+    let mut tls = match connector.connect(server_name, tcp).await {
+        Ok(tls) => tls,
+        Err(error) => return classify_tls_probe_error(&error, Vec::new()),
+    };
+    if let Err(error) = tokio::io::AsyncWriteExt::write_all(&mut tls, data).await {
+        return classify_tls_probe_error(&error, Vec::new());
+    }
+    if let Err(error) = tokio::io::AsyncWriteExt::shutdown(&mut tls).await {
+        return classify_tls_probe_error(&error, Vec::new());
+    }
+    Box::pin(read_tls_probe(&mut tls, observed)).await
+}
 
-        if tokio::io::AsyncWriteExt::write_all(&mut tls, data).await.is_err() {
-            return true;
+/// Retain a small bounded application response and its final read outcome.
+async fn read_tls_probe(
+    stream: &mut tokio_rustls::client::TlsStream<AsyncTcpStream>,
+    bytes: &mut Vec<u8>,
+) -> TlsProbeOutcome {
+    let mut buffer = [0_u8; 4096];
+    loop {
+        match tokio::io::AsyncReadExt::read(stream, &mut buffer).await {
+            Ok(0) => {
+                return TlsProbeOutcome::ApplicationData {
+                    bytes: std::mem::take(bytes),
+                    end: TlsProbeEnd::CleanClose,
+                };
+            },
+            Ok(count) => {
+                if bytes.len().saturating_add(count) > 65_536 {
+                    return TlsProbeOutcome::ApplicationData {
+                        bytes: std::mem::take(bytes),
+                        end: TlsProbeEnd::ReadFailure("TLS probe response exceeds 64 KiB".to_owned()),
+                    };
+                }
+                bytes.extend_from_slice(&buffer[..count]);
+            },
+            Err(error) => return classify_tls_probe_error(&error, std::mem::take(bytes)),
         }
-        let _ = tokio::io::AsyncWriteExt::shutdown(&mut tls).await;
+    }
+}
 
-        let mut buf = Vec::new();
-        match tokio::io::AsyncReadExt::read_to_end(&mut tls, &mut buf).await {
-            Ok(0) | Err(_) => true,
-            Ok(_) => buf.is_empty(),
-        }
-    })
+/// Classify peer alerts separately from local verification and I/O errors.
+fn classify_tls_probe_error(error: &std::io::Error, bytes: Vec<u8>) -> TlsProbeOutcome {
+    let cause = error.get_ref().and_then(|cause| cause.downcast_ref::<rustls::Error>());
+    if !bytes.is_empty() {
+        let end = match cause {
+            Some(rustls::Error::AlertReceived(alert)) => TlsProbeEnd::PeerAlert(*alert),
+            _ => TlsProbeEnd::ReadFailure(error.to_string()),
+        };
+        return TlsProbeOutcome::ApplicationData { bytes, end };
+    }
+    match cause {
+        Some(rustls::Error::AlertReceived(alert)) => TlsProbeOutcome::PeerAlert(*alert),
+        Some(rustls::Error::InvalidCertificate(_)) => TlsProbeOutcome::LocalTrustFailure(error.to_string()),
+        _ => TlsProbeOutcome::OtherFailure(error.to_string()),
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -780,6 +922,22 @@ pub fn start_tls_backend(certs: &TestCertificates, body: &str) -> u16 {
     start_tls_backend_from_pem(&cert_pem, &key_pem, body)
 }
 
+/// Start a fixed TLS backend and count accepted TCP connections.
+///
+/// The counter lets routing tests detect forwarding even when a client's
+/// hostname verification would fail before any application response.
+///
+/// # Panics
+///
+/// Panics if the certificate cannot be loaded or the backend cannot bind.
+pub fn start_counting_tls_backend(certs: &TestCertificates, body: &str) -> (u16, Arc<AtomicUsize>) {
+    let cert_pem = std::fs::read(&certs.cert_path).expect("read cert PEM");
+    let key_pem = std::fs::read(&certs.key_path).expect("read key PEM");
+    let accepts = Arc::new(AtomicUsize::new(0));
+    let port = start_tls_backend_from_pem_with_counter(&cert_pem, &key_pem, body, Some(Arc::clone(&accepts)));
+    (port, accepts)
+}
+
 /// Start an HTTPS backend presenting the given PEM certificate chain and
 /// key, for tests that need a backend with a particular certificate (a
 /// fixture with a weak key or a legacy signature, say).
@@ -788,6 +946,16 @@ pub fn start_tls_backend(certs: &TestCertificates, body: &str) -> u16 {
 ///
 /// Panics if TLS server setup or binding fails.
 pub fn start_tls_backend_from_pem(cert_pem: &[u8], key_pem: &[u8], body: &str) -> u16 {
+    start_tls_backend_from_pem_with_counter(cert_pem, key_pem, body, None)
+}
+
+/// Start the shared fixed-response TLS fixture with optional accept tracing.
+fn start_tls_backend_from_pem_with_counter(
+    cert_pem: &[u8],
+    key_pem: &[u8],
+    body: &str,
+    accepts: Option<Arc<AtomicUsize>>,
+) -> u16 {
     let acceptor = build_tls_acceptor(cert_pem, key_pem);
     let body = body.to_owned();
 
@@ -798,7 +966,7 @@ pub fn start_tls_backend_from_pem(cert_pem: &[u8], key_pem: &[u8], body: &str) -
             .enable_all()
             .build()
             .expect("tokio runtime for TLS backend");
-        rt.block_on(tls_accept_loop(listener, acceptor, body));
+        rt.block_on(tls_accept_loop(listener, acceptor, body, accepts));
     });
 
     port
@@ -835,7 +1003,7 @@ pub fn start_mtls_backend(certs: &TestCertificates, body: &str) -> u16 {
             .enable_all()
             .build()
             .expect("tokio runtime for mTLS backend");
-        rt.block_on(tls_accept_loop(listener, acceptor, body));
+        rt.block_on(tls_accept_loop(listener, acceptor, body, None));
     });
 
     port
@@ -869,7 +1037,12 @@ fn build_mtls_acceptor(certs: &TestCertificates) -> tokio_rustls::TlsAcceptor {
 
 /// Accept TLS connections and serve fixed HTTP responses.
 #[expect(clippy::infinite_loop, reason = "server accept loop runs until task cancellation")]
-async fn tls_accept_loop(listener: std::net::TcpListener, acceptor: tokio_rustls::TlsAcceptor, body: String) {
+async fn tls_accept_loop(
+    listener: std::net::TcpListener,
+    acceptor: tokio_rustls::TlsAcceptor,
+    body: String,
+    accepts: Option<Arc<AtomicUsize>>,
+) {
     listener.set_nonblocking(true).expect("set non-blocking");
     let listener = tokio::net::TcpListener::from_std(listener).expect("tokio listener");
 
@@ -877,6 +1050,9 @@ async fn tls_accept_loop(listener: std::net::TcpListener, acceptor: tokio_rustls
         let Ok((stream, _)) = listener.accept().await else {
             continue;
         };
+        if let Some(accepts) = &accepts {
+            accepts.fetch_add(1, Ordering::Relaxed);
+        }
         let Ok(tls_stream) = acceptor.accept(stream).await else {
             continue;
         };
@@ -1137,5 +1313,139 @@ mod serial_tests {
         assert_eq!(canonical_hex_serial("00ABCDEF"), "ABCDEF");
         assert_eq!(canonical_hex_serial("abcdef"), "ABCDEF");
         assert_eq!(canonical_hex_serial("000"), "0");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[expect(clippy::too_many_lines, reason = "distinct TLS and application outcomes")]
+    fn negative_probe_distinguishes_application_delivery() {
+        let certs = TestCertificates::generate();
+        let trusted = certs.raw_tls_client_config();
+        let (addr, server) = probe_server(&certs, ProbeServerMode::RequireClientCert);
+        let outcome = tls_negative_probe(&addr, "localhost", b"ping", &trusted);
+        assert!(
+            outcome.is_client_auth_alert(),
+            "missing client cert must receive peer alert: {outcome:?}"
+        );
+        server.join().expect("mTLS server");
+
+        for (mode, expected) in [
+            (ProbeServerMode::CleanEmpty, b"".as_slice()),
+            (ProbeServerMode::UncleanWithData, b"protected"),
+            (ProbeServerMode::CleanWithData, b"ok"),
+        ] {
+            let (addr, server) = probe_server(&certs, mode);
+            let outcome = tls_negative_probe(&addr, "localhost", b"ping", &trusted);
+            match outcome {
+                TlsProbeOutcome::ApplicationData { bytes, end } => {
+                    assert_eq!(bytes, expected, "application bytes must never disappear");
+                    if mode == ProbeServerMode::UncleanWithData {
+                        assert!(
+                            matches!(end, TlsProbeEnd::ReadFailure(_)),
+                            "unclean peer close must remain visible"
+                        );
+                    } else {
+                        assert!(
+                            matches!(end, TlsProbeEnd::CleanClose),
+                            "clean TLS close must remain visible"
+                        );
+                    }
+                },
+                other => panic!("accepted application exchange must remain visible: {other:?}"),
+            }
+            server.join().expect("application server");
+        }
+
+        let untrusted = TestCertificates::generate().raw_tls_client_config();
+        let (addr, server) = probe_server(&certs, ProbeServerMode::CleanEmpty);
+        let outcome = tls_negative_probe(&addr, "localhost", b"ping", &untrusted);
+        assert!(
+            matches!(&outcome, TlsProbeOutcome::LocalTrustFailure(_)),
+            "local trust failure is not peer authentication refusal: {outcome:?}"
+        );
+        server.join().expect("untrusted server");
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("temporary listener");
+        let addr = listener.local_addr().expect("address").to_string();
+        drop(listener);
+        let outcome = tls_negative_probe(&addr, "localhost", b"ping", &trusted);
+        assert!(
+            matches!(&outcome, TlsProbeOutcome::ConnectFailure(_)),
+            "TCP refusal is not peer authentication refusal: {outcome:?}"
+        );
+    }
+
+    /// Server action after accepting one probe connection.
+    #[derive(Clone, Copy, PartialEq)]
+    enum ProbeServerMode {
+        CleanEmpty,
+        CleanWithData,
+        RequireClientCert,
+        UncleanWithData,
+    }
+
+    /// Spawn one TLS peer whose accept and application behavior is controlled.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one-shot TLS fixture handshake and response variants"
+    )]
+    fn probe_server(certs: &TestCertificates, mode: ProbeServerMode) -> (String, std::thread::JoinHandle<()>) {
+        let acceptor = if mode == ProbeServerMode::RequireClientCert {
+            build_mtls_acceptor(certs)
+        } else {
+            let cert_pem = std::fs::read(&certs.cert_path).expect("cert PEM");
+            let key_pem = std::fs::read(&certs.key_path).expect("key PEM");
+            build_tls_acceptor(&cert_pem, &key_pem)
+        };
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("probe listener");
+        let addr = listener.local_addr().expect("address").to_string();
+        let handle = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("probe accept");
+            stream.set_nonblocking(true).expect("nonblocking socket");
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("probe runtime");
+            runtime.block_on(async {
+                let stream = tokio::net::TcpStream::from_std(stream).expect("Tokio socket");
+                let accepted = tokio::time::timeout(Duration::from_secs(3), acceptor.accept(stream))
+                    .await
+                    .expect("bounded TLS accept");
+                if mode == ProbeServerMode::RequireClientCert {
+                    assert!(accepted.is_err(), "server must reject missing client certificate");
+                    return;
+                }
+                let Ok(mut tls) = accepted else {
+                    return;
+                };
+                let mut input = [0_u8; 4];
+                tokio::io::AsyncReadExt::read_exact(&mut tls, &mut input)
+                    .await
+                    .expect("probe payload");
+                match mode {
+                    ProbeServerMode::CleanEmpty => {},
+                    ProbeServerMode::CleanWithData => {
+                        tokio::io::AsyncWriteExt::write_all(&mut tls, b"ok")
+                            .await
+                            .expect("response");
+                    },
+                    ProbeServerMode::UncleanWithData => {
+                        tokio::io::AsyncWriteExt::write_all(&mut tls, b"protected")
+                            .await
+                            .expect("response");
+                        return;
+                    },
+                    ProbeServerMode::RequireClientCert => unreachable!("handled above"),
+                }
+                tokio::io::AsyncWriteExt::shutdown(&mut tls)
+                    .await
+                    .expect("close notify");
+            });
+        });
+        (addr, handle)
     }
 }

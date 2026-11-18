@@ -12,7 +12,9 @@ Payload processing filters inspect, validate, and extract data from request and 
 
 ## Key Filters
 
-**JSON Body Field**: Promotes a field from a JSON request body to a header during pre-read (before the body is forwarded). Enables routing and filtering on body content without buffering in every filter.
+**JSON Body Field**: Promotes a field from a JSON request body to a header
+after the full body is pre-read, before forwarding. Enables routing and
+filtering on body content without each filter buffering it separately.
 
 **Body Size Limit**: Enforces maximum request or response body size. Rejects oversized payloads early.
 
@@ -20,9 +22,13 @@ Payload processing filters inspect, validate, and extract data from request and 
 
 ## Key Concepts
 
-**StreamBuffer Pre-Read**: The `json_body_field` filter runs during `StreamBuffer` pre-read phase, allowing it to inspect the body before forwarding while still streaming to the upstream.
+**StreamBuffer Pre-Read**: The `json_body_field` filter waits for the full
+request body before extraction. The proxy holds it during pre-read, then
+selects the upstream and forwards the body.
 
-**Reserved Headers**: Promoted fields must use reserved header names (`x-praxis-*`, `x-ext-*`) so clients cannot spoof them.
+**Reserved Headers**: Use `x-praxis-*`, `x-ext-protocol-*`, or
+`x-ext-agent-*` for promoted fields that must be client-unspoofable.
+Other `x-ext-*` names are not reserved.
 
 ## Best Practices
 

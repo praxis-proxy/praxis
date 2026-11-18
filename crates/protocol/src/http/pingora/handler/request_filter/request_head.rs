@@ -82,11 +82,6 @@ pub(super) async fn prepare(
 /// keeps the large request on the caller's frame; the cold rejection and error
 /// paths clone it into the snapshot.
 #[cfg(feature = "pingora")]
-#[expect(
-    clippy::large_stack_frames,
-    reason = "embeds the filter-context future, like the request-phase execute and pre_read_body; \
-              the head phase does strictly less work than pre-read"
-)]
 pub(super) async fn execute(
     pipeline: &FilterPipeline,
     session: &mut Session,

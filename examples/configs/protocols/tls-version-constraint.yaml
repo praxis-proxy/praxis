@@ -27,7 +27,7 @@
 #   mkcert -install && mkcert localhost 127.0.0.1
 #   cargo run -p praxis-proxy -- -c examples/configs/protocols/tls-version-constraint.yaml
 #   curl --tlsv1.3 https://localhost:8443/    # succeeds
-#   curl --tlsv1.2 https://localhost:8443/    # rejected
+#   curl --tlsv1.2 --tls-max 1.2 https://localhost:8443/  # rejected
 
 listeners:
   - name: tls13-only

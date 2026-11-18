@@ -113,7 +113,8 @@ fn session_store_falls_back_to_filter_registry_without_pipeline_stores() {
     let mut configs = HashMap::new();
     configs.insert(Arc::<str>::from("cluster-a"), Arc::clone(&cfg));
     let filter = StickySessionsFilter {
-        stores: Arc::new(StickySessionsFilter::build_stores(&configs)),
+        stores: Arc::new(SessionStoreRegistry::new()),
+        bound_stores: configs.keys().map(|name| (Arc::clone(name), OnceLock::new())).collect(),
         configs,
     };
 
@@ -260,10 +261,242 @@ fn handle_header_response_records_session() {
     ctx.filter_metadata
         .insert(META_SESSION_KEY, "header-key-abc")
         .expect("entry must fit in the filter's metadata");
+    ctx.upstream_reached = true;
+    ctx.extensions
+        .insert(crate::UpstreamForwardedEndpoint(Arc::clone(&endpoint)));
 
     StickySessionsFilter::handle_header_response(&ctx, &store, &endpoint);
 
     assert_eq!(store.get("header-key-abc").as_deref(), Some("10.0.0.2:80"));
+}
+
+#[test]
+fn header_connect_failure_does_not_create_binding() {
+    let store = SessionStore::new(100, Duration::from_secs(3600), config::EvictionPolicy::Lru);
+    let endpoint: Arc<str> = Arc::from("10.0.0.2:80");
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.filter_metadata
+        .insert(META_SESSION_KEY, "failed-key")
+        .expect("entry must fit in the filter's metadata");
+    ctx.upstream_reached = true;
+
+    StickySessionsFilter::handle_header_response(&ctx, &store, &endpoint);
+
+    assert!(
+        store.get("failed-key").is_none(),
+        "selecting a peer is not a successful dial"
+    );
+}
+
+#[test]
+fn header_local_rejection_does_not_create_binding() {
+    let store = SessionStore::new(100, Duration::from_secs(3600), config::EvictionPolicy::Lru);
+    let endpoint: Arc<str> = Arc::from("10.0.0.2:80");
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.filter_metadata
+        .insert(META_SESSION_KEY, "local-key")
+        .expect("entry must fit in the filter's metadata");
+    // An earlier attempt can leave this request-level bit true while the
+    // response hook sees a later local terminal header.
+    ctx.upstream_reached = true;
+
+    let mut local_response = crate::test_utils::make_response();
+    local_response.status = http::StatusCode::FORBIDDEN;
+    ctx.response_header = Some(&mut local_response);
+    StickySessionsFilter::handle_header_response(&ctx, &store, &endpoint);
+
+    assert!(
+        store.get("local-key").is_none(),
+        "a local response header cannot establish a backend session"
+    );
+}
+
+/// Emit an actual terminal response after endpoint selection in the unit fixture.
+struct LocalTerminalFilter;
+
+#[async_trait::async_trait]
+impl HttpFilter for LocalTerminalFilter {
+    fn name(&self) -> &'static str {
+        "test_local_terminal"
+    }
+
+    async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        let mut headers = http::HeaderMap::new();
+        headers.insert("x-fixture-terminal", http::HeaderValue::from_static("local"));
+        Ok(FilterAction::TerminalResponse(Box::new(
+            crate::TerminalResponse::new(202)
+                .with_headers(headers)
+                .with_body("local-terminal"),
+        )))
+    }
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the fixture and local response assertions prove the complete pipeline path"
+)]
+async fn header_local_terminal_response_with_header_does_not_bind() -> Result<(), FilterError> {
+    let yaml = "
+- filter: router
+  routes:
+    - path_prefix: /
+      cluster: backend
+- filter: sticky_sessions
+  clusters:
+    - name: backend
+      type: header
+      header_name: X-Session-Id
+      ttl_secs: 3600
+      max_entries: 1000
+      storage: local
+- filter: load_balancer
+  clusters:
+    - name: backend
+      endpoints: ['127.0.0.1:9']
+- filter: test_local_terminal
+";
+    let mut registry = crate::FilterRegistry::with_builtins();
+    registry
+        .register(
+            "test_local_terminal",
+            crate::FilterFactory::Http(Arc::new(|_| Ok(Box::new(LocalTerminalFilter)))),
+        )
+        .unwrap();
+    let mut entries: Vec<crate::FilterEntry> = serde_yaml::from_str(yaml).unwrap();
+    let mut pipeline = crate::FilterPipeline::build(&mut entries, &registry).unwrap();
+    let stores = Arc::new(SessionStoreRegistry::new());
+    pipeline.set_session_stores(Arc::clone(&stores));
+    let store = stores.get_or_create("backend", 1000, Duration::from_secs(3600), config::EvictionPolicy::Lru);
+    let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+    req.headers
+        .insert("x-session-id", http::HeaderValue::from_static("local-terminal"));
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.session_stores = Some(&stores);
+
+    let terminal = match pipeline.execute_http_request(&mut ctx).await.unwrap() {
+        FilterAction::TerminalResponse(terminal) => terminal,
+        other => return Err(format!("expected a real terminal response after selection, got {other:?}").into()),
+    };
+    assert_eq!(terminal.status, 202, "the local status is synthetic");
+    assert_eq!(terminal.body.as_deref(), Some(b"local-terminal".as_slice()));
+    assert_eq!(
+        terminal.headers.get("x-fixture-terminal"),
+        Some(&http::HeaderValue::from_static("local"))
+    );
+    assert!(
+        ctx.upstream.is_some(),
+        "load balancer must have selected an endpoint before local terminal"
+    );
+    assert_eq!(
+        ctx.filter_metadata.get(META_SESSION_KEY),
+        Some("local-terminal"),
+        "the sticky filter must carry this exact key into response processing"
+    );
+    let mut response = crate::Response {
+        status: http::StatusCode::from_u16(terminal.status).unwrap(),
+        headers: terminal.headers.clone(),
+    };
+    ctx.response_header = Some(&mut response);
+    drop(pipeline.execute_http_response(&mut ctx).await.unwrap());
+    drop(ctx);
+    assert_eq!(response.status, http::StatusCode::ACCEPTED);
+
+    assert!(
+        store.get("local-terminal").is_none(),
+        "a synthetic local header must not authorize a binding"
+    );
+    Ok(())
+}
+
+#[test]
+fn header_failed_failover_keeps_previous_binding() {
+    let store = SessionStore::new(100, Duration::from_secs(3600), config::EvictionPolicy::Lru);
+    let previous: Arc<str> = Arc::from("10.0.0.1:80");
+    let failed: Arc<str> = Arc::from("10.0.0.2:80");
+    store.put("existing-key", Arc::clone(&previous));
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.filter_metadata
+        .insert(META_SESSION_KEY, "existing-key")
+        .expect("entry must fit in the filter's metadata");
+
+    StickySessionsFilter::handle_header_response(&ctx, &store, &failed);
+
+    assert_eq!(
+        store.get("existing-key"),
+        Some(previous),
+        "failed failover must retain the usable binding"
+    );
+}
+
+#[test]
+fn header_later_failed_dial_does_not_claim_endpoint() {
+    let store = SessionStore::new(100, Duration::from_secs(3600), config::EvictionPolicy::Lru);
+    let connected: Arc<str> = Arc::from("10.0.0.1:80");
+    let failed: Arc<str> = Arc::from("10.0.0.2:80");
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.filter_metadata
+        .insert(META_SESSION_KEY, "retry-key")
+        .expect("entry must fit in the filter's metadata");
+    ctx.upstream_reached = true;
+    ctx.extensions.insert(crate::UpstreamForwardedEndpoint(connected));
+
+    StickySessionsFilter::handle_header_response(&ctx, &store, &failed);
+
+    assert!(
+        store.get("retry-key").is_none(),
+        "an earlier endpoint cannot authorize a later failed dial"
+    );
+}
+
+#[test]
+fn header_read_failure_obeys_binding_policy() {
+    let store = SessionStore::new(100, Duration::from_secs(3600), config::EvictionPolicy::Lru);
+    let endpoint: Arc<str> = Arc::from("10.0.0.2:80");
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.filter_metadata
+        .insert(META_SESSION_KEY, "ambiguous-key")
+        .expect("entry must fit in the filter's metadata");
+    ctx.upstream_reached = true;
+    ctx.extensions
+        .insert(crate::UpstreamForwardedEndpoint(Arc::clone(&endpoint)));
+
+    StickySessionsFilter::handle_header_response(&ctx, &store, &endpoint);
+
+    assert_eq!(
+        store.get("ambiguous-key"),
+        Some(endpoint),
+        "the backend may have created state before read failed"
+    );
+}
+
+#[test]
+fn header_successful_exchange_creates_binding() {
+    let store = SessionStore::new(100, Duration::from_secs(3600), config::EvictionPolicy::Lru);
+    let endpoint: Arc<str> = Arc::from("10.0.0.2:80");
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.filter_metadata
+        .insert(META_SESSION_KEY, "served-key")
+        .expect("entry must fit in the filter's metadata");
+    ctx.upstream_reached = true;
+    ctx.extensions
+        .insert(crate::UpstreamForwardedEndpoint(Arc::clone(&endpoint)));
+    let mut response = crate::test_utils::make_response();
+    ctx.response_header = Some(&mut response);
+
+    StickySessionsFilter::handle_header_response(&ctx, &store, &endpoint);
+
+    assert_eq!(
+        store.get("served-key"),
+        Some(endpoint),
+        "a served header-mode request must remain sticky"
+    );
 }
 
 #[test]
@@ -459,7 +692,8 @@ fn registry_preserves_store_across_reload_when_config_unchanged() {
     let first = registry.get_or_create("backend", 100, Duration::from_secs(3600), config::EvictionPolicy::Lru);
     first.put("sess1", Arc::from("10.0.0.1:80"));
 
-    let second = registry.get_or_create("backend", 100, Duration::from_secs(3600), config::EvictionPolicy::Lru);
+    let candidate = registry.candidate();
+    let second = candidate.get_or_create("backend", 100, Duration::from_secs(3600), config::EvictionPolicy::Lru);
     assert!(
         Arc::ptr_eq(&first, &second),
         "unchanged config must reuse the existing store"
@@ -470,9 +704,169 @@ fn registry_preserves_store_across_reload_when_config_unchanged() {
         "session bindings must survive a reload"
     );
 
-    let third = registry.get_or_create("backend", 100, Duration::from_secs(60), config::EvictionPolicy::Lru);
+    registry.publish(&candidate);
+    let changed_candidate = registry.candidate();
+    let third = changed_candidate.get_or_create("backend", 100, Duration::from_secs(60), config::EvictionPolicy::Lru);
     assert!(!Arc::ptr_eq(&first, &third), "changed config must replace the store");
     assert!(third.get("sess1").is_none(), "replaced store starts empty");
+}
+
+#[test]
+fn unchanged_reload_retains_binding_without_old_guards() {
+    let live = SessionStoreRegistry::new();
+    let old = live.get_or_create("backend", 100, Duration::from_secs(3600), config::EvictionPolicy::Lru);
+    old.put("session", Arc::from("10.0.0.1:80"));
+    drop(old);
+
+    let candidate = live.candidate();
+    let bound = candidate.get_or_create("backend", 100, Duration::from_secs(3600), config::EvictionPolicy::Lru);
+    live.publish(&candidate);
+    drop(bound);
+    drop(candidate);
+
+    let next = live.candidate();
+    let retained = next.get_or_create("backend", 100, Duration::from_secs(3600), config::EvictionPolicy::Lru);
+    assert_eq!(
+        retained.get("session").as_deref(),
+        Some("10.0.0.1:80"),
+        "zero-overlap reload must retain binding"
+    );
+}
+
+#[test]
+fn old_response_cannot_replace_reloaded_store() {
+    for (max_entries, ttl, eviction) in [
+        (101, Duration::from_secs(3600), config::EvictionPolicy::Lru),
+        (100, Duration::from_secs(1800), config::EvictionPolicy::Lru),
+        (100, Duration::from_secs(3600), config::EvictionPolicy::Ttl),
+    ] {
+        let live = SessionStoreRegistry::new();
+        let old = live.get_or_create("backend", 100, Duration::from_secs(3600), config::EvictionPolicy::Lru);
+        let candidate = live.candidate();
+        let new = candidate.get_or_create("backend", max_entries, ttl, eviction);
+        new.put("new-session", Arc::from("10.0.0.2:80"));
+        live.publish(&candidate);
+
+        old.put("old-response", Arc::from("10.0.0.1:80"));
+        let next = live.candidate().get_or_create("backend", max_entries, ttl, eviction);
+        assert!(!Arc::ptr_eq(&old, &new), "changed bounds must own a different store");
+        assert!(Arc::ptr_eq(&new, &next), "an old response must not republish its store");
+        assert_eq!(next.get("new-session").as_deref(), Some("10.0.0.2:80"));
+        assert!(
+            next.get("old-response").is_none(),
+            "old response cannot contaminate new bounds"
+        );
+    }
+}
+
+#[test]
+fn failed_reload_retains_session_store() {
+    let live = SessionStoreRegistry::new();
+    let original = live.get_or_create("backend", 100, Duration::from_secs(3600), config::EvictionPolicy::Lru);
+    original.put("session", Arc::from("10.0.0.1:80"));
+    let failed_candidate = live.candidate();
+    let _replacement =
+        failed_candidate.get_or_create("backend", 101, Duration::from_secs(3600), config::EvictionPolicy::Lru);
+    drop(failed_candidate);
+
+    let next = live
+        .candidate()
+        .get_or_create("backend", 100, Duration::from_secs(3600), config::EvictionPolicy::Lru);
+    assert!(
+        Arc::ptr_eq(&original, &next),
+        "an uncommitted candidate cannot mutate live stores"
+    );
+    assert_eq!(next.get("session").as_deref(), Some("10.0.0.1:80"));
+}
+
+#[test]
+fn retired_generation_metadata_is_pruned() {
+    let live = SessionStoreRegistry::new();
+    let retained = live.get_or_create("backend", 100, Duration::from_secs(3600), config::EvictionPolicy::Lru);
+    let retired = live.get_or_create("backend", 101, Duration::from_secs(3600), config::EvictionPolicy::Lru);
+    let retired_weak = Arc::downgrade(&retired);
+    drop(retired);
+
+    let candidate = live.candidate();
+    let rebound = candidate.get_or_create("backend", 100, Duration::from_secs(3600), config::EvictionPolicy::Lru);
+    live.publish(&candidate);
+    drop(candidate);
+
+    assert!(
+        Arc::ptr_eq(&retained, &rebound),
+        "the active store must survive publication"
+    );
+    assert!(
+        retired_weak.upgrade().is_none(),
+        "retired store and its key must leave both registries"
+    );
+}
+
+#[test]
+fn retained_listener_store_survives_removed_generation() {
+    let live = SessionStoreRegistry::new();
+    let old_listener = live.candidate();
+    let old_store = old_listener.get_or_create("retained", 100, Duration::from_secs(3600), config::EvictionPolicy::Lru);
+    old_store.put("session", Arc::from("10.0.0.1:80"));
+    live.publish(&old_listener);
+
+    let removed = live.candidate();
+    removed.retain_used_from(&old_listener);
+    live.publish(&removed);
+    drop(removed);
+
+    let restored = live.candidate();
+    let restored_store =
+        restored.get_or_create("retained", 100, Duration::from_secs(3600), config::EvictionPolicy::Lru);
+    assert!(Arc::ptr_eq(&old_store, &restored_store));
+    assert_eq!(restored_store.get("session").as_deref(), Some("10.0.0.1:80"));
+}
+
+#[test]
+fn conflicting_listener_sticky_bounds_do_not_flap() {
+    let live = SessionStoreRegistry::new();
+    let first = live.get_or_create("backend", 100, Duration::from_secs(3600), config::EvictionPolicy::Lru);
+    let second = live.get_or_create("backend", 200, Duration::from_secs(3600), config::EvictionPolicy::Lru);
+    first.put("first", Arc::from("10.0.0.1:80"));
+    second.put("second", Arc::from("10.0.0.2:80"));
+
+    for _ in 0..4 {
+        let left = live.get_or_create("backend", 100, Duration::from_secs(3600), config::EvictionPolicy::Lru);
+        let right = live.get_or_create("backend", 200, Duration::from_secs(3600), config::EvictionPolicy::Lru);
+        assert!(Arc::ptr_eq(&left, &first));
+        assert!(Arc::ptr_eq(&right, &second));
+        assert_eq!(left.get("first").as_deref(), Some("10.0.0.1:80"));
+        assert_eq!(right.get("second").as_deref(), Some("10.0.0.2:80"));
+    }
+}
+
+#[test]
+fn first_use_shares_one_session_store() {
+    use std::sync::Barrier;
+
+    let registry = Arc::new(SessionStoreRegistry::new());
+    let gate = Arc::new(Barrier::new(3));
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..2)
+            .map(|index| {
+                let registry = Arc::clone(&registry);
+                let gate = Arc::clone(&gate);
+                scope.spawn(move || {
+                    gate.wait();
+                    let store =
+                        registry.get_or_create("backend", 100, Duration::from_secs(3600), config::EvictionPolicy::Lru);
+                    store.put(&format!("session-{index}"), Arc::from("10.0.0.1:80"));
+                    store
+                })
+            })
+            .collect();
+        gate.wait();
+        let stores: Vec<_> = handles.into_iter().map(|handle| handle.join().unwrap()).collect();
+        let first = stores.first().unwrap();
+        let second = stores.get(1).unwrap();
+        assert!(Arc::ptr_eq(first, second), "concurrent first use must share one Arc");
+        assert_eq!(first.len(), 2, "both concurrently inserted sessions must survive");
+    });
 }
 
 #[test]
@@ -491,4 +885,342 @@ fn find_request_cookie_checks_all_cookie_headers() {
         Some("split-value"),
         "cookie lookup must consider every Cookie header"
     );
+}
+
+/// Select streaming without changing affinity processing.
+struct StickyStreamingSelector;
+
+#[async_trait::async_trait]
+impl HttpFilter for StickyStreamingSelector {
+    fn name(&self) -> &'static str {
+        "sticky_streaming_selector"
+    }
+
+    fn may_select_streaming_subrequest_response(&self) -> bool {
+        true
+    }
+
+    async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        ctx.set_subrequest_response_mode(crate::SubRequestResponseMode::Streaming);
+        Ok(FilterAction::Continue)
+    }
+}
+
+/// A backend whose receipt counter also witnesses deliberately missing responses.
+async fn sticky_counted_backend(
+    reply: bool,
+) -> (
+    std::net::SocketAddr,
+    Arc<std::sync::atomic::AtomicUsize>,
+    tokio::task::JoinHandle<()>,
+) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let receipt = Arc::clone(&count);
+    let task = tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut head = Vec::new();
+            while !head.ends_with(b"\r\n\r\n") {
+                head.push(socket.read_u8().await.unwrap());
+            }
+            receipt.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if reply {
+                socket
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    .await
+                    .unwrap();
+            }
+        }
+    });
+    (address, count, task)
+}
+
+#[tokio::test]
+#[expect(
+    clippy::large_futures,
+    reason = "exercises real buffered and streaming nested exchanges"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "both response modes verify backend receipt and parent scope restoration"
+)]
+async fn nested_header_affinity_preserves_success_and_ambiguous_read_bindings() -> Result<(), FilterError> {
+    for streaming in [false, true] {
+        for reply in [false, true] {
+            let (first, first_count, first_task) = sticky_counted_backend(reply).await;
+            let (second, second_count, second_task) = sticky_counted_backend(true).await;
+            let (pipeline, stores) = nested_sticky_pipeline(first, second, streaming);
+            let client = praxis_core::subrequest::SubRequestClient::new(crate::test_support::connector(4, None));
+            let executor = crate::FilteredSubrequestExecutor::for_callout(
+                client,
+                crate::SubrequestRuntime::new(None, false, None, std::time::Instant::now()),
+                0,
+                1024,
+                Duration::from_secs(2),
+            );
+            let mut request = crate::SubRequest {
+                method: http::Method::GET,
+                uri: http::Uri::from_static("/"),
+                headers: http::HeaderMap::new(),
+                body: bytes::Bytes::new(),
+            };
+            request
+                .headers
+                .insert("x-session-id", http::HeaderValue::from_static("nested-session"));
+            for _ in 0..2 {
+                let parent_endpoint: Arc<str> = Arc::from("parent.example:80");
+                let mut extensions = crate::RequestExtensions::default();
+                extensions.insert(crate::UpstreamForwardedEndpoint(Arc::clone(&parent_endpoint)));
+                let input = crate::filtered_subrequest::FilteredSubrequestInput::callout(
+                    &pipeline,
+                    &request,
+                    std::time::Instant::now() + Duration::from_secs(2),
+                    extensions,
+                );
+                let crate::filtered_subrequest::OpenedSubrequest { continuation, kind } =
+                    match executor.execute(input).await {
+                        Ok(opened) => opened,
+                        Err(error) => return Err(error.into_parts().0),
+                    };
+                let status = match &kind {
+                    crate::filtered_subrequest::OpenedResponse::Complete(outcome)
+                    | crate::filtered_subrequest::OpenedResponse::Streaming { outcome, .. } => outcome.response.status,
+                };
+                assert_eq!(
+                    status,
+                    if reply { 200 } else { 502 },
+                    "must observe the first backend's actual exchange outcome"
+                );
+                drop(kind);
+                let restored = continuation.into_parent_extensions();
+                assert_eq!(
+                    restored
+                        .get::<crate::UpstreamForwardedEndpoint>()
+                        .map(|marker| &marker.0),
+                    Some(&parent_endpoint),
+                    "child forwarding must restore parent evidence"
+                );
+            }
+            let store = stores.get_or_create("backend", 100, Duration::from_secs(3600), config::EvictionPolicy::Lru);
+            assert_eq!(store.get("nested-session").as_deref(), Some(first.to_string().as_str()));
+            assert_eq!(
+                first_count.load(std::sync::atomic::Ordering::SeqCst),
+                2,
+                "both actual requests must reach the bound endpoint"
+            );
+            assert_eq!(
+                second_count.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "the second round-robin endpoint must be bypassed by affinity"
+            );
+            first_task.abort();
+            second_task.abort();
+        }
+    }
+    Ok(())
+}
+
+/// Build the actual nested sticky chain for two observable transport endpoints.
+fn nested_sticky_pipeline(
+    first: std::net::SocketAddr,
+    second: std::net::SocketAddr,
+    streaming: bool,
+) -> (Arc<crate::FilterPipeline>, Arc<SessionStoreRegistry>) {
+    let selector = if streaming {
+        "- filter: sticky_streaming_selector\n"
+    } else {
+        ""
+    };
+    let yaml = format!(
+        "{selector}- filter: router\n  routes:\n    - path_prefix: /\n      cluster: backend\n- filter: sticky_sessions\n  clusters:\n    - name: backend\n      type: header\n      header_name: X-Session-Id\n      ttl_secs: 3600\n      max_entries: 100\n      storage: local\n- filter: load_balancer\n  clusters:\n    - name: backend\n      load_balancer_strategy: round_robin\n      endpoints: ['{first}', '{second}']\n"
+    );
+    let mut registry = crate::FilterRegistry::with_builtins();
+    registry
+        .register(
+            "sticky_streaming_selector",
+            crate::FilterFactory::Http(Arc::new(|_| Ok(Box::new(StickyStreamingSelector)))),
+        )
+        .unwrap();
+    let mut entries = serde_yaml::from_str::<Vec<crate::FilterEntry>>(&yaml).unwrap();
+    let mut pipeline = crate::FilterPipeline::build(&mut entries, &registry).unwrap();
+    let stores = Arc::new(SessionStoreRegistry::new());
+    pipeline.set_session_stores(Arc::clone(&stores));
+    pipeline.set_allow_private_upstreams(true);
+    let pipeline = Arc::new(pipeline);
+    (pipeline, stores)
+}
+
+#[tokio::test]
+#[expect(
+    clippy::large_futures,
+    reason = "exercises nested failed dial followed by real forwarded requests"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "failed dial and subsequent exchanges prove absence then establishment of affinity"
+)]
+async fn nested_failed_dial_cannot_inherit_parent_forwarding_or_create_affinity() {
+    for streaming in [false, true] {
+        let refused = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let refused_address = refused.local_addr().unwrap();
+        drop(refused);
+        let (healthy, count, backend) = sticky_counted_backend(true).await;
+        let (pipeline, stores) = nested_sticky_pipeline(refused_address, healthy, streaming);
+        let client = praxis_core::subrequest::SubRequestClient::new(crate::test_support::connector(4, None));
+        let executor = crate::FilteredSubrequestExecutor::for_callout(
+            client,
+            crate::SubrequestRuntime::new(None, false, None, std::time::Instant::now()),
+            0,
+            1024,
+            Duration::from_secs(2),
+        );
+        let mut request = crate::SubRequest {
+            method: http::Method::GET,
+            uri: http::Uri::from_static("/"),
+            headers: http::HeaderMap::new(),
+            body: bytes::Bytes::new(),
+        };
+        request
+            .headers
+            .insert("x-session-id", http::HeaderValue::from_static("failed-then-healthy"));
+        let store = stores.get_or_create("backend", 100, Duration::from_secs(3600), config::EvictionPolicy::Lru);
+        for expected in [502, 200, 200] {
+            let mut extensions = crate::RequestExtensions::default();
+            extensions.insert(crate::UpstreamForwardedEndpoint(Arc::from(refused_address.to_string())));
+            let result = executor
+                .run(
+                    &pipeline,
+                    &request,
+                    extensions,
+                    std::time::Instant::now() + Duration::from_secs(2),
+                )
+                .await
+                .unwrap();
+            let status = match result {
+                crate::CalloutResponse::Buffered(response) | crate::CalloutResponse::Streaming { response, .. } => {
+                    response.status
+                },
+            };
+            assert_eq!(
+                status, expected,
+                "failed dial must permit a fresh selection, then successful affinity"
+            );
+            if expected == 502 {
+                assert!(
+                    store.get("failed-then-healthy").is_none(),
+                    "parent forwarding cannot authorize a failed child dial"
+                );
+                assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 0);
+            } else {
+                assert_eq!(
+                    store.get("failed-then-healthy").as_deref(),
+                    Some(healthy.to_string().as_str())
+                );
+            }
+        }
+        assert_eq!(
+            count.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "both later requests must reach the healthy pinned endpoint"
+        );
+        backend.abort();
+    }
+}
+
+#[tokio::test]
+#[expect(
+    clippy::large_futures,
+    reason = "drives real staged-address fallback in both nested response modes"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "first fallback and subsequent pinned exchange require distinct transport assertions"
+)]
+async fn nested_fallback_binds_the_address_that_forwarded_the_request() {
+    for streaming in [false, true] {
+        let (_reserved, refused) = crate::test_support::refusing_addr();
+        let (healthy, count, backend) = sticky_counted_backend(true).await;
+        let (pipeline, stores) = nested_sticky_pipeline(refused, healthy, streaming);
+        let client = praxis_core::subrequest::SubRequestClient::new(crate::test_support::connector(4, None));
+        let executor = crate::FilteredSubrequestExecutor::for_callout(
+            client,
+            crate::SubrequestRuntime::new(None, false, None, std::time::Instant::now()),
+            0,
+            1024,
+            Duration::from_secs(2),
+        );
+        let mut request = crate::SubRequest {
+            method: http::Method::GET,
+            uri: http::Uri::from_static("/"),
+            headers: http::HeaderMap::new(),
+            body: bytes::Bytes::new(),
+        };
+        request
+            .headers
+            .insert("x-session-id", http::HeaderValue::from_static("fallback-session"));
+        let staged = crate::StagedUpstream(praxis_core::connectivity::Upstream {
+            address: Arc::from(refused.to_string()),
+            authority: None,
+            base_path: None,
+            connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
+            tls: None,
+        });
+        let mut first_extensions = crate::RequestExtensions::default();
+        first_extensions.insert(staged);
+        first_extensions.insert(crate::StagedUpstreamFallback(vec![refused, healthy]));
+        let first = executor
+            .run(
+                &pipeline,
+                &request,
+                first_extensions,
+                std::time::Instant::now() + Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+        let first_status = match first {
+            crate::CalloutResponse::Buffered(response) | crate::CalloutResponse::Streaming { response, .. } => {
+                response.status
+            },
+        };
+        assert_eq!(first_status, 200, "live fallback must answer");
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let store = stores.get_or_create("backend", 100, Duration::from_secs(3600), config::EvictionPolicy::Lru);
+        assert_eq!(
+            store.get("fallback-session").as_deref(),
+            Some(healthy.to_string().as_str()),
+            "binding must name the backend that received the request"
+        );
+
+        for follow_up in 1..=2 {
+            let next = executor
+                .run(
+                    &pipeline,
+                    &request,
+                    crate::RequestExtensions::default(),
+                    std::time::Instant::now() + Duration::from_secs(2),
+                )
+                .await
+                .unwrap();
+            let status = match next {
+                crate::CalloutResponse::Buffered(response) | crate::CalloutResponse::Streaming { response, .. } => {
+                    response.status
+                },
+            };
+            assert_eq!(status, 200, "follow-up {follow_up} must use the healthy binding");
+            assert_eq!(
+                count.load(std::sync::atomic::Ordering::SeqCst),
+                follow_up + 1,
+                "follow-up {follow_up} must reach the real fallback backend"
+            );
+            assert_eq!(
+                store.get("fallback-session").as_deref(),
+                Some(healthy.to_string().as_str()),
+                "follow-up {follow_up} must retain the forwarded endpoint binding"
+            );
+        }
+        backend.abort();
+    }
 }

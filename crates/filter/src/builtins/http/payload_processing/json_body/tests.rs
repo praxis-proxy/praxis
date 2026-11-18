@@ -997,6 +997,27 @@ async fn metadata_add_skipped_when_extract_late_in_wire_order() {
 }
 
 #[tokio::test]
+async fn metadata_add_existing_key_with_late_extract_does_not_duplicate() {
+    let filter = parse_filter(
+        r#"
+        request_add:
+          - pointer: /a
+            metadata: m
+        request_extract:
+          - pointer: /b
+            metadata: m
+        "#,
+    );
+    let req = crate::test_utils::make_request(http::Method::POST, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let mut body = Some(Bytes::from_static(br#"{"a":"old","b":"new"}"#));
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert!(matches!(action, FilterAction::BodyDone));
+    assert_eq!(body.as_deref(), Some(br#"{"a":"old","b":"new"}"#.as_slice()));
+    assert_eq!(ctx.filter_metadata.get("m"), Some("new"));
+}
+
+#[tokio::test]
 async fn same_key_extract_before_replace() {
     let filter = parse_filter(
         r#"

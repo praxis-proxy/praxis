@@ -121,6 +121,7 @@ impl FilteredStreamingBody {
                 request_body_mode: cont.pipeline.body_capabilities().request_body_mode,
                 request_headers_to_remove: Vec::new(),
                 request_headers_to_set: Vec::new(),
+                request_header_mutations: Vec::new(),
                 request_start: cont.request_start,
                 response_body_bytes: cont.response_body_bytes,
                 response_body_mode: cont.response_body_mode,

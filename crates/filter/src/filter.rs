@@ -5,7 +5,6 @@
 //!
 //! Every HTTP filter implements this trait.
 
-#[cfg(any(feature = "upstream-binding", feature = "slow-start"))]
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -69,6 +68,12 @@ pub type FilterContext<'a> = HttpFilterContext<'a>;
 pub trait HttpFilter: Send + Sync {
     /// Unique name identifying this filter type (e.g. `"router"`, `"rate_limit"`).
     fn name(&self) -> &'static str;
+
+    /// Bind state shared by identical sticky-session configurations in this
+    /// candidate pipeline generation. Called during pipeline construction,
+    /// before a server publishes a successful reload.
+    #[doc(hidden)]
+    fn bind_session_stores(&self, _registry: &Arc<crate::SessionStoreRegistry>) {}
 
     /// Attach this filter's slow-start tables when the pipeline is installed.
     ///
@@ -150,6 +155,16 @@ pub trait HttpFilter: Send + Sync {
         false
     }
 
+    /// Whether `on_request` can assign a new [`HttpFilterContext::upstream`]
+    /// endpoint address. Terminal-branch security validation uses this
+    /// capability to detect a branch that may forward around later security
+    /// filters. Extensions that assign an endpoint should override it.
+    ///
+    /// [`HttpFilterContext::upstream`]: crate::HttpFilterContext::upstream
+    fn selects_upstream_endpoint(&self) -> bool {
+        false
+    }
+
     /// The cluster names this filter may select at runtime.
     ///
     /// Return every configured cluster target so pipeline validation
@@ -160,19 +175,44 @@ pub trait HttpFilter: Send + Sync {
         Vec::new()
     }
 
-    /// Emit this filter's end-of-request record from the logging phase.
+    /// Claim the request's deferred access record from the logging phase.
     ///
     /// The access log normally emits from its own completion hooks, but
     /// some responses never reach them: a request rejected before the
     /// upstream, a stream aborted mid-body, or a gRPC response whose
     /// body ends with trailers rather than an end-of-stream body chunk.
-    /// The protocol layer calls this from the logging phase for those,
-    /// where late-arriving facts — the `grpc-status` trailer among them
-    /// — are finally available.
+    /// The protocol logging phase supplies late facts such as `grpc-status`.
     ///
-    /// Returns whether a record was emitted. Filters that log nothing
-    /// leave the default.
+    /// The pipeline calls this only on the first top-level `access_log`
+    /// instance whose own request conditions match, with that instance's
+    /// `current_filter_id` bound for the call. Other filters, including
+    /// independent event publishers, do not participate in this dispatch.
+    ///
+    /// Return `true` when the access record is claimed, including when
+    /// sampling or emit conditions suppress it; `false` permits the protocol's
+    /// fixed-shape access-log fallback. Other filters leave the default.
     fn emit_deferred_record(&self, _ctx: &HttpFilterContext<'_>, _status: u16) -> bool {
+        false
+    }
+
+    /// Observe terminal request completion after response delivery or failure.
+    ///
+    /// This hook runs once in the protocol completion callback, inside the
+    /// request span, for an invocation that ran in the request phase. The
+    /// dispatcher enforces response conditions; see
+    /// [`FilterPipeline::emit_request_completion`]. The completion context has
+    /// no response headers, so retain needed values in `on_response`. A zero
+    /// status means no response status was written. Implementations must not
+    /// change the client response or block on outbound work.
+    ///
+    /// [`FilterPipeline::emit_request_completion`]: crate::FilterPipeline::emit_request_completion
+    fn on_request_complete(&self, _ctx: &mut HttpFilterContext<'_>, _status: u16) {}
+
+    /// Whether this filter needs the terminal request-completion hook.
+    ///
+    /// The pipeline caches this declaration, including branch filters, so
+    /// ordinary requests avoid a completion-phase filter traversal.
+    fn observes_request_completion(&self) -> bool {
         false
     }
 
@@ -465,6 +505,9 @@ pub trait HttpFilter: Send + Sync {
     /// calls [`FilterAction::Release`] or end-of-stream; use this
     /// when the filter needs the full body before making a decision
     /// (e.g. JSON parsing for routing).
+    /// A filter-declared [`BodyMode::SizeLimit`] does not install an
+    /// independent transfer limit. The listener body ceiling remains
+    /// the hard cap when buffering is requested.
     ///
     /// [`FilterAction::Release`]: crate::FilterAction::Release
     fn request_body_mode(&self) -> BodyMode {
@@ -479,6 +522,9 @@ pub trait HttpFilter: Send + Sync {
     /// calls [`FilterAction::Release`] or end-of-stream; use this
     /// when the filter needs the complete response body (e.g.
     /// response persistence).
+    /// A filter-declared [`BodyMode::SizeLimit`] does not install an
+    /// independent transfer limit. The listener body ceiling remains
+    /// the hard cap when buffering is requested.
     ///
     /// [`FilterAction::Release`]: crate::FilterAction::Release
     fn response_body_mode(&self) -> BodyMode {

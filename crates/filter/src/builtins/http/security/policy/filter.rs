@@ -59,7 +59,7 @@ use super::{
     llm::{ParsedLlmRequest, ParsedLlmResponse, request_message, response_message},
     request_facts::{RequestFacts, RequestView},
     request_headers,
-    request_state::{MetadataResponseDispatch, state, state_mut},
+    request_state::{InferenceResponseKind, MetadataResponseDispatch, state, state_mut},
     response_rules::{ensure_supported_entity_results, metadata_only_policy},
     transport::PolicyHttpTransport,
 };
@@ -865,6 +865,15 @@ impl PolicyFilter {
         (self.llm_routes, self.llm_post)
     }
 
+    /// Return the emitted request and response mutation-warning flags for tests.
+    #[cfg(all(test, feature = "policy-builtins"))]
+    pub(super) fn mutation_warning_flags(&self) -> (bool, bool) {
+        (
+            self.llm_request_mutator_warned.load(Ordering::Relaxed),
+            self.llm_response_mutator_warned.load(Ordering::Relaxed),
+        )
+    }
+
     /// Warn about inference configurations that can skip policy evaluation.
     fn warn_on_inference_gaps(
         policy_config: &ppe::praxis_policy_core::config::PolicyConfig,
@@ -1299,10 +1308,33 @@ impl PolicyFilter {
             ..Default::default()
         });
 
-        // -- meta: entity identity (from protocol classifier) + operator config --
+        // -- operator-supplied context + entity coordinates in a single meta clone --
+        Self::stamp_operator_context(&mut ext, headers, cfg, Some((entity_type, entity_name)));
+
+        ext
+    }
+
+    /// Stamp operator-supplied context onto extensions: `context_meta`
+    /// (scope, tags, properties), the dedicated `agent.session_id`
+    /// binding, and `context_headers` (header → extension field
+    /// mapping). When `entity` is `Some`, the entity coordinates are
+    /// assigned in the same metadata clone. Called from both
+    /// `extensions_from_identity` (normal path, with entity) and the
+    /// entity-less fallback in `response_extensions` (with `None`) so
+    /// response-phase rules see the same operator context regardless
+    /// of whether a request-phase identity was stashed.
+    fn stamp_operator_context(
+        ext: &mut Extensions,
+        headers: &std::collections::HashMap<String, String>,
+        cfg: &PolicyFilterConfig,
+        entity: Option<(&str, &str)>,
+    ) {
+        // -- meta: entity identity + context_meta (scope, tags, properties) --
         let mut meta = ext.meta.as_ref().map(|arc| (**arc).clone()).unwrap_or_default();
-        meta.entity_type = Some(entity_type.to_owned());
-        meta.entity_name = Some(entity_name.to_owned());
+        if let Some((entity_type, entity_name)) = entity {
+            meta.entity_type = Some(entity_type.to_owned());
+            meta.entity_name = Some(entity_name.to_owned());
+        }
         if let Some(scope) = &cfg.context_meta.scope {
             meta.scope = Some(scope.clone());
         }
@@ -1324,10 +1356,8 @@ impl PolicyFilter {
 
         // -- context_headers: map reserved-prefix headers → extension fields --
         if !cfg.context_headers.is_empty() {
-            Self::apply_context_headers(headers, &cfg.context_headers, &mut ext);
+            Self::apply_context_headers(headers, &cfg.context_headers, ext);
         }
-
-        ext
     }
 
     /// Read headers named in `context_headers` and write their values
@@ -1723,7 +1753,7 @@ impl PolicyFilter {
         // CMF cannot losslessly rebuild multi-part inference bodies, so keep
         // the original instead of applying a partial mutation.
         if matches!(self.cfg.body_access, BodyAccessMode::ReadWrite)
-            && cmf_result.modified_payload.is_some()
+            && cmf_result.payload_modified
             && !self.llm_request_mutator_warned.swap(true, Ordering::Relaxed)
         {
             tracing::warn!(
@@ -1808,31 +1838,24 @@ impl PolicyFilter {
 
         let body_bytes = body.as_ref().cloned().unwrap_or_else(Bytes::new);
 
-        // Fail closed because this filter cannot evaluate encoded content.
-        if let Some(encoding) = Self::response_content_encoding(ctx) {
-            tracing::warn!(
-                target: "policy.filter",
-                model = %model,
-                encoding = %encoding,
-                "inference response is content-encoded and cannot be evaluated; failing closed \
-                 (replacing the response body with the deny envelope)",
-            );
-            let violation = PluginViolation::new(
-                "llm.response_unreadable",
-                "inference response is content-encoded and cannot be evaluated",
-            );
-            *body = Some(llm_deny_body(
-                Some(&violation),
-                body_bytes.len(),
-                "content-encoded inference response",
-            ));
-            return Ok(FilterAction::Continue);
-        }
-
         let parsed = ParsedLlmResponse::parse(&body_bytes);
         if !parsed.is_object() {
             if ctx.extensions.get::<PolicyResponseContext>().is_some() {
                 return self.dispatch_llm_response_context(ctx);
+            }
+            if !body_bytes.is_empty()
+                && state(ctx).is_some_and(|state| state.inference_response_kind == InferenceResponseKind::DeclaredJson)
+            {
+                let violation = PluginViolation::new(
+                    "llm.response_unreadable",
+                    "declared JSON inference response cannot be evaluated",
+                );
+                *body = Some(llm_deny_body(
+                    Some(&violation),
+                    body_bytes.len(),
+                    "invalid JSON inference response",
+                ));
+                return Ok(FilterAction::Continue);
             }
             tracing::debug!(
                 target: "policy.filter",
@@ -1926,7 +1949,7 @@ impl PolicyFilter {
         }
 
         // Keep the original because CMF cannot rebuild multi-choice responses.
-        if cmf_result.modified_payload.is_some() && !self.llm_response_mutator_warned.swap(true, Ordering::Relaxed) {
+        if cmf_result.payload_modified && !self.llm_response_mutator_warned.swap(true, Ordering::Relaxed) {
             tracing::warn!(
                 target: "policy.filter",
                 model = %model,
@@ -2074,7 +2097,7 @@ impl PolicyFilter {
     /// Return the request model for a non-streaming inference response.
     fn llm_response_model(ctx: &HttpFilterContext<'_>) -> Option<String> {
         let model = state(ctx)?.inference_model.as_ref()?;
-        if Self::response_is_event_stream(ctx) {
+        if state(ctx).is_some_and(|state| state.inference_response_kind == InferenceResponseKind::Streamed) {
             tracing::debug!(
                 target: "policy.filter",
                 model = %model,
@@ -2089,7 +2112,7 @@ impl PolicyFilter {
     fn inference_response_is_streamed(&self, ctx: &HttpFilterContext<'_>) -> bool {
         self.llm_post
             && state(ctx).is_some_and(|state| state.inference_model.is_some())
-            && Self::response_is_event_stream(ctx)
+            && state(ctx).is_some_and(|state| state.inference_response_kind == InferenceResponseKind::Streamed)
     }
 
     /// Whether the upstream is streaming this response as server-sent events.
@@ -2098,11 +2121,21 @@ impl PolicyFilter {
             .is_some_and(|value| media_type_is(value, "text/event-stream"))
     }
 
-    /// Return a non-identity response content encoding.
-    fn response_content_encoding(ctx: &HttpFilterContext<'_>) -> Option<String> {
-        Self::response_header_value(ctx, &http::header::CONTENT_ENCODING)
-            .map(|value| value.trim().to_ascii_lowercase())
-            .filter(|value| !value.is_empty() && value != "identity")
+    /// Whether every Content-Encoding field names only identity codings.
+    fn response_encoding_is_readable(ctx: &HttpFilterContext<'_>) -> bool {
+        ctx.response_header.as_ref().is_none_or(|response| {
+            response
+                .headers
+                .get_all(http::header::CONTENT_ENCODING)
+                .iter()
+                .all(|value| {
+                    value.to_str().ok().is_some_and(|value| {
+                        value
+                            .split(',')
+                            .all(|token| token.trim().eq_ignore_ascii_case("identity"))
+                    })
+                })
+        })
     }
 
     /// Reject an inference request over its configured body limit.
@@ -2250,11 +2283,7 @@ impl PolicyFilter {
                  an entry sourced from it renders nothing",
             );
             let mut ext = Self::entity_less_extensions();
-            if let (Some(scope), Some(meta)) = (&cfg.context_meta.scope, ext.meta.as_ref()) {
-                let mut m = (**meta).clone();
-                m.scope = Some(scope.clone());
-                ext.meta = Some(Arc::new(m));
-            }
+            Self::stamp_operator_context(&mut ext, view.headers(), cfg, None);
             ext
         };
         // Keep the request line, so a response contract resolves the same route
@@ -2434,14 +2463,56 @@ impl PolicyFilter {
         Ok(None)
     }
 
-    /// Remember an SSE classification until the clean body EOF callback.
-    fn record_streamed_inference_response(&self, ctx: &mut HttpFilterContext<'_>) {
-        if self.llm_post
-            && state(ctx).is_some_and(|state| state.inference_model.is_some())
-            && Self::response_is_event_stream(ctx)
-        {
-            state_mut(ctx).streamed_inference_response = true;
+    /// Classify only the final response head visible to this filter.
+    fn record_final_inference_response(&self, ctx: &mut HttpFilterContext<'_>) -> Option<Rejection> {
+        let response = ctx.response_header.as_ref()?;
+        if response.status.is_informational() {
+            return None;
         }
+        let kind = self.classify_inference_response(ctx);
+        state_mut(ctx).inference_response_kind = kind;
+        if kind == InferenceResponseKind::DeclaredJson && !Self::response_encoding_is_readable(ctx) {
+            let violation = PluginViolation::new(
+                "llm.response_unreadable",
+                "declared JSON inference response is content-encoded and cannot be evaluated",
+            );
+            return Some(llm_deny_rejection(Some(&violation)));
+        }
+        None
+    }
+
+    /// Select the response representation that controls body-phase policy.
+    fn classify_inference_response(&self, ctx: &HttpFilterContext<'_>) -> InferenceResponseKind {
+        let inferred = self.llm_post && state(ctx).is_some_and(|state| state.inference_model.is_some());
+        let streamed = inferred && Self::response_is_event_stream(ctx);
+        if streamed {
+            return InferenceResponseKind::Streamed;
+        }
+        let json = inferred
+            && matches!(self.cfg.body_access, BodyAccessMode::ReadWrite)
+            && ctx
+                .response_header
+                .as_ref()
+                .is_some_and(|response| response.status.is_success())
+            && !Self::response_ends_at_headers(ctx)
+            && Self::response_is_json(ctx);
+        if json {
+            InferenceResponseKind::DeclaredJson
+        } else {
+            InferenceResponseKind::Other
+        }
+    }
+
+    /// Whether the final response advertises a JSON representation.
+    fn response_is_json(ctx: &HttpFilterContext<'_>) -> bool {
+        Self::response_header_value(ctx, &http::header::CONTENT_TYPE).is_some_and(|value| {
+            value.split(';').next().map(str::trim).is_some_and(|media_type| {
+                media_type.eq_ignore_ascii_case("application/json")
+                    || media_type.split_once('/').is_some_and(|(type_name, subtype)| {
+                        type_name.eq_ignore_ascii_case("application") && subtype.to_ascii_lowercase().ends_with("+json")
+                    })
+            })
+        })
     }
 
     /// Put the rendered response contract on the response the client receives.
@@ -2939,6 +3010,7 @@ impl HttpFilter for PolicyFilter {
         // mutated `MessagePayload` back into the JSON-RPC body so the
         // upstream service receives the rewritten args.
         if matches!(self.cfg.body_access, BodyAccessMode::ReadWrite)
+            && cmf_result.payload_modified
             && let Some(mp) = cmf_result.modified_payload.as_ref()
             && let Some(updated) = mp.as_any().downcast_ref::<MessagePayload>()
         {
@@ -2974,12 +3046,14 @@ impl HttpFilter for PolicyFilter {
     }
 
     async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        self.record_streamed_inference_response(ctx);
         if ctx.response_header.is_none() {
             return Ok(FilterAction::Continue);
         }
         if let Some(action) = self.dispatch_http_response_hook(ctx).await? {
             return Ok(action);
+        }
+        if let Some(rejection) = self.record_final_inference_response(ctx) {
+            return Ok(FilterAction::Reject(rejection));
         }
         Self::snapshot_response_context(ctx);
         if Self::response_ends_at_headers(ctx) && self.entity_routes && self.llm_post {
@@ -3002,8 +3076,7 @@ impl HttpFilter for PolicyFilter {
         // Keep the clean-EOF callback available for metadata-only response policy.
         if !end_of_stream
             && matches!(self.cfg.body_access, BodyAccessMode::ReadWrite)
-            && (self.inference_response_is_streamed(ctx)
-                || state(ctx).is_some_and(|state| state.streamed_inference_response))
+            && self.inference_response_is_streamed(ctx)
         {
             return Ok(FilterAction::Release);
         }
@@ -3017,9 +3090,7 @@ impl HttpFilter for PolicyFilter {
         }
         if self.llm_post
             && ctx.extensions.get::<PolicyResponseContext>().is_some()
-            && (matches!(self.cfg.body_access, BodyAccessMode::ReadOnly)
-                || self.inference_response_is_streamed(ctx)
-                || state(ctx).is_some_and(|state| state.streamed_inference_response))
+            && (matches!(self.cfg.body_access, BodyAccessMode::ReadOnly) || self.inference_response_is_streamed(ctx))
         {
             return self.dispatch_llm_response_context(ctx);
         }
@@ -3140,7 +3211,10 @@ impl HttpFilter for PolicyFilter {
             return Ok(FilterAction::Continue);
         }
 
-        if let Some(mp) = cmf_result.modified_payload.as_ref()
+        // PPE carries the original payload in every allowed result. Only an
+        // accepted plugin mutation warrants replacing the JSON-RPC body.
+        if cmf_result.payload_modified
+            && let Some(mp) = cmf_result.modified_payload.as_ref()
             && let Some(updated) = mp.as_any().downcast_ref::<MessagePayload>()
         {
             // Capture the id before the rewrite consumes the parsed DOM
