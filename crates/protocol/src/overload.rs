@@ -226,11 +226,23 @@ mod tests {
     fn old_header_cleanup_preserves_a_recycled_socket_deadline() {
         let deadlines = super::HeaderDeadlines::default();
         let now = tokio::time::Instant::now();
-        deadlines.lock().unwrap().insert(7, (now, 1));
+        deadlines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(7, (now, 1));
         let old = super::InitialDeadline(std::sync::Arc::clone(&deadlines), 7, 1);
-        deadlines.lock().unwrap().insert(7, (now, 2));
+        deadlines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(7, (now, 2));
         drop(old);
-        assert_eq!(deadlines.lock().unwrap().get(&7), Some(&(now, 2)));
+        assert_eq!(
+            deadlines
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&7),
+            Some(&(now, 2))
+        );
     }
 
     #[test]
