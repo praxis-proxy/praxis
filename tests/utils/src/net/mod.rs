@@ -33,6 +33,7 @@ pub use http_client::{
 pub use http1::{H1Completion, H1Response, assert_buffered_response_rejected, read_h1_response};
 pub use http2::{
     H2PausedResult, H2PausedUploads, H2Response, H2Upload, read_h2_response, send_h2_payload, start_h2_paused_uploads,
+    start_h2_upload_paused_after_prefix,
 };
 pub use port::{
     PortGuard, bind_unique_port, bind_unique_port_on, free_port, free_port_guard, free_port_v6, ipv6_available,
@@ -42,6 +43,7 @@ pub use tls::{
     ClientCert, TestCertificates, TlsProbeEnd, TlsProbeOutcome, ensure_crypto_provider, https_client_config, https_get,
     https_get_attempt, https_get_attempt_on, parse_cert_chain_and_key, start_counting_tls_backend, start_mtls_backend,
     start_tcp_echo_backend, start_tcp_tagged_backend, start_tls_backend, start_tls_backend_from_pem,
-    tls_negative_probe, tls_send_recv, tls_serial, wait_for_https, wait_for_tls, write_test_certificate,
+    tls_handshake_probe, tls_negative_probe, tls_send_recv, tls_serial, wait_for_https, wait_for_tls,
+    write_test_certificate,
 };
 pub use wait::{wait_for_http, wait_for_http2, wait_for_tcp};

@@ -24,6 +24,8 @@ use praxis_test_utils::{
     start_h2_paused_uploads, start_payload_response_backend,
 };
 
+use super::payload_lifecycle::wait_active_requests;
+
 /// One mebibyte.
 const MIB: u64 = 1_048_576;
 /// Deadline for an individual socket or backend receipt.
@@ -845,13 +847,13 @@ fn stalled_download_resumes_and_client_cancellation_stops_producer() {
                 let receipt = backend.receipt.recv_timeout(WAIT).unwrap();
                 assert!(!receipt.complete && receipt.written_bytes < length, "{receipt:?}");
             } else {
+                // Release the source before draining: waiting for the full
+                // prefix in the reader can exhaust the source's pause deadline.
+                backend.resume();
                 let mut received = 0;
                 let response = read_h1_response(&mut BufReader::new(stream), false, length, |chunk| {
                     assert_eq!(spec.mismatch(received, chunk), None);
                     received += chunk.len() as u64;
-                    if received >= 16 * MIB {
-                        backend.resume();
-                    }
                     Ok(())
                 });
                 assert_eq!(response.status, Some(200));
@@ -1348,24 +1350,31 @@ fn near_cap_uploads_obey_listener_admission_and_release_permits() {
     let clean = start_echo_backend();
     let port = free_port();
     let addr = format!("127.0.0.1:{port}");
+    let admin = format!("127.0.0.1:{}", free_port());
     let filters = "      - filter: json_body_field\n        field: model\n        header: x-praxis-model\n        max_body_bytes: 1048576\n";
     let yaml = config(port, backend.port, clean.port(), filters, "    max_connections: 1\n")
-        .replace("max_request_bytes: 67108864", "max_request_bytes: 1048576");
+        .replace("max_request_bytes: 67108864", "max_request_bytes: 1048576")
+        + &format!("\nadmin:\n  metrics_address: \"{admin}\"\n");
     let mut process = PraxisProcess::spawn(&yaml, &addr);
+    praxis_test_utils::wait_for_tcp(&admin);
     probe(&addr);
-    thread::sleep(Duration::from_millis(300));
+    wait_active_requests(&admin, 0);
     let mut first = upload(&addr, body.len());
     first.write_all(&body[..body.len() - 1]).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let response = http_get(&addr, "/probe", None).0;
-        if response == 503 {
-            break;
-        }
-        assert_eq!(response, 200);
-        assert!(Instant::now() < deadline, "listener did not apply its admission limit");
-        thread::sleep(Duration::from_millis(20));
-    }
+    wait_active_requests(&admin, 1);
+    assert_eq!(
+        http_get(&addr, "/probe", None).0,
+        503,
+        "held upload must exhaust the listener"
+    );
+    let (metrics_status, metrics) = http_get(&admin, "/metrics", None);
+    assert_eq!(metrics_status, 200);
+    assert!(
+        metrics
+            .lines()
+            .any(|line| line == "praxis_overload_rejects_total{reason=\"listener_connections\"} 1"),
+        "the listener must account for its rejected probe: {metrics}"
+    );
     first.write_all(&body[body.len() - 1..]).unwrap();
     assert_eq!(status(first), 200);
     assert_eq!(
@@ -1373,16 +1382,8 @@ fn near_cap_uploads_obey_listener_admission_and_release_permits() {
         body.len() as u64,
         "backend must receive every upload byte"
     );
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let response = http_get(&addr, "/probe", None).0;
-        if response == 200 {
-            break;
-        }
-        assert_eq!(response, 503);
-        assert!(Instant::now() < deadline, "listener did not release a completed permit");
-        thread::sleep(Duration::from_millis(20));
-    }
+    wait_active_requests(&admin, 0);
+    probe(&addr);
     stop(&mut process);
 }
 
@@ -1617,9 +1618,23 @@ fn h2_tiny_frame_flood_is_bounded_by_transport_guard() {
     );
     let before = sample_process(process.pid()).unwrap();
     let (_, samples) = measure(process.pid(), || {
-        let client = start_h2_paused_uploads(&addr, spec.clone(), 1, 128, false);
+        let mut client = praxis_test_utils::start_h2_upload_paused_after_prefix(&addr, spec.clone());
+        assert_eq!(
+            client.ready.recv_timeout(WAIT).unwrap().unwrap(),
+            16_384,
+            "the initial body prefix must be queued before the guard is exercised"
+        );
+        backend
+            .accepted
+            .recv_timeout(WAIT)
+            .expect("upstream must accept the staged request");
+        backend
+            .first_byte
+            .recv_timeout(WAIT)
+            .expect("upstream must receive the staged body");
+        client.resume();
         let failure = client
-            .ready
+            .result
             .recv_timeout(WAIT)
             .unwrap()
             .expect_err("unpaced flood must hit the transport guard");
