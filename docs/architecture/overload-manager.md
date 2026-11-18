@@ -91,8 +91,9 @@ shared background-cleanup deadline (one second when dropped independently).
 The deadline bounds joins; revocation first waits for the short publication
 critical section. Subscriber/recorder callbacks, rejection diagnostics, and
 retired pipeline destructors execute outside that section. The watcher retains
-pipeline slots through its exit and releases filters on its own thread, keeping
-downstream destructors off the stopping thread without another OS thread.
+pipeline slots through its exit and releases its references on its own thread,
+without another OS thread. Filters drop there only when it holds the last
+reference; other owners can release the last reference on the stopping thread.
 Pipeline construction, downstream validation, advisory file-permission checks,
 and change diagnostics run outside the publication lock. Stalled validation,
 filesystem checks, or sinks for these diagnostics cannot hold that lock, and
