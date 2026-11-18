@@ -78,7 +78,7 @@ sequenceDiagram
   Housekeeping drop cancels samplers and clears their controller. A running
   purge remains owned by the housekeeping runtime during background cleanup.
   After network shutdown, the server allows two seconds in total to join its
-  watcher, pipeline-release worker, housekeeping runtime, and health-check runtimes.
+  watcher, housekeeping runtime, and health-check runtimes.
   A task exceeding that deadline is detached with a warning; an in-flight allocator call is
   never forcibly interrupted.
 
@@ -90,9 +90,9 @@ with any publication already in progress, then joins its thread within the
 shared background-cleanup deadline (one second when dropped independently).
 The deadline bounds joins; revocation first waits for the short publication
 critical section. Subscriber/recorder callbacks, rejection diagnostics, and
-retired pipeline destructors execute outside that section. Shutdown releases
-live pipelines on a separate worker whose join uses the same deadline, so a
-blocking downstream destructor cannot run on the stopping thread.
+retired pipeline destructors execute outside that section. The watcher retains
+pipeline slots through its exit and releases filters on its own thread, keeping
+downstream destructors off the stopping thread without another OS thread.
 Pipeline construction, downstream validation, advisory file-permission checks,
 and change diagnostics run outside the publication lock. Stalled validation,
 filesystem checks, or sinks for these diagnostics cannot hold that lock, and

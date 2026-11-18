@@ -1397,14 +1397,14 @@ mod tests {
         fn poll_read(
             mut self: std::pin::Pin<&mut Self>,
             _cx: &mut std::task::Context<'_>,
-            buffer: &mut tokio::io::ReadBuf<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
         ) -> std::task::Poll<std::io::Result<()>> {
             self.read_after_failure = self.failed_write;
             std::task::Poll::Ready(
                 self.read
                     .take()
                     .unwrap_or_else(|| Ok(Vec::new()))
-                    .map(|bytes| buffer.put_slice(&bytes)),
+                    .map(|bytes| buf.put_slice(&bytes)),
             )
         }
     }

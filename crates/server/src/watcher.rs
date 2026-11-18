@@ -127,11 +127,13 @@ pub(crate) struct WatcherParams {
 /// The thread runs until the `shutdown` token is cancelled or
 /// the process exits.
 pub(crate) fn spawn_config_watcher(params: WatcherParams) -> std::thread::JoinHandle<()> {
+    let retained = params.pipelines.retain_pipelines();
     #[cfg(test)]
     let observation = crate::server::background_observation::capture();
     std::thread::spawn(move || {
         #[cfg(test)]
         let _observation = crate::server::background_observation::start("config watcher", observation);
+        let _retained = retained;
         let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
             Ok(rt) => rt,
             Err(err) => {
