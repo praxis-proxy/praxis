@@ -146,9 +146,10 @@ This fragment belongs inside a proxy filter chain:
   config_path: /etc/praxis/policy.yaml
 ```
 
-The default `body_access: read_only` preserves response streaming. Enable
-`read_write` only for the rewriting or response-inspection cases listed below;
-it buffers responses and enforces the configured buffer limit.
+The default `body_access: read_only` preserves response streaming.
+`read_write` enables rewriting and response inspection using the configured
+buffer limit. For streaming inference with response rules, chunks are released
+before EOF; the full response is not buffered.
 
 Filter fields sit directly under `filter`, without a nested `config` key. For a
 complete configuration, use the [Core policy example][core-example] or the
