@@ -21,4 +21,4 @@ jobs:
   audit:
     permissions:
       contents: read
-    uses: praxis-proxy/conventions/.github/workflows/supply-chain.yaml@f671c1215f89562d286310a6cabdcbaa5da9605c # v0.4.0
+    uses: praxis-proxy/conventions/.github/workflows/supply-chain.yaml@2a0d28ddd3690ed73347ddbe59d08dac02f604ce # v0.5.0
