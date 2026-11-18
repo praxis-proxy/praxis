@@ -1198,6 +1198,18 @@ impl HttpFilterContext<'_> {
         }
     }
 
+    /// Move this pass's trusted header mutations out of the context, with the
+    /// precedence of [`pass_header_mutations`].
+    ///
+    /// [`pass_header_mutations`]: Self::pass_header_mutations
+    pub fn take_pass_header_mutations(&mut self) -> Vec<TrustedHeaderMutation> {
+        if self.pre_read_mutations.is_empty() {
+            self.grouped_queue_mutations()
+        } else {
+            std::mem::take(&mut self.pre_read_mutations)
+        }
+    }
+
     /// The grouped header queues as ordered trusted mutations: removes, then
     /// sets, then adds. A promoted header with an invalid name or value is
     /// skipped with a warning.
@@ -1810,6 +1822,8 @@ mod tests {
             ctx.pass_header_mutations().as_slice(),
             [TrustedHeaderMutation::Remove(name)] if name == "x-log"
         ));
+        assert_eq!(ctx.take_pass_header_mutations().len(), 1);
+        assert!(ctx.pre_read_mutations.is_empty(), "taking moves the ordered log out");
     }
 
     #[test]

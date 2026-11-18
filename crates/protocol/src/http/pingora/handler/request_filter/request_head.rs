@@ -161,7 +161,7 @@ pub(in crate::http) async fn run_head_filters(
 
         // Capture trusted header mutations with the same precedence as the
         // pre-read pass: the ordered log wins, else the grouped queues.
-        let mutations = filter_ctx.pass_header_mutations();
+        let mutations = filter_ctx.take_pass_header_mutations();
 
         // Publish head facts back to ctx before propagating any error.
         // `build_filter_context` moved these out of ctx (including the
