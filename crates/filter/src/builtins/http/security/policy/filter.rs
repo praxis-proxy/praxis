@@ -59,7 +59,7 @@ use super::{
     llm::{ParsedLlmRequest, ParsedLlmResponse, request_message, response_message},
     request_facts::{RequestFacts, RequestView},
     request_headers,
-    request_state::{InferenceResponseKind, MetadataResponseDispatch, state, state_mut},
+    request_state::{InferenceResponseKind, MetadataResponseDispatch, RequestState, state, state_mut},
     response_rules::{ensure_supported_entity_results, metadata_only_policy},
     transport::PolicyHttpTransport,
 };
@@ -1541,18 +1541,18 @@ impl PolicyFilter {
     /// Whether this policy instance already completed admission in an earlier
     /// lifecycle phase.
     fn admission_complete(ctx: &HttpFilterContext<'_>) -> bool {
-        state(ctx).is_some_and(|state| state.admitted)
+        state(ctx).is_some_and(RequestState::is_admitted)
     }
 
     /// Record that this instance admitted the request.
     fn mark_admission_complete(ctx: &mut HttpFilterContext<'_>) {
-        state_mut(ctx).admitted = true;
+        state_mut(ctx).admit();
     }
 
     /// Keep the full identity this instance admitted, for its later hooks.
     fn store_identity(ctx: &mut HttpFilterContext<'_>, identity: IdentityPayload) {
         let state = state_mut(ctx);
-        state.gated = None;
+        drop(state.take_held_identity());
         state.identity = Some(identity);
     }
 
@@ -1597,7 +1597,7 @@ impl PolicyFilter {
         &self,
         ctx: &mut HttpFilterContext<'_>,
     ) -> Result<Result<IdentityPayload, Rejection>, FilterError> {
-        match state_mut(ctx).gated.take() {
+        match state_mut(ctx).take_held_identity() {
             Some(identity) => Ok(Ok(identity)),
             None => self.resolve_gated_identity(ctx).await,
         }
@@ -1656,7 +1656,7 @@ impl PolicyFilter {
         // PPE the authoritative route coordinates. Publishing this unscoped
         // gate result could expose a principal from the wrong route resolver.
         if self.entity_routes {
-            state_mut(ctx).gated = Some(identity);
+            state_mut(ctx).hold_identity(identity);
         } else {
             if let Some(rejection) = self.post_identity_limit_http(ctx, &identity).await? {
                 return Ok(FilterAction::Reject(rejection));
