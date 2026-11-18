@@ -4,12 +4,20 @@ name: Supply Chain
 # Workflow Settings
 # ------------------------------------------------------------------------------
 #
-# Shared from praxis-proxy/conventions (supply-chain.yaml).
+# The dependency audit (`cargo audit` + `cargo deny check`) is not a pull
+# request gate. Advisory-database and duplicate-dependency changes land without
+# any commit in the PR, so a red audit says nothing about the change under
+# review. The shared workflow runs it on every push to main (the release
+# preflight uses that run) and on a daily schedule against the default branch,
+# and keeps a single tracking issue for failures, closing it once the audit
+# recovers. The praxis-bot App token writes that issue; the audit itself needs
+# no secrets.
+#
+# Shared from praxis-proxy/conventions (supply-chain.yaml). The pin is the
+# first release that carries the issue reporting.
 
 on:
   push:
-    branches: [main]
-  pull_request:
     branches: [main]
   schedule:
     - cron: "23 3 * * *"
@@ -21,4 +29,7 @@ jobs:
   audit:
     permissions:
       contents: read
-    uses: praxis-proxy/conventions/.github/workflows/supply-chain.yaml@f671c1215f89562d286310a6cabdcbaa5da9605c # v0.4.0
+    uses: praxis-proxy/conventions/.github/workflows/supply-chain.yaml@v0.5.0
+    secrets:
+      PRAXIS_BOT_APP_ID: ${{ secrets.PRAXIS_BOT_APP_ID }}
+      PRAXIS_BOT_APP_PRIVATE_KEY: ${{ secrets.PRAXIS_BOT_APP_PRIVATE_KEY }}
