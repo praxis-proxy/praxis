@@ -222,8 +222,11 @@ production` at startup. Do not run an experimental build in production.
   listeners, which turns a listener into an HTTP CONNECT egress gateway:
   CONNECT requests run the filter pipeline, then the destination allowlist
   and the private-IP guard decide the dial, and the tunnel relays raw bytes
-  under the configured timeouts. Default builds reject the key. Tunneled
-  payloads are opaque to body-inspecting filters.
+  under the configured timeouts. An empty `allow_destinations` list admits
+  every destination through the allowlist; the filters and the private-IP
+  guard still apply, and validation then requires an `ip_acl` or `policy`
+  filter. Default builds reject the key. Tunneled payloads are opaque to
+  body-inspecting filters.
 - **`bound-upstream-request-body`**: the once-per-request bound-upstream
   request-body hook (`bound_upstream_request_body_access` and
   `on_bound_upstream_request_body` on `HttpFilter`). It runs right after the
