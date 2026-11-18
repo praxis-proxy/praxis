@@ -224,12 +224,13 @@ pub(crate) fn resolve_pipelines_with_composition(
             &config.insecure_options,
             &config.clusters,
         )?;
+        let listener_session_stores = Arc::new(session_stores.candidate());
         configure_pipeline(
             &mut pipeline,
             config,
             health_registry,
             kv_stores,
-            session_stores,
+            &listener_session_stores,
             slow_start_registry,
             subrequest_client,
         )
@@ -260,6 +261,9 @@ pub(crate) fn resolve_pipelines_with_composition(
         // validator sees the pristine flattened entries, not the husks left by
         // build_with_chains.
         composition.validate(&ValidatorContext::new(config, listener, &entry_snapshot, &pipeline))?;
+
+        listener_session_stores.prune_unused();
+        session_stores.retain_used_from(&listener_session_stores);
 
         pipelines.insert(listener.name.clone(), Arc::new(pipeline));
     }
@@ -319,9 +323,8 @@ fn configure_pipeline(
     // `kv_store` mode deny every request.
     pipeline.set_kv_stores(kv_stores.clone());
 
-    // Always inject the process-wide registry (even while empty): the sticky
-    // sessions filter adopts per-cluster stores into it on demand, which is
-    // what lets session bindings survive config reloads.
+    // Each listener owns only its bound stores, including nested pipelines.
+    // Identical configurations reuse Arcs from the publication candidate.
     pipeline.set_session_stores(Arc::clone(session_stores));
     pipeline.set_slow_start_registry(Arc::clone(slow_start_registry));
     pipeline.set_subrequest_client(subrequest_client.clone());

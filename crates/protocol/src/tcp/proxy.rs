@@ -20,7 +20,7 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     task::{Context, Poll},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use arc_swap::ArcSwap;
@@ -39,11 +39,13 @@ use praxis_tls::sni;
 use tokio::{
     io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, ReadBuf},
     net::TcpStream,
-    sync::{Semaphore, watch},
+    sync::{OwnedSemaphorePermit, Semaphore, watch},
 };
 use tracing::{Instrument as _, Span, debug, error, info, info_span, trace, warn};
 
 use super::groups::TcpGroupKey;
+#[cfg(feature = "pingora")]
+use super::pending::{PendingAdmissions, PreTlsAdmission};
 use crate::ListenerPipelines;
 
 // -----------------------------------------------------------------------------
@@ -78,6 +80,95 @@ const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// hold a connection (and semaphore permit) indefinitely.
 const SNI_PEEK_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Claims held from TCP admission until upstream and downstream close.
+pub(super) struct TcpAdmission {
+    /// Descriptor forecast claim, settled on upstream connection.
+    fd: praxis_core::fd::Admission<'static>,
+    /// Process-wide slot, if configured.
+    _global: Option<OwnedSemaphorePermit>,
+    /// TCP group slot, if configured.
+    _group: Option<OwnedSemaphorePermit>,
+    /// Admission instant, including TLS time where the adapter can observe it.
+    started: tokio::time::Instant,
+    /// Absolute maximum session deadline, if configured.
+    deadline: Option<tokio::time::Instant>,
+}
+
+impl TcpAdmission {
+    /// Return the timestamp used for connection metrics and filter context.
+    fn connect_time(&self) -> Instant {
+        self.started.into_std()
+    }
+
+    /// Return the absolute maximum session deadline.
+    pub(super) fn deadline(&self) -> Option<tokio::time::Instant> {
+        self.deadline
+    }
+}
+
+/// Shared admission gate for TLS callbacks and plain TCP sessions.
+pub(super) struct TcpAdmissionGate {
+    /// TCP group capacity shared across all listeners in the group.
+    group: Option<Arc<Semaphore>>,
+    /// Maximum duration counted from admission.
+    max_duration: Option<Duration>,
+}
+
+impl TcpAdmissionGate {
+    /// Construct the group's gate from its configured limits.
+    pub(super) fn new(group: Option<Arc<Semaphore>>, max_duration: Option<Duration>) -> Self {
+        Self { group, max_duration }
+    }
+
+    /// Admit a connection immediately or reject it with its overload metric.
+    pub(super) fn try_admit(&self, remote: &str) -> Option<TcpAdmission> {
+        if praxis_core::memory::is_exceeded() {
+            record_tcp_overload(remote, crate::http::pingora::metrics::OVERLOAD_REASON_MEMORY);
+            return None;
+        }
+        let fd = praxis_core::fd::try_admit().or_else(|| {
+            record_tcp_overload(remote, crate::http::pingora::metrics::OVERLOAD_REASON_FILE_DESCRIPTORS);
+            None
+        })?;
+        let (exceeded, global) = crate::connections::try_acquire_global();
+        if exceeded {
+            record_tcp_overload(
+                remote,
+                crate::http::pingora::metrics::OVERLOAD_REASON_GLOBAL_CONNECTIONS,
+            );
+            return None;
+        }
+        let group = self.try_group_slot(remote).ok()?;
+        let started = tokio::time::Instant::now();
+        Some(TcpAdmission {
+            fd,
+            _global: global,
+            _group: group,
+            started,
+            deadline: self.max_duration.and_then(|duration| started.checked_add(duration)),
+        })
+    }
+
+    /// Acquire the TCP group slot, if a group cap exists.
+    fn try_group_slot(&self, remote: &str) -> Result<Option<OwnedSemaphorePermit>, tokio::sync::TryAcquireError> {
+        let Some(group) = &self.group else {
+            return Ok(None);
+        };
+        Arc::clone(group).try_acquire_owned().map(Some).inspect_err(|_| {
+            record_tcp_overload(
+                remote,
+                crate::http::pingora::metrics::OVERLOAD_REASON_LISTENER_CONNECTIONS,
+            );
+        })
+    }
+}
+
+/// Record one rejected TCP admission using the shared overload labels.
+fn record_tcp_overload(remote: &str, reason: &'static str) {
+    warn!(remote, reason, "TCP connection admission rejected");
+    crate::http::pingora::metrics::record_overload_reject(reason);
+}
+
 // -----------------------------------------------------------------------------
 // PingoraTcpProxy
 // -----------------------------------------------------------------------------
@@ -106,8 +197,12 @@ pub(crate) struct PingoraTcpProxy {
     /// Cluster name for load-balanced TCP connections.
     cluster: Option<Arc<str>>,
 
-    /// Per-listener connection semaphore for max connections.
-    connection_semaphore: Option<Arc<Semaphore>>,
+    /// Shared group, process and descriptor admission gate.
+    admission_gate: Arc<TcpAdmissionGate>,
+
+    /// TLS handshakes admitted before Pingora's shared serving callback.
+    #[cfg(feature = "pingora")]
+    pending: Arc<PendingAdmissions>,
 
     /// Fallback listener label when local-address lookup misses.
     ///
@@ -128,9 +223,6 @@ pub(crate) struct PingoraTcpProxy {
 
     /// Optional session timeout for the bidirectional forwarding phase.
     session_timeout: Option<Duration>,
-
-    /// Optional maximum total session duration.
-    max_duration: Option<Duration>,
 
     /// Swappable filter pipeline for TCP filter hooks.
     pipeline: Arc<ArcSwap<FilterPipeline>>,
@@ -156,15 +248,30 @@ impl PingoraTcpProxy {
         Self {
             allow_private_upstreams,
             cluster,
-            connection_semaphore,
+            admission_gate: Arc::new(TcpAdmissionGate::new(connection_semaphore, max_duration)),
+            #[cfg(feature = "pingora")]
+            pending: Arc::new(PendingAdmissions::new()),
             default_listener_name,
             listener_ports: ports_by_listener(&listener_names),
             listener_names,
             session_timeout,
-            max_duration,
             pipeline,
             upstream_addr,
         }
+    }
+
+    /// Admit before TLS or plain serving, using the same group gate.
+    pub(super) fn try_admit(&self, remote: &str) -> Option<TcpAdmission> {
+        self.admission_gate.try_admit(remote)
+    }
+
+    /// Build the callback that admits TLS before Pingora handshakes.
+    #[cfg(feature = "pingora")]
+    pub(super) fn pre_tls_callback(&self) -> pingora_core::listeners::PreTlsCallback {
+        Arc::new(PreTlsAdmission {
+            gate: Arc::clone(&self.admission_gate),
+            pending: Arc::clone(&self.pending),
+        })
     }
 
     /// Resolve the metrics `listener` label for this connection's local address.
@@ -186,40 +293,46 @@ impl PingoraTcpProxy {
             })
     }
 
+    /// Record a connection stopped during setup by its absolute duration.
+    fn record_early_duration(&self, local_addr: &str, connect_time: Instant, reason: &'static str) {
+        super::metrics::record_tcp_connection_duration(
+            self.listener_label_for(local_addr),
+            reason,
+            connect_time.elapsed().as_secs_f64(),
+        );
+        log_early_close(connect_time, reason);
+    }
+
     /// Run bidirectional forwarding, returning how the session ended.
     ///
     /// The peeked prefix is written inside the same future as the copy, so
     /// shutdown, the session timeout, and the max duration bound its pace
     /// wait. A failed prefix write stays separate from a later copy error.
-    #[expect(clippy::too_many_arguments, reason = "per-connection forwarding state")]
     async fn forward<S>(
         &self,
         session: &mut S,
         upstream: &mut TcpStream,
         shutdown_rx: &mut watch::Receiver<bool>,
-        upstream_addr: &str,
-        counters: &ByteCounters,
-        #[cfg(feature = "bandwidth")] pacer: Option<&TcpBandwidthPacer>,
-        peeked: Vec<u8>,
+        state: ForwardState<'_>,
     ) -> SessionEnd
     where
         S: AsyncRead + AsyncWrite + Unpin + Send,
     {
         let mut counted = CountingStream {
             inner: session,
-            counters,
+            counters: state.counters,
         };
         let prefix_written = AtomicBool::new(false);
         let work = Box::pin(paced_session(
             &mut counted,
             upstream,
             #[cfg(feature = "bandwidth")]
-            pacer,
-            peeked,
+            state.pacer,
+            state.peeked,
             &prefix_written,
         ));
-        let bound = Box::pin(self.bound_forward(work, shutdown_rx, upstream_addr)).await;
-        session_end(bound, prefix_written.load(Ordering::Relaxed), upstream_addr)
+        let bound = Box::pin(self.bound_forward(work, shutdown_rx, state.upstream_addr, state.deadline)).await;
+        session_end(bound, prefix_written.load(Ordering::Relaxed), state.upstream_addr)
     }
 
     /// Apply the session deadline, shutdown, and max duration to `work`.
@@ -228,20 +341,20 @@ impl PingoraTcpProxy {
         work: F,
         shutdown_rx: &mut watch::Receiver<bool>,
         upstream_addr: &str,
+        deadline: Option<tokio::time::Instant>,
     ) -> Drive<T>
     where
         F: Future<Output = T>,
     {
         let driven = drive_session(work, shutdown_rx, self.session_timeout, upstream_addr);
-        let Some(limit) = self.max_duration else {
+        let Some(deadline) = deadline else {
             return driven.await;
         };
-        match tokio::time::timeout(limit, driven).await {
+        match tokio::time::timeout_at(deadline, driven).await {
             Ok(outcome) => outcome,
             Err(_elapsed) => {
                 warn!(
                     upstream = %upstream_addr,
-                    max_duration_secs = limit.as_secs(),
                     "TCP session exceeded maximum duration"
                 );
                 Drive::MaxDuration
@@ -249,93 +362,56 @@ impl PingoraTcpProxy {
         }
     }
 
-    /// Run TCP connect filters; returns the resolved upstream address if allowed.
-    #[expect(clippy::too_many_arguments, reason = "pipeline generation pinned by caller")]
-    async fn run_connect_filters(
-        &self,
-        pipeline: &FilterPipeline,
-        remote_addr: &str,
-        local_addr: &str,
-        sni: Option<&str>,
-        connect_time: std::time::Instant,
-    ) -> ConnectOutcome {
-        let upstream_cow = self.upstream_addr.as_deref().map(Cow::Borrowed);
-        let health_registry = pipeline.health_registry().cloned();
-
-        let mut ctx = TcpFilterContext {
-            remote_addr,
-            local_addr,
-            sni,
-            upstream_addr: upstream_cow,
-            cluster: self.cluster.clone(),
-            health_registry: health_registry.as_ref(),
-            kv_stores: pipeline.kv_stores(),
-            connect_time,
-            bytes_in: 0,
-            bytes_out: 0,
-        };
-
-        let result = resolve_connect_choice(pipeline, &mut ctx, remote_addr).await;
+    /// Run TCP connect filters with caller-owned state for timeout cleanup.
+    async fn run_connect_filters(&self, pipeline: &FilterPipeline, ctx: &mut TcpFilterContext<'_>) -> ConnectOutcome {
+        let remote_addr = ctx.remote_addr;
+        let result = resolve_connect_choice(pipeline, ctx, remote_addr).await;
         if result.is_none() {
             super::metrics::record_tcp_connection_duration(
-                self.listener_label_for(local_addr),
+                self.listener_label_for(ctx.local_addr),
                 "filter_rejection",
-                connect_time.elapsed().as_secs_f64(),
+                ctx.connect_time.elapsed().as_secs_f64(),
             );
-            log_early_close(connect_time, "filter_rejection");
+            log_early_close(ctx.connect_time, "filter_rejection");
         }
         result
     }
 
-    /// Run TCP disconnect filters for logging.
-    #[expect(clippy::too_many_arguments, reason = "per-connection metrics")]
+    /// Run paired disconnect filters on the pinned context and pipeline.
     async fn run_disconnect_filters(
         &self,
         pipeline: &FilterPipeline,
-        remote_addr: &str,
-        local_addr: &str,
-        upstream_addr: &str,
-        sni_hostname: Option<&str>,
-        connect_time: std::time::Instant,
+        ctx: &mut TcpFilterContext<'_>,
         bytes_in: u64,
         bytes_out: u64,
     ) {
-        let health_registry = pipeline.health_registry().cloned();
-        let mut ctx = TcpFilterContext {
-            remote_addr,
-            local_addr,
-            sni: sni_hostname,
-            upstream_addr: Some(Cow::Borrowed(upstream_addr)),
-            cluster: self.cluster.clone(),
-            health_registry: health_registry.as_ref(),
-            kv_stores: pipeline.kv_stores(),
-            connect_time,
-            bytes_in,
-            bytes_out,
-        };
-        let _result = pipeline.execute_tcp_disconnect(&mut ctx).await;
+        ctx.bytes_in = bytes_in;
+        ctx.bytes_out = bytes_out;
+        let _result = pipeline.execute_tcp_disconnect(ctx).await;
     }
 
     /// Serve one accepted connection to completion, through the proxy's whole
     /// lifecycle.
     ///
-    /// `remote_addr` and `local_addr` are the client's and the listener's
-    /// socket addresses; forwarding ends early once `shutdown` flips.
-    #[expect(
-        clippy::too_many_lines,
-        clippy::large_stack_frames,
-        reason = "linear connection lifecycle"
+    /// `addresses` contains the client and listener socket addresses;
+    /// forwarding ends early once `shutdown` flips.
+    #[expect(clippy::too_many_lines, reason = "linear connection lifecycle")]
+    #[cfg_attr(
+        feature = "bandwidth",
+        expect(clippy::large_stack_frames, reason = "paced connection lifecycle")
     )]
     pub(super) async fn serve_connection<S>(
         &self,
         mut session: S,
-        remote_addr: &str,
-        local_addr: &str,
+        addresses: (&str, &str),
         shutdown: &watch::Receiver<bool>,
+        mut admission: TcpAdmission,
     ) where
         S: AsyncRead + AsyncWrite + Unpin + Send,
     {
-        let connect_time = std::time::Instant::now();
+        let (remote_addr, local_addr) = addresses;
+        let connect_time = admission.connect_time();
+        let max_deadline = admission.deadline();
 
         let span = info_span!(
             "tcp_connection",
@@ -345,44 +421,13 @@ impl PingoraTcpProxy {
         );
 
         Box::pin(async {
-            if praxis_core::memory::is_exceeded() {
-                warn!(remote = %remote_addr, "memory pressure threshold exceeded, closing TCP connection");
-                crate::http::pingora::metrics::record_overload_reject(
-                    crate::http::pingora::metrics::OVERLOAD_REASON_MEMORY,
-                );
+            if admission
+                .deadline()
+                .is_some_and(|deadline| deadline <= tokio::time::Instant::now())
+            {
+                self.record_early_duration(local_addr, connect_time, "max_duration");
                 return;
             }
-
-            let Some(mut fd_admission) = praxis_core::fd::try_admit() else {
-                warn!(remote = %remote_addr, "file descriptor limit nearly exhausted, closing TCP connection");
-                crate::http::pingora::metrics::record_overload_reject(
-                    crate::http::pingora::metrics::OVERLOAD_REASON_FILE_DESCRIPTORS,
-                );
-                return;
-            };
-
-            let (exceeded, _global_permit) = crate::connections::try_acquire_global();
-            if exceeded {
-                warn!(remote = %remote_addr, "global max connections reached, closing TCP connection");
-                crate::http::pingora::metrics::record_overload_reject(
-                    crate::http::pingora::metrics::OVERLOAD_REASON_GLOBAL_CONNECTIONS,
-                );
-                return;
-            }
-
-            let _permit = if let Some(sem) = &self.connection_semaphore {
-                if let Ok(permit) = Arc::clone(sem).try_acquire_owned() {
-                    Some(permit)
-                } else {
-                    warn!(remote = %remote_addr, "max TCP connections reached, closing connection");
-                    crate::http::pingora::metrics::record_overload_reject(
-                        crate::http::pingora::metrics::OVERLOAD_REASON_LISTENER_CONNECTIONS,
-                    );
-                    return;
-                }
-            } else {
-                None
-            };
 
             let listener_label = self.listener_label_for(local_addr);
             let _active_tcp_connection = super::metrics::TcpActiveConnectionGuard::acquire(listener_label.clone());
@@ -391,14 +436,14 @@ impl PingoraTcpProxy {
             info!("connection_accepted");
 
             let (sni_hostname, peeked_bytes) = if self.upstream_addr.is_none() {
-                let Ok(result) = tokio::time::timeout(SNI_PEEK_TIMEOUT, peek_sni(&mut session)).await else {
-                    warn!(remote = %remote_addr, "SNI peek timed out, closing connection");
-                    super::metrics::record_tcp_connection_duration(
-                        self.listener_label_for(local_addr),
-                        "sni_timeout",
-                        connect_time.elapsed().as_secs_f64(),
-                    );
-                    log_early_close(connect_time, "sni_timeout");
+                let deadline = phase_deadline(max_deadline, SNI_PEEK_TIMEOUT);
+                let Ok(result) = tokio::time::timeout_at(deadline, peek_sni(&mut session)).await else {
+                    let reason = if max_deadline.is_some_and(|max| max <= deadline) {
+                        "max_duration"
+                    } else {
+                        "sni_timeout"
+                    };
+                    self.record_early_duration(local_addr, connect_time, reason);
                     return;
                 };
                 result
@@ -407,66 +452,75 @@ impl PingoraTcpProxy {
             };
             let peeked_len = u64::try_from(peeked_bytes.len()).unwrap_or(u64::MAX);
 
-            // Pin one pipeline generation for the whole connection so paired
-            // connect/disconnect filter state (e.g. least-connections counters)
-            // stays on the same instance across a hot reload.
+            // Pin one generation so connect and disconnect use the same LB state.
             let pipeline = self.pipeline.load_full();
+            let health_registry = pipeline.health_registry().cloned();
+            let mut ctx = TcpFilterContext {
+                remote_addr,
+                local_addr,
+                sni: sni_hostname.as_deref(),
+                upstream_addr: self.upstream_addr.as_deref().map(Cow::Borrowed),
+                lb_selection: None,
+                cluster: self.cluster.clone(),
+                health_registry: health_registry.as_ref(),
+                kv_stores: pipeline.kv_stores(),
+                connect_time,
+                bytes_in: 0,
+                bytes_out: 0,
+            };
+            let connected = match before_deadline(max_deadline, self.run_connect_filters(&pipeline, &mut ctx)).await {
+                Some(Some(choice)) => choice,
+                Some(None) => {
+                    drop(session);
+                    release_selected_endpoint(&pipeline, &mut ctx).await;
+                    return;
+                },
+                None => {
+                    drop(session);
+                    release_selected_endpoint(&pipeline, &mut ctx).await;
+                    self.record_early_duration(local_addr, connect_time, "max_duration");
+                    return;
+                },
+            };
 
-            let connected = self
-                .run_connect_filters(
-                    &pipeline,
-                    remote_addr,
-                    local_addr,
-                    sni_hostname.as_deref(),
-                    connect_time,
-                )
-                .await;
             #[cfg(feature = "bandwidth")]
-            let Some((upstream_addr, pacer)) = connected else {
-                return;
-            };
+            let (upstream_addr, pacer) = connected;
             #[cfg(not(feature = "bandwidth"))]
-            let Some(upstream_addr) = connected else {
-                return;
-            };
+            let upstream_addr = connected;
 
             Span::current().record("upstream.address", upstream_addr.as_str());
 
-            let upstream_connect_start = std::time::Instant::now();
+            let upstream_connect_start = Instant::now();
             let cluster_label = self.metrics_cluster_label();
-            let mut upstream =
-                if let Some(stream) = connect_upstream(&upstream_addr, self.allow_private_upstreams).await {
-                    fd_admission.connected(true);
+            let connect_result = before_deadline(
+                max_deadline,
+                connect_upstream(&upstream_addr, self.allow_private_upstreams),
+            )
+            .await;
+            let mut upstream = match connect_result {
+                Some(Some(stream)) => {
+                    admission.fd.connected(true);
                     crate::http::pingora::metrics::record_upstream_connect_duration(
                         cluster_label,
                         upstream_connect_start.elapsed().as_secs_f64(),
                     );
                     stream
-                } else {
-                    crate::http::pingora::metrics::record_upstream_connect_failure(cluster_label);
-                    // Connect filters already ran (least-connections/P2C counters
-                    // were incremented on selection), so the paired disconnect
-                    // filters must run on this exit path too or the in-flight
-                    // counters leak permanently.
-                    self.run_disconnect_filters(
-                        &pipeline,
-                        remote_addr,
-                        local_addr,
-                        &upstream_addr,
-                        sni_hostname.as_deref(),
-                        connect_time,
-                        0,
-                        0,
-                    )
-                    .await;
-                    super::metrics::record_tcp_connection_duration(
-                        self.listener_label_for(local_addr),
-                        "connect_failure",
-                        connect_time.elapsed().as_secs_f64(),
-                    );
-                    log_early_close(connect_time, "connect_failure");
+                },
+                failed => {
+                    if failed.is_some() {
+                        crate::http::pingora::metrics::record_upstream_connect_failure(cluster_label);
+                    }
+                    drop(session);
+                    self.run_disconnect_filters(&pipeline, &mut ctx, 0, 0).await;
+                    let reason = if failed.is_none() {
+                        "max_duration"
+                    } else {
+                        "connect_failure"
+                    };
+                    self.record_early_duration(local_addr, connect_time, reason);
                     return;
-                };
+                },
+            };
 
             let mut shutdown_rx: watch::Receiver<bool> = shutdown.clone();
             let counters = ByteCounters::default();
@@ -474,11 +528,14 @@ impl PingoraTcpProxy {
                 &mut session,
                 &mut upstream,
                 &mut shutdown_rx,
-                &upstream_addr,
-                &counters,
-                #[cfg(feature = "bandwidth")]
-                pacer.as_deref(),
-                peeked_bytes,
+                ForwardState {
+                    upstream_addr: &upstream_addr,
+                    counters: &counters,
+                    deadline: max_deadline,
+                    #[cfg(feature = "bandwidth")]
+                    pacer: pacer.as_deref(),
+                    peeked: peeked_bytes,
+                },
             ))
             .await;
             let (close_reason, prefix_written) = match ended {
@@ -489,17 +546,9 @@ impl PingoraTcpProxy {
                         phase = "peeked_write",
                         "connection_error"
                     );
-                    self.run_disconnect_filters(
-                        &pipeline,
-                        remote_addr,
-                        local_addr,
-                        &upstream_addr,
-                        sni_hostname.as_deref(),
-                        connect_time,
-                        0,
-                        0,
-                    )
-                    .await;
+                    drop(upstream);
+                    drop(session);
+                    self.run_disconnect_filters(&pipeline, &mut ctx, 0, 0).await;
                     super::metrics::record_tcp_connection_duration(
                         self.listener_label_for(local_addr),
                         "peeked_write_error",
@@ -520,17 +569,10 @@ impl PingoraTcpProxy {
                 copied_in
             };
 
-            self.run_disconnect_filters(
-                &pipeline,
-                remote_addr,
-                local_addr,
-                &upstream_addr,
-                sni_hostname.as_deref(),
-                connect_time,
-                bytes_in,
-                bytes_out,
-            )
-            .await;
+            drop(upstream);
+            drop(session);
+            self.run_disconnect_filters(&pipeline, &mut ctx, bytes_in, bytes_out)
+                .await;
 
             let duration = connect_time.elapsed();
             #[expect(clippy::cast_possible_truncation, reason = "millis fit u64")]
@@ -555,12 +597,42 @@ impl PingoraTcpProxy {
     }
 }
 
+/// Inputs shared by forwarding and its absolute session deadline.
+struct ForwardState<'a> {
+    /// Upstream used in close and timeout diagnostics.
+    upstream_addr: &'a str,
+    /// Byte counts retained when a copy future is cancelled.
+    counters: &'a ByteCounters,
+    /// Maximum duration counted from connection admission.
+    deadline: Option<tokio::time::Instant>,
+    /// Per-connection bandwidth pacing, when enabled.
+    #[cfg(feature = "bandwidth")]
+    pacer: Option<&'a TcpBandwidthPacer>,
+    /// Peeked client bytes that still need a paced upstream write.
+    peeked: Vec<u8>,
+}
+
 #[cfg(feature = "pingora")]
 #[async_trait]
 impl ServerApp for PingoraTcpProxy {
+    #[expect(
+        clippy::significant_drop_tightening,
+        reason = "the owned admission is moved into serving and must retain its permits until that future ends"
+    )]
     async fn process_new(self: &Arc<Self>, session: Stream, shutdown: &ShutdownWatch) -> Option<Stream> {
         let (remote_addr, local_addr) = extract_addrs(&session);
-        Box::pin(self.serve_connection(session, &remote_addr, &local_addr, shutdown)).await;
+        let admission = if session.get_ssl().is_some() {
+            session
+                .get_socket_digest()
+                .and_then(|digest| self.pending.take(&digest))
+        } else {
+            self.try_admit(&remote_addr)
+        };
+        let Some(admission) = admission else {
+            warn!(remote = %remote_addr, "TLS admission handoff missing or TCP admission rejected");
+            return None;
+        };
+        Box::pin(self.serve_connection(session, (&remote_addr, &local_addr), shutdown, admission)).await;
         None
     }
 }
@@ -685,7 +757,7 @@ async fn resolve_connect_result(
             | FilterAction::BodyDone
             | FilterAction::TerminalResponse(_)
             | FilterAction::StreamingTerminalResponse(_),
-        ) => take_upstream_address(ctx, remote_addr),
+        ) => selected_upstream_address(ctx, remote_addr),
         Ok(FilterAction::Reject(r)) => {
             log_tcp_rejection(
                 remote_addr,
@@ -693,24 +765,21 @@ async fn resolve_connect_result(
                 #[cfg(feature = "bandwidth")]
                 state.close_reason(),
             );
-            release_selected_endpoint(pipeline, ctx).await;
             None
         },
         Err(e) => {
             error!(remote = %remote_addr, error = %e, "TCP connect filter error");
-            release_selected_endpoint(pipeline, ctx).await;
             None
         },
     }
 }
 
-/// Move the selected address out when the connect context is about to end.
-fn take_upstream_address(ctx: &mut TcpFilterContext<'_>, remote: &str) -> Option<String> {
-    if let Some(address) = ctx.upstream_addr.take() {
-        return Some(address.into_owned());
-    }
-    error!(remote = %remote, "no upstream address resolved for TCP connection");
-    None
+/// Copy the selected address while retaining caller-owned disconnect state.
+fn selected_upstream_address(ctx: &TcpFilterContext<'_>, remote_addr: &str) -> Option<String> {
+    ctx.upstream_addr.as_deref().map(str::to_owned).or_else(|| {
+        error!(remote = %remote_addr, "no upstream address resolved for TCP connection");
+        None
+    })
 }
 
 /// Log a connect-filter rejection, including its close cause when it has one.
@@ -730,11 +799,10 @@ fn log_tcp_rejection(
 /// Run disconnect filters when the connect phase selected an endpoint but
 /// the connection will not proceed.
 ///
-/// A rejection or error from a filter after `tcp_load_balancer` leaves the
-/// selected endpoint's in-flight counter incremented; only the disconnect
-/// hook releases it.
+/// Called once outside the connect deadline, after closing the socket.
+/// Built-in load-balancer claims also release when the context is dropped.
 async fn release_selected_endpoint(pipeline: &FilterPipeline, ctx: &mut TcpFilterContext<'_>) {
-    if ctx.upstream_addr.is_none() {
+    if ctx.lb_selection.is_none() && ctx.upstream_addr.is_none() {
         return;
     }
     if let Err(e) = pipeline.execute_tcp_disconnect(ctx).await {
@@ -876,9 +944,33 @@ fn reassembler_step(active: &mut sni::SniReassembler, data: &[u8], filled: usize
 // Utilities
 // -----------------------------------------------------------------------------
 
+/// Use the earlier of a phase's own timeout and the total session deadline.
+fn phase_deadline(maximum: Option<tokio::time::Instant>, phase_timeout: Duration) -> tokio::time::Instant {
+    let phase = tokio::time::Instant::now() + phase_timeout;
+    maximum.map_or(phase, |deadline| deadline.min(phase))
+}
+
+/// Poll setup work only while the absolute session deadline remains.
+async fn before_deadline<F: Future>(deadline: Option<tokio::time::Instant>, future: F) -> Option<F::Output> {
+    match deadline {
+        Some(deadline) => tokio::time::timeout_at(deadline, future).await.ok(),
+        None => Some(future.await),
+    }
+}
+
+/// Replay SNI-peeked bytes within the same absolute connection budget.
+#[cfg(test)]
+async fn replay_peeked<Output: AsyncWrite + Unpin>(
+    output: &mut Output,
+    bytes: &[u8],
+    deadline: Option<tokio::time::Instant>,
+) -> Option<io::Result<()>> {
+    before_deadline(deadline, output.write_all(bytes)).await
+}
+
 /// Log a `connection_close` event for early-exit paths that fire after
 /// `connection_accepted` but before the happy-path close.
-fn log_early_close(connect_time: std::time::Instant, reason: &str) {
+fn log_early_close(connect_time: Instant, reason: &str) {
     #[expect(clippy::cast_possible_truncation, reason = "millis fit u64")]
     let duration_ms = connect_time.elapsed().as_millis() as u64;
     info!(
@@ -1696,10 +1788,11 @@ mod tests {
             local_addr: "127.0.0.1:5432",
             sni: None,
             upstream_addr: None,
+            lb_selection: None,
             cluster: Some(Arc::from(cluster)),
             health_registry: None,
             kv_stores: None,
-            connect_time: std::time::Instant::now(),
+            connect_time: Instant::now(),
             bytes_in: 0,
             bytes_out: 0,
         }
@@ -1711,9 +1804,10 @@ mod tests {
         let disconnects = Arc::new(AtomicUsize::new(0));
         let pipeline = counting_selector_reject_pipeline(&connects, &disconnects);
 
+        let mut ctx = make_tcp_ctx("db");
         let result = resolve_connect_result(
             &pipeline,
-            &mut make_tcp_ctx("db"),
+            &mut ctx,
             "192.0.2.7:9999",
             #[cfg(feature = "bandwidth")]
             &mut praxis_filter::TcpConnectState::default(),
@@ -1721,6 +1815,12 @@ mod tests {
         .await;
 
         assert!(result.is_none(), "the ACL filter should reject the connection");
+        assert_eq!(
+            disconnects.load(Ordering::SeqCst),
+            0,
+            "resolution leaves cleanup to its caller"
+        );
+        release_selected_endpoint(&pipeline, &mut ctx).await;
         assert_eq!(
             connects.load(Ordering::SeqCst),
             1,
@@ -1730,6 +1830,38 @@ mod tests {
             disconnects.load(Ordering::SeqCst),
             1,
             "a rejected connection must run the disconnect hook so the selected endpoint's in-flight counter is released"
+        );
+    }
+
+    #[tokio::test]
+    async fn static_upstream_rejection_keeps_custom_disconnect_hook() {
+        let connects = Arc::new(AtomicUsize::new(0));
+        let disconnects = Arc::new(AtomicUsize::new(0));
+        let pipeline = counting_selector_reject_pipeline(&connects, &disconnects);
+        let mut ctx = make_tcp_ctx("db");
+        ctx.upstream_addr = Some(Cow::Borrowed("127.0.0.1:5432"));
+
+        let result = resolve_connect_result(
+            &pipeline,
+            &mut ctx,
+            "192.0.2.7:9999",
+            #[cfg(feature = "bandwidth")]
+            &mut praxis_filter::TcpConnectState::default(),
+        )
+        .await;
+
+        assert!(result.is_none(), "a later filter rejects the static upstream");
+        assert_eq!(
+            disconnects.load(Ordering::SeqCst),
+            0,
+            "resolution must not start cleanup"
+        );
+        release_selected_endpoint(&pipeline, &mut ctx).await;
+        assert_eq!(connects.load(Ordering::SeqCst), 1, "custom connect hook ran");
+        assert_eq!(
+            disconnects.load(Ordering::SeqCst),
+            1,
+            "custom disconnect hook still runs"
         );
     }
 
@@ -2407,7 +2539,7 @@ mod tests {
         let (mut client, mut client_peer) = tokio::io::duplex(64 * 1024);
         let (mut upstream, mut upstream_peer) = tokio::io::duplex(64 * 1024);
         let pacer = TcpBandwidthPacer::new(Some(4_000), None, 0);
-        let started = std::time::Instant::now();
+        let started = Instant::now();
         let copy = tokio::spawn(async move {
             copy_bidirectional_paced(&mut client, &mut upstream, &pacer)
                 .await
@@ -2432,7 +2564,7 @@ mod tests {
     async fn oversized_tcp_write_releases_the_burst_before_its_refilled_tail() {
         let (mut writer, mut reader) = tokio::io::duplex(1024);
         let pacer = TcpBandwidthPacer::new(Some(1_000), None, 100);
-        let started = std::time::Instant::now();
+        let started = Instant::now();
         let task = tokio::spawn(async move {
             write_paced(&mut writer, &[7; 400], 400, &pacer, CopyDirection::Upload)
                 .await
@@ -2505,7 +2637,7 @@ mod tests {
         let (mut upstream, mut upstream_peer) = tokio::io::duplex(64 * 1024);
         let pacer = TcpBandwidthPacer::new(Some(4_000), None, 0);
         let payload = vec![9_u8; 2_000];
-        let started = std::time::Instant::now();
+        let started = Instant::now();
         write_client_prefix(&mut upstream, &payload, Some(&pacer))
             .await
             .unwrap();
@@ -2555,7 +2687,7 @@ mod tests {
         let (mut upstream, _peer) = tokio::io::duplex(64);
         let pacer = TcpBandwidthPacer::new(Some(1), None, 0);
         let payload = vec![1_u8; 4_000];
-        let started = std::time::Instant::now();
+        let started = Instant::now();
         let outcome = drive_session(
             async {
                 write_client_prefix(&mut upstream, &payload, Some(&pacer))
@@ -2579,5 +2711,367 @@ mod tests {
             pacer.reserve_upload(1).delay() < Duration::from_secs(2),
             "the unsent prefix reservation is refunded"
         );
+    }
+    mod tcp_duration_regressions {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        use super::*;
+
+        #[tokio::test]
+        async fn total_duration_includes_sni_setup() {
+            let proxy = test_proxy(None, None, Duration::from_millis(80));
+            let admission = proxy.try_admit("client").expect("admission");
+            let (session, mut peer) = tokio::io::duplex(64);
+            let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+            tokio::time::timeout(
+                Duration::from_millis(300),
+                proxy.serve_connection(session, ("client", "listener"), &shutdown_rx, admission),
+            )
+            .await
+            .expect("absolute duration must interrupt SNI peek before its 5-second limit");
+            let mut byte = [0_u8; 1];
+            assert_eq!(
+                peer.read(&mut byte).await.expect("peer read"),
+                0,
+                "expired setup closes the socket"
+            );
+        }
+
+        #[tokio::test]
+        async fn total_duration_bounds_stalled_peek_replay() {
+            let (mut output, _reader) = tokio::io::duplex(1);
+            let deadline = tokio::time::Instant::now() + Duration::from_millis(40);
+            let replay = tokio::time::timeout(
+                Duration::from_millis(200),
+                replay_peeked(&mut output, &[7_u8; 1_024], Some(deadline)),
+            )
+            .await
+            .expect("absolute budget must interrupt a blocked replay");
+            assert!(replay.is_none(), "replay consumes the original session budget");
+        }
+
+        #[tokio::test]
+        async fn early_peer_close_finishes_before_duration_budget() {
+            let backend = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("backend bind");
+            let upstream = backend.local_addr().expect("backend address").to_string();
+            let proxy = test_proxy(Some(upstream), None, Duration::from_secs(2));
+            let admission = proxy.try_admit("client").expect("admission");
+            let (session, peer) = tokio::io::duplex(64);
+            drop(peer);
+            let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+            let backend_task = tokio::spawn(async move {
+                let (stream, _) = backend.accept().await.expect("backend accepted");
+                drop(stream);
+            });
+            tokio::time::timeout(
+                Duration::from_millis(500),
+                proxy.serve_connection(session, ("client", "listener"), &shutdown_rx, admission),
+            )
+            .await
+            .expect("closed peer and backend should finish before max duration");
+            backend_task.await.expect("backend task joined");
+        }
+
+        #[tokio::test]
+        async fn duration_closes_sockets_before_stalled_disconnect_hook() {
+            let backend = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("backend bind");
+            let upstream = backend.local_addr().expect("backend address").to_string();
+            let pipeline = pending_disconnect_pipeline();
+            let proxy = Arc::new(test_proxy(Some(upstream), Some(pipeline), Duration::from_millis(80)));
+            let admission = proxy.try_admit("client").expect("admission");
+            let (session, mut peer) = tokio::io::duplex(64);
+            let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+            let serving = tokio::spawn(async move {
+                proxy
+                    .serve_connection(session, ("client", "listener"), &shutdown_rx, admission)
+                    .await;
+            });
+            let (backend_stream, _) = tokio::time::timeout(Duration::from_millis(150), backend.accept())
+                .await
+                .expect("upstream connect before deadline")
+                .expect("backend accepted");
+            let mut byte = [0_u8; 1];
+            let count = tokio::time::timeout(Duration::from_millis(300), peer.read(&mut byte))
+                .await
+                .expect("client socket closes before a stalled disconnect hook")
+                .expect("peer read");
+            assert_eq!(count, 0, "deadline closes downstream before hook completion");
+            assert!(!serving.is_finished(), "custom disconnect hook remains pending");
+            serving.abort();
+            drop(backend_stream);
+        }
+
+        #[tokio::test]
+        async fn total_duration_does_not_restart_after_connect() {
+            let backend = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("backend bind");
+            let upstream = backend.local_addr().expect("backend address").to_string();
+            let proxy = Arc::new(test_proxy(Some(upstream), None, Duration::from_millis(600)));
+            let admission = proxy.try_admit("client").expect("admission");
+            tokio::time::sleep(Duration::from_millis(350)).await;
+            let (session, _peer) = tokio::io::duplex(64);
+            let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+            let serving = tokio::spawn(async move {
+                proxy
+                    .serve_connection(session, ("client", "listener"), &shutdown_rx, admission)
+                    .await;
+            });
+            let (_upstream_socket, _) = tokio::time::timeout(Duration::from_millis(120), backend.accept())
+                .await
+                .expect("upstream connected before deadline")
+                .expect("backend accepted");
+            tokio::time::timeout(Duration::from_millis(350), serving)
+                .await
+                .expect("remaining budget must close forwarding")
+                .expect("serve task joined");
+        }
+
+        #[tokio::test]
+        async fn duration_expiry_releases_connect_filter_state() {
+            let connects = Arc::new(AtomicUsize::new(0));
+            let disconnects = Arc::new(AtomicUsize::new(0));
+            let pipeline = pending_selector_pipeline(&connects, &disconnects);
+            let proxy = test_proxy(None, Some(pipeline), Duration::from_millis(120));
+            let admission = proxy.try_admit("client").expect("admission");
+            let (session, mut peer) = tokio::io::duplex(1024);
+            let hello = wrap_in_record(&build_client_hello(
+                &[],
+                &[0, 0xFF],
+                &[0],
+                &build_sni_extension("example.com"),
+            ));
+            peer.write_all(&hello).await.expect("complete ClientHello");
+            let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+            tokio::time::timeout(
+                Duration::from_millis(350),
+                proxy.serve_connection(session, ("client", "listener"), &shutdown_rx, admission),
+            )
+            .await
+            .expect("connect filter must observe the same absolute deadline");
+            assert_eq!(connects.load(Ordering::SeqCst), 1, "selector ran before pending filter");
+            assert_eq!(
+                disconnects.load(Ordering::SeqCst),
+                1,
+                "timed connect releases selected state"
+            );
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn rejected_connect_cleanup_runs_once_across_deadline() {
+            for fail in [false, true] {
+                let disconnects = Arc::new(AtomicUsize::new(0));
+                let entered = Arc::new(tokio::sync::Notify::new());
+                let pipeline = rejecting_cleanup_pipeline(&disconnects, &entered, fail);
+                let proxy = Arc::new(test_proxy(
+                    Some("127.0.0.1:9".to_owned()),
+                    Some(pipeline),
+                    Duration::from_secs(1),
+                ));
+                let admission = proxy.try_admit("client").expect("admission");
+                let (session, mut peer) = tokio::io::duplex(64);
+                let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+                let serving = tokio::spawn(async move {
+                    proxy
+                        .serve_connection(session, ("client", "listener"), &shutdown_rx, admission)
+                        .await;
+                });
+                entered.notified().await;
+                assert_eq!(disconnects.load(Ordering::SeqCst), 1, "reverse counting hook completed");
+                let mut byte = [0_u8; 1];
+                assert_eq!(
+                    peer.read(&mut byte).await.expect("peer EOF"),
+                    0,
+                    "socket closes before stalled cleanup"
+                );
+                tokio::time::advance(Duration::from_secs(2)).await;
+                tokio::task::yield_now().await;
+                assert_eq!(
+                    disconnects.load(Ordering::SeqCst),
+                    1,
+                    "deadline must not restart rejection or error cleanup"
+                );
+                assert!(
+                    !serving.is_finished(),
+                    "cleanup remains pending outside the connect timeout"
+                );
+                serving.abort();
+                assert!(serving.await.expect_err("task cancelled").is_cancelled());
+            }
+        }
+
+        struct StalledCleanup {
+            entered: Arc<tokio::sync::Notify>,
+        }
+
+        #[async_trait]
+        impl praxis_filter::TcpFilter for StalledCleanup {
+            fn name(&self) -> &'static str {
+                "test_stalled_cleanup"
+            }
+
+            async fn on_disconnect(&self, _ctx: &mut TcpFilterContext<'_>) -> Result<(), praxis_filter::FilterError> {
+                self.entered.notify_one();
+                std::future::pending().await
+            }
+        }
+
+        struct RejectWithCleanup {
+            disconnects: Arc<AtomicUsize>,
+            fail: bool,
+        }
+
+        #[async_trait]
+        impl praxis_filter::TcpFilter for RejectWithCleanup {
+            fn name(&self) -> &'static str {
+                "test_reject_cleanup"
+            }
+
+            async fn on_connect(
+                &self,
+                _ctx: &mut TcpFilterContext<'_>,
+            ) -> Result<FilterAction, praxis_filter::FilterError> {
+                if self.fail {
+                    Err("connect failed".into())
+                } else {
+                    Ok(FilterAction::Reject(praxis_filter::Rejection::status(403)))
+                }
+            }
+
+            async fn on_disconnect(&self, _ctx: &mut TcpFilterContext<'_>) -> Result<(), praxis_filter::FilterError> {
+                self.disconnects.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        fn rejecting_cleanup_pipeline(
+            disconnects: &Arc<AtomicUsize>,
+            entered: &Arc<tokio::sync::Notify>,
+            fail: bool,
+        ) -> FilterPipeline {
+            let mut entries = serde_yaml::from_str::<Vec<praxis_core::config::FilterEntry>>(
+                "- filter: test_stalled_cleanup\n- filter: test_reject_cleanup\n",
+            )
+            .expect("cleanup entries");
+            let mut registry = praxis_filter::FilterRegistry::with_builtins();
+            let entered = Arc::clone(entered);
+            registry
+                .register(
+                    "test_stalled_cleanup",
+                    praxis_filter::FilterFactory::Tcp(Arc::new(move |_| {
+                        Ok(Box::new(StalledCleanup {
+                            entered: Arc::clone(&entered),
+                        }))
+                    })),
+                )
+                .expect("stalled cleanup registered");
+            let disconnects = Arc::clone(disconnects);
+            registry
+                .register(
+                    "test_reject_cleanup",
+                    praxis_filter::FilterFactory::Tcp(Arc::new(move |_| {
+                        Ok(Box::new(RejectWithCleanup {
+                            disconnects: Arc::clone(&disconnects),
+                            fail,
+                        }))
+                    })),
+                )
+                .expect("reject cleanup registered");
+            FilterPipeline::build(&mut entries, &registry).expect("cleanup pipeline")
+        }
+
+        struct PendingFilter;
+
+        struct PendingDisconnectFilter;
+
+        #[async_trait]
+        impl praxis_filter::TcpFilter for PendingDisconnectFilter {
+            fn name(&self) -> &'static str {
+                "test_pending_disconnect"
+            }
+
+            async fn on_disconnect(&self, _ctx: &mut TcpFilterContext<'_>) -> Result<(), praxis_filter::FilterError> {
+                std::future::pending().await
+            }
+        }
+
+        fn pending_disconnect_pipeline() -> FilterPipeline {
+            let mut entries: Vec<praxis_core::config::FilterEntry> =
+                serde_yaml::from_str("- filter: test_pending_disconnect\n").expect("entry");
+            let mut registry = praxis_filter::FilterRegistry::with_builtins();
+            registry
+                .register(
+                    "test_pending_disconnect",
+                    praxis_filter::FilterFactory::Tcp(Arc::new(|_| Ok(Box::new(PendingDisconnectFilter)))),
+                )
+                .expect("pending disconnect registered");
+            FilterPipeline::build(&mut entries, &registry).expect("pipeline")
+        }
+
+        #[async_trait]
+        impl praxis_filter::TcpFilter for PendingFilter {
+            fn name(&self) -> &'static str {
+                "test_pending_filter"
+            }
+
+            async fn on_connect(
+                &self,
+                _ctx: &mut TcpFilterContext<'_>,
+            ) -> Result<FilterAction, praxis_filter::FilterError> {
+                std::future::pending().await
+            }
+        }
+
+        fn pending_selector_pipeline(connects: &Arc<AtomicUsize>, disconnects: &Arc<AtomicUsize>) -> FilterPipeline {
+            let mut entries: Vec<praxis_core::config::FilterEntry> =
+                serde_yaml::from_str("- filter: test_counting_selector\n- filter: test_pending_filter\n")
+                    .expect("entries");
+            let mut registry = praxis_filter::FilterRegistry::with_builtins();
+            let connects = Arc::clone(connects);
+            let disconnects = Arc::clone(disconnects);
+            registry
+                .register(
+                    "test_counting_selector",
+                    praxis_filter::FilterFactory::Tcp(Arc::new(move |_| {
+                        Ok(Box::new(CountingSelectorFilter {
+                            connects: Arc::clone(&connects),
+                            disconnects: Arc::clone(&disconnects),
+                        }))
+                    })),
+                )
+                .expect("selector registered");
+            registry
+                .register(
+                    "test_pending_filter",
+                    praxis_filter::FilterFactory::Tcp(Arc::new(|_| Ok(Box::new(PendingFilter)))),
+                )
+                .expect("pending filter registered");
+            FilterPipeline::build(&mut entries, &registry).expect("pipeline")
+        }
+
+        fn test_proxy(
+            upstream: Option<String>,
+            pipeline: Option<FilterPipeline>,
+            maximum: Duration,
+        ) -> PingoraTcpProxy {
+            let pipeline = pipeline.unwrap_or_else(|| {
+                FilterPipeline::build(&mut [], &praxis_filter::FilterRegistry::with_builtins()).expect("empty pipeline")
+            });
+            PingoraTcpProxy::new(
+                upstream,
+                None,
+                Arc::new(ArcSwap::from_pointee(pipeline)),
+                Some(Duration::from_secs(10)),
+                Some(maximum),
+                None,
+                true,
+                HashMap::new(),
+                ::metrics::SharedString::const_str("test"),
+            )
+        }
     }
 }

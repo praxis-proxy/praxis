@@ -246,6 +246,7 @@ async fn deliver(
     source.swap_extensions(&mut flight.ctx.extensions);
     match pulled {
         Ok(Some(chunk)) => send_chunk(flight, source, relay, head, chunk).await,
+        // Keep recovered extensions on the flight at EOF or cancellation.
         Ok(None) => finish(flight, relay, head).await,
         Err(err) => {
             warn!(error = %err, "streaming terminal response source failed after commitment");
@@ -296,6 +297,8 @@ async fn finish(flight: &mut Flight, relay: &Relay, head: &praxis_filter::Respon
     };
     if !wrote || relay.end().await.is_err() {
         debug!("failed to finish streaming terminal response");
+        flight.error = Some(crate::http::pingora::handler::health_util::ErrorOrigin::Downstream);
+        return Step::Cancel;
     }
     Step::Done
 }
@@ -322,10 +325,16 @@ mod tests {
     use http::{HeaderMap, HeaderValue, Method};
     use http_body_util::BodyExt as _;
     use hyper::body::Body as _;
-    use praxis_filter::{FilterAction, FilterPipeline};
+    use praxis_filter::{
+        BodyAccess, BodyRequirement, FilterAction, FilterEntry, FilterError, FilterFactory, FilterPipeline,
+        FilterRegistry, HttpFilter, HttpFilterContext, RequestExtensions,
+    };
 
     use super::*;
     use crate::http::hyper::test_utils::{Pull, Script, Source, empty_pipeline, scripted_pipeline};
+
+    /// EOF completion observations: extension writeback and client classification.
+    type EofCompletions = Arc<Mutex<Vec<(bool, bool)>>>;
 
     #[tokio::test]
     async fn chunks_are_pulled_in_order_until_the_end() {
@@ -606,6 +615,154 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn final_terminal_send_failure_records_downstream_origin() {
+        for suffix in [None, Some(Bytes::from_static(b"tail"))] {
+            assert_failed_terminal_eof(suffix).await;
+        }
+        assert_successful_terminal_eof().await;
+    }
+
+    /// Build an EOF hook that can produce final body bytes.
+    fn eof_suffix_pipeline(suffix: Option<Bytes>) -> FilterPipeline {
+        scripted_pipeline(Script {
+            response_body: Some((
+                BodyMode::Stream,
+                Arc::new(move |body, end_of_stream| {
+                    if end_of_stream {
+                        *body = suffix.clone();
+                    }
+                    Ok(FilterAction::Continue)
+                }),
+            )),
+            ..Script::default()
+        })
+    }
+
+    /// A failed final send must cancel once and classify client departure.
+    async fn assert_failed_terminal_eof(suffix: Option<Bytes>) {
+        let mut flight = get_flight(eof_suffix_pipeline(suffix));
+        let (mut source, calls) = Source::new(&[Pull::End]);
+        let head = praxis_filter::Response {
+            headers: HeaderMap::new(),
+            status: StatusCode::OK,
+        };
+        let (relay, body) = Relay::new();
+        drop(body);
+        let step = deliver(&mut flight, &mut source, &relay, &head, Ok(None)).await;
+        assert!(matches!(step, Step::Cancel), "failed EOF send must cancel the source");
+        assert!(
+            matches!(
+                flight.error,
+                Some(crate::http::pingora::handler::health_util::ErrorOrigin::Downstream)
+            ),
+            "failed EOF send must retain downstream origin"
+        );
+        source.cancel().await;
+        flight.complete().await;
+        assert!(
+            flight.ctx.ended_by_client,
+            "terminal completion must record client departure"
+        );
+        assert_eq!(*calls.lock().unwrap(), ["cancel"], "source cancellation happens once");
+    }
+
+    /// A successful EOF still delivers a clean empty body.
+    async fn assert_successful_terminal_eof() {
+        let mut flight = get_flight(empty_pipeline());
+        let head = praxis_filter::Response {
+            headers: HeaderMap::new(),
+            status: StatusCode::OK,
+        };
+        let (relay, body) = Relay::new();
+        let collecting = tokio::spawn(body.collect());
+        let step = finish(&mut flight, &relay, &head).await;
+        assert!(matches!(step, Step::Done), "a received EOF remains successful");
+        let collected = collecting.await.unwrap().unwrap().to_bytes();
+        assert!(collected.is_empty(), "successful EOF reaches the body");
+    }
+
+    #[tokio::test]
+    async fn final_terminal_eof_preserves_extensions_through_pump_completion() {
+        for (disconnect, reject, suffix) in [
+            (false, false, None),
+            (false, false, Some(Bytes::from_static(b"tail"))),
+            (true, false, None),
+            (true, false, Some(Bytes::from_static(b"tail"))),
+            (false, true, None),
+        ] {
+            assert_eof_pump_case(disconnect, reject, suffix).await;
+        }
+    }
+
+    /// Observable effects of one real EOF pump execution.
+    struct EofPumpObservation {
+        /// Source, EOF and completion hook order.
+        events: Arc<Mutex<Vec<&'static str>>>,
+        /// Completion state for extensions and client departure.
+        completions: EofCompletions,
+        /// Live downstream collector, absent when the client disconnects.
+        collecting: Option<tokio::task::JoinHandle<(Vec<u8>, bool)>>,
+    }
+
+    /// Run the actual pump with the chosen EOF suffix, rejection and client state.
+    async fn run_eof_pump_case(disconnect: bool, reject: bool, suffix: Option<Bytes>) -> EofPumpObservation {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let completions = Arc::new(Mutex::new(Vec::new()));
+        let pipeline = eof_pipeline(reject, suffix, &events, &completions);
+        let mut flight = get_flight(pipeline);
+        // Keep response_phase_done unset to exercise the completion cleanup hook.
+        flight.ctx.upstream_contacted = true;
+        let (relay, body) = Relay::new();
+        let (close_on_pull, collecting) = if disconnect {
+            (Some(body), None)
+        } else {
+            (None, Some(tokio::spawn(read_body(body))))
+        };
+        let source = eof_source(close_on_pull, &events);
+        let head = praxis_filter::Response {
+            headers: HeaderMap::new(),
+            status: StatusCode::OK,
+        };
+        tokio::time::timeout(Duration::from_secs(5), pump(flight, Box::new(source), relay, head))
+            .await
+            .expect("the EOF path must complete");
+        EofPumpObservation {
+            events,
+            completions,
+            collecting,
+        }
+    }
+
+    /// Preserve every permutation's extension, event, abort and byte assertions.
+    async fn assert_eof_pump_case(disconnect: bool, reject: bool, suffix: Option<Bytes>) {
+        let EofPumpObservation {
+            events,
+            completions,
+            collecting,
+        } = run_eof_pump_case(disconnect, reject, suffix.clone()).await;
+        assert_eq!(
+            *completions.lock().unwrap(),
+            [(true, !disconnect)],
+            "completion sees the EOF filter's extensions and client classification exactly once"
+        );
+        let expected = if disconnect || reject {
+            vec!["pull", "eof", "cancel", "complete"]
+        } else {
+            vec!["pull", "eof", "complete"]
+        };
+        assert_eq!(
+            *events.lock().unwrap(),
+            expected,
+            "no duplicate pulls, cancellation or completion"
+        );
+        if let Some(collecting) = collecting {
+            let (bytes, aborted) = collecting.await.unwrap();
+            assert_eq!(aborted, reject, "only a rejected EOF aborts a live body");
+            assert_eq!(bytes, suffix.unwrap_or_default(), "successful EOF bytes arrive intact");
+        }
+    }
+
+    #[tokio::test]
     async fn client_leaving_while_a_pull_is_pending_cancels_the_source() {
         let (source, calls) = Source::new(&[Pull::Hang]);
 
@@ -622,6 +779,135 @@ mod tests {
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
+
+    /// A request extension changed by the EOF filter and consumed at completion.
+    struct EofMarker(u8);
+
+    /// A real extension owner that can close the receiver during its EOF pull.
+    struct ExtensionSource {
+        /// Dropping this inside the selected pull forces the EOF-send race.
+        close_on_pull: Option<ProxyBody>,
+        /// Ordered source, filter and completion lifecycle observations.
+        events: Arc<Mutex<Vec<&'static str>>>,
+        /// Parent state transferred by the same swap contract as real sources.
+        extensions: RequestExtensions,
+    }
+
+    /// Give the EOF source its initial extension marker and event recorder.
+    fn eof_source(close_on_pull: Option<ProxyBody>, events: &Arc<Mutex<Vec<&'static str>>>) -> ExtensionSource {
+        let mut extensions = RequestExtensions::default();
+        extensions.insert(EofMarker(7));
+        ExtensionSource {
+            close_on_pull,
+            events: Arc::clone(events),
+            extensions,
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl StreamingResponseBody for ExtensionSource {
+        async fn next_chunk(&mut self) -> Result<Option<Bytes>, FilterError> {
+            self.events.lock().unwrap().push("pull");
+            drop(self.close_on_pull.take());
+            Ok(None)
+        }
+
+        async fn suppress(&mut self) -> Result<(), FilterError> {
+            Err("the bodyful pump must not suppress its source".into())
+        }
+
+        async fn cancel(&mut self) {
+            self.events.lock().unwrap().push("cancel");
+        }
+
+        fn swap_extensions(&mut self, extensions: &mut RequestExtensions) {
+            std::mem::swap(&mut self.extensions, extensions);
+        }
+    }
+
+    /// Records state visible to the actual pump's completion cleanup hook.
+    struct EofObserver {
+        /// Whether each completion saw EOF state and considered upstream reached.
+        completions: EofCompletions,
+        /// Source, EOF and completion event order.
+        events: Arc<Mutex<Vec<&'static str>>>,
+        /// Reject from the EOF hook when testing filter cancellation.
+        reject: bool,
+        /// Optional bytes generated at EOF.
+        suffix: Option<Bytes>,
+    }
+
+    #[async_trait::async_trait]
+    impl HttpFilter for EofObserver {
+        fn name(&self) -> &'static str {
+            "eof_observer"
+        }
+
+        async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+            Ok(FilterAction::Continue)
+        }
+
+        async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+            self.events.lock().unwrap().push("complete");
+            self.completions.lock().unwrap().push((
+                ctx.extensions.get::<EofMarker>().is_some_and(|marker| marker.0 == 11),
+                ctx.upstream_reached,
+            ));
+            Ok(FilterAction::Continue)
+        }
+
+        fn response_body_access(&self) -> BodyAccess {
+            BodyAccess::ReadWrite(BodyRequirement::Optional)
+        }
+
+        fn on_response_body(
+            &self,
+            ctx: &mut HttpFilterContext<'_>,
+            body: &mut Option<Bytes>,
+            end_of_stream: bool,
+        ) -> Result<FilterAction, FilterError> {
+            assert!(end_of_stream, "this source yields only EOF");
+            assert_eq!(
+                ctx.extensions.get::<EofMarker>().unwrap().0,
+                7,
+                "source state reaches EOF"
+            );
+            self.events.lock().unwrap().push("eof");
+            ctx.extensions.insert(EofMarker(11));
+            *body = self.suffix.clone();
+            if self.reject {
+                return Err("EOF rejected".into());
+            }
+            Ok(FilterAction::Continue)
+        }
+    }
+
+    /// Build a filter that observes EOF writeback during real pump completion.
+    fn eof_pipeline(
+        reject: bool,
+        suffix: Option<Bytes>,
+        events: &Arc<Mutex<Vec<&'static str>>>,
+        completions: &EofCompletions,
+    ) -> FilterPipeline {
+        let events = Arc::clone(events);
+        let completions = Arc::clone(completions);
+        let mut registry = FilterRegistry::with_builtins();
+        registry
+            .register(
+                "eof_observer",
+                FilterFactory::Http(Arc::new(move |_config| {
+                    Ok(Box::new(EofObserver {
+                        completions: Arc::clone(&completions),
+                        events: Arc::clone(&events),
+                        reject,
+                        suffix: suffix.clone(),
+                    }))
+                })),
+            )
+            .unwrap();
+        let mut entries: Vec<FilterEntry> = serde_yaml::from_str("- filter: eof_observer").unwrap();
+        FilterPipeline::build(&mut entries, &registry).unwrap()
+    }
 
     /// Wait up to five seconds for the source to be asked to `call`.
     async fn eventually_called(calls: &Arc<Mutex<Vec<&'static str>>>, call: &str) -> bool {

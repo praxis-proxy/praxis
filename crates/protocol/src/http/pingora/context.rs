@@ -115,7 +115,7 @@ pub struct PingoraRequestCtx {
     /// after filter execution.
     ///
     /// [`HttpFilterContext`]: praxis_filter::HttpFilterContext
-    pub filter_metadata: std::collections::HashMap<String, String>,
+    pub filter_metadata: praxis_filter::FilterMetadata,
 
     /// Ordered log of trusted header mutations from pre-read body
     /// processing. Swapped into each [`HttpFilterContext`] and written
@@ -453,6 +453,7 @@ macro_rules! filter_context {
             extra_request_headers: Vec::new(),
             request_headers_to_remove: Vec::new(),
             request_headers_to_set: Vec::new(),
+            request_header_mutations: Vec::new(),
             filter_metadata: std::mem::take(&mut $ctx.filter_metadata),
             // Seeded per pre-read pass by `pre_read_body`; empty otherwise.
             prior_pre_read_mutations: Vec::new(),
@@ -640,7 +641,7 @@ impl Default for PingoraRequestCtx {
             downstream_tls: false,
             peer_identity: None,
             extensions: praxis_filter::RequestExtensions::new(),
-            filter_metadata: std::collections::HashMap::new(),
+            filter_metadata: praxis_filter::FilterMetadata::default(),
             pre_read_mutations: Vec::new(),
             structured_metadata: std::collections::HashMap::new(),
             mutated_request_body_len: None,
@@ -996,17 +997,21 @@ mod tests {
         };
 
         let mut ctx = default_ctx();
-        ctx.filter_metadata.insert("rpc.method".to_owned(), "echo".to_owned());
-        ctx.filter_metadata.insert("rpc.status".to_owned(), "ok".to_owned());
+        ctx.filter_metadata
+            .insert("rpc.method", "echo")
+            .expect("entry must fit in the filter's metadata");
+        ctx.filter_metadata
+            .insert("rpc.status", "ok")
+            .expect("entry must fit in the filter's metadata");
 
         let fctx = ctx.build_filter_context(&pipeline, &request, None);
         assert_eq!(
-            fctx.get_metadata("rpc.method"),
+            fctx.filter_metadata.get("rpc.method"),
             Some("echo"),
             "metadata written before build should survive into filter context"
         );
         assert_eq!(
-            fctx.get_metadata("rpc.status"),
+            fctx.filter_metadata.get("rpc.status"),
             Some("ok"),
             "multiple metadata keys should round-trip"
         );
@@ -1024,17 +1029,21 @@ mod tests {
 
         let mut ctx = default_ctx();
         let mut fctx = ctx.build_filter_context(&pipeline, &request, None);
-        fctx.set_metadata("trace.id", "abc-123");
-        fctx.set_metadata("trace.span", "42");
+        fctx.filter_metadata
+            .insert("trace.id", "abc-123")
+            .expect("entry must fit in the filter's metadata");
+        fctx.filter_metadata
+            .insert("trace.span", "42")
+            .expect("entry must fit in the filter's metadata");
 
         ctx.filter_metadata = fctx.filter_metadata;
         assert_eq!(
-            ctx.filter_metadata.get("trace.id").map(String::as_str),
+            ctx.filter_metadata.get("trace.id"),
             Some("abc-123"),
             "metadata set in filter context should persist back to protocol context"
         );
         assert_eq!(
-            ctx.filter_metadata.get("trace.span").map(String::as_str),
+            ctx.filter_metadata.get("trace.span"),
             Some("42"),
             "multiple metadata keys should persist back"
         );

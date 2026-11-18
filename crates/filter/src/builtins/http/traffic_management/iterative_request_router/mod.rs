@@ -343,6 +343,14 @@ impl IterativeRequestRouterFilter {
                 )
                 .into());
             }
+            if pipeline.has_request_completion_observer() {
+                return Err(format!(
+                    "iterative_request_router: step '{}' contains a request-completion observer; \
+                     terminal completion runs only for listener requests, not iterative steps",
+                    step.name
+                )
+                .into());
+            }
             // A step runs as a continuation of this IRR's parent, which already
             // guarantees a logical binding on entry (the parent's own
             // bound-upstream reachability check enforces that a binding precedes

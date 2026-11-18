@@ -52,7 +52,7 @@ pub(crate) fn request_header_from_session(session: &mut Session) -> Request {
 /// Build a transport-agnostic [`Response`] by copying a Pingora response's
 /// status and headers.
 ///
-/// Clones the [`HeaderMap`]: Pingora 0.9.0 removed `DerefMut` on
+/// Clones the [`HeaderMap`]: the pinned Pingora fork has no `DerefMut` on
 /// `ResponseHeader`, so the map can no longer be moved out in place, and the
 /// original must stay intact regardless so its status stays readable for the
 /// retry and commit checks that run before write-back.

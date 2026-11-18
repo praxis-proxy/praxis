@@ -21,8 +21,9 @@
 //! - **Cipher suite and version control**: Restrict accepted cipher suites and set minimum TLS versions per listener
 //!   via [`TlsVersion`].
 //!
-//! Deserialization validates paths (rejecting traversal), file existence, and
-//! configuration consistency (e.g., mTLS modes must specify a CA).
+//! Deserialization validates path structure (rejecting traversal) and
+//! configuration consistency (e.g., mTLS modes must specify a CA). Certificate
+//! files are read when the server configuration is built.
 
 use serde::{Deserialize, Deserializer, Serialize, de};
 
@@ -35,8 +36,8 @@ use crate::TlsError;
 
 /// TLS settings for a listener (server role).
 ///
-/// Deserialization validates path traversal, file existence,
-/// certificate count, and mTLS consistency.
+/// Deserialization validates path traversal, certificate count, and mTLS
+/// consistency. Server construction loads the referenced files.
 ///
 /// ```
 /// use praxis_tls::ListenerTls;
@@ -154,8 +155,8 @@ impl ListenerTls {
     ///
     /// # Errors
     ///
-    /// Returns [`TlsError`] if paths contain `..` traversal or files
-    /// do not exist.
+    /// Returns [`TlsError`] if paths contain `..` traversal or the
+    /// certificate configuration is inconsistent. Files are loaded later.
     ///
     /// ```
     /// use praxis_tls::ListenerTls;
@@ -198,9 +199,9 @@ impl ListenerTls {
     ///
     /// # Errors
     ///
-    /// Returns [`TlsError`] if any path contains `..`, files do not
-    /// exist, no certificates are provided, or mTLS mode requires a
-    /// CA that is not set.
+    /// Returns [`TlsError`] if any path contains `..`, no certificates are
+    /// provided, or mTLS mode requires a CA that is not set. File loading
+    /// occurs when the server configuration is built.
     ///
     /// ```
     /// use praxis_tls::ListenerTls;

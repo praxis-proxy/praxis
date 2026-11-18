@@ -3,11 +3,12 @@
 
 //! Integration tests for the `sni_router` TCP filter.
 
-use std::sync::Arc;
+use std::sync::{Arc, atomic::Ordering};
 
 use praxis_core::config::Config;
 use praxis_test_utils::{
-    TestCertificates, free_port, start_full_proxy, start_tls_backend, tls_connection_rejected, wait_for_tcp,
+    TestCertificates, TlsProbeOutcome, free_port, start_counting_tls_backend, start_full_proxy, start_tls_backend,
+    tls_negative_probe, wait_for_tcp,
 };
 
 // -----------------------------------------------------------------------------
@@ -105,7 +106,7 @@ filter_chains:
 #[test]
 fn sni_router_rejects_when_no_match_and_no_default() {
     let certs = TestCertificates::generate_for_san("known.localhost");
-    let known_port = start_tls_backend(&certs, "known-response");
+    let (known_port, accepts) = start_counting_tls_backend(&certs, "known-response");
     let proxy_port = free_port();
 
     let yaml = format!(
@@ -133,11 +134,32 @@ filter_chains:
     let _proxy = start_full_proxy(&config);
     wait_for_tcp(&format!("127.0.0.1:{proxy_port}"));
 
-    let unknown_certs = TestCertificates::generate_for_san("unknown.localhost");
-    let unknown_client = unknown_certs.raw_tls_client_config();
+    let known_client = no_alpn_client_config(&certs);
     let addr = format!("127.0.0.1:{proxy_port}");
-    let rejected = tls_connection_rejected(&addr, b"should not echo", &unknown_client);
-    assert!(rejected, "unmatched SNI without default should reject the connection");
+    let outcome = tls_negative_probe(
+        &addr,
+        "unknown.localhost",
+        b"GET / HTTP/1.1\r\nHost: unknown.localhost\r\nConnection: close\r\n\r\n",
+        &known_client,
+    );
+    assert!(
+        !matches!(&outcome, TlsProbeOutcome::ApplicationData { bytes, .. } if !bytes.is_empty()),
+        "unmatched SNI must not deliver protected application bytes: {outcome:?}"
+    );
+    assert_eq!(
+        accepts.load(Ordering::SeqCst),
+        0,
+        "unmatched SNI must not reach the known backend"
+    );
+
+    let (status, body) = http1_over_tls(&addr, "/", &known_client, "known.localhost");
+    assert_eq!(status, 200, "matched SNI must complete an HTTPS request");
+    assert_eq!(body, "known-response", "matched SNI must reach the known backend");
+    assert_eq!(
+        accepts.load(Ordering::SeqCst),
+        1,
+        "matched control must use the same backend"
+    );
 }
 
 #[test]

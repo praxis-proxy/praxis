@@ -116,7 +116,7 @@ fn capture_client(flight: &mut Flight, connection: &ConnectionFacts, parts: Part
     flight.ctx.client_http_version = Some(parts.version);
     flight.ctx.client_addr = Some(normalize_mapped_ipv4(connection.peer.ip()));
     flight.ctx.downstream_tls = connection.tls;
-    flight.ctx.peer_identity = None;
+    flight.ctx.peer_identity.clone_from(&connection.peer_identity);
     flight.ctx.request_is_idempotent = matches!(
         parts.method,
         http::Method::GET | http::Method::HEAD | http::Method::OPTIONS
@@ -430,6 +430,37 @@ mod tests {
             flight.ctx.client_addr,
             Some("2001:db8::1".parse::<IpAddr>().unwrap()),
             "a native IPv6 client is kept as is"
+        );
+    }
+
+    #[test]
+    fn capture_client_keeps_verified_connection_identity_per_request() {
+        let identity = Arc::new(praxis_tls::TlsPeerIdentity {
+            cert_digest: vec![0xAB; 32],
+            organization: Some("gateway-peer".to_owned()),
+            serial_number: Some("12:34".to_owned()),
+        });
+        let mut connection = facts("127.0.0.1:40000", true);
+        Arc::get_mut(&mut connection)
+            .expect("new connection facts are unshared")
+            .peer_identity = Some(Arc::clone(&identity));
+        for _request in 0..2 {
+            let mut flight = Flight::for_tests(empty_pipeline());
+            let _captured = capture_client(&mut flight, &connection, head(Method::GET, "/"));
+            assert!(
+                flight
+                    .ctx
+                    .peer_identity
+                    .as_ref()
+                    .is_some_and(|seen| Arc::ptr_eq(seen, &identity)),
+                "each request on the connection receives the authenticated identity"
+            );
+        }
+        let mut anonymous = Flight::for_tests(empty_pipeline());
+        let _captured = capture_client(&mut anonymous, &facts("127.0.0.1:40001", false), head(Method::GET, "/"));
+        assert!(
+            anonymous.ctx.peer_identity.is_none(),
+            "plain connections cannot gain an identity"
         );
     }
 
@@ -857,6 +888,7 @@ mod tests {
         Arc::new(ConnectionFacts {
             peer: peer.parse().unwrap(),
             tls,
+            peer_identity: None,
         })
     }
 
@@ -884,6 +916,7 @@ mod tests {
             extra_headers: Vec::new(),
             headers_to_remove: Vec::new(),
             headers_to_set: Vec::new(),
+            header_mutations: Vec::new(),
         }
     }
 

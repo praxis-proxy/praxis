@@ -43,7 +43,7 @@ pub use body_limits::{
     MAX_BUFFER_BYTES,
 };
 pub use bootstrap::{ConfigFile, DEFAULT_CONFIG, load_config};
-pub use branch_chain::{BranchChainConfig, BranchCondition, ResultMatch};
+pub use branch_chain::{BranchChainConfig, BranchCondition, MAX_RESULT_KEY_LEN, ResultMatch};
 pub use chain_ref::ChainRef;
 pub use cluster::{
     AuthoritySource, BackoffConfig, BudgetPercent, Cluster, ClusterHttpOptions, ConsistentHashOpts,

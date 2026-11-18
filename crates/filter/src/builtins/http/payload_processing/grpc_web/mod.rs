@@ -18,13 +18,13 @@ mod tests;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use praxis_core::grpc::{GrpcStatusCode, GrpcWebKind};
+use praxis_core::grpc::{GrpcKind, GrpcStatusCode, GrpcWebKind};
 use serde::Deserialize;
 use tracing::{debug, trace};
 
 use self::frame::{Base64Stream, decode_base64, encode_trailer_frame};
 use crate::{
-    BodyAccess, BodyMode, FilterAction, FilterError, Rejection, ResponseTrailersPending,
+    BodyAccess, BodyMode, FilterAction, FilterError, FilterMetadata, Rejection, ResponseTrailersPending,
     filter::{HttpFilter, HttpFilterContext},
     parse_filter_config,
 };
@@ -223,7 +223,9 @@ impl HttpFilter for GrpcWebFilter {
         ctx.request_headers_to_set
             .push((http::header::TE, http::HeaderValue::from_static("trailers")));
 
-        ctx.set_metadata("grpc_web.encoding", kind.as_str());
+        ctx.filter_metadata
+            .insert("grpc_web.encoding", kind.as_str())
+            .unwrap_or_else(FilterMetadata::log_loss);
         ctx.filter_results
             .entry("grpc_web")
             .or_default()
@@ -348,38 +350,38 @@ impl HttpFilter for GrpcWebFilter {
         body: &mut Option<Bytes>,
         end_of_stream: bool,
     ) -> Result<FilterAction, FilterError> {
-        let on_missing = self.on_missing_trailers;
         let trailers_pending = ctx.extensions.get::<ResponseTrailersPending>().is_some();
         let Some(state) = ctx.get_filter_state_mut::<GrpcWebState>() else {
             return Ok(FilterAction::Continue);
         };
 
-        let mut out = Vec::new();
-        if let Some(chunk) = body.as_ref() {
+        let mut out = body.take().map_or_else(Bytes::new, |chunk| {
             if state.kind.is_text() {
-                out.extend_from_slice(&state.encoder.push(chunk));
+                state.encoder.push(&chunk)
             } else {
-                out.extend_from_slice(chunk);
+                chunk
             }
-        }
+        });
 
         if end_of_stream && !trailers_pending {
-            let needs_status = !state.status_delivered && on_missing == MissingTrailers::Synthesize;
+            let mut appended = out.to_vec();
+            let needs_status = !state.status_delivered && self.on_missing_trailers == MissingTrailers::Synthesize;
             if needs_status {
                 state.status_delivered = true;
                 let frame = encode_trailer_frame(&synthesized_trailers());
                 if state.kind.is_text() {
-                    out.extend_from_slice(&state.encoder.push(&frame));
+                    appended.extend_from_slice(&state.encoder.push(&frame));
                 } else {
-                    out.extend_from_slice(&frame);
+                    appended.extend_from_slice(&frame);
                 }
             }
             if state.kind.is_text() {
-                out.extend_from_slice(&state.encoder.finish());
+                appended.extend_from_slice(&state.encoder.finish());
             }
+            out = Bytes::from(appended);
         }
 
-        *body = (!out.is_empty()).then(|| Bytes::from(out));
+        *body = (!out.is_empty()).then_some(out);
         Ok(FilterAction::Continue)
     }
 
@@ -447,7 +449,7 @@ fn synthesize_missing_status(trailers: &mut http::HeaderMap) {
 // -----------------------------------------------------------------------------
 
 /// Returns `true` if the upstream response is native gRPC
-/// (`Content-Type: application/grpc...`).
+/// (`Content-Type: application/grpc` or `application/grpc+codec`).
 ///
 /// Non-gRPC responses (such as an HTML error page from an intermediary)
 /// are passed through untranslated.
@@ -456,5 +458,5 @@ fn upstream_is_grpc(ctx: &HttpFilterContext<'_>) -> bool {
         .as_ref()
         .and_then(|response| response.headers.get(http::header::CONTENT_TYPE))
         .and_then(|value| value.to_str().ok())
-        .is_some_and(|ct| ct.to_ascii_lowercase().starts_with("application/grpc"))
+        .is_some_and(|content_type| GrpcKind::from_content_type(content_type).is_grpc())
 }

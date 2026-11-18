@@ -20,7 +20,7 @@
 use std::collections::HashSet;
 
 use crate::{
-    config::{BranchChainConfig, ChainRef, FilterChainConfig, FilterEntry, ResultMatch},
+    config::{BranchChainConfig, ChainRef, FilterChainConfig, FilterEntry, MAX_RESULT_KEY_LEN, ResultMatch},
     errors::ProxyError,
 };
 
@@ -321,6 +321,11 @@ fn validate_on_result_key_value(branch: &BranchChainConfig) -> Result<(), ProxyE
     if cond.key.is_empty() {
         return Err(ProxyError::Config(format!(
             "branch '{bname}': on_result.key must not be empty"
+        )));
+    }
+    if cond.key.len() > MAX_RESULT_KEY_LEN {
+        return Err(ProxyError::Config(format!(
+            "branch '{bname}': on_result.key must be at most {MAX_RESULT_KEY_LEN} bytes"
         )));
     }
     validate_on_result_field(&cond.key, "key", bname)?;
@@ -1623,12 +1628,65 @@ filter_chains:
         );
     }
 
+    #[test]
+    fn on_result_key_length_boundary() {
+        for result in ["result: hit", "result: {not: miss}"] {
+            let at_limit = "k".repeat(super::MAX_RESULT_KEY_LEN);
+            let over_limit = "k".repeat(super::MAX_RESULT_KEY_LEN + 1);
+            Config::from_yaml(&on_result_config_with_key(result, &at_limit))
+                .unwrap_or_else(|err| panic!("{result}: 64-byte key should load: {err}"));
+            let err = Config::from_yaml(&on_result_config_with_key(result, &over_limit)).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("branch 'branch': on_result.key must be at most 64 bytes"),
+                "{result}: overlong key should be rejected: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn bound_branch_result_key_length_boundary() {
+        use std::collections::HashSet;
+
+        use crate::config::FilterEntry;
+
+        let known = HashSet::new();
+        for result in ["result: hit", "result: {not: miss}"] {
+            for (len, accepted) in [
+                (super::MAX_RESULT_KEY_LEN, true),
+                (super::MAX_RESULT_KEY_LEN + 1, false),
+            ] {
+                let key = "k".repeat(len);
+                let yaml = format!(
+                    "- filter: headers\n  branch_chains:\n    - name: outbound_branch\n      on_result:\n        filter: headers\n        key: {key}\n        {result}\n      chains:\n        - name: inline\n          filters:\n            - filter: headers\n"
+                );
+                let entries: Vec<FilterEntry> = serde_yaml::from_str(&yaml).unwrap();
+                let outcome = super::validate_chain_entries_branch_chains("outbound", &entries, &known, 0);
+                if accepted {
+                    assert_eq!(outcome.unwrap(), 2, "{result}: 64-byte key should pass");
+                } else {
+                    let err = outcome.unwrap_err();
+                    assert!(
+                        err.to_string()
+                            .contains("branch 'outbound_branch': on_result.key must be at most 64 bytes"),
+                        "{result}: 65-byte key should be rejected: {err}"
+                    );
+                }
+            }
+        }
+    }
+
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
 
     /// A config with one branch whose `on_result` uses the given `result:` line.
     fn on_result_config(result: &str) -> String {
+        on_result_config_with_key(result, "verdict")
+    }
+
+    /// A config with a branch result condition using a specific key.
+    fn on_result_config_with_key(result: &str, key: &str) -> String {
         format!(
             r#"
 listeners:
@@ -1643,7 +1701,7 @@ filter_chains:
           - name: branch
             on_result:
               filter: headers
-              key: verdict
+              key: {key}
               {result}
             chains:
               - name: inline

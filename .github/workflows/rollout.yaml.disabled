@@ -1,3 +1,5 @@
+# Disabled: four-node rootless KIND exhausts the shared inotify instance budget.
+# Move this suite to https://github.com/praxis-proxy/gateway-controller before re-enabling.
 name: Rollout
 
 on:

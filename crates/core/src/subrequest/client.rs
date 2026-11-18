@@ -32,8 +32,8 @@ use super::{
         is_request_stripped, min_timeout, record_header_termination, transport_error,
     },
     types::{
-        FrameworkHeaders, StreamLimits, StreamingSubResponse, SubRequest, SubRequestError, SubResponse,
-        SubResponseBody, UrlSubRequestError,
+        FrameworkHeaders, RequestProgress, StreamLimits, StreamingSubResponse, SubRequest, SubRequestError,
+        SubResponse, SubResponseBody, UrlSubRequestError,
     },
 };
 use crate::{
@@ -160,6 +160,17 @@ impl<C: Connector> SubRequestClient<C> {
     pub fn with_upload_control(&self, control: Arc<dyn super::UploadControl>) -> Self {
         let mut client = self.clone();
         client.upload_control = Some(control);
+        client
+    }
+
+    /// Copy this client with a new buffered response ceiling.
+    ///
+    /// Keeps the connector and trust anchors loaded at startup. Use this when
+    /// a reload changes the body limit without rebuilding startup-only state.
+    #[must_use]
+    pub fn with_response_ceiling(&self, max_response_bytes: usize) -> Self {
+        let mut client = self.clone();
+        client.max_response_bytes = max_response_bytes.min(crate::config::MAX_BUFFER_BYTES);
         client
     }
 
@@ -323,6 +334,7 @@ impl<C: Connector> SubRequestClient<C> {
         connect_attempt_cap: Option<Duration>,
         framework_headers: Option<&FrameworkHeaders>,
         abandon_neutral: bool,
+        progress: Option<&RequestProgress>,
     ) -> Result<RawExchange<'conn, 'conn, C>, SubRequestError> {
         #[cfg(feature = "otel")]
         let client_span = subrequest_client_span(peer, request);
@@ -338,6 +350,7 @@ impl<C: Connector> SubRequestClient<C> {
                 framework_headers,
                 &client_span,
                 abandon_neutral,
+                progress,
             )
             .instrument(client_span.clone())
             .await;
@@ -363,6 +376,7 @@ impl<C: Connector> SubRequestClient<C> {
         framework_headers: Option<&FrameworkHeaders>,
         client_span: &Span,
         abandon_neutral: bool,
+        progress: Option<&RequestProgress>,
     ) -> Result<RawExchange<'conn, 'conn, C>, SubRequestError> {
         let exchange_started = tokio::time::Instant::now();
         let deadline = exchange_started
@@ -460,6 +474,9 @@ impl<C: Connector> SubRequestClient<C> {
                 )
             })?
             .map_err(|err| charge(&mut circuit_guard, transport_error(err)))?;
+        if let Some(progress) = progress {
+            progress.mark_forwarded();
+        }
 
         if let Some(control) = &self.upload_control {
             super::upload::send_controlled(&mut session, request.body.clone(), control, deadline, write_timeout)
@@ -603,7 +620,6 @@ impl<C: Connector> SubRequestClient<C> {
         clippy::too_many_arguments,
         reason = "framework_headers is the typed metadata injection point"
     )]
-    #[expect(clippy::too_many_lines, reason = "sequential HTTP exchange steps")]
     pub async fn send_streaming(
         &self,
         peer: &PeerSpec,
@@ -612,11 +628,37 @@ impl<C: Connector> SubRequestClient<C> {
         limits: StreamLimits,
         framework_headers: Option<&FrameworkHeaders>,
     ) -> Result<StreamingSubResponse<C>, SubRequestError> {
+        self.send_streaming_with_progress(peer, request, timeout, limits, framework_headers, None)
+            .await
+    }
+
+    /// Send a streaming request with an optional per-attempt forwarding witness.
+    ///
+    /// The witness remains readable when this future is cancelled or returns
+    /// an error. Use a fresh witness for each attempt.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same transport errors as [`Self::send_streaming`].
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "per-attempt observation extends the streaming options"
+    )]
+    #[expect(clippy::too_many_lines, reason = "sequential HTTP exchange steps")]
+    pub async fn send_streaming_with_progress(
+        &self,
+        peer: &PeerSpec,
+        request: &SubRequest,
+        timeout: Duration,
+        limits: StreamLimits,
+        framework_headers: Option<&FrameworkHeaders>,
+        progress: Option<&RequestProgress>,
+    ) -> Result<StreamingSubResponse<C>, SubRequestError> {
         // Streaming uses no per-attempt connect cap: its header `timeout` already
         // bounds the whole connect-plus-header phase. Cancellation still records
         // a circuit failure; only a hedged attempt is neutral on drop.
         let mut exchange = self
-            .open_exchange(peer, request, timeout, None, framework_headers, false)
+            .open_exchange(peer, request, timeout, None, framework_headers, false, progress)
             .await?;
 
         // Hold the circuit guard until the header-time outcome is known.
@@ -717,14 +759,15 @@ impl<C: Connector> SubRequestClient<C> {
     /// by `max_response_bytes`), and returns a [`SubResponse`].
     ///
     /// Transport-level headers (hop-by-hop, `Connection`-nominated)
-    /// and reserved internal headers (`x-praxis-*`, `x-ext-*`) are
-    /// stripped from both request and response.
+    /// and reserved internal headers (`x-praxis-*`,
+    /// `x-ext-protocol-*`, `x-ext-agent-*`) are stripped from both
+    /// request and response.
     ///
     /// `framework_headers` are injected **after** all sanitisation
-    /// passes. The [`FrameworkHeaders`] type validates at insertion
-    /// time that no transport-level or reserved internal header
-    /// (`x-praxis-*`, `x-ext-*`) can be added, so callers cannot
-    /// reintroduce sanitised headers.
+    /// passes. [`FrameworkHeaders::insert`] rejects transport-level
+    /// names and the reserved prefixes above. The dedicated
+    /// [`FrameworkHeaders::set_depth`] method injects the trusted
+    /// `x-praxis-iterative-depth` header.
     ///
     /// # Errors
     ///
@@ -751,6 +794,41 @@ impl<C: Connector> SubRequestClient<C> {
             None,
             framework_headers,
             false,
+            None,
+        )
+        .await
+    }
+
+    /// Execute a buffered request with a per-attempt forwarding witness.
+    ///
+    /// The witness remains readable when this future is cancelled or returns
+    /// an error. Use a fresh witness for each attempt.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same transport errors as [`Self::execute`].
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "per-attempt observation extends the buffered options"
+    )]
+    pub async fn execute_with_progress(
+        &self,
+        peer: &PeerSpec,
+        request: &SubRequest,
+        max_response_bytes: usize,
+        timeout: Duration,
+        framework_headers: Option<&FrameworkHeaders>,
+        progress: &RequestProgress,
+    ) -> Result<SubResponse, SubRequestError> {
+        self.execute_inner(
+            peer,
+            request,
+            max_response_bytes,
+            timeout,
+            None,
+            framework_headers,
+            false,
+            Some(progress),
         )
         .await
     }
@@ -785,6 +863,7 @@ impl<C: Connector> SubRequestClient<C> {
             None,
             framework_headers,
             true,
+            None,
         )
         .await
     }
@@ -816,6 +895,7 @@ impl<C: Connector> SubRequestClient<C> {
             connect_attempt_cap,
             framework_headers,
             false,
+            None,
         )
         .await
     }
@@ -836,6 +916,7 @@ impl<C: Connector> SubRequestClient<C> {
         connect_attempt_cap: Option<Duration>,
         framework_headers: Option<&FrameworkHeaders>,
         abandon_neutral: bool,
+        progress: Option<&RequestProgress>,
     ) -> Result<SubResponse, SubRequestError> {
         let exchange = self
             .open_exchange(
@@ -845,6 +926,7 @@ impl<C: Connector> SubRequestClient<C> {
                 connect_attempt_cap,
                 framework_headers,
                 abandon_neutral,
+                progress,
             )
             .await;
 

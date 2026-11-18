@@ -3,11 +3,18 @@
 
 //! Proxy startup and configuration test utilities for integration tests.
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     collections::HashMap,
+    ffi::OsStr,
     fmt,
-    path::PathBuf,
-    sync::Arc,
+    path::{Path, PathBuf},
+    process::Command,
+    sync::{
+        Arc,
+        mpsc::{self, TryRecvError},
+    },
     thread::JoinHandle,
     time::{Duration, Instant},
 };
@@ -15,13 +22,13 @@ use std::{
 use praxis_core::{
     ServerRuntime as _,
     backend::Runtime,
-    config::{Config, ExpandedFilterChains, Listener, ProtocolKind},
+    config::{Config, ConfigFile, ExpandedFilterChains, Listener, ProtocolKind},
     health::{HealthRegistry, build_health_registry},
     kv::KvStoreRegistry,
 };
 use praxis_filter::{FilterFactory, FilterPipeline, FilterRegistry, HttpFilter};
 use praxis_protocol::{
-    ListenerPipelines, Protocol as _,
+    CertWatcherShutdowns, ListenerPipelines, Protocol as _,
     backend::{Http, Tcp, admin},
     http::health,
 };
@@ -81,10 +88,10 @@ pub const PRAXIS_BIN_ENV: &str = "PRAXIS_BIN";
 
 /// Path to the `praxis` binary for subprocess integration tests.
 ///
-/// Uses [`PRAXIS_BIN_ENV`] when set, then `CARGO_BIN_EXE_praxis`; otherwise
-/// resolves under `CARGO_TARGET_DIR` (including llvm-cov's alternate target
-/// dir; see `build_target_dir`), and builds the binary for this harness's
-/// backend and Policy selection unless one with that selection is present.
+/// Uses [`PRAXIS_BIN_ENV`] when set. Coverage runs select a binary beside the
+/// running test executable. Other runs use `CARGO_BIN_EXE_praxis` or the
+/// isolated `CARGO_TARGET_DIR` fallback. Every selected binary must match the
+/// harness's backend and Policy selection.
 ///
 /// # Panics
 ///
@@ -102,31 +109,178 @@ pub fn praxis_bin() -> PathBuf {
             "{PRAXIS_BIN_ENV} names {} but there is no such file",
             path.display()
         );
-        if let Err(mismatch) = binary_backend_matches(&path).and_then(|()| binary_policy_profile_matches(&path)) {
+        if let Err(mismatch) = binary_profile_matches(&path) {
             panic!("{PRAXIS_BIN_ENV}: {mismatch}");
         }
         return path;
     }
 
-    let path = resolve_praxis_bin_path();
-    if path.exists() && binary_policy_profile_matches(&path).is_ok() {
-        return path;
+    if cfg!(coverage) || std::env::var_os("CARGO_LLVM_COV").is_some() {
+        let executable = std::env::current_exe().expect("locate coverage test executable");
+        let profile = coverage_profile_dir_for(&executable).unwrap_or_else(|error| panic!("coverage proxy: {error}"));
+        let cargo_bin = std::env::var_os("CARGO_BIN_EXE_praxis").map(PathBuf::from);
+        return select_coverage_bin(&profile, cargo_bin.as_deref(), || build_coverage_bin(&profile))
+            .unwrap_or_else(|error| panic!("coverage proxy: {error}"));
     }
 
-    let status = std::process::Command::new(env!("CARGO"))
-        .args(["build", "-p", "praxis-proxy", "--bin", "praxis", "-q", "--target-dir"])
+    select_normal_bin(&resolve_praxis_bin_path(), build_normal_bin)
+        .unwrap_or_else(|error| panic!("the harness-built binary: {error}"))
+}
+
+/// Reuse a normal cached binary or validate the exact fallback build output.
+fn select_normal_bin(path: &Path, build: impl FnOnce() -> Result<PathBuf, String>) -> Result<PathBuf, String> {
+    if path.is_file() && binary_profile_matches(path).is_ok() {
+        return Ok(path.to_path_buf());
+    }
+    let built = build()?;
+    if !built.is_file() {
+        return Err(format!("praxis binary missing at {} after build", built.display()));
+    }
+    binary_profile_matches(&built)?;
+    Ok(built)
+}
+
+/// Canonical profile directory containing the running coverage test binary.
+fn coverage_profile_dir_for(executable: &Path) -> Result<PathBuf, String> {
+    let deps = executable
+        .parent()
+        .ok_or_else(|| format!("{} has no parent", executable.display()))?;
+    if deps.file_name() != Some(OsStr::new("deps")) {
+        return Err(format!("{} is not in a profile/deps directory", executable.display()));
+    }
+    deps.parent()
+        .ok_or_else(|| format!("{} has no profile directory", executable.display()))?
+        .canonicalize()
+        .map_err(|error| format!("canonicalize coverage profile: {error}"))
+}
+
+/// Select a measured binary or build one into the active coverage profile.
+fn select_coverage_bin(
+    profile: &Path,
+    cargo_bin: Option<&Path>,
+    build: impl FnOnce() -> Result<PathBuf, String>,
+) -> Result<PathBuf, String> {
+    let active = profile.join("praxis");
+    if let Some(path) = matching_coverage_candidate(&active, profile) {
+        return Ok(path);
+    }
+    if let Some(path) = cargo_bin.and_then(|candidate| matching_coverage_candidate(candidate, profile)) {
+        return Ok(path);
+    }
+    let built = build()?;
+    let built = built
+        .canonicalize()
+        .map_err(|error| format!("canonicalize built proxy: {error}"))?;
+    if !built.starts_with(profile) {
+        return Err(format!(
+            "built proxy {} escapes coverage profile {}",
+            built.display(),
+            profile.display()
+        ));
+    }
+    binary_profile_matches(&built)?;
+    Ok(built)
+}
+
+/// Accept only a matching executable located under the measured profile.
+fn matching_coverage_candidate(path: &Path, profile: &Path) -> Option<PathBuf> {
+    let canonical = path.canonicalize().ok()?;
+    (canonical.starts_with(profile) && canonical.is_file() && binary_profile_matches(&canonical).is_ok())
+        .then_some(canonical)
+}
+
+/// Build the proxy into the active coverage target and return Cargo's artifact.
+fn build_coverage_bin(profile: &Path) -> Result<PathBuf, String> {
+    if std::env::var_os("CARGO_LLVM_COV").is_none() {
+        return Err(
+            "coverage proxy build needs the cargo llvm-cov environment; no matching binary was found".to_owned(),
+        );
+    }
+    let target = profile
+        .parent()
+        .ok_or_else(|| format!("{} has no target directory", profile.display()))?;
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut command = Command::new(env!("CARGO"));
+    command
+        .current_dir(workspace)
+        .args(["build", "-p", "praxis-proxy", "--bin", "praxis", "--target-dir"])
+        .arg(target)
+        .arg("--message-format=json-render-diagnostics")
+        .args(backend_build_args());
+    add_coverage_profile(&mut command, profile)?;
+    let output = command
+        .output()
+        .map_err(|error| format!("spawn coverage proxy build: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "coverage proxy build failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    cargo_binary_artifact(&output.stdout)
+}
+
+/// Build the normal backend-isolated proxy and return Cargo's emitted path.
+fn build_normal_bin() -> Result<PathBuf, String> {
+    let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".into());
+    let mut command = Command::new(env!("CARGO"));
+    command
+        .args(["build", "-p", "praxis-proxy", "--bin", "praxis", "--target-dir"])
         .arg(build_target_dir())
-        .args(backend_build_args())
-        .status()
-        .expect("spawn cargo build for praxis binary");
-    assert!(status.success(), "cargo build -p praxis-proxy --bin praxis failed");
-
-    let path = resolve_praxis_bin_path();
-    assert!(path.exists(), "praxis binary missing at {} after build", path.display());
-    if let Err(mismatch) = binary_policy_profile_matches(&path) {
-        panic!("the harness-built binary: {mismatch}");
+        .arg("--message-format=json-render-diagnostics")
+        .args(backend_build_args());
+    add_build_profile(&mut command, &profile);
+    let output = command
+        .output()
+        .map_err(|error| format!("spawn proxy build: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "proxy build failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
     }
-    path
+    cargo_binary_artifact(&output.stdout)
+}
+
+/// Match Cargo's build profile to the directory holding the test executable.
+fn add_coverage_profile(command: &mut Command, profile: &Path) -> Result<(), String> {
+    let name = profile
+        .file_name()
+        .and_then(OsStr::to_str)
+        .ok_or_else(|| format!("invalid coverage profile directory: {}", profile.display()))?;
+    add_build_profile(command, name);
+    Ok(())
+}
+
+/// Supply the Cargo flag for a profile directory name.
+fn add_build_profile(command: &mut Command, name: &str) {
+    match name {
+        "debug" => {},
+        "release" => {
+            command.arg("--release");
+        },
+        custom => {
+            command.args(["--profile", custom]);
+        },
+    }
+}
+
+/// Extract Cargo's `praxis` binary path from machine-readable build output.
+fn cargo_binary_artifact(stdout: &[u8]) -> Result<PathBuf, String> {
+    let output = str::from_utf8(stdout).map_err(|error| format!("Cargo output is not UTF-8: {error}"))?;
+    output
+        .lines()
+        .filter_map(|line| serde_yaml::from_str::<serde_yaml::Value>(line).ok())
+        .filter(|value| value.get("reason").and_then(serde_yaml::Value::as_str) == Some("compiler-artifact"))
+        .filter_map(|value| {
+            let target = value.get("target")?;
+            let kind = target.get("kind")?.as_sequence()?;
+            (target.get("name")?.as_str() == Some("praxis") && kind.iter().any(|entry| entry.as_str() == Some("bin")))
+                .then(|| value.get("executable")?.as_str().map(PathBuf::from))
+                .flatten()
+        })
+        .next_back()
+        .ok_or_else(|| "Cargo did not report a praxis binary artifact".to_owned())
 }
 
 /// Resolve the expected `praxis` binary path without building.
@@ -246,14 +400,22 @@ fn subprocess_features(backend: &str, policy: &[&str]) -> String {
 /// The network backend this harness tests, as `praxis --version` names it.
 const NETWORK_BACKEND: &str = if cfg!(feature = "hyper") { "hyper" } else { "pingora" };
 
-/// Whether the binary at `path` was compiled with this harness's network
-/// backend, going by `praxis --version`. `Err` carries the mismatch.
-fn binary_backend_matches(path: &std::path::Path) -> Result<(), String> {
-    let output = std::process::Command::new(path)
+/// Validate the executable's backend and Policy profile from one version run.
+fn binary_profile_matches(path: &Path) -> Result<(), String> {
+    let output = Command::new(path)
         .arg("--version")
         .output()
         .map_err(|err| format!("run {} --version: {err}", path.display()))?;
+    if !output.status.success() {
+        return Err(format!("{} --version failed with {}", path.display(), output.status));
+    }
     let stdout = String::from_utf8_lossy(&output.stdout);
+    backend_version_matches(path, &stdout)?;
+    policy_version_matches(path, &stdout)
+}
+
+/// Match the network backend line of a successful version response.
+fn backend_version_matches(path: &Path, stdout: &str) -> Result<(), String> {
     let reported = stdout
         .lines()
         .find_map(|line| line.strip_prefix("network backend: "))
@@ -269,15 +431,9 @@ fn binary_backend_matches(path: &std::path::Path) -> Result<(), String> {
     }
 }
 
-/// Whether the binary at `path` was compiled with the Policy selection this
-/// harness claims, going by `praxis --version`. `Err` carries the mismatch.
-fn binary_policy_profile_matches(path: &std::path::Path) -> Result<(), String> {
-    let output = std::process::Command::new(path)
-        .arg("--version")
-        .output()
-        .map_err(|err| format!("run {} --version: {err}", path.display()))?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let reported = parse_policy_features(&stdout)
+/// Match the Policy feature line of a successful version response.
+fn policy_version_matches(path: &Path, stdout: &str) -> Result<(), String> {
+    let reported = parse_policy_features(stdout)
         .ok_or_else(|| format!("{} --version reports no policy features:\n{stdout}", path.display()))?;
     let selected = selected_policy_features();
     let (reported, expected) = (
@@ -382,6 +538,10 @@ pub struct ProxyGuard {
     addr: String,
     /// Handle to the spawned server thread, joined on drop.
     handle: Option<JoinHandle<()>>,
+    /// Separate health runtime, when any cluster has active probes.
+    health: Option<HealthRuntime>,
+    /// Stops certificate reload watchers started by this fixture.
+    cert_watchers: FixtureCertWatchers,
     /// Fires the shutdown signal on drop.
     notify: Arc<Notify>,
 }
@@ -401,28 +561,84 @@ impl fmt::Display for ProxyGuard {
 
 impl Drop for ProxyGuard {
     fn drop(&mut self) {
+        self.cert_watchers.shutdown();
+        if let Some(health) = self.health.as_ref() {
+            health.shutdown.cancel();
+        }
         self.notify.notify_one();
         if let Some(handle) = self.handle.take() {
-            let start = Instant::now();
-            while !handle.is_finished() {
-                if start.elapsed() >= JOIN_TIMEOUT {
-                    tracing::warn!(
-                        addr = %self.addr,
-                        timeout_secs = JOIN_TIMEOUT.as_secs(),
-                        "server thread did not exit within timeout",
-                    );
-                    return;
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            let _ = handle.join();
+            join_bounded(handle, &self.addr, "server");
+        }
+        if let Some(health) = self.health.take() {
+            join_bounded(health.handle, &self.addr, "health");
         }
     }
 }
 
+/// Owns certificate reload watchers across fixture construction and teardown.
+#[derive(Default)]
+struct FixtureCertWatchers {
+    /// Shutdown handles returned by each protocol registration.
+    shutdowns: Vec<CertWatcherShutdowns>,
+}
+
+impl FixtureCertWatchers {
+    /// Retain one protocol's watcher handles until fixture teardown.
+    fn push(&mut self, shutdowns: CertWatcherShutdowns) {
+        self.shutdowns.push(shutdowns);
+    }
+
+    /// Signal all watchers, including during partial construction or unwinding.
+    fn shutdown(&mut self) {
+        for shutdowns in self.shutdowns.drain(..) {
+            shutdowns.shutdown();
+        }
+    }
+}
+
+impl Drop for FixtureCertWatchers {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+/// A cancellable health-check runtime separate from the proxy runtime.
+struct HealthRuntime {
+    /// Stops active health probes and the health runtime.
+    shutdown: CancellationToken,
+    /// Health runtime thread.
+    handle: JoinHandle<()>,
+    /// Allows the fixture regression to observe completed shutdown.
+    #[cfg(test)]
+    finished: Arc<AtomicBool>,
+}
+
+/// Wait at most the fixture shutdown budget for one runtime thread.
+fn join_bounded(handle: JoinHandle<()>, addr: &str, runtime: &str) {
+    let start = Instant::now();
+    while !handle.is_finished() {
+        if start.elapsed() >= JOIN_TIMEOUT {
+            tracing::warn!(
+                addr,
+                runtime,
+                timeout_secs = JOIN_TIMEOUT.as_secs(),
+                "fixture thread did not exit"
+            );
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let _ = handle.join();
+}
+
 /// Run `runtime` on its own thread until `notify` fires, then join on drop
 /// through the returned guard.
-fn spawn_runtime(addr: String, runtime: Runtime) -> ProxyGuard {
+fn spawn_runtime(
+    addr: String,
+    runtime: Runtime,
+    health: Option<HealthRuntime>,
+    cert_watchers: FixtureCertWatchers,
+) -> ProxyGuard {
     let notify = Arc::new(Notify::new());
     let watch_notify = Arc::clone(&notify);
 
@@ -433,6 +649,8 @@ fn spawn_runtime(addr: String, runtime: Runtime) -> ProxyGuard {
     ProxyGuard {
         addr,
         handle: Some(handle),
+        health,
+        cert_watchers,
         notify,
     }
 }
@@ -449,7 +667,7 @@ fn capped_config(config: &Config) -> Config {
 /// Build a backend runtime with every HTTP listener's pipeline resolved from
 /// `registry`, plus the optional admin and metrics endpoints, and nothing else
 /// (no sub-request client, no health probes).
-fn build_light_runtime(config: &Config, registry: &FilterRegistry) -> Runtime {
+fn build_light_runtime(config: &Config, registry: &FilterRegistry) -> (Runtime, FixtureCertWatchers) {
     // Registering a listener builds the backend's upstream connector, which
     // constructs a rustls `ClientConfig` even for a listener that serves plain HTTP.
     crate::net::tls::ensure_crypto_provider();
@@ -466,11 +684,11 @@ fn build_light_runtime(config: &Config, registry: &FilterRegistry) -> Runtime {
         })
         .collect();
     let pipelines = ListenerPipelines::new(pipelines);
-    // Dropping the senders does not stop the cert watchers; they run for the
-    // life of the test process.
-    let _cert_shutdowns = Box::new(Http)
+    let mut cert_watchers = FixtureCertWatchers::default();
+    let shutdowns = Box::new(Http)
         .register(&mut runtime, config, &pipelines)
         .expect("HTTP protocol registration should succeed in test");
+    cert_watchers.push(CertWatcherShutdowns::new(shutdowns));
 
     if let Some(admin_addr) = &config.admin.address {
         admin::add_admin_api(&mut runtime, admin_addr, admin::AdminEndpointOptions::default());
@@ -480,7 +698,7 @@ fn build_light_runtime(config: &Config, registry: &FilterRegistry) -> Runtime {
         admin::add_health_endpoint(&mut runtime, metrics_addr, None, config.admin.verbose);
     }
 
-    runtime
+    (runtime, cert_watchers)
 }
 
 /// Build a [`ProxyGuard`] by spawning a backend runtime that
@@ -492,8 +710,8 @@ fn spawn_proxy_server(config: &Config, registry: &FilterRegistry) -> ProxyGuard 
         .expect("config must have at least one listener")
         .address
         .clone();
-    let runtime = build_light_runtime(config, registry);
-    spawn_runtime(addr, runtime)
+    let (runtime, cert_watchers) = build_light_runtime(config, registry);
+    spawn_runtime(addr, runtime, None, cert_watchers)
 }
 
 // -----------------------------------------------------------------------------
@@ -529,7 +747,7 @@ pub fn start_proxy_with_registry(config: &Config, registry: &FilterRegistry) -> 
 
 /// Build a backend [`Runtime`] with HTTP and TCP protocols
 /// and spawn background health check probes.
-fn build_full_server(config: &Config) -> Runtime {
+fn build_full_server(config: &Config) -> (Runtime, Option<HealthRuntime>, FixtureCertWatchers) {
     let registry = praxis::build_full_registry();
     build_full_server_with_registry(config, &registry, KvStoreRegistry::new())
 }
@@ -538,7 +756,11 @@ fn build_full_server(config: &Config) -> Runtime {
 /// registry and KV store registry, HTTP and TCP protocols, and
 /// background health probes.
 #[expect(clippy::too_many_lines, reason = "test utility wiring")]
-fn build_full_server_with_registry(config: &Config, registry: &FilterRegistry, kv_stores: KvStoreRegistry) -> Runtime {
+fn build_full_server_with_registry(
+    config: &Config,
+    registry: &FilterRegistry,
+    kv_stores: KvStoreRegistry,
+) -> (Runtime, Option<HealthRuntime>, FixtureCertWatchers) {
     // Every full-proxy start builds a `SubRequestConnector`, which constructs a
     // rustls `ClientConfig`. Hooking the certificate fixtures is not enough: a test
     // that starts a proxy without TLS reaches rustls with no provider installed.
@@ -575,17 +797,20 @@ fn build_full_server_with_registry(config: &Config, registry: &FilterRegistry, k
     let cluster_meta = health::new_cluster_meta_store(health::cluster_meta_from_config(config));
 
     let mut runtime = Runtime::from_config(&capped_config(config));
+    let mut cert_watchers = FixtureCertWatchers::default();
 
     if config.listeners.iter().any(|l| l.protocol == ProtocolKind::Http) {
-        let _ = Box::new(Http)
+        let shutdowns = Box::new(Http)
             .register(&mut runtime, config, &pipelines)
             .expect("HTTP protocol registration should succeed in test");
+        cert_watchers.push(CertWatcherShutdowns::new(shutdowns));
     }
 
     if config.listeners.iter().any(|l| l.protocol == ProtocolKind::Tcp) {
-        let _ = Box::new(Tcp)
+        let shutdowns = Box::new(Tcp)
             .register(&mut runtime, config, &pipelines)
             .expect("TCP protocol registration should succeed in test");
+        cert_watchers.push(CertWatcherShutdowns::new(shutdowns));
     }
 
     let recorder = (config.admin.address.is_some() || config.admin.metrics_address.is_some())
@@ -625,29 +850,41 @@ fn build_full_server_with_registry(config: &Config, registry: &FilterRegistry, k
         admin::add_prometheus_upkeep(&mut runtime, recorder);
     }
 
-    spawn_test_health_checks(config, &health_registry);
-
-    runtime
+    let health = spawn_test_health_checks(config, &health_registry);
+    (runtime, health, cert_watchers)
 }
 
 /// Spawn background health check tasks for tests.
-fn spawn_test_health_checks(config: &Config, registry: &HealthRegistry) {
+fn spawn_test_health_checks(config: &Config, registry: &HealthRegistry) -> Option<HealthRuntime> {
     if registry.is_empty() {
-        return;
+        return None;
     }
     let clusters = config.clusters.clone();
     let registry = Arc::clone(registry);
     let shutdown = CancellationToken::new();
-    std::thread::spawn(move || {
+    let thread_shutdown = shutdown.clone();
+    #[cfg(test)]
+    let finished = Arc::new(AtomicBool::new(false));
+    #[cfg(test)]
+    let thread_finished = Arc::clone(&finished);
+    let handle = std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("health check runtime");
         rt.block_on(async {
-            health::runner::spawn_health_checks(&clusters, &registry, &shutdown);
-            shutdown.cancelled().await;
+            health::runner::spawn_health_checks(&clusters, &registry, &thread_shutdown);
+            thread_shutdown.cancelled().await;
         });
+        #[cfg(test)]
+        thread_finished.store(true, Ordering::Release);
     });
+    Some(HealthRuntime {
+        shutdown,
+        handle,
+        #[cfg(test)]
+        finished,
+    })
 }
 
 /// Start a full proxy server (HTTP + TCP protocols) in a
@@ -702,14 +939,17 @@ pub fn start_full_proxy_with_kv_stores(config: &Config, kv_stores: &KvStoreRegis
 }
 
 /// Spawn a fully configured proxy runtime in a background thread.
-fn start_full_proxy_runtime(config: &Config, runtime: Runtime) -> ProxyGuard {
+fn start_full_proxy_runtime(
+    config: &Config,
+    server: (Runtime, Option<HealthRuntime>, FixtureCertWatchers),
+) -> ProxyGuard {
     let addr = config
         .listeners
         .first()
         .expect("config must have at least one listener")
         .address
         .clone();
-    spawn_runtime(addr, runtime)
+    spawn_runtime(addr, server.0, server.1, server.2)
 }
 
 // -----------------------------------------------------------------------------
@@ -739,7 +979,7 @@ impl ReloadableProxyGuard {
     }
 
     /// Path to the config file for in-test mutation.
-    pub fn config_path(&self) -> &std::path::Path {
+    pub fn config_path(&self) -> &Path {
         &self.config_path
     }
 
@@ -822,17 +1062,34 @@ pub fn start_reloadable_proxy(yaml: &str) -> ReloadableProxyGuard {
     std::io::Write::write_all(&mut temp_file, yaml.as_bytes()).expect("failed to write temp config");
     let config_path = temp_file.path().to_path_buf();
 
-    let path_for_server = config_path.clone();
-    std::thread::spawn(move || {
-        praxis::run_server(config, Some(path_for_server), None);
-    });
-
-    crate::net::wait::wait_for_http(&addr);
+    let config_file = ConfigFile::read(&config_path).expect("reloadable test config should remain readable");
+    spawn_process_lifetime_server(config, Some(config_file), &addr);
 
     ReloadableProxyGuard {
         addr,
         config_path,
         _temp_file: temp_file,
+    }
+}
+
+/// Start a process-lifetime test server while surfacing early errors to its caller.
+pub(crate) fn spawn_process_lifetime_server(config: Config, config_file: Option<ConfigFile>, addr: &str) {
+    let (sender, receiver) = mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let result = praxis::try_run_server(config, config_file, None).map_err(|error| error.to_string());
+        let _ = sender.send(result);
+    });
+
+    let readiness = std::panic::catch_unwind(|| crate::net::wait::wait_for_http(addr));
+    match receiver.try_recv() {
+        Ok(Ok(())) => panic!("process-lifetime test server exited before readiness"),
+        Ok(Err(error)) => panic!("process-lifetime test server failed before readiness: {error}"),
+        Err(TryRecvError::Disconnected) => panic!("server thread ended without a result"),
+        Err(TryRecvError::Empty) => {
+            if let Err(failure) = readiness {
+                std::panic::resume_unwind(failure);
+            }
+        },
     }
 }
 
@@ -961,7 +1218,437 @@ pub fn registry_with(name: &str, make: fn() -> Box<dyn HttpFilter>) -> FilterReg
 
 #[cfg(test)]
 mod tests {
-    use super::{effective_policy_features, parse_policy_features, subprocess_features};
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::{net::TcpListener, sync::mpsc::RecvTimeoutError};
+
+    use super::*;
+
+    /// A fake proxy whose version report and exit code are controlled by the test.
+    #[cfg(unix)]
+    fn fake_proxy(path: &Path, version: &str, exit_code: i32) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let script = format!("#!/bin/sh\ncat <<'PRAXIS_VERSION'\n{version}\nPRAXIS_VERSION\nexit {exit_code}\n");
+        std::fs::write(path, script).unwrap();
+        let mut permissions = std::fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(path, permissions).unwrap();
+    }
+
+    /// Version output matching the features compiled into this test utility.
+    #[cfg(unix)]
+    fn matching_version() -> String {
+        let policy = selected_policy_features();
+        let policy = if policy.is_empty() {
+            "none".to_owned()
+        } else {
+            policy.join(",")
+        };
+        format!("praxis test\nnetwork backend: {NETWORK_BACKEND}\npolicy features: {policy}\n")
+    }
+
+    /// Version output with the opposite backend and the same Policy profile.
+    #[cfg(unix)]
+    fn opposite_backend_version() -> String {
+        let opposite = if NETWORK_BACKEND == "pingora" {
+            "hyper"
+        } else {
+            "pingora"
+        };
+        matching_version().replace(
+            &format!("network backend: {NETWORK_BACKEND}"),
+            &format!("network backend: {opposite}"),
+        )
+    }
+
+    /// Run the explicit-bin test body in a child with a private environment.
+    #[cfg(unix)]
+    fn explicit_bin_child(executable: &Path, binary: &Path, sentinel: &Path) -> std::process::Output {
+        Command::new(executable)
+            .args([
+                "--exact",
+                "proxy::tests::explicit_binary_override_accepts_match_and_rejects_wrong_backend",
+                "--nocapture",
+            ])
+            .env("PRAXIS_EXPLICIT_BINARY_CHILD", sentinel)
+            .env(PRAXIS_BIN_ENV, binary)
+            .output()
+            .unwrap()
+    }
+
+    #[test]
+    fn coverage_profile_follows_the_running_test_artifact() {
+        let directory = tempfile::tempdir().unwrap();
+        let profile = directory.path().join("custom-profile");
+        std::fs::create_dir_all(profile.join("deps")).unwrap();
+        let executable = profile.join("deps/suite-fixture");
+        assert_eq!(
+            coverage_profile_dir_for(&executable),
+            profile.canonicalize().map_err(|error| error.to_string())
+        );
+        coverage_profile_dir_for(&profile.join("suite-fixture")).unwrap_err();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn binary_version_requires_successful_matching_backend_and_policy() {
+        let directory = tempfile::tempdir().unwrap();
+        let binary = directory.path().join("praxis");
+        let matching = matching_version();
+        fake_proxy(&binary, &matching, 0);
+        binary_profile_matches(&binary).unwrap();
+        for invalid in [
+            opposite_backend_version(),
+            matching.replace("network backend: ", "backend: "),
+            matching.replace("policy features: ", "features: "),
+            matching.replace("policy features: ", "policy features: policy-invalid,"),
+        ] {
+            fake_proxy(&binary, &invalid, 0);
+            binary_profile_matches(&binary).unwrap_err();
+        }
+        fake_proxy(&binary, &matching, 7);
+        assert!(binary_profile_matches(&binary).unwrap_err().contains("failed with"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_binary_override_accepts_match_and_rejects_wrong_backend() {
+        if let Some(sentinel) = std::env::var_os("PRAXIS_EXPLICIT_BINARY_CHILD") {
+            std::fs::write(sentinel, praxis_bin().display().to_string()).unwrap();
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let binary = directory.path().join("praxis");
+        let sentinel = directory.path().join("selected");
+        let executable = std::env::current_exe().unwrap();
+        fake_proxy(&binary, &matching_version(), 0);
+        let accepted = explicit_bin_child(&executable, &binary, &sentinel);
+        assert!(
+            accepted.status.success(),
+            "{}",
+            String::from_utf8_lossy(&accepted.stderr)
+        );
+        assert_eq!(
+            std::fs::read_to_string(&sentinel).unwrap(),
+            binary.display().to_string()
+        );
+        std::fs::remove_file(&sentinel).unwrap();
+        fake_proxy(&binary, &opposite_backend_version(), 0);
+        let rejected = explicit_bin_child(&executable, &binary, &sentinel);
+        assert!(!rejected.status.success());
+        assert!(String::from_utf8_lossy(&rejected.stderr).contains("but this suite tests"));
+        assert!(!sentinel.exists(), "mismatched explicit override must not be selected");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn coverage_selector_prefers_the_active_artifact_without_building() {
+        let directory = tempfile::tempdir().unwrap();
+        let profile = directory.path().join("coverage/debug");
+        let active = profile.join("praxis");
+        let ordinary = directory.path().join("debug/praxis");
+        fake_proxy(&active, &matching_version(), 0);
+        fake_proxy(&ordinary, &matching_version(), 0);
+        let profile = profile.canonicalize().unwrap();
+        let selected = select_coverage_bin(&profile, Some(&ordinary), || {
+            panic!("matching active binary must not build")
+        });
+        assert_eq!(selected.unwrap(), active.canonicalize().unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn coverage_selector_rebuilds_wrong_backend_and_returns_built_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let profile = directory.path().join("coverage/debug");
+        let active = profile.join("praxis");
+        let ordinary = directory.path().join("debug/praxis");
+        fake_proxy(&active, &opposite_backend_version(), 0);
+        fake_proxy(&ordinary, &matching_version(), 0);
+        let profile = profile.canonicalize().unwrap();
+        let mut builds = 0;
+        let selected = select_coverage_bin(&profile, Some(&ordinary), || {
+            builds += 1;
+            fake_proxy(&active, &matching_version(), 0);
+            Ok(active.clone())
+        });
+        assert_eq!(
+            builds, 1,
+            "a matching ordinary binary outside coverage cannot be reused"
+        );
+        assert_eq!(selected.unwrap(), active.canonicalize().unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn normal_selector_reuses_matching_cache_and_rebuilds_wrong_backend() {
+        let directory = tempfile::tempdir().unwrap();
+        let cached = directory.path().join("cached/praxis");
+        let built = directory.path().join("built/praxis");
+        fake_proxy(&cached, &matching_version(), 0);
+        let selected = select_normal_bin(&cached, || panic!("matching cache must not build"));
+        assert_eq!(selected.unwrap(), cached);
+        fake_proxy(&cached, &opposite_backend_version(), 0);
+        let mut builds = 0;
+        let selected = select_normal_bin(&cached, || {
+            builds += 1;
+            fake_proxy(&built, &matching_version(), 0);
+            Ok(built.clone())
+        });
+        assert_eq!(builds, 1);
+        assert_eq!(
+            selected.unwrap(),
+            built,
+            "return Cargo's output, not the stale cached path"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn normal_selector_rejects_invalid_build_outputs() {
+        let directory = tempfile::tempdir().unwrap();
+        let cached = directory.path().join("cached/praxis");
+        let built = directory.path().join("built/praxis");
+        fake_proxy(&cached, &matching_version(), 7);
+        assert!(
+            select_normal_bin(&cached, || Ok(built.clone()))
+                .unwrap_err()
+                .contains("missing")
+        );
+        fake_proxy(&built, &opposite_backend_version(), 0);
+        assert!(
+            select_normal_bin(&cached, || Ok(built.clone()))
+                .unwrap_err()
+                .contains("backend")
+        );
+        let invalid = matching_version().replace("policy features: ", "policy features: policy-invalid,");
+        fake_proxy(&built, &invalid, 0);
+        assert!(
+            select_normal_bin(&cached, || Ok(built.clone()))
+                .unwrap_err()
+                .contains("Policy features")
+        );
+        fake_proxy(&built, &matching_version(), 7);
+        assert!(
+            select_normal_bin(&cached, || Ok(built))
+                .unwrap_err()
+                .contains("failed with")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn coverage_selector_rejects_unmeasured_or_mismatched_build_outputs() {
+        let directory = tempfile::tempdir().unwrap();
+        let profile = directory.path().join("coverage/debug");
+        std::fs::create_dir_all(&profile).unwrap();
+        let profile = profile.canonicalize().unwrap();
+        let outside = directory.path().join("ordinary/praxis");
+        fake_proxy(&outside, &matching_version(), 0);
+        assert!(
+            select_coverage_bin(&profile, None, || Ok(outside))
+                .unwrap_err()
+                .contains("escapes coverage profile")
+        );
+        let wrong = profile.join("praxis");
+        let invalid_policy = matching_version().replace("policy features: ", "policy features: policy-invalid,");
+        for (version, exit_code, expected) in [
+            (opposite_backend_version(), 0, "backend"),
+            (invalid_policy, 0, "Policy features"),
+            (matching_version(), 7, "failed with"),
+        ] {
+            fake_proxy(&wrong, &version, exit_code);
+            let error = select_coverage_bin(&profile, None, || Ok(wrong.clone())).unwrap_err();
+            assert!(error.contains(expected), "{error}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn coverage_selector_rejects_symlink_outside_measured_profile() {
+        let directory = tempfile::tempdir().unwrap();
+        let profile = directory.path().join("coverage/debug");
+        std::fs::create_dir_all(&profile).unwrap();
+        let outside = directory.path().join("ordinary/praxis");
+        fake_proxy(&outside, &matching_version(), 0);
+        std::os::unix::fs::symlink(&outside, profile.join("praxis")).unwrap();
+        let profile = profile.canonicalize().unwrap();
+        let selected = select_coverage_bin(&profile, None, || Err("outside cache rejected".to_owned()));
+        assert_eq!(selected.unwrap_err(), "outside cache rejected");
+    }
+
+    #[test]
+    fn cargo_artifact_parser_selects_only_the_praxis_binary() {
+        let output =
+            br#"{"reason":"compiler-artifact","target":{"name":"other","kind":["bin"]},"executable":"/tmp/other"}
+{"reason":"compiler-artifact","target":{"name":"praxis","kind":["lib"]},"executable":"/tmp/lib"}
+{"reason":"compiler-artifact","target":{"name":"praxis","kind":["bin"]},"executable":"/tmp/praxis"}"#;
+        assert_eq!(cargo_binary_artifact(output).unwrap(), PathBuf::from("/tmp/praxis"));
+        cargo_binary_artifact(b"{\"reason\":\"build-finished\"}").unwrap_err();
+    }
+
+    #[test]
+    fn coverage_build_uses_the_active_profile_name() {
+        for (name, expected) in [
+            ("debug", None),
+            ("release", Some("--release")),
+            ("custom", Some("--profile")),
+        ] {
+            let mut command = Command::new("cargo");
+            add_coverage_profile(&mut command, Path::new(name)).unwrap();
+            let arguments: Vec<_> = command.get_args().collect();
+            assert_eq!(arguments.first().and_then(|value| value.to_str()), expected);
+            if name == "custom" {
+                assert_eq!(arguments.get(1).and_then(|value| value.to_str()), Some("custom"));
+            }
+        }
+    }
+
+    #[test]
+    #[expect(clippy::too_many_lines, reason = "child process and startup-error assertions")]
+    fn reloadable_startup_failure_does_not_exit_parent() {
+        const CHILD: &str = "PRAXIS_RELOAD_STARTUP_FAILURE_CHILD";
+        if let Some(sentinel) = std::env::var_os(CHILD) {
+            let port = crate::net::free_port();
+            let yaml = format!(
+                r#"
+listeners:
+  - name: default
+    address: "127.0.0.1:{port}"
+    filter_chains: [main]
+    tls:
+      certificates:
+        - cert_path: "/nonexistent/praxis-test-cert.pem"
+          key_path: "/nonexistent/praxis-test-key.pem"
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+        body: ok
+insecure_options:
+  allow_root: true
+"#
+            );
+            Config::from_yaml(&yaml).expect("startup fault must follow config parsing");
+            let Err(failure) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| start_reloadable_proxy(&yaml)))
+            else {
+                panic!("startup must fail");
+            };
+            let message = failure
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| failure.downcast_ref::<&str>().copied())
+                .expect("panic text");
+            assert!(
+                message.contains("server failed before readiness"),
+                "the returnable server error must reach the test caller: {message}"
+            );
+            std::fs::write(sentinel, b"returned").expect("completion sentinel");
+            return;
+        }
+
+        let directory = tempfile::tempdir().expect("sentinel directory");
+        let sentinel = directory.path().join("completed");
+        let output = Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "proxy::tests::reloadable_startup_failure_does_not_exit_parent",
+            ])
+            .env(CHILD, &sentinel)
+            .output()
+            .expect("run child test executable");
+        assert!(
+            output.status.success(),
+            "child failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(std::fs::read(sentinel).expect("child completion sentinel"), b"returned");
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "two fixture lifetimes and probe completion assertions"
+    )]
+    fn health_probes_stop_with_proxy_guard() {
+        for _ in 0..2 {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("health listener");
+            listener.set_nonblocking(true).expect("nonblocking listener");
+            let health_addr = listener.local_addr().expect("health address");
+            let (sender, receiver) = mpsc::channel();
+            let stop = Arc::new(AtomicBool::new(false));
+            let thread_stop = Arc::clone(&stop);
+            let endpoint = std::thread::spawn(move || {
+                while !thread_stop.load(Ordering::Acquire) {
+                    match listener.accept() {
+                        Ok((stream, _)) => {
+                            sender.send(()).expect("report health probe");
+                            drop(stream);
+                        },
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(5));
+                        },
+                        Err(error) => panic!("health accept: {error}"),
+                    }
+                }
+            });
+            let proxy_port = crate::net::free_port();
+            let yaml = format!(
+                r#"
+listeners:
+  - name: default
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains: [main]
+clusters:
+  - name: backend
+    endpoints: ["{health_addr}"]
+    health_check:
+      type: tcp
+      interval_ms: 100
+      timeout_ms: 50
+      healthy_threshold: 1
+      unhealthy_threshold: 1
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints: ["{health_addr}"]
+insecure_options:
+  allow_private_endpoints: true
+  allow_private_health_checks: true
+"#
+            );
+            let config = Config::from_yaml(&yaml).expect("health fixture config");
+            let guard = start_full_proxy(&config);
+            let finished = Arc::clone(&guard.health.as_ref().expect("health runtime").finished);
+            receiver
+                .recv_timeout(Duration::from_secs(2))
+                .expect("first health probe");
+            drop(guard);
+            assert!(finished.load(Ordering::Acquire), "guard drop must join health runtime");
+            while receiver.try_recv().is_ok() {}
+            assert_eq!(
+                receiver.recv_timeout(Duration::from_millis(350)),
+                Err(RecvTimeoutError::Timeout),
+                "cancelled health runtime must stop probing"
+            );
+            stop.store(true, Ordering::Release);
+            endpoint.join().expect("health endpoint");
+        }
+        let empty = Config::from_yaml(&simple_proxy_yaml(crate::net::free_port(), 1)).expect("plain config");
+        let registry = build_health_registry(&empty.clusters);
+        assert!(
+            spawn_test_health_checks(&empty, &registry).is_none(),
+            "no health checks spawn no health thread"
+        );
+    }
 
     /// The Policy selections the harness supports, by profile name.
     fn profiles() -> Vec<(&'static str, Vec<&'static str>)> {
@@ -1011,7 +1698,7 @@ mod tests {
 
     #[test]
     fn the_bundle_and_its_granular_spelling_are_the_same_profile() {
-        let granular = super::POLICY_BUNDLE.to_vec();
+        let granular = POLICY_BUNDLE.to_vec();
         assert_eq!(
             effective_policy_features(&["policy-builtins", "policy-engine"]),
             effective_policy_features(&granular),

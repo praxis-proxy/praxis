@@ -286,7 +286,9 @@ async fn a_subject_keyed_limit_without_a_subject_is_401() {
     let mut ctx = context(&req, 1);
     let _admitted = filter.on_request(&mut ctx).await.unwrap();
     let mut body = Some(Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#));
-    ctx.set_metadata("mcp.method", "ping");
+    ctx.filter_metadata
+        .insert("mcp.method", "ping")
+        .expect("entry must fit in the filter's metadata");
     let denied = rejection(filter.on_request_body(&mut ctx, &mut body, true).await.unwrap());
     assert_eq!(denied.status, 401);
     assert_eq!(header(&denied, "X-Policy-Violation"), Some("ratelimit.no_identity"));
@@ -626,8 +628,12 @@ async fn tool_call(filter: &PolicyFilter, user: &str) -> FilterAction {
     let mut ctx = context(&req, 1);
     let action = filter.on_request(&mut ctx).await.unwrap();
     assert!(matches!(action, FilterAction::Continue), "gate: {action:?}");
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", "echo");
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
     let mut body = Some(Bytes::from_static(
         br#"{"jsonrpc":"2.0","id":"call-7","method":"tools/call","params":{"name":"echo","arguments":{}}}"#,
     ));

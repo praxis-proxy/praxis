@@ -47,6 +47,7 @@ use crate::{actions::FilterAction, filter::FilterError};
 ///     local_addr: "0.0.0.0:8080",
 ///     sni: None,
 ///     upstream_addr: Some(Cow::Borrowed("10.0.0.1:80")),
+///     lb_selection: None,
 ///     cluster: None,
 ///     health_registry: None,
 ///     kv_stores: None,
@@ -124,6 +125,47 @@ impl TcpConnectState {
 // TcpFilterContext
 // -----------------------------------------------------------------------------
 
+/// One exact load-balancer strategy's in-flight endpoint claim.
+pub struct TcpLbSelection {
+    /// Cluster captured when this endpoint was selected.
+    cluster: Arc<str>,
+    /// Exact strategy that acquired the slot.
+    strategy: Arc<crate::load_balancing::strategy::Strategy>,
+    /// Endpoint whose in-flight count must be released.
+    endpoint: Arc<str>,
+}
+
+impl TcpLbSelection {
+    /// Record an acquired strategy slot for cancellation-safe cleanup.
+    pub(crate) fn new(
+        cluster: Arc<str>,
+        strategy: Arc<crate::load_balancing::strategy::Strategy>,
+        endpoint: Arc<str>,
+    ) -> Self {
+        Self {
+            cluster,
+            strategy,
+            endpoint,
+        }
+    }
+
+    /// Check whether this filter owns the slot, independent of mutable context.
+    pub(crate) fn belongs_to(
+        &self,
+        strategies: &std::collections::HashMap<Arc<str>, Arc<crate::load_balancing::strategy::Strategy>>,
+    ) -> bool {
+        strategies
+            .get(&self.cluster)
+            .is_some_and(|strategy| Arc::ptr_eq(strategy, &self.strategy))
+    }
+}
+
+impl Drop for TcpLbSelection {
+    fn drop(&mut self) {
+        self.strategy.release(&self.endpoint);
+    }
+}
+
 /// Per-connection state for TCP filters.
 pub struct TcpFilterContext<'a> {
     /// Remote client address.
@@ -140,6 +182,9 @@ pub struct TcpFilterContext<'a> {
     /// `None` until a static upstream or a filter (e.g. `sni_router`)
     /// provides one.
     pub upstream_addr: Option<Cow<'a, str>>,
+
+    /// Owned TCP load-balancer selection, released on disconnect or drop.
+    pub lb_selection: Option<TcpLbSelection>,
 
     /// Cluster name selected for this connection.
     ///
@@ -187,6 +232,7 @@ mod tests {
             local_addr: "0.0.0.0:5432",
             sni: None,
             upstream_addr: Some(Cow::Borrowed("10.0.0.1:5432")),
+            lb_selection: None,
             cluster: None,
             health_registry: None,
             kv_stores: None,
@@ -206,6 +252,7 @@ mod tests {
             local_addr: "0.0.0.0:5432",
             sni: None,
             upstream_addr: Some(Cow::Borrowed("10.0.0.1:5432")),
+            lb_selection: None,
             cluster: None,
             health_registry: None,
             kv_stores: None,

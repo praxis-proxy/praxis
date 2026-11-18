@@ -17,7 +17,7 @@ use pingora_proxy::Session;
 use praxis_core::connectivity::normalize_mapped_ipv4;
 #[cfg(feature = "pingora")]
 use praxis_filter::{BodyMode, Rejection};
-use praxis_filter::{FilterAction, FilterError, FilterPipeline, Request};
+use praxis_filter::{FilterAction, FilterError, FilterPipeline, Request, TrustedHeaderMutation};
 #[cfg(feature = "pingora")]
 use tracing::{Instrument as _, error};
 
@@ -25,7 +25,7 @@ use tracing::{Instrument as _, error};
 use super::{
     super::super::convert::{request_header_from_session, send_rejection_for},
     error_handling::handle_pre_read_io_error,
-    header_mutations::apply_pre_read_mutations,
+    header_mutations::{apply_pre_read_mutations, apply_request_mutations_to_session},
     request_utils::{create_request_span, snapshot_for_early_exit},
     stream_buffer::PreReadError,
     terminal_responses::{run_streaming_terminal_response, run_terminal_response},
@@ -65,6 +65,9 @@ pub(in crate::http) struct PipelineResult {
 
     /// Headers to set (overwrite) on the upstream request.
     pub(in crate::http) headers_to_set: Vec<(http::header::HeaderName, http::header::HeaderValue)>,
+
+    /// Ordered headers-filter mutations applied after generic remove/set.
+    pub(in crate::http) header_mutations: Vec<TrustedHeaderMutation>,
 }
 
 // -----------------------------------------------------------------------------
@@ -212,10 +215,11 @@ pub(in crate::http) async fn execute(
             extra_headers,
             headers_to_remove,
             headers_to_set,
+            header_mutations,
         }) => {
-            // Mirror of `apply_pending_header_mutations`, which applied the
-            // same three lists to `ctx.request_snapshot` in the same
-            // remove -> set -> add order. Keep the two in step.
+            // Mirror `apply_pending_header_mutations` on the request snapshot:
+            // generic removals and sets, ordered header-filter mutations,
+            // then extra headers. Keep the two in step.
             let req_headers = session.req_header_mut();
             for name in &headers_to_remove {
                 let _remove = req_headers.remove_header(name);
@@ -223,6 +227,8 @@ pub(in crate::http) async fn execute(
             for (name, value) in &headers_to_set {
                 let _insert = req_headers.insert_header(name.clone(), value.clone());
             }
+            apply_request_mutations_to_session(session, &header_mutations);
+            let req_headers = session.req_header_mut();
             for (name, value) in extra_headers {
                 // Most promoted names are `Cow::Borrowed` statics
                 // ("X-Forwarded-For", …): Pingora converts a &'static
@@ -324,6 +330,7 @@ pub(in crate::http) async fn run_pipeline(
         extra_headers,
         headers_to_remove,
         headers_to_set,
+        header_mutations,
         cluster,
         upstream,
         rewritten_path,
@@ -439,6 +446,7 @@ pub(in crate::http) async fn run_pipeline(
             filter_ctx.extra_request_headers,
             filter_ctx.request_headers_to_remove,
             filter_ctx.request_headers_to_set,
+            filter_ctx.request_header_mutations,
             filter_ctx.cluster,
             filter_ctx.upstream,
             filter_ctx.rewritten_path,
@@ -475,6 +483,7 @@ pub(in crate::http) async fn run_pipeline(
         &mut request.headers,
         &headers_to_remove,
         &headers_to_set,
+        &header_mutations,
         &extra_headers,
     );
     ctx.request_snapshot = Some(request);
@@ -533,6 +542,7 @@ pub(in crate::http) async fn run_pipeline(
                 extra_headers,
                 headers_to_remove,
                 headers_to_set,
+                header_mutations,
             })
         },
         Ok(FilterAction::Reject(rejection)) => Ok(PipelineResult {
@@ -540,18 +550,21 @@ pub(in crate::http) async fn run_pipeline(
             extra_headers: Vec::new(),
             headers_to_remove: Vec::new(),
             headers_to_set: Vec::new(),
+            header_mutations: Vec::new(),
         }),
         Ok(FilterAction::TerminalResponse(terminal)) => Ok(PipelineResult {
             action: FilterAction::TerminalResponse(terminal),
             extra_headers: Vec::new(),
             headers_to_remove: Vec::new(),
             headers_to_set: Vec::new(),
+            header_mutations: Vec::new(),
         }),
         Ok(FilterAction::StreamingTerminalResponse(terminal)) => Ok(PipelineResult {
             action: FilterAction::StreamingTerminalResponse(terminal),
             extra_headers: Vec::new(),
             headers_to_remove: Vec::new(),
             headers_to_set: Vec::new(),
+            header_mutations: Vec::new(),
         }),
         Err(e) => Err(e),
     }
@@ -577,9 +590,9 @@ mod tests {
     use praxis_core::config::FailureMode;
     #[cfg(not(feature = "pingora"))]
     use praxis_core::connectivity::normalize_mapped_ipv4;
+    use praxis_filter::FilterRegistry;
     #[cfg(not(feature = "pingora"))]
     use praxis_filter::{BodyMode, Rejection};
-    use praxis_filter::{FilterRegistry, TrustedHeaderMutation};
 
     use super::*;
 

@@ -25,7 +25,7 @@ use std::{
     io::Write as _,
     net::IpAddr,
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Child, Command, Output, Stdio},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -52,6 +52,9 @@ const CRASH_EXIT_CODES: [i64; 7] = [101, 132, 134, 135, 136, 137, 139];
 /// Longest tag a container engine accepts, including the generated suffix.
 const MAX_IMAGE_TAG_LEN: usize = 128;
 
+/// Container terminations tolerated because they preceded the pod watch.
+type StartupRetries = BTreeSet<(String, String)>;
+
 /// Retains pod lifecycle events, including containers removed during rollouts.
 struct PodWatch {
     /// Watch process, stopped even when a scenario returns an error.
@@ -62,7 +65,7 @@ struct PodWatch {
     ///
     /// These are pre-watch startup retries: a nonzero exit here is tolerated
     /// unless it is a panic or signal. Anything else is a rollout failure.
-    startup_retries: BTreeSet<(String, String)>,
+    startup_retries: StartupRetries,
 }
 
 /// Runs an OpenSSL client inside the cluster so pod IPs can be probed directly.
@@ -180,10 +183,8 @@ impl HttpProbePod {
             "-c".to_owned(),
             command,
         ];
-        match kubectl(&self.cluster, args) {
-            Ok(_) => Ok(ProbeOutcome::Reachable),
-            Err(error) => Ok(classify_probe_error(&error)),
-        }
+        let output = kubectl_probe_output(&self.cluster, args)?;
+        probe_result(&output)
     }
 }
 
@@ -198,33 +199,13 @@ impl Drop for HttpProbePod {
 impl PodWatch {
     /// Starts watching before any disruption and waits for the initial list.
     fn start(cluster: &str) -> Result<Self, String> {
-        let events = NamedTempFile::new().map_err(|error| error.to_string())?;
-        let output = events.reopen().map_err(|error| error.to_string())?;
-        let child = Command::new("kubectl")
-            .args([
-                "--context",
-                &format!("kind-{cluster}"),
-                "-n",
-                "praxis",
-                "get",
-                "pods",
-                "-l",
-                "app.kubernetes.io/instance=rollout",
-                "--watch",
-                "--output-watch-events",
-                "-o=json",
-            ])
-            .stdout(output)
-            .spawn()
-            .map_err(|error| error.to_string())?;
-        // Keep the child under the cleanup guard before the fallible snapshot,
-        // so a snapshot error still kills the spawned watch.
+        let (startup_retries, (child, events)) =
+            baseline_then_spawn(|| startup_retries(cluster), || spawn_pod_watch(cluster))?;
         let mut watch = Self {
             child,
             events,
-            startup_retries: BTreeSet::new(),
+            startup_retries,
         };
-        watch.startup_retries = startup_retries(cluster)?;
         for _ in 0..100 {
             if watch.child.try_wait().map_err(|error| error.to_string())?.is_some() {
                 return Err("pod watch exited before scenarios began".to_owned());
@@ -289,6 +270,40 @@ impl PodWatch {
     }
 }
 
+/// Captures tolerated exits before opening the event stream.
+fn baseline_then_spawn<T>(
+    snapshot: impl FnOnce() -> Result<StartupRetries, String>,
+    spawn: impl FnOnce() -> Result<T, String>,
+) -> Result<(StartupRetries, T), String> {
+    let baseline = snapshot()?;
+    let stream = spawn()?;
+    Ok((baseline, stream))
+}
+
+/// Starts the pod event stream and keeps its output available for validation.
+fn spawn_pod_watch(cluster: &str) -> Result<(Child, NamedTempFile), String> {
+    let events = NamedTempFile::new().map_err(|error| error.to_string())?;
+    let output = events.reopen().map_err(|error| error.to_string())?;
+    let child = Command::new("kubectl")
+        .args([
+            "--context",
+            &format!("kind-{cluster}"),
+            "-n",
+            "praxis",
+            "get",
+            "pods",
+            "-l",
+            "app.kubernetes.io/instance=rollout",
+            "--watch",
+            "--output-watch-events",
+            "-o=json",
+        ])
+        .stdout(output)
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    Ok((child, events))
+}
+
 impl Drop for PodWatch {
     fn drop(&mut self) {
         drop(self.child.kill());
@@ -301,7 +316,7 @@ impl Drop for PodWatch {
 /// Matching on `(pod UID, container ID)` identifies a termination instance.
 /// `finishedAt` has second granularity, so two exits in the same second would
 /// otherwise collide; the container ID is unique per container instance.
-fn startup_retries(cluster: &str) -> Result<BTreeSet<(String, String)>, String> {
+fn startup_retries(cluster: &str) -> Result<StartupRetries, String> {
     let pods = kubectl(
         cluster,
         ["get", "pods", "-l", "app.kubernetes.io/instance=rollout", "-o=json"],
@@ -312,7 +327,7 @@ fn startup_retries(cluster: &str) -> Result<BTreeSet<(String, String)>, String> 
 }
 
 /// Collects `(pod UID, container ID)` for every terminated container instance.
-fn terminations(pods: &serde_json::Value) -> BTreeSet<(String, String)> {
+fn terminations(pods: &serde_json::Value) -> StartupRetries {
     let mut retries = BTreeSet::new();
     let items = pods.get("items").and_then(serde_json::Value::as_array);
     for pod in items.into_iter().flatten() {
@@ -338,7 +353,7 @@ fn terminations(pods: &serde_json::Value) -> BTreeSet<(String, String)> {
 }
 
 /// Validates exits from current and previous states and retains deleted pods.
-fn check_pod_events(events: &str, startup_retries: &BTreeSet<(String, String)>) -> Result<(), String> {
+fn check_pod_events(events: &str, startup_retries: &StartupRetries) -> Result<(), String> {
     let mut latest = BTreeMap::new();
     let mut deletion_deadlines = BTreeMap::new();
     for event in serde_json::Deserializer::from_str(events).into_iter::<serde_json::Value>() {
@@ -430,7 +445,7 @@ fn check_pod_exit(
     pod: &serde_json::Value,
     terminating: bool,
     deadline: Option<&chrono::DateTime<chrono::FixedOffset>>,
-    startup_retries: Option<&BTreeSet<(String, String)>>,
+    startup_retries: Option<&StartupRetries>,
 ) -> Result<(), String> {
     let containers = pod
         .pointer("/status/containerStatuses")
@@ -1257,13 +1272,27 @@ enum ProbeOutcome {
     Inconclusive,
 }
 
-/// Classifies a wget probe failure by its text.
-///
-/// A pod answer is any failure that is neither a transport error nor a
-/// kubectl/API failure; wget reports the listener's HTTP status (for example a
-/// 404) without those markers, which proves the listener answered.
-fn classify_probe_error(error: &str) -> ProbeOutcome {
-    let error = error.to_ascii_lowercase();
+/// Returns positive probe evidence or a bounded failure detail for the wait.
+fn probe_result(output: &Output) -> Result<ProbeOutcome, String> {
+    let outcome = classify_probe_output(output);
+    if outcome == ProbeOutcome::Reachable {
+        return Ok(outcome);
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = stdout.chars().take(256).collect::<String>();
+    let stderr = stderr.chars().take(256).collect::<String>();
+    Err(format!(
+        "listener probe {outcome:?} (exit {:?}): stdout: {stdout}; stderr: {stderr}",
+        output.status.code()
+    ))
+}
+
+/// Classifies the full exec result, including wget's redirected diagnostics.
+fn classify_probe_output(output: &Output) -> ProbeOutcome {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let error = format!("{stdout}\n{stderr}").to_ascii_lowercase();
     let transport = [
         "connection refused",
         "can't connect",
@@ -1274,7 +1303,7 @@ fn classify_probe_error(error: &str) -> ProbeOutcome {
         "exit code 124",
         "exit code 143",
     ];
-    if transport.iter().any(|marker| error.contains(marker)) {
+    if matches!(output.status.code(), Some(124 | 143)) || transport.iter().any(|marker| error.contains(marker)) {
         return ProbeOutcome::Unreachable;
     }
     let api = [
@@ -1286,10 +1315,27 @@ fn classify_probe_error(error: &str) -> ProbeOutcome {
         "the server could not find",
         "timeout: not found",
     ];
-    if api.iter().any(|marker| error.contains(marker)) {
+    if api.iter().any(|marker| error.contains(marker)) || output.status.code() == Some(127) {
         return ProbeOutcome::Inconclusive;
     }
-    ProbeOutcome::Reachable
+    if output.status.success() || stdout.lines().any(is_http_status_line) {
+        ProbeOutcome::Reachable
+    } else {
+        ProbeOutcome::Inconclusive
+    }
+}
+
+/// Recognizes an actual HTTP response status line in wget's header output.
+fn is_http_status_line(line: &str) -> bool {
+    let mut fields = line.split_whitespace();
+    let version = fields.next();
+    let status = fields.next();
+    matches!(version, Some("HTTP/1.0" | "HTTP/1.1" | "HTTP/2" | "HTTP/3"))
+        && status.is_some_and(|code| {
+            code.len() == 3
+                && code.bytes().all(|digit| digit.is_ascii_digit())
+                && code.parse::<u16>().is_ok_and(|value| (100..=599).contains(&value))
+        })
 }
 
 /// Waits until the operator has applied the requested data-plane image.
@@ -1856,6 +1902,26 @@ where
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+/// Runs a listener probe while retaining both output streams and exit status.
+fn kubectl_probe_output<I, S>(cluster: &str, args: I) -> Result<Output, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let args = args.into_iter().collect::<Vec<_>>();
+    let mut command = Command::new("kubectl");
+    command
+        .arg("--context")
+        .arg(format!("kind-{cluster}"))
+        .arg("--namespace")
+        .arg("praxis");
+    command.arg("--request-timeout").arg(request_timeout(&args));
+    for arg in args {
+        command.arg(arg.as_ref());
+    }
+    command.output().map_err(|error| format!("run kubectl probe: {error}"))
+}
+
 /// Runs `kubectl` with standard input and returns stdout.
 fn kubectl_stdin<I, S>(cluster: &str, args: I, input: &str) -> Result<String, String>
 where
@@ -2166,36 +2232,99 @@ mod tests {
     #[test]
     fn listener_probe_classifies_answers_and_transport_failures() {
         assert_eq!(
-            classify_probe_error("kubectl failed: 404 page not found"),
+            classify_probe_output(&probe_output(
+                1,
+                "  HTTP/1.1 404 Not Found\n",
+                "command terminated with exit code 1"
+            )),
             ProbeOutcome::Reachable
         );
         assert_eq!(
-            classify_probe_error("kubectl failed: dial tcp 10.244.1.5:8081: connect: connection refused"),
+            classify_probe_output(&probe_output(
+                1,
+                "connect: connection refused",
+                "command terminated with exit code 1"
+            )),
             ProbeOutcome::Unreachable
         );
         assert_eq!(
-            classify_probe_error("kubectl failed: context deadline exceeded"),
+            classify_probe_output(&probe_output(1, "context deadline exceeded", "")),
             ProbeOutcome::Unreachable
         );
         assert_eq!(
-            classify_probe_error("command terminated with exit code 124"),
+            classify_probe_output(&probe_output(124, "", "command terminated with exit code 124")),
             ProbeOutcome::Unreachable,
             "the exec cap must not look like a listener answer"
         );
         assert_eq!(
-            classify_probe_error("kubectl failed: Error from server (Forbidden)"),
+            classify_probe_output(&probe_output(1, "", "Error from server (Forbidden)")),
             ProbeOutcome::Inconclusive
         );
         assert_eq!(
-            classify_probe_error("sh: timeout: not found"),
+            classify_probe_output(&probe_output(127, "sh: timeout: not found", "")),
             ProbeOutcome::Inconclusive,
             "a missing exec cap is a probe environment failure"
         );
         assert_eq!(
-            classify_probe_error("error: exec plugin: invalid apiVersion"),
+            classify_probe_output(&probe_output(1, "", "error: exec plugin: invalid apiVersion")),
             ProbeOutcome::Inconclusive
         );
-        assert_eq!(classify_probe_error(""), ProbeOutcome::Reachable);
+        assert_eq!(
+            classify_probe_output(&probe_output(1, "", "")),
+            ProbeOutcome::Inconclusive
+        );
+    }
+
+    #[test]
+    fn listener_probe_requires_positive_http_evidence() {
+        for (output, expected) in [
+            (probe_output(0, "", ""), ProbeOutcome::Reachable),
+            (
+                probe_output(1, "  HTTP/1.1 404 Not Found\n", "command terminated with exit code 1"),
+                ProbeOutcome::Reachable,
+            ),
+            (
+                probe_output(1, "404 page not found", "command terminated with exit code 1"),
+                ProbeOutcome::Inconclusive,
+            ),
+            (
+                probe_output(1, "connect: connection refused", "command terminated with exit code 1"),
+                ProbeOutcome::Unreachable,
+            ),
+            (
+                probe_output(127, "sh: wget: not found", "command terminated with exit code 127"),
+                ProbeOutcome::Inconclusive,
+            ),
+            (probe_output(1, "", ""), ProbeOutcome::Inconclusive),
+            (probe_output(124, "HTTP/1.1 200 OK", ""), ProbeOutcome::Unreachable),
+            (probe_output(143, "HTTP/1.1 200 OK", ""), ProbeOutcome::Unreachable),
+            (
+                probe_output(1, "HTTP/1.1 200 OK", "Error from server (Forbidden)"),
+                ProbeOutcome::Inconclusive,
+            ),
+        ] {
+            assert_eq!(classify_probe_output(&output), expected, "probe output: {output:?}");
+        }
+    }
+
+    #[test]
+    fn listener_probe_preserves_failed_exec_output() {
+        let output = probe_output(
+            1,
+            "wget: can't connect to remote host (127.0.0.1): Connection refused\n",
+            "command terminated with exit code 1",
+        );
+        assert_eq!(
+            classify_probe_output(&output),
+            ProbeOutcome::Unreachable,
+            "the failed exec's redirected stdout must be inspected with its generic stderr"
+        );
+        let error = probe_result(&output).unwrap_err();
+        assert!(
+            error.contains("Connection refused"),
+            "redirected stdout must survive: {error}"
+        );
+        assert!(error.contains("exit code 1"), "kubectl stderr must survive: {error}");
     }
 
     #[test]
@@ -2450,6 +2579,44 @@ mod tests {
     }
 
     #[test]
+    fn pod_watch_baseline_is_captured_before_stream_start() {
+        let phase = std::cell::Cell::new(0);
+        let (baseline, observed_phase) = baseline_then_spawn(
+            || {
+                assert_eq!(phase.get(), 0, "snapshot must be the first operation");
+                phase.set(1);
+                Ok(BTreeSet::from([("proxy-a".to_owned(), "container-a".to_owned())]))
+            },
+            || {
+                assert_eq!(phase.get(), 1, "the stream must start after the snapshot");
+                phase.set(2);
+                Ok(phase.get())
+            },
+        )
+        .unwrap();
+        assert_eq!(observed_phase, 2);
+
+        let old_exit = pod_exit_event("proxy-a", "container-a", 1);
+        let new_exit = pod_exit_event("proxy-b", "container-b", 1);
+        assert_eq!(
+            check_pod_events(&old_exit.to_string(), &baseline),
+            Ok(()),
+            "a pre-watch code-1 startup retry must be tolerated"
+        );
+        assert!(
+            check_pod_events(&format!("{old_exit}\n{new_exit}"), &baseline).is_err(),
+            "a new code-1 exit after watch start must fail"
+        );
+        for code in [101, 139] {
+            let crash = pod_exit_event("proxy-a", "container-a", code);
+            assert!(
+                check_pod_events(&crash.to_string(), &baseline).is_err(),
+                "a baseline crash exit {code} must still fail"
+            );
+        }
+    }
+
+    #[test]
     fn deleted_pods_must_have_observed_exits_within_grace() {
         let mut deleted = deleted_pod_event();
         *deleted
@@ -2568,5 +2735,35 @@ mod tests {
                 .unwrap_err()
                 .contains("deadline")
         );
+    }
+
+    // -----------------------------------------------------------------------------
+    // Test Utilities
+    // -----------------------------------------------------------------------------
+
+    fn probe_output(code: i32, stdout: &str, stderr: &str) -> Output {
+        let status = Command::new("sh")
+            .arg("-c")
+            .arg(format!("exit {code}"))
+            .status()
+            .unwrap();
+        Output {
+            status,
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.as_bytes().to_vec(),
+        }
+    }
+
+    fn pod_exit_event(uid: &str, container_id: &str, code: i32) -> serde_json::Value {
+        serde_json::json!({
+            "type": "MODIFIED",
+            "object": {
+                "metadata": {"uid": uid},
+                "status": {"containerStatuses": [{"lastState": {"terminated": {
+                    "exitCode": code,
+                    "containerID": container_id
+                }}}]}
+            }
+        })
     }
 }

@@ -37,8 +37,8 @@ pub enum Endpoint {
         /// Socket address as `host:port`.
         address: String,
 
-        /// Relative forwarding weight. Higher values receive proportionally more
-        /// traffic. Defaults to 1.
+        /// Relative forwarding weight. Its effect depends on the load-balancing
+        /// strategy; it does not always produce proportional traffic. Defaults to 1.
         #[serde(default = "default_weight")]
         weight: u32,
 

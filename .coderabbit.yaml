@@ -156,7 +156,7 @@ reviews:
 
     - path: "crates/server/src/**"
       instructions: |
-        The binary entrypoint (main.rs) is excluded from the 96% coverage
+        The binary entrypoint (main.rs) is excluded from the 97% coverage
         floor, so keep it to wiring; logic belongs in a library crate where it
         is tested and counted. Reload must be atomic: a request observes
         exactly one pipeline generation end to end, a config that fails

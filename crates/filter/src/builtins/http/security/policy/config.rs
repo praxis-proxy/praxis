@@ -36,9 +36,11 @@ use serde::Deserialize;
 #[serde(deny_unknown_fields)]
 pub(crate) struct PolicyFilterConfig {
     /// Body-access tier. `ReadOnly` (default) lets policy inspect request
-    /// and response bodies for routing / policy decisions but discards
-    /// any mutations. `ReadWrite` enables the CMF → JSON-RPC
-    /// re-serialization round-trip so policy field mutators
+    /// bodies for routing and policy decisions but discards mutations.
+    /// Ordinary response-content hooks require `ReadWrite`; a trusted host
+    /// may still supply metadata-only inference response context.
+    /// `ReadWrite` enables the CMF → JSON-RPC re-serialization round-trip
+    /// so policy field mutators
     /// (e.g. `args.ssn: redact(!perm.view_ssn)`) rewrite the upstream
     /// body and response. Pay the round-trip cost only when needed.
     #[serde(default)]
