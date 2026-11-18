@@ -67,53 +67,55 @@ impl<L: ReloadTarget> ReloadTarget for Arc<L> {
     }
 }
 
-/// Revocable watcher access; a stalled build never holds this lock or its live Arc.
-pub(crate) struct WatcherReloadTarget(
-    Mutex<Option<Arc<ListenerPipelines>>>,
-    Mutex<Option<std::sync::mpsc::Sender<()>>>,
-    Mutex<Option<std::thread::JoinHandle<()>>>,
-);
+/// Revocable watcher access; a stalled build never retains the controller.
+pub(crate) struct WatcherReloadTarget(Mutex<Option<Arc<ListenerPipelines>>>);
 
 impl WatcherReloadTarget {
-    /// Keep live pipelines available until the serving owner stops the watcher.
-    #[cfg(test)]
-    #[expect(clippy::expect_used, reason = "test fixture requires a cleanup worker")]
+    /// Prepare live state; cleanup uses the existing config-watcher thread.
     pub(crate) fn new(live: Arc<ListenerPipelines>) -> Self {
-        Self::try_new(live).expect("start test pipeline cleanup worker")
+        Self(Mutex::new(Some(live)))
     }
 
-    /// Start the cleanup worker before serving, while setup can return an error.
-    pub(crate) fn try_new(live: Arc<ListenerPipelines>) -> std::io::Result<Self> {
-        let (release, wait) = std::sync::mpsc::channel();
-        let retained = Arc::clone(&live);
-        let worker = std::thread::Builder::new()
-            .name("pipeline cleanup".to_owned())
-            .spawn(move || {
-                let _released = wait.recv();
-                drop(retained);
-            })?;
-        Ok(Self(
-            Mutex::new(Some(live)),
-            Mutex::new(Some(release)),
-            Mutex::new(Some(worker)),
-        ))
+    /// Pin pipeline slots, not the controller, until the watcher exits.
+    pub(crate) fn retain_pipelines(self: &Arc<Self>) -> PipelineRetention {
+        let live = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let slots = live
+            .as_ref()
+            .into_iter()
+            .flat_map(|live| {
+                live.listener_names()
+                    .filter_map(|name| live.get(name))
+                    .cloned()
+                    .map(|slot| -> Arc<dyn Send + Sync> { slot })
+            })
+            .collect();
+        drop(live);
+        PipelineRetention {
+            target: Arc::clone(self),
+            slots,
+        }
     }
 
-    /// Revoke publication; release user-owned state on a separately joinable thread.
-    pub(crate) fn stop(&self) -> Option<std::thread::JoinHandle<()>> {
-        // The prestarted worker retains a strong reference until after revocation.
+    /// Revoke publication; the watcher still owns slots that can run user drops.
+    pub(crate) fn stop(&self) {
         drop(self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take());
-        drop(self.1.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take());
-        self.2.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take()
     }
 }
 
-impl Drop for WatcherReloadTarget {
+/// Runs downstream destructors on the watcher, including early exit or unwinding.
+pub(crate) struct PipelineRetention {
+    /// Revoke live state before releasing the last retained slots.
+    target: Arc<WatcherReloadTarget>,
+    /// Type-erased slot Arcs avoid retaining the server controller.
+    slots: Vec<Arc<dyn Send + Sync>>,
+}
+
+impl Drop for PipelineRetention {
     fn drop(&mut self) {
-        drop(self.stop());
+        self.target.stop();
+        self.slots.clear();
     }
 }
-
 impl ReloadTarget for WatcherReloadTarget {
     fn with_live<T, Operation>(&self, operation: Operation) -> ReloadResult<T>
     where
@@ -220,7 +222,6 @@ pub(crate) fn reload_pipelines(
     log_config_change_audit(old_config, new_config);
 
     let health = PreparedHealth::new(
-        old_config,
         new_config,
         &health_registry,
         health_lifecycle,
@@ -278,6 +279,14 @@ pub(crate) fn reload_pipelines(
         Some(log_level) => log_level.refresh_baseline_with(new_config, publish)?,
         None => publish()?,
     };
+    // Reloads execute serially on the config watcher. Keep gauge reconciliation
+    // here, outside publication, rather than on cancellable generation workers:
+    // a later reload cannot skip pending removals or overtake an older seed.
+    praxis_protocol::http::metrics::clear_stale_upstream_health_gauges(
+        health_checked_cluster_names(old_config),
+        health_checked_cluster_names(new_config),
+    );
+    praxis_protocol::http::metrics::seed_upstream_health_gauges(&health_registry);
     drop(retired);
     if carried > 0 {
         info!(
@@ -577,7 +586,6 @@ struct PreparedHealth {
 impl PreparedHealth {
     /// Prepare fallible runtime resources while the old probes are still active.
     fn new(
-        old: &Config,
         config: &Config,
         registry: &HealthRegistry,
         owner: Option<&HealthTaskLifecycle>,
@@ -589,10 +597,20 @@ impl PreparedHealth {
             activate: None,
             committed: false,
         };
-        let work = HealthWork::new(old, config, registry, token, upstream_ca);
-        if work.registry.is_empty() && work.old_clusters.is_empty() {
+        if registry.is_empty() {
             return Ok(prepared);
         }
+        let work = HealthWork {
+            clusters: config
+                .clusters
+                .iter()
+                .filter(|cluster| cluster.health_check.is_some())
+                .cloned()
+                .collect(),
+            registry: Arc::clone(registry),
+            token,
+            upstream_ca,
+        };
         let (activate, wait) = tokio::sync::oneshot::channel();
         let handle = spawn_health_worker(work, wait)?;
         if let Some(owner) = owner {
@@ -630,8 +648,6 @@ impl Drop for PreparedHealth {
 struct HealthWork {
     /// Health-checked clusters for the new generation.
     clusters: Vec<praxis_core::config::Cluster>,
-    /// Names whose stale gauges need clearing after commitment.
-    old_clusters: Vec<String>,
     /// New endpoint state, carried over before activation.
     registry: HealthRegistry,
     /// Server root child, already cancelled if shutdown won the race.
@@ -641,31 +657,6 @@ struct HealthWork {
 }
 
 impl HealthWork {
-    /// Snapshot probe inputs without retaining live pipelines or invoking callbacks.
-    fn new(
-        old: &Config,
-        config: &Config,
-        registry: &HealthRegistry,
-        token: CancellationToken,
-        upstream_ca: Option<Arc<praxis_tls::CachedCaCerts>>,
-    ) -> Self {
-        Self {
-            clusters: config
-                .clusters
-                .iter()
-                .filter(|cluster| cluster.health_check.is_some())
-                .cloned()
-                .collect(),
-            old_clusters: health_checked_cluster_names(old)
-                .into_iter()
-                .map(str::to_owned)
-                .collect(),
-            registry: Arc::clone(registry),
-            token,
-            upstream_ca,
-        }
-    }
-
     /// Await commitment without probing; then own all probe tasks until cancellation.
     async fn run(self, activate: tokio::sync::oneshot::Receiver<()>) {
         tokio::select! {
@@ -674,14 +665,6 @@ impl HealthWork {
             ready = activate => if ready.is_err() { return; },
         }
         if self.token.is_cancelled() {
-            return;
-        }
-        praxis_protocol::http::metrics::clear_stale_upstream_health_gauges(
-            self.old_clusters.iter().map(String::as_str),
-            self.clusters.iter().map(|cluster| cluster.name.as_ref()),
-        );
-        praxis_protocol::http::metrics::seed_upstream_health_gauges(&self.registry);
-        if self.token.is_cancelled() || self.registry.is_empty() {
             return;
         }
         praxis_protocol::http::health::runner::spawn_health_checks_with_ca(
@@ -839,9 +822,7 @@ mod tests {
             "replacement probes must start while the retired pipeline destructor is blocked"
         );
         assert!(publication_unlocked, "user destructors must run outside publication");
-        if let Some(cleanup) = target.stop() {
-            cleanup.join().unwrap();
-        }
+        target.stop();
         assert!(target.with_live(|_| Ok(())).is_err());
     }
 
@@ -858,17 +839,15 @@ mod tests {
         let target = Arc::new(WatcherReloadTarget::new(Arc::new(ListenerPipelines::new(
             HashMap::from([("web".to_owned(), Arc::new(pipeline))]),
         ))));
-        let stopping = Arc::clone(&target);
-        let (stopped, observed) = std::sync::mpsc::channel();
-        let worker = std::thread::spawn(move || stopped.send(stopping.stop()).unwrap());
-        let cleanup = observed.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        let retention = target.retain_pipelines();
+        let worker = std::thread::spawn(move || drop(retention));
+        target.stop();
         entered.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
         assert!(
             target.with_live(|_| Ok(())).is_err(),
             "revocation precedes slow destruction"
         );
         release.send(()).unwrap();
-        cleanup.unwrap().join().unwrap();
         worker.join().unwrap();
     }
 
@@ -882,131 +861,49 @@ mod tests {
     #[cfg(unix)]
     fn permission_warning_can_revoke_reload_before_publication() {
         use std::os::unix::fs::PermissionsExt as _;
-
-        use tracing_subscriber::layer::SubscriberExt as _;
-
-        let (pipelines, old_config, registry, shutdown, meta, cluster_meta) = setup_live_pipelines();
-        let pipelines = Arc::new(pipelines);
-        let original = pipelines.get("web").unwrap().load_full();
-        let original_token = shutdown.lock().unwrap().clone();
-        let target = Arc::new(WatcherReloadTarget::new(Arc::clone(&pipelines)));
         let file = tempfile::NamedTempFile::new().unwrap();
         std::fs::set_permissions(file.path(), std::fs::Permissions::from_mode(0o644)).unwrap();
-        let mut new_config = old_config.clone();
-        new_config.runtime.logging.output = praxis_core::config::LogOutput::File;
-        new_config.runtime.logging.file_path = Some(file.path().display().to_string());
-        let observations = Arc::new(AtomicUsize::new(0));
-        let locked = Arc::new(AtomicUsize::new(0));
-        let subscriber = tracing_subscriber::registry().with(PublicationLockProbe {
-            diagnostic_target: "startup_checks",
-            level: None,
-            target: Arc::clone(&target),
-            observations: Arc::clone(&observations),
-            locked: Arc::clone(&locked),
+        assert_diagnostic_revokes("startup_checks", None, "discarding staged reload", |config| {
+            config.runtime.logging.output = praxis_core::config::LogOutput::File;
+            config.runtime.logging.file_path = Some(file.path().display().to_string());
         });
-
-        let result = tracing::subscriber::with_default(subscriber, || {
-            reload_pipelines(
-                &new_config,
-                &old_config,
-                &registry,
-                &target,
-                &meta,
-                &cluster_meta,
-                &shutdown,
-                None,
-                &empty_kv_stores(),
-                &empty_session_stores(),
-                &empty_slow_start_registry(),
-                &empty_subrequest_client(),
-                None,
-                &PipelineComposition::default(),
-            )
-        });
-
-        assert!(
-            observations.load(Ordering::Relaxed) > 0,
-            "the permission check must run"
-        );
-        assert_eq!(
-            locked.load(Ordering::Relaxed),
-            0,
-            "permission checks must not hold the publication lock"
-        );
-        assert!(result.unwrap_err().to_string().contains("discarding staged reload"));
-        assert!(Arc::ptr_eq(&original, &pipelines.get("web").unwrap().load_full()));
-        assert!(
-            !original_token.is_cancelled(),
-            "late reload must not restart health checks"
-        );
     }
 
     #[test]
     fn change_diagnostics_can_revoke_reload_before_publication() {
-        let (pipelines, old_config, registry, shutdown, meta, cluster_meta) = setup_live_pipelines();
-        let mut new_config = old_config.clone();
-        new_config.runtime.overload_purge = !old_config.runtime.overload_purge;
-        let pipelines = Arc::new(pipelines);
-        let original = pipelines.get("web").unwrap().load_full();
-        let original_token = shutdown.lock().unwrap().clone();
-        let target = Arc::new(WatcherReloadTarget::new(Arc::clone(&pipelines)));
-        let observations = Arc::new(AtomicUsize::new(0));
-        let locked = Arc::new(AtomicUsize::new(0));
-        let subscriber = tracing_subscriber::registry().with(PublicationLockProbe {
-            diagnostic_target: "reload_diagnostics",
-            level: None,
-            target: Arc::clone(&target),
-            observations: Arc::clone(&observations),
-            locked: Arc::clone(&locked),
+        assert_diagnostic_revokes("reload_diagnostics", None, "discarding staged reload", |config| {
+            config.runtime.overload_purge = !config.runtime.overload_purge;
         });
-
-        let result = tracing::subscriber::with_default(subscriber, || {
-            reload_pipelines(
-                &new_config,
-                &old_config,
-                &registry,
-                &target,
-                &meta,
-                &cluster_meta,
-                &shutdown,
-                None,
-                &empty_kv_stores(),
-                &empty_session_stores(),
-                &empty_slow_start_registry(),
-                &empty_subrequest_client(),
-                None,
-                &PipelineComposition::default(),
-            )
-        });
-
-        assert!(observations.load(Ordering::Relaxed) > 0, "change diagnostic must run");
-        assert_eq!(
-            locked.load(Ordering::Relaxed),
-            0,
-            "diagnostics must not lock publication"
-        );
-        assert!(result.unwrap_err().to_string().contains("discarding staged reload"));
-        assert!(Arc::ptr_eq(&original, &pipelines.get("web").unwrap().load_full()));
-        assert!(
-            !original_token.is_cancelled(),
-            "late reload must not restart health checks"
-        );
     }
 
     #[test]
     fn rejection_diagnostic_does_not_hold_publication() {
+        assert_diagnostic_revokes("reload", Some(tracing::Level::ERROR), "protocol", |config| {
+            config.listeners[0].protocol = ProtocolKind::Tcp;
+        });
+    }
+
+    /// Exercise distinct diagnostics with identical publication/rollback invariants.
+    fn assert_diagnostic_revokes<Prepare>(
+        diagnostic_target: &'static str,
+        level: Option<tracing::Level>,
+        error: &str,
+        prepare: Prepare,
+    ) where
+        Prepare: FnOnce(&mut Config),
+    {
         let (pipelines, old, registry, shutdown, meta, cluster_meta) = setup_live_pipelines();
         let pipelines = Arc::new(pipelines);
         let original = pipelines.get("web").unwrap().load_full();
-        let original_token = shutdown.lock().unwrap().clone();
+        let token = shutdown.lock().unwrap().clone();
         let target = Arc::new(WatcherReloadTarget::new(Arc::clone(&pipelines)));
         let mut candidate = old.clone();
-        candidate.listeners[0].protocol = ProtocolKind::Tcp;
+        prepare(&mut candidate);
         let observations = Arc::new(AtomicUsize::new(0));
         let locked = Arc::new(AtomicUsize::new(0));
         let subscriber = tracing_subscriber::registry().with(PublicationLockProbe {
-            diagnostic_target: "reload",
-            level: Some(tracing::Level::ERROR),
+            diagnostic_target,
+            level,
             target: Arc::clone(&target),
             observations: Arc::clone(&observations),
             locked: Arc::clone(&locked),
@@ -1029,17 +926,25 @@ mod tests {
                 &PipelineComposition::default(),
             )
         });
-        assert!(result.unwrap_err().to_string().contains("protocol"));
-        assert!(observations.load(Ordering::Relaxed) > 0);
+        assert!(
+            result.unwrap_err().to_string().contains(error),
+            "diagnostic must preserve its rejection reason"
+        );
+        assert!(
+            observations.load(Ordering::Relaxed) > 0,
+            "the intended diagnostic must run"
+        );
         assert_eq!(
             locked.load(Ordering::Relaxed),
             0,
-            "rejection logging must not lock publication"
+            "diagnostics must not hold publication"
         );
-        assert!(Arc::ptr_eq(&original, &pipelines.get("web").unwrap().load_full()));
-        assert!(!original_token.is_cancelled());
+        assert!(
+            Arc::ptr_eq(&original, &pipelines.get("web").unwrap().load_full()),
+            "rejected reload must preserve pipelines"
+        );
+        assert!(!token.is_cancelled(), "rejected reload must preserve health tasks");
     }
-
     #[test]
     fn incompatible_buffered_request_reload_preserves_live_state() {
         let (live, old_config, registry, shutdown, meta, cluster_meta) = setup_live_pipelines();

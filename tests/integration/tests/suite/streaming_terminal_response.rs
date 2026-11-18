@@ -851,7 +851,8 @@ mod overload_keepalive_tests {
             !response
                 .headers
                 .iter()
-                .any(|(name, value)| name.eq_ignore_ascii_case("connection") && value.eq_ignore_ascii_case("close")),
+                .any(|(name, value)| name.eq_ignore_ascii_case("connection")
+                    && value.split(',').any(|token| token.trim().eq_ignore_ascii_case("close"))),
             "headers preceded pressure"
         );
         assert_eq!(

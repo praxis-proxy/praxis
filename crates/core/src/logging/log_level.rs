@@ -184,15 +184,13 @@ impl LogLevelState {
         validate_put_request(request.module.as_deref(), &request.level, duration_secs)?;
 
         let target = overlay_target_key(request.module.as_deref());
-        let ttl = chrono::Duration::seconds(i64::try_from(duration_secs).unwrap_or(i64::MAX));
-        let expires_at = Utc::now().checked_add_signed(ttl).unwrap_or(DateTime::<Utc>::MAX_UTC);
-
         let _update = self.updates.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut guard = self.inner.lock().expect("log level state lock poisoned");
+        let (expires_at, deadline) = overlay_deadlines(duration_secs);
         let previous = guard.overlays.remove(&target);
 
         let generation = guard.take_generation();
-        let abort_handle = spawn_revert_task(Arc::clone(self), target.clone(), duration_secs, generation);
+        let abort_handle = spawn_revert_task(Arc::clone(self), target.clone(), deadline, generation);
 
         guard.overlays.insert(
             target.clone(),
@@ -476,10 +474,25 @@ fn remove_overlay_locked(guard: &mut LogLevelInner, target: &str) {
     }
 }
 
-/// Spawn a task that reverts one overlay after `duration_secs`.
-fn spawn_revert_task(state: Arc<LogLevelState>, target: String, duration_secs: u64, generation: u64) -> AbortHandle {
+/// Derive the advertised expiry and timer deadline when the overlay is installed.
+fn overlay_deadlines(duration_secs: u64) -> (DateTime<Utc>, tokio::time::Instant) {
+    let ttl = chrono::Duration::seconds(i64::try_from(duration_secs).unwrap_or(i64::MAX));
+    let expires_at = Utc::now().checked_add_signed(ttl).unwrap_or(DateTime::<Utc>::MAX_UTC);
+    let deadline = tokio::time::Instant::now()
+        .checked_add(Duration::from_secs(duration_secs))
+        .unwrap_or_else(tokio::time::Instant::now);
+    (expires_at, deadline)
+}
+
+/// Revert at the installation deadline, even if the task's first poll is delayed.
+fn spawn_revert_task(
+    state: Arc<LogLevelState>,
+    target: String,
+    deadline: tokio::time::Instant,
+    generation: u64,
+) -> AbortHandle {
     let handle = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(duration_secs)).await;
+        tokio::time::sleep_until(deadline).await;
         state.revert_target(&target, generation);
     });
     handle.abort_handle()
@@ -612,6 +625,7 @@ mod tests {
         });
         attempted.recv_timeout(Duration::from_secs(5)).unwrap();
         let early_update = completed.recv_timeout(Duration::from_millis(50));
+        let earliest_expiry = Utc::now().checked_add_signed(chrono::Duration::seconds(300)).unwrap();
         release.send(()).unwrap();
         worker.join().unwrap();
         probe.join().unwrap();
@@ -633,6 +647,18 @@ mod tests {
         assert!(
             completed.recv_timeout(Duration::from_secs(5)).unwrap().is_ok(),
             "queued overlay must complete"
+        );
+        assert!(
+            state
+                .inner
+                .lock()
+                .unwrap()
+                .overlays
+                .get("overlay_test")
+                .unwrap()
+                .expires_at
+                >= earliest_expiry,
+            "queued PUT expiry must start at installation, after the cache-rebuild wait"
         );
     }
     /// Stall one interest-cache callback only after the worker commits.
@@ -800,10 +826,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "setup, timer advance, and assertions in one async test"
-    )]
     async fn overlay_auto_reverts_after_duration() {
         let state = shared_test_state();
         {
@@ -826,8 +848,6 @@ mod tests {
             );
         }
 
-        // Let the revert task register its sleep before advancing fake time.
-        tokio::task::yield_now().await;
         tokio::time::advance(Duration::from_secs(10)).await;
         tokio::task::yield_now().await;
 

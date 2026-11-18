@@ -528,58 +528,6 @@ fn assert_socket_refused(port: u16) {
 
 #[cfg(feature = "overload-actions")]
 #[test]
-fn overload_header_deadline_spans_probe_and_drip_reads() {
-    use praxis_core::{config::Config, overload::EngagedActions};
-    let backend = praxis_test_utils::start_echo_backend();
-    let yaml = example_yaml(free_port(), free_port(), backend.port()).replace(
-        "    filter_chains:",
-        "    downstream_keepalive_timeout_ms: 4000\n    filter_chains:",
-    );
-    let (proxy, signal) = praxis_test_utils::start_proxy_with_overload(&Config::from_yaml(&yaml).unwrap(), |_| {});
-    signal.update(EngagedActions::default(), 1.0);
-    let mut socket = TcpStream::connect(proxy.addr()).unwrap();
-    socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
-    std::thread::sleep(Duration::from_millis(250));
-    socket.write_all(b"GET / HTTP/1.1\r\nHost: x\r\n").unwrap();
-    std::thread::sleep(Duration::from_millis(250));
-    let _late_write = socket.write_all(b"\r\n");
-    let mut byte = [0_u8; 1];
-    let end = socket.read(&mut byte);
-    assert!(
-        matches!(&end, Ok(0)) || matches!(&end, Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset),
-        "probe time must count against the header deadline: {end:?}"
-    );
-
-    let mut socket = TcpStream::connect(proxy.addr()).unwrap();
-    socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
-    socket.write_all(b"GET / HTTP/1.1\r\nHost: x\r\nX-Drip: ").unwrap();
-    socket.set_nonblocking(true).unwrap();
-    let deadline = Instant::now() + Duration::from_millis(700);
-    let mut closed = false;
-    while Instant::now() < deadline {
-        let _drip = socket.write_all(b"x");
-        match socket.read(&mut byte) {
-            Ok(0) => {
-                closed = true;
-                break;
-            },
-            Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {
-                closed = true;
-                break;
-            },
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {},
-            other => panic!("incomplete header must close without an application response: {other:?}"),
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    assert!(
-        closed,
-        "the total header deadline must close while drips are still being sent"
-    );
-}
-
-#[cfg(feature = "overload-actions")]
-#[test]
 fn tcp_admission_recovers_when_controlled_pressure_clears() {
     use praxis_core::{config::Config, overload::EngagedActions};
     let backend = praxis_test_utils::start_tcp_echo_backend();

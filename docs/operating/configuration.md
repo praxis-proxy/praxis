@@ -917,7 +917,7 @@ earlier if SIGINT ends the delay. See
 
 The overload housekeeping runtime stops its periodic loops on shutdown
 and clears its server's action state. After the network runtime's shutdown
-budget, server-owned watcher, pipeline-release, housekeeping, and health tasks
+budget, server-owned watcher, housekeeping, and health tasks
 share a two-second cleanup budget. An active jemalloc purge is joined while
 that budget remains. If it expires, cleanup warns and detaches the runtime;
 allocator work is never forcibly interrupted. Returning from an embedded

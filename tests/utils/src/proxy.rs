@@ -777,18 +777,22 @@ pub fn start_proxy_with_registry(config: &Config, registry: &FilterRegistry) -> 
 /// and spawn background health check probes.
 fn build_full_server(config: &Config) -> FullServer {
     let registry = praxis::build_full_registry();
-    build_full_server_with_registry(config, &registry, KvStoreRegistry::new())
+    build_full_server_with_registry(config, &registry, KvStoreRegistry::new(), |_| {})
 }
 
 /// Build a backend [`Runtime`] with a caller-supplied filter
 /// registry and KV store registry, HTTP and TCP protocols, and
 /// background health probes.
 #[expect(clippy::too_many_lines, reason = "test utility wiring")]
-fn build_full_server_with_registry(
+fn build_full_server_with_registry<Configure>(
     config: &Config,
     registry: &FilterRegistry,
     kv_stores: KvStoreRegistry,
-) -> FullServer {
+    configure: Configure,
+) -> FullServer
+where
+    Configure: FnOnce(&Arc<praxis_core::overload::Signal>),
+{
     // Every full-proxy start builds a `SubRequestConnector`, which constructs a
     // rustls `ClientConfig`. Hooking the certificate fixtures is not enough: a test
     // that starts a proxy without TLS reaches rustls with no provider installed.
@@ -821,6 +825,7 @@ fn build_full_server_with_registry(
     )
     .expect("pipeline resolution should succeed in test");
     let pipelines = Arc::new(pipelines);
+    configure(&pipelines.overload());
     let listener_meta = health::new_listener_meta_store(health::listener_meta_from_config(config));
     let cluster_meta = health::new_cluster_meta_store(health::cluster_meta_from_config(config));
 
@@ -948,9 +953,9 @@ pub fn start_full_proxy_with_overload<Configure>(
 where
     Configure: FnOnce(&Arc<praxis_core::overload::Signal>),
 {
-    let server = build_full_server(config);
+    let registry = praxis::build_full_registry();
+    let server = build_full_server_with_registry(config, &registry, KvStoreRegistry::new(), configure);
     let signal = Arc::clone(&server.3);
-    configure(&signal);
     let guard = start_full_proxy_runtime(config, server);
     crate::net::wait::wait_for_tcp(guard.addr());
     (guard, signal)
@@ -967,7 +972,7 @@ where
 /// Panics if `config.listeners` is empty or pipeline resolution
 /// fails.
 pub fn start_full_proxy_with_registry(config: &Config, registry: &FilterRegistry) -> ProxyGuard {
-    let runtime = build_full_server_with_registry(config, registry, KvStoreRegistry::new());
+    let runtime = build_full_server_with_registry(config, registry, KvStoreRegistry::new(), |_| {});
     start_full_proxy_runtime(config, runtime)
 }
 
@@ -983,7 +988,7 @@ pub fn start_full_proxy_with_registry(config: &Config, registry: &FilterRegistry
 /// fails.
 pub fn start_full_proxy_with_kv_stores(config: &Config, kv_stores: &KvStoreRegistry) -> ProxyGuard {
     let registry = praxis::build_full_registry();
-    let runtime = build_full_server_with_registry(config, &registry, kv_stores.clone());
+    let runtime = build_full_server_with_registry(config, &registry, kv_stores.clone(), |_| {});
     start_full_proxy_runtime(config, runtime)
 }
 
@@ -1708,6 +1713,15 @@ insecure_options:
 "#
             );
             let config = Config::from_yaml(&yaml).expect("health fixture config");
+            let failed = std::panic::catch_unwind(|| {
+                start_full_proxy_with_overload(&config, |_signal| panic!("configuration failure"));
+            });
+            assert!(failed.is_err(), "configuration panic must propagate");
+            assert_eq!(
+                receiver.recv_timeout(Duration::from_millis(350)),
+                Err(RecvTimeoutError::Timeout),
+                "failed configuration must not start health probes"
+            );
             let guard = start_full_proxy(&config);
             let finished = Arc::clone(&guard.health.as_ref().expect("health runtime").finished);
             receiver

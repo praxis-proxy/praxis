@@ -738,6 +738,37 @@ mod tests {
         );
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn initial_header_deadline_includes_probe_and_continuous_drips() {
+        let mut shared = shared("");
+        shared.header_timeout = Duration::from_secs(4);
+        shared
+            .overload
+            .update(praxis_core::overload::EngagedActions::default(), 1.0);
+        let initial = tokio::time::Instant::now() + Duration::from_millis(400);
+        tokio::time::advance(Duration::from_millis(250)).await;
+        let mut client = serve_with_initial_deadline(&shared, Some(initial));
+        client
+            .write_all(b"GET / HTTP/1.1\r\nHost: x\r\nX-Drip: ")
+            .await
+            .unwrap();
+        tokio::task::yield_now().await;
+        for step in 0..4 {
+            tokio::time::advance(Duration::from_millis(50)).await;
+            let sent = client.write_all(b"x").await;
+            assert!(
+                step >= 2 || sent.is_ok(),
+                "the header must stay open before its deadline"
+            );
+            tokio::task::yield_now().await;
+        }
+        let closed = tokio::time::timeout(Duration::ZERO, read_to_close(&mut client)).await;
+        assert!(
+            closed.is_ok_and(|response| !response.starts_with(b"HTTP/1.1 200")),
+            "the probe starts one 400ms budget; controlled 50ms drips cannot renew it"
+        );
+    }
+
     #[tokio::test]
     async fn silent_connection_times_out() {
         let mut shared = shared("");
@@ -1030,18 +1061,26 @@ mod tests {
     /// builder and a service answering every request with `200 ok`; the
     /// client's end.
     fn serve(shared: &ListenerShared) -> DuplexStream {
+        serve_with_initial_deadline(shared, None)
+    }
+
+    /// Simulate a completed protocol probe without relying on client scheduling.
+    fn serve_with_initial_deadline(shared: &ListenerShared, initial: Option<tokio::time::Instant>) -> DuplexStream {
         let (client, server) = tokio::io::duplex(1_048_576); // 1 MiB
         let service = service_fn(|_request: Request<Incoming>| async {
             Ok::<_, Infallible>(Response::new(ProxyBody::full(Bytes::from_static(b"ok"))))
         });
         let builder = connection_builder(shared);
-        drop(tokio::spawn(async move {
-            drop(
-                builder
-                    .serve_connection_with_upgrades(TokioIo::new(server), service)
-                    .await,
-            );
-        }));
+        drop(tokio::spawn(INITIAL_HEADER_DEADLINE.scope(
+            std::cell::Cell::new(initial),
+            async move {
+                drop(
+                    builder
+                        .serve_connection_with_upgrades(TokioIo::new(server), service)
+                        .await,
+                );
+            },
+        )));
         client
     }
 

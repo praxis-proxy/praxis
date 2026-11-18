@@ -367,7 +367,7 @@ fn try_run_server_with_composition_and_shutdown(
 
     #[cfg(feature = "config-reload")]
     {
-        tasks.watcher = spawn_watcher(config_file, config, registry, state)?;
+        tasks.watcher = spawn_watcher(config_file, config, registry, state);
     }
     // Without the config-reload feature there is no file watcher; consume the
     // now-unused startup values so the server still runs, just without reload.
@@ -861,16 +861,14 @@ fn spawn_watcher(
     config: Config,
     registry: FilterRegistry,
     state: ServerState,
-) -> Result<Option<ConfigWatcher>, StartupError> {
-    let Some(params) = watcher_params(config_file, config, registry, state)? else {
-        return Ok(None);
-    };
+) -> Option<ConfigWatcher> {
+    let params = watcher_params(config_file, config, registry, state)?;
     let shutdown = params.shutdown.clone();
-    Ok(Some(ConfigWatcher {
+    Some(ConfigWatcher {
         shutdown,
         pipelines: Arc::clone(&params.pipelines),
         thread: Some(crate::watcher::spawn_config_watcher(params)),
-    }))
+    })
 }
 
 /// Revoke live state and bound shutdown even if downstream reload code stalls.
@@ -899,13 +897,9 @@ impl ConfigWatcher {
     fn stop_until(&mut self, deadline: Instant) {
         self.shutdown.cancel();
         #[cfg(feature = "config-reload")]
-        let release = self.pipelines.stop();
+        self.pipelines.stop();
         if let Some(thread) = self.thread.take() {
             join_background_thread(thread, deadline, "config watcher");
-        }
-        #[cfg(feature = "config-reload")]
-        if let Some(release) = release {
-            join_background_thread(release, deadline, "retired pipelines");
         }
     }
 }
@@ -917,10 +911,8 @@ fn watcher_params(
     config: Config,
     registry: FilterRegistry,
     state: ServerState,
-) -> Result<Option<crate::watcher::WatcherParams>, StartupError> {
-    let Some(ConfigFile { path, content }) = config_file else {
-        return Ok(None);
-    };
+) -> Option<crate::watcher::WatcherParams> {
+    let ConfigFile { path, content } = config_file?;
     // Documents the configured filters read, asked of the pipelines that were just
     // built rather than reconstructed here: building a filter to interrogate it
     // would load its document and open network connections as a side effect.
@@ -939,7 +931,7 @@ fn watcher_params(
     // An edit to one between its filter loading it and this read is therefore
     // missed until the next change to any watched file triggers a reload.
     let initial_content_hash = crate::watcher::composite_hash(&content, &referenced_files);
-    Ok(Some(crate::watcher::WatcherParams {
+    Some(crate::watcher::WatcherParams {
         config_path: path,
         health_shutdown: state.health_shutdown,
         health_lifecycle: Some(state.health_lifecycle),
@@ -950,14 +942,14 @@ fn watcher_params(
         cluster_meta: state.cluster_meta,
         session_stores: state.session_stores,
         slow_start_registry: state.slow_start_registry,
-        pipelines: Arc::new(crate::reload::WatcherReloadTarget::try_new(state.pipelines)?),
+        pipelines: Arc::new(crate::reload::WatcherReloadTarget::new(state.pipelines)),
         referenced_files,
         registry: Arc::new(registry),
         shutdown: CancellationToken::new(),
         subrequest_client: state.subrequest_client,
         log_level: state.log_level,
         pipeline_composition: state.pipeline_composition,
-    }))
+    })
 }
 
 // -----------------------------------------------------------------------------
@@ -2206,9 +2198,7 @@ runtime:
         let (state, registry) = startup_state(&config);
         let pipelines = Arc::clone(&state.pipelines);
         let started_with = Arc::as_ptr(&pipelines.get("web").unwrap().load());
-        let params = watcher_params(Some(config_file), config, registry, state)
-            .unwrap()
-            .expect("a config file must be watched");
+        let params = watcher_params(Some(config_file), config, registry, state).expect("a config file must be watched");
         assert_eq!(
             params.initial_content_hash,
             crate::watcher::composite_hash(&static_response_yaml(200), &[]),
@@ -2235,7 +2225,7 @@ runtime:
         let (state, registry) = startup_state(&config);
 
         assert!(
-            watcher_params(None, config, registry, state).unwrap().is_none(),
+            watcher_params(None, config, registry, state).is_none(),
             "the built-in default has no file to watch"
         );
     }
@@ -2251,7 +2241,7 @@ runtime:
             let config = Config::from_config_file(&file).unwrap();
             let (state, registry) = startup_state(&config);
             let controller = Arc::downgrade(&state.pipelines.overload());
-            let watcher = spawn_watcher(Some(file), config, registry, state).unwrap().unwrap();
+            let watcher = spawn_watcher(Some(file), config, registry, state).unwrap();
             assert!(controller.upgrade().is_some());
             drop(watcher);
             assert!(
@@ -2289,7 +2279,7 @@ runtime:
             })
             .into_parts();
         state.pipeline_composition = composition;
-        let params = watcher_params(Some(file), config, registry, state).unwrap().unwrap();
+        let params = watcher_params(Some(file), config, registry, state).unwrap();
         let weak_registry = Arc::downgrade(&params.registry);
         std::fs::write(&path, static_response_yaml(201)).unwrap();
         let watcher = ConfigWatcher {
