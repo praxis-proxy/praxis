@@ -91,7 +91,7 @@ pub(super) enum ResponseCustomState {
 // PolicyFilter
 // -----------------------------------------------------------------------------
 
-/// The `policy` filter embeds the [Praxis Policy Engine (PPE)](https://github.com/praxis-proxy/policy)
+/// The `policy` filter embeds the Praxis Policy Engine (PPE)
 /// for JWT and API-key authentication, authorization, identity delegation,
 /// rate limiting and data protection across HTTP APIs, MCP tools, prompts
 /// and resources, and AI inference requests.
@@ -99,8 +99,11 @@ pub(super) enum ResponseCustomState {
 /// Policies combine shared defaults and route-specific controls, with ordered
 /// evaluation that stops on denial.
 ///
-/// See the [PPE documentation](https://github.com/praxis-proxy/policy/blob/main/docs/content/index.md)
-/// for policy configuration, plugin references and worked examples.
+/// See the [PPE documentation] for policy configuration, plugin references
+/// and worked examples.
+///
+/// Start with [Policy enforcement with PPE] for use cases, filter selection,
+/// and the Core integration requirements.
 ///
 /// It provides:
 ///
@@ -366,13 +369,6 @@ pub(super) enum ResponseCustomState {
 /// `https`: an IP carries no SNI, and Pingora peers skip certificate
 /// verification entirely when SNI is empty. Use a hostname for `https`.
 ///
-/// [Identity configuration]: https://github.com/praxis-proxy/policy/blob/main/docs/content/apl/identity.md
-/// [OIDC claim mapping]: https://github.com/praxis-proxy/policy/blob/main/docs/content/identity-delegation.md#reading-claims-the-way-your-idp-writes-them
-/// [Header assertions]: https://github.com/praxis-proxy/policy/blob/main/docs/content/assertions.md
-/// [Vault delegation recipes]: https://github.com/praxis-proxy/policy/blob/main/docs/content/identity-delegation.md#recipe-8-a-users-vault-stored-credential
-/// [Structured request input]: https://github.com/praxis-proxy/policy/blob/main/docs/content/apl/pdp.md#structured-request-input
-/// [normalized LLM input example]: https://github.com/praxis-proxy/praxis/blob/main/examples/configs/security/policy-llm-input.yaml
-///
 /// # YAML configuration
 ///
 /// Filter fields sit directly under the `- filter:` entry; there is no
@@ -391,6 +387,15 @@ pub(super) enum ResponseCustomState {
 ///   require_route: true
 ///   provider: openai
 /// ```
+///
+/// [PPE documentation]: https://github.com/praxis-proxy/policy/blob/main/docs/content/index.md
+/// [Policy enforcement with PPE]: https://github.com/praxis-proxy/praxis/blob/main/docs/security/policy-enforcement.md
+/// [Identity configuration]: https://github.com/praxis-proxy/policy/blob/main/docs/content/apl/identity.md
+/// [OIDC claim mapping]: https://github.com/praxis-proxy/policy/blob/main/docs/content/identity-delegation.md#reading-claims-the-way-your-idp-writes-them
+/// [Header assertions]: https://github.com/praxis-proxy/policy/blob/main/docs/content/assertions.md
+/// [Vault delegation recipes]: https://github.com/praxis-proxy/policy/blob/main/docs/content/identity-delegation.md#recipe-8-a-users-vault-stored-credential
+/// [Structured request input]: https://github.com/praxis-proxy/policy/blob/main/docs/content/apl/pdp.md#structured-request-input
+/// [normalized LLM input example]: https://github.com/praxis-proxy/praxis/blob/main/examples/configs/security/policy-llm-input.yaml
 #[expect(
     clippy::struct_excessive_bools,
     reason = "independent facts derived from the policy document; they combine rather than \
