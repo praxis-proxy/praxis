@@ -210,6 +210,17 @@ fn record_streaming_writer(pipeline: &FilterPipeline, body: Option<&Bytes>, end:
 impl ProxyHttp for PingoraHttpHandler {
     type CTX = PingoraRequestCtx;
 
+    fn on_connection_reuse(
+        &self,
+        _session: &mut Session,
+        _ctx: &mut Self::CTX,
+        previous: Box<dyn std::any::Any + Send + Sync>,
+    ) {
+        if let Ok(parsed) = previous.downcast::<crate::overload::HeaderParsed>() {
+            parsed.0.notify_one();
+        }
+    }
+
     fn new_ctx(&self) -> Self::CTX {
         PingoraRequestCtx {
             listener_name: self.listener_name.clone(),

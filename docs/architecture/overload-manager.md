@@ -51,11 +51,13 @@ sequenceDiagram
 ## Adapter boundaries
 
 - Timeout factor is `1 - 0.9 * pressure`, with pressure rounded to 1% steps.
-  Each attempt uses original configured connect/total-connect/idle budgets.
+  Connection setup uses original configured connect/total-connect budgets;
+  idle retention uses its baseline when the last active exchange ends.
   A ten-second budget becomes 5.5 seconds at pressure 0.5 and one second at 1.
 - Pingora uses its connection-filter hook before TLS and application wrappers
-  before protocol probing/header parsing. Its body read budget is restored
-  after parsing. Hyper checks accepted sockets before TLS and uses a separate
+  before protocol probing/header parsing. One absolute HTTP/1 header deadline
+  includes the initial probe; individual reads cannot renew it. A parsed-header
+  notification ends that deadline before body processing. Hyper checks accepted sockets before TLS and uses a separate
   HTTP/1 header timer, including for reused connections.
 - Returned upstream connections receive shorter idle expiries; an unset idle
   timeout has a sixty-second baseline when actions are enabled. Already idle
@@ -68,19 +70,29 @@ sequenceDiagram
   RSS, descriptor, and connection limits remain independent backstops.
 - HTTP/1 keep-alive restores at pressure 0.4 or below. Response commitment
   rechecks pressure, including buffered/streamed terminal responses and
-  HEAD/204/304 suppression. HTTP/2 receives no connection-specific header.
+  HEAD/204/304 suppression. Terminal streams also recheck on completion, finishing
+  the body before closing an HTTP/1 socket if pressure rose after commitment.
+  HTTP/2 receives no connection-specific header.
 - Memory pressure requests one blocking allocator purge at a time per sampler.
   Missing callbacks start no worker, and the gauge reports completed success.
   Housekeeping drop cancels samplers and clears their controller. A running
   purge remains owned by the housekeeping runtime during background cleanup.
   After network shutdown, the server allows two seconds in total to join its
-  watcher, housekeeping runtime, and health-check runtimes. A task exceeding
-  that deadline is detached with a warning; an in-flight allocator call is
+  watcher, pipeline-release worker, housekeeping runtime, and health-check runtimes.
+  A task exceeding that deadline is detached with a warning; an in-flight allocator call is
   never forcibly interrupted.
+
+  Server return does not guarantee that a detached purge has finished. It can
+  continue in an embedded process; process exit ends remaining background work.
 
 The config watcher revokes its access to live pipelines on shutdown, serialized
 with any publication already in progress, then joins its thread within the
 shared background-cleanup deadline (one second when dropped independently).
+The deadline bounds joins; revocation first waits for the short publication
+critical section. Subscriber/recorder callbacks, rejection diagnostics, and
+retired pipeline destructors execute outside that section. Shutdown releases
+live pipelines on a separate worker whose join uses the same deadline, so a
+blocking downstream destructor cannot run on the stopping thread.
 Pipeline construction, downstream validation, advisory file-permission checks,
 and change diagnostics run outside the publication lock. Stalled validation,
 filesystem checks, or sinks for these diagnostics cannot hold that lock, and

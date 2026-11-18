@@ -199,6 +199,7 @@ impl Connection {
         let earlier = self.info.exchanges.fetch_add(1, Ordering::Relaxed);
         Exchange {
             idle_timeout,
+            overload: None,
             info: Arc::clone(&self.info),
             reused: earlier > 0,
         }
@@ -294,6 +295,9 @@ pub(super) struct Exchange {
     /// How long the connection may sit unused once this was its last exchange.
     idle_timeout: Option<Duration>,
 
+    /// Live controller sampled only when the last active exchange becomes idle.
+    overload: Option<Arc<crate::overload::Signal>>,
+
     /// The connection the exchange runs on.
     info: Arc<ConnectionInfo>,
 
@@ -302,6 +306,11 @@ pub(super) struct Exchange {
 }
 
 impl Exchange {
+    /// Keep the baseline; pressure at checkout must not freeze idle retention.
+    pub(super) fn set_idle_overload(&mut self, signal: Arc<crate::overload::Signal>) {
+        self.overload = Some(signal);
+    }
+
     /// Whether the connection carried an exchange before this one.
     pub(super) const fn reused(&self) -> bool {
         self.reused
@@ -310,7 +319,13 @@ impl Exchange {
 
 impl Drop for Exchange {
     fn drop(&mut self) {
-        let idle_timeout = self.idle_timeout;
+        let idle_timeout = self
+            .overload
+            .as_ref()
+            .filter(|signal| signal.is_enabled())
+            .map_or(self.idle_timeout, |signal| {
+                Some(signal.scale_timeout(self.idle_timeout.unwrap_or(Duration::from_secs(60))))
+            });
         self.info.idle.send_if_modified(|state| {
             state.open = state.open.saturating_sub(1);
             if state.open > 0 {
@@ -643,6 +658,47 @@ fn log_end(result: hyper::Result<()>, peer_address: SocketAddr) {
 #[allow(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "cover both active-to-idle pressure sampling and fixed idle expiry"
+    )]
+    async fn idle_deadline_uses_pressure_at_final_exchange_completion() {
+        let driver = tokio::spawn(std::future::pending::<()>());
+        let (idle, _receiver) = watch::channel(IdleState {
+            open: 1,
+            deadline: None,
+        });
+        let info = Arc::new(ConnectionInfo {
+            driver: driver.abort_handle(),
+            exchanges: AtomicU64::new(1),
+            idle,
+            peer_address: "127.0.0.1:80".parse().unwrap(),
+            tls_version: None,
+        });
+        let signal = Arc::new(crate::overload::Signal::default());
+        signal.update(crate::overload::EngagedActions::default(), 0.0);
+        let exchange = Exchange {
+            idle_timeout: Some(Duration::from_secs(60)),
+            overload: Some(Arc::clone(&signal)),
+            info: Arc::clone(&info),
+            reused: false,
+        };
+        tokio::time::advance(Duration::from_secs(20)).await;
+        signal.update(crate::overload::EngagedActions::default(), 1.0);
+        let expected = Instant::now() + Duration::from_secs(6);
+        drop(exchange);
+        assert_eq!(info.idle.borrow().deadline, Some(expected));
+        signal.clear();
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_eq!(
+            info.idle.borrow().deadline,
+            Some(expected),
+            "already idle entries retain their deadline"
+        );
+        driver.abort();
+    }
 
     #[test]
     fn setup_timeouts_never_outlive_the_exchange() {

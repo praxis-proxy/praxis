@@ -1341,6 +1341,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn negative_probe_reads_authentication_alert_despite_a_large_failed_write() {
+        let certs = TestCertificates::generate();
+        let trusted = certs.raw_tls_client_config();
+        let payload = vec![b'x'; 1_048_576]; // Exceed transport buffering after rejection.
+        for _ in 0..4 {
+            let (addr, server) = probe_server(&certs, ProbeServerMode::RequireClientCert);
+            let outcome = tls_negative_probe(&addr, "localhost", &payload, &trusted);
+            assert!(
+                outcome.is_client_auth_alert(),
+                "peer alert must survive failed application writes: {outcome:?}"
+            );
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
     #[expect(clippy::too_many_lines, reason = "distinct TLS and application outcomes")]
     fn negative_probe_distinguishes_application_delivery() {
         let certs = TestCertificates::generate();

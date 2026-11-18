@@ -387,8 +387,8 @@ pub(crate) fn warn_insecure_option_escalations(old: &Config, new: &Config) {
     if !escalated.is_empty() {
         warn!(
             options = ?escalated,
-            "insecure options escalated during reload; \
-             security overrides were newly enabled"
+            "proposed reload would escalate insecure options; \
+             security overrides will be enabled if publication succeeds"
         );
     }
 }
@@ -451,8 +451,8 @@ pub(crate) fn warn_stateful_filter_reset(config: &Config) {
 
     if has_stateful {
         warn!(
-            "stateful filters (rate_limit, circuit_breaker) have been \
-             reset; in-flight requests and open TCP connections retain \
+            "proposed reload would reset stateful filters (rate_limit, circuit_breaker); \
+             in-flight requests and open TCP connections retain \
              the old state via their pinned pipeline generation"
         );
     }
@@ -505,7 +505,7 @@ pub(crate) fn log_config_change_audit(old: &Config, new: &Config) {
         chains_removed = fr,
         chains_modified = fm,
         insecure_options_changed = insecure_changed,
-        "config reload audit"
+        "proposed config reload audit"
     );
 }
 
