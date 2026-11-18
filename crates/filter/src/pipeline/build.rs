@@ -398,6 +398,7 @@ impl FilterPipeline {
         super::checks::check_router_without_lb(&self.filters, &names, &mut warnings);
         super::checks::check_all_routers_conditional(&names, &self.filters, &mut warnings);
         super::checks::check_security_filter_in_conditional_branch(&self.filters, &mut warnings);
+        super::checks::check_head_admission_ordering(&self.filters, &mut warnings);
 
         warnings
     }

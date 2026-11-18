@@ -973,6 +973,48 @@ pub(super) fn check_selected_upstream_condition_pre_read(
 // Warning Checks
 // -----------------------------------------------------------------------------
 
+/// A `policy` filter that admits at the request head runs its rate limits and
+/// identity checks before any earlier filter's request phase.
+///
+/// Two orderings change meaning. Its request conditions (only reachable on the
+/// `conditional_security` opt-out) are evaluated at the head against the
+/// request as the client sent it, so headers an earlier filter sets are
+/// invisible to that evaluation. And an earlier security filter that rejects
+/// in its request phase, such as `ip_acl`, no longer shields policy's limiter
+/// and verifier. Both still enforce, so these are advisories. Branch filters
+/// never run at the head and are not checked.
+pub(super) fn check_head_admission_ordering(filters: &[PipelineFilter], warnings: &mut Vec<String>) {
+    for (position, pf) in filters.iter().enumerate() {
+        if pf.filter.name() != "policy" || !runs_request_head(pf) {
+            continue;
+        }
+        let earlier = filters.get(..position).unwrap_or_default();
+        if !pf.conditions.is_empty() && !earlier.is_empty() {
+            warnings.push(format!(
+                "filter 'policy' at position {position} admits at the request head, where its \
+                 request conditions see the request as the client sent it, not headers that \
+                 earlier filters set; the head and request phases may evaluate them differently"
+            ));
+        }
+        for prior in earlier
+            .iter()
+            .filter(|prior| prior.is_security && !runs_request_head(prior))
+        {
+            let name = prior.filter.name();
+            warnings.push(format!(
+                "security filter '{name}' precedes 'policy' at position {position}, but policy \
+                 admits at the request head: its rate limits and identity checks run before \
+                 '{name}' can reject the request"
+            ));
+        }
+    }
+}
+
+/// Whether `pf` runs in the request-head phase.
+fn runs_request_head(pf: &PipelineFilter) -> bool {
+    matches!(&pf.filter, AnyFilter::Http(filter) if filter.runs_request_head())
+}
+
 /// Router without any following LB (requests will 502).
 ///
 /// Suppressed when a consumer the binding router reaches selects an endpoint
@@ -1110,7 +1152,7 @@ mod tests {
     use super::*;
     #[cfg(feature = "upstream-binding")]
     use crate::pipeline::test_filters::{binding_router, bound_lb, terminal_filter};
-    use crate::pipeline::test_filters::{lb_filter, noop_filter_with_conditions, selector_filter};
+    use crate::pipeline::test_filters::{head_filter, lb_filter, noop_filter_with_conditions, selector_filter};
 
     #[test]
     fn invalid_condition_header_name_rejected_at_build() {
@@ -3226,6 +3268,63 @@ mod tests {
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
+
+    #[test]
+    fn head_admitting_policy_first_in_the_chain_warns_about_nothing() {
+        let filters = vec![head_filter("policy"), security_noop_filter("ip_acl", vec![])];
+        let mut warnings = Vec::new();
+        check_head_admission_ordering(&filters, &mut warnings);
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn an_earlier_security_filter_no_longer_shields_head_admission() {
+        let filters = vec![security_noop_filter("ip_acl", vec![]), head_filter("policy")];
+        let mut warnings = Vec::new();
+        check_head_admission_ordering(&filters, &mut warnings);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("'ip_acl' precedes 'policy'"), "{warnings:?}");
+    }
+
+    #[test]
+    fn a_conditional_head_policy_after_any_filter_warns() {
+        for earlier in [head_filter("head_classifier"), make_pf(vec![])] {
+            let mut policy = head_filter("policy");
+            policy.conditions = vec![make_condition()];
+            let filters = vec![earlier, policy];
+            let mut warnings = Vec::new();
+            check_head_admission_ordering(&filters, &mut warnings);
+            assert_eq!(warnings.len(), 1, "{warnings:?}");
+            assert!(warnings[0].contains("request conditions"), "{warnings:?}");
+        }
+    }
+
+    #[test]
+    fn head_admission_warnings_skip_filters_outside_the_head() {
+        let mut head_security = head_filter("other_auth");
+        head_security.is_security = true;
+        let mut conditional_classifier = head_filter("head_classifier");
+        conditional_classifier.conditions = vec![make_condition()];
+        let cases = [
+            (
+                "a policy without a head phase",
+                vec![security_noop_filter("ip_acl", vec![]), make_pf(vec![])],
+            ),
+            (
+                "an earlier head security filter",
+                vec![head_security, head_filter("policy")],
+            ),
+            (
+                "a conditional head filter other than policy",
+                vec![make_pf(vec![]), conditional_classifier],
+            ),
+        ];
+        for (case, filters) in cases {
+            let mut warnings = Vec::new();
+            check_head_admission_ordering(&filters, &mut warnings);
+            assert!(warnings.is_empty(), "{case}: {warnings:?}");
+        }
+    }
 
     /// Build a [`PipelineFilter`] with the given conditions.
     fn make_pf(conditions: Vec<Condition>) -> PipelineFilter {
