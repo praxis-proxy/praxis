@@ -95,6 +95,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Return gRPC `DEADLINE_EXCEEDED` when Pingora's rounded upstream timeout fires just before the call's exact deadline, while preserving earlier transport timeouts.
 - Strip reserved and hop-by-hop headers from preformatted gRPC rejections while retaining safe gRPC fields, and frame empty HTTP/1 responses with one correct zero length even when filters supply stale or conflicting lengths.
 - Preserve final body-filter bytes with forwarded trailers on Hyper; abort Pingora delivery when both outputs cannot be represented or EOF filtering fails, while retaining ordinary trailers and deliberate conversion.
 - Keep requests streaming when any repeated Accept field contains text/event-stream.
