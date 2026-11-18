@@ -114,20 +114,34 @@ pub(super) fn body_filter_indices(filters: &[PipelineFilter]) -> (Vec<usize>, Ve
 /// opts in by overriding [`runs_request_head`].
 ///
 /// Top-level only: branch filters never run the head hook, matching the
-/// body-phase precompute helpers.
+/// body-phase precompute helpers. A filter that [`admits_at_request_head`] is
+/// left out when an earlier filter can end the request first, so that filter
+/// still answers or rejects before admission.
 ///
 /// [`on_request_head`]: crate::HttpFilter::on_request_head
 /// [`runs_request_head`]: crate::HttpFilter::runs_request_head
+/// [`admits_at_request_head`]: crate::HttpFilter::admits_at_request_head
 pub(super) fn request_head_filter_indices(filters: &[PipelineFilter]) -> Vec<usize> {
     let mut indices = Vec::new();
     for (idx, pf) in filters.iter().enumerate() {
         if let AnyFilter::Http(f) = &pf.filter
             && f.runs_request_head()
+            && !(f.admits_at_request_head() && first_request_ender(filters, idx).is_some())
         {
             indices.push(idx);
         }
     }
     indices
+}
+
+/// The first filter before `position` that can end the request in its request
+/// phase.
+pub(super) fn first_request_ender(filters: &[PipelineFilter], position: usize) -> Option<&PipelineFilter> {
+    filters
+        .get(..position)
+        .unwrap_or_default()
+        .iter()
+        .find(|pf| pf.can_end_request())
 }
 
 /// Precompute the pipeline indices of filters that declared
@@ -1228,6 +1242,27 @@ mod tests {
             caps.any_request_body_writer,
             "the bound phase declares ReadWrite, so capability calc must mark the body as written"
         );
+    }
+
+    #[test]
+    fn an_admitting_head_filter_is_left_out_behind_a_filter_that_can_end_the_request() {
+        use crate::pipeline::test_filters::{admitting_head_filter, head_filter, noop_filter};
+
+        let mut ip_acl = noop_filter("ip_acl");
+        ip_acl.is_security = true;
+        let indices =
+            request_head_filter_indices(&[ip_acl, admitting_head_filter("policy"), head_filter("classifier")]);
+        assert_eq!(
+            indices,
+            vec![2],
+            "the policy admits in the request phase; the classifier still runs"
+        );
+
+        let indices = request_head_filter_indices(&[noop_filter("static_response"), admitting_head_filter("policy")]);
+        assert!(indices.is_empty(), "an answering filter shields the policy too");
+
+        let indices = request_head_filter_indices(&[head_filter("classifier"), admitting_head_filter("policy")]);
+        assert_eq!(indices, vec![0, 1], "a fact-publishing filter ends nothing");
     }
 
     #[test]

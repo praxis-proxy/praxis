@@ -129,7 +129,8 @@ fn snapshot_filter(
     siblings: &[PipelineFilter],
     top_level: bool,
 ) -> FilterIntrospection {
-    let (phases, request_body, response_body) = phase_and_body_info(pf, top_level);
+    let head = top_level && super::body::request_head_filter_indices(siblings).contains(&index);
+    let (phases, request_body, response_body) = phase_and_body_info(pf, top_level, head);
     let mut conditions = pf.conditions.clone();
     redact_condition_headers(&mut conditions);
     let mut response_conditions = pf.response_conditions.clone();
@@ -156,6 +157,7 @@ fn snapshot_filter(
 fn phase_and_body_info(
     pf: &PipelineFilter,
     top_level: bool,
+    head: bool,
 ) -> (Vec<&'static str>, Option<BodyAccessInfo>, Option<BodyAccessInfo>) {
     match &pf.filter {
         AnyFilter::Http(f) => {
@@ -164,7 +166,7 @@ fn phase_and_body_info(
             let req_mode = HttpFilter::request_body_mode(f.as_ref());
             let resp_mode = HttpFilter::response_body_mode(f.as_ref());
             (
-                potential_http_phases(pf, f.as_ref(), top_level),
+                potential_http_phases(pf, f.as_ref(), top_level, head),
                 Some(body_info(req_access, req_mode)),
                 Some(body_info(resp_access, resp_mode)),
             )
@@ -173,8 +175,14 @@ fn phase_and_body_info(
     }
 }
 
-/// Potential HTTP hooks for this filter's position and resolved body phase.
-fn potential_http_phases(pf: &PipelineFilter, filter: &dyn HttpFilter, top_level: bool) -> Vec<&'static str> {
+/// Potential HTTP hooks for this filter's position and resolved body phase;
+/// `head` says whether the pipeline runs its request-head hook.
+fn potential_http_phases(
+    pf: &PipelineFilter,
+    filter: &dyn HttpFilter,
+    top_level: bool,
+    head: bool,
+) -> Vec<&'static str> {
     let pre_read = effective_request_body_phase(pf) == RequestBodyPhase::PreRead;
     let request_body = if top_level && pre_read {
         filter.request_body_access()
@@ -186,7 +194,7 @@ fn potential_http_phases(pf: &PipelineFilter, filter: &dyn HttpFilter, top_level
     } else {
         BodyAccess::None
     };
-    let mut phases = http_phases(top_level && filter.runs_request_head(), request_body, response_body);
+    let mut phases = http_phases(head, request_body, response_body);
     if top_level && filter.selected_upstream_request_body_access() != BodyAccess::None {
         phases.push("selected_upstream_request_body");
     }

@@ -49,6 +49,16 @@ pub(in crate::pipeline) fn head_filter(name: &'static str) -> PipelineFilter {
     })
 }
 
+/// A filter named `name` whose request-head hook admits, as `policy` does.
+pub(in crate::pipeline) fn admitting_head_filter(name: &'static str) -> PipelineFilter {
+    capability_filter(CapabilityFilter {
+        name,
+        runs_request_head: true,
+        admits_at_request_head: true,
+        ..CapabilityFilter::default()
+    })
+}
+
 #[cfg(feature = "upstream-binding")]
 pub(in crate::pipeline) fn terminal_filter(name: &'static str) -> PipelineFilter {
     capability_filter(CapabilityFilter {
@@ -190,6 +200,7 @@ struct CapabilityFilter {
     declared_metadata: Vec<ClusterMetadataDeclaration>,
     produces_terminal_response: bool,
     runs_request_head: bool,
+    admits_at_request_head: bool,
 }
 
 #[async_trait]
@@ -244,6 +255,10 @@ impl HttpFilter for CapabilityFilter {
 
     fn runs_request_head(&self) -> bool {
         self.runs_request_head
+    }
+
+    fn admits_at_request_head(&self) -> bool {
+        self.admits_at_request_head
     }
 
     #[cfg(feature = "upstream-binding")]
