@@ -456,14 +456,23 @@ pub struct PolicyFilter {
 /// What a policy does in the request-head phase, fixed by its document.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum HeadAdmission {
-    /// No head phase: `context_headers` may read values set after it, or there
-    /// is nothing to run.
+    /// No head phase: `context_headers` may read values set after it.
     Off,
-    /// Only `ratelimit.pre_identity`: the global resolver may not be the one
-    /// that judges the request's route.
-    Limit,
+    /// `ratelimit.pre_identity` only: an entity default, bundle, group or route
+    /// can extend or replace the global resolver, so identity waits for the
+    /// route.
+    Defer,
     /// The pre-identity limiter and the identity gate.
     Gate,
+}
+
+/// Whether `request` is a CORS preflight.
+fn is_cors_preflight(request: &crate::Request) -> bool {
+    request.method == http::Method::OPTIONS
+        && request.headers.contains_key(http::header::ORIGIN)
+        && request
+            .headers
+            .contains_key(http::header::ACCESS_CONTROL_REQUEST_METHOD)
 }
 
 impl HeadAdmission {
@@ -471,17 +480,14 @@ impl HeadAdmission {
     fn for_policy(
         cfg: &PolicyFilterConfig,
         entity_routes: bool,
-        limit_pre: bool,
         policy: &ppe::praxis_policy_core::config::PolicyConfig,
     ) -> Self {
         if !cfg.context_headers.is_empty() {
             Self::Off
         } else if !entity_routes || only_global_authentication(policy) {
             Self::Gate
-        } else if limit_pre {
-            Self::Limit
         } else {
-            Self::Off
+            Self::Defer
         }
     }
 }
@@ -758,7 +764,16 @@ impl PolicyFilter {
             (mgr.has_hooks_for(HOOK_HTTP_RESPONSE) || !response_assertions.is_empty()).then_some(HOOK_HTTP_RESPONSE);
 
         let limit_pre = mgr.has_hooks_for(HOOK_RATELIMIT_PRE_IDENTITY);
-        let head = HeadAdmission::for_policy(&cfg, entity_routes, limit_pre, &policy_config);
+        let head = HeadAdmission::for_policy(&cfg, entity_routes, &policy_config);
+        if head == HeadAdmission::Defer && cfg.body_access == BodyAccessMode::ReadOnly && !llm_routes {
+            tracing::warn!(
+                target: "policy.filter",
+                "policy: {}: a route's authentication decides identity at end of stream, so request \
+                 bodies are buffered up to max_buffer_bytes ({}) before they are forwarded",
+                cfg.config_path,
+                cfg.max_buffer_bytes,
+            );
+        }
         let llm_route_table = llm_routes.then(|| Arc::new(policy_config));
         let limit_post = mgr.has_hooks_for(HOOK_RATELIMIT_POST_IDENTITY);
 
@@ -2753,7 +2768,7 @@ impl HttpFilter for PolicyFilter {
             BodyAccessMode::ReadOnly if self.llm_routes => BodyMode::StreamBuffer {
                 max_bytes: Some(self.cfg.llm.max_request_bytes),
             },
-            BodyAccessMode::ReadOnly if self.head == HeadAdmission::Limit => BodyMode::StreamBuffer {
+            BodyAccessMode::ReadOnly if self.head == HeadAdmission::Defer => BodyMode::StreamBuffer {
                 max_bytes: Some(self.cfg.max_buffer_bytes),
             },
             BodyAccessMode::ReadOnly => BodyMode::Stream,
@@ -2788,12 +2803,17 @@ impl HttpFilter for PolicyFilter {
     }
 
     async fn on_request_head(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        // A preflight carries no credentials. An earlier `cors` filter answers
+        // it in the request phase, where the gate still runs if none does.
+        if is_cors_preflight(ctx.request) {
+            return Ok(FilterAction::Continue);
+        }
         // No facts are captured here: the head phase applies earlier head
         // filters' mutations only after it ends, and later phases must see them.
         let view = self.head_view(ctx);
         match self.head {
             HeadAdmission::Off => Ok(FilterAction::Continue),
-            HeadAdmission::Limit => {
+            HeadAdmission::Defer => {
                 if let Some(rejection) = self.pre_identity_limit(ctx, &view).await? {
                     return Ok(FilterAction::Reject(rejection));
                 }

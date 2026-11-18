@@ -24,7 +24,8 @@
 //! Every other method (`initialize`, `tools/list`, `prompts/list`,
 //! `resources/list`, `resources/subscribe`, `ping`, `notifications/*`,
 //! `roots/*`, `sampling/*`) is **identity-only by design**: the
-//! `on_request` identity gate still runs, but `on_request_body`
+//! identity gate still runs (at the request head, or in `on_request` when
+//! the head phase does not), but `on_request_body`
 //! returns `BodyDone` without dispatching CMF. The premise is that
 //! route policy applies to entity invocations, not to
 //! discovery / control-plane traffic. Operators who need policy on a

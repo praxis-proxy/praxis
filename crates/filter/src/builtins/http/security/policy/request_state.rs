@@ -74,7 +74,8 @@ enum Admission {
     /// No baseline identity is held and the request is not admitted.
     #[default]
     Pending,
-    /// The head ran the limiter only; identity waits for the route.
+    /// The gate ran, or was deferred to the route; the final admission is
+    /// still due.
     Deferred,
     /// The baseline identity is resolved; the final admission is still due.
     Held(Box<IdentityPayload>),
@@ -161,7 +162,10 @@ impl RequestState {
     /// Take the held baseline identity, if any.
     pub(super) fn take_held_identity(&mut self) -> Option<IdentityPayload> {
         match std::mem::take(&mut self.admission) {
-            Admission::Held(identity) => Some(*identity),
+            Admission::Held(identity) => {
+                self.admission = Admission::Deferred;
+                Some(*identity)
+            },
             other => {
                 self.admission = other;
                 None
@@ -248,6 +252,7 @@ mod tests {
         state.hold_identity(identity());
         assert!(state.take_held_identity().is_some());
         assert!(state.take_held_identity().is_none(), "taking consumes it");
+        assert!(state.gate_done(), "taking it does not reopen the gate");
         assert!(!state.is_admitted());
     }
 

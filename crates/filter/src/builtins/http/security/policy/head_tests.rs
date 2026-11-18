@@ -183,13 +183,15 @@ async fn a_route_that_replaces_global_authentication_defers_identity() {
     let mut ctx = context(&req, 1);
     assert!(matches!(head(&filter, &mut ctx).await, FilterAction::Continue));
     assert_eq!(plugins(&calls), ["pre"], "no global resolution at the head");
-
-    // Header-first: the request phase must not run the global gate either.
     assert!(matches!(
         filter.on_request(&mut ctx).await.unwrap(),
         FilterAction::Continue
     ));
-    assert_eq!(plugins(&calls), ["pre"]);
+    assert_eq!(
+        plugins(&calls),
+        ["pre"],
+        "a header-first request phase does not run the global gate either"
+    );
     assert!(matches!(tool_body(&filter, &mut ctx).await, FilterAction::BodyDone));
     assert_eq!(plugins(&calls), ["pre", "key"], "only the route resolver judged it");
 }
@@ -216,23 +218,76 @@ async fn later_header_mutations_do_not_change_what_the_head_judged() {
     let req = request(Some("bob"));
     let mut ctx = context(&req, 1);
     assert!(matches!(head(&filter, &mut ctx).await, FilterAction::Continue));
-    // An earlier request-phase filter queues a change; identity has always
-    // judged the request as it arrived, plus trusted head mutations.
     ctx.request_headers_to_set
         .push((HeaderName::from_static("x-user"), HeaderValue::from_static("alice")));
     let action = filter.on_request(&mut ctx).await.unwrap();
-    assert_eq!(rejection(action).status, 403);
+    assert_eq!(
+        rejection(action).status,
+        403,
+        "identity judges the request as it arrived, plus trusted head mutations"
+    );
     assert_eq!(subject_of(&calls, "who"), "bob");
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_replaced_global_resolver_without_a_limiter_runs_no_head_phase() {
+async fn a_replaced_global_resolver_without_a_limiter_still_defers_identity() {
     let yaml = ROUTE_REPLACES_GLOBAL.replace("  rate_limits: [pre]\n", "").replace(
         "  - name: pre\n    kind: {kind}\n    hooks: [ratelimit.pre_identity]\n    capabilities: [read_headers]\n",
         "",
     );
-    let (_dir, path, _calls) = recorded_policy("test/head-route-no-limit", &yaml);
-    assert!(!filter(path).runs_request_head());
+    let (_dir, path, calls) = recorded_policy("test/head-route-no-limit", &yaml);
+    let filter = filter(path);
+    assert!(filter.runs_request_head());
+    assert!(matches!(filter.request_body_mode(), BodyMode::StreamBuffer { .. }));
+    let req = request(Some("alice"));
+    let mut ctx = context(&req, 1);
+    assert!(matches!(head(&filter, &mut ctx).await, FilterAction::Continue));
+    assert!(matches!(
+        filter.on_request(&mut ctx).await.unwrap(),
+        FilterAction::Continue
+    ));
+    assert!(plugins(&calls).is_empty(), "the global gate never ran");
+    assert!(matches!(tool_body(&filter, &mut ctx).await, FilterAction::BodyDone));
+    assert_eq!(plugins(&calls), ["key"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deferred_policy_limiter_still_rejects_at_the_head() {
+    let yaml = ROUTE_REPLACES_GLOBAL.replace(
+        "    capabilities: [read_headers]\nglobal:",
+        "    capabilities: [read_headers]\n    config: {deny: ratelimit.exceeded}\nglobal:",
+    );
+    let (_dir, path, calls) = recorded_policy("test/head-deferred-deny", &yaml);
+    let filter = filter(path);
+    let req = request(Some("alice"));
+    let mut ctx = context(&req, 1);
+    assert_eq!(rejection(head(&filter, &mut ctx).await).status, 429);
+    assert_eq!(plugins(&calls), ["pre"]);
+    assert!(
+        !state(&ctx).is_some_and(RequestState::gate_done),
+        "a denied head defers nothing"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cors_preflight_is_left_to_the_request_phase() {
+    let (_dir, path, calls) = recorded_policy("test/head-preflight", &HOST_LIMITERS.replace("{deny}", "{}"));
+    let filter = filter(path);
+    let mut req = request(None);
+    req.method = http::Method::OPTIONS;
+    req.headers
+        .insert(http::header::ORIGIN, HeaderValue::from_static("https://app.example"));
+    req.headers.insert(
+        http::header::ACCESS_CONTROL_REQUEST_METHOD,
+        HeaderValue::from_static("POST"),
+    );
+    let mut ctx = context(&req, 1);
+    assert!(matches!(head(&filter, &mut ctx).await, FilterAction::Continue));
+    assert!(plugins(&calls).is_empty(), "an earlier cors filter can still answer it");
+    assert!(
+        !state(&ctx).is_some_and(RequestState::gate_done),
+        "the request-phase gate still runs if nothing answers"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
