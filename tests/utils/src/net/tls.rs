@@ -747,13 +747,24 @@ async fn tls_probe_exchange(
         Ok(tls) => tls,
         Err(error) => return classify_tls_probe_error(&error, Vec::new()),
     };
-    if let Err(error) = tokio::io::AsyncWriteExt::write_all(&mut tls, data).await {
-        return classify_tls_probe_error(&error, Vec::new());
+    let write_error = send_tls_probe(&mut tls, data).await.err();
+    let outcome = Box::pin(read_tls_probe(&mut tls, observed)).await;
+    match (write_error, outcome) {
+        (Some(error), TlsProbeOutcome::ApplicationData { bytes, .. }) if bytes.is_empty() => {
+            classify_tls_probe_error(&error, Vec::new())
+        },
+        (Some(error), TlsProbeOutcome::OtherFailure(_)) => classify_tls_probe_error(&error, Vec::new()),
+        (_, outcome) => outcome,
     }
-    if let Err(error) = tokio::io::AsyncWriteExt::shutdown(&mut tls).await {
-        return classify_tls_probe_error(&error, Vec::new());
-    }
-    Box::pin(read_tls_probe(&mut tls, observed)).await
+}
+
+/// Leave the read side available when a rejected peer races the probe's final write.
+async fn send_tls_probe(
+    stream: &mut tokio_rustls::client::TlsStream<AsyncTcpStream>,
+    data: &[u8],
+) -> std::io::Result<()> {
+    tokio::io::AsyncWriteExt::write_all(stream, data).await?;
+    tokio::io::AsyncWriteExt::shutdown(stream).await
 }
 
 /// Retain a small bounded application response and its final read outcome.
@@ -1377,6 +1388,23 @@ mod tests {
             matches!(&outcome, TlsProbeOutcome::ConnectFailure(_)),
             "TCP refusal is not peer authentication refusal: {outcome:?}"
         );
+    }
+
+    #[test]
+    fn negative_probe_retains_rejection_alert_during_large_write() {
+        let certs = TestCertificates::generate();
+        let (addr, server) = probe_server(&certs, ProbeServerMode::RequireClientCert);
+        let outcome = tls_negative_probe(
+            &addr,
+            "localhost",
+            &vec![0; 1024 * 1024],
+            &certs.raw_tls_client_config(),
+        );
+        assert!(
+            outcome.is_client_auth_alert(),
+            "peer rejection must survive a failed application write: {outcome:?}"
+        );
+        server.join().expect("mTLS server");
     }
 
     /// Server action after accepting one probe connection.
