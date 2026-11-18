@@ -41,10 +41,15 @@ call Cedar, CEL, and OPA.
 
 ### Model access and inference inputs
 
-An application can be limited to approved models. By default, a request with a
-missing or unlisted model is denied. Rules can also inspect the parsed request's
-tool definitions and message content. The filter reads these requests directly,
-without an MCP classifier.
+An application can be limited to approved models. By default, a body-bearing
+inference request with a missing or unlisted model is denied. Rules can also
+inspect the parsed request's tool definitions and message content. The filter
+reads these requests directly, without an MCP classifier.
+
+Authenticated bodyless requests, such as `GET /v1/models`, use HTTP or global
+authorization rules instead of the model requirement. With neither configured,
+they can reach the upstream on identity alone. Protect other endpoints on the
+listener with HTTP/global rules or restricted routing.
 
 [LLM routes][llm] describes the available request fields. Core's
 [inference input example][llm-example] includes rules for checking them.
@@ -115,7 +120,9 @@ For simpler rules, Core provides dedicated filters:
 
 - [IP ACL][ip-acl] allows or denies source IPs and CIDR ranges.
 - [Guardrails][guardrails] matches strings, regexes, or PII patterns in
-  headers and request bodies.
+  request headers and bodies. It does not inspect response bodies. Use PPE's
+  supported response controls for policy-based output inspection or MCP
+  redaction, subject to the requirements below.
 - [Credential injection][credentials] attaches a fixed per-cluster credential.
 
 Use `policy` when rules depend on verified identity, caller permissions,
@@ -136,8 +143,11 @@ This fragment belongs inside a proxy filter chain:
 ```yaml
 - filter: policy
   config_path: /etc/praxis/policy.yaml
-  body_access: read_write
 ```
+
+The default `body_access: read_only` preserves response streaming. Enable
+`read_write` only for the rewriting or response-inspection cases listed below;
+it buffers responses and enforces the configured buffer limit.
 
 Filter fields sit directly under `filter`, without a nested `config` key. For a
 complete configuration, use the [Core policy example][core-example] or the
