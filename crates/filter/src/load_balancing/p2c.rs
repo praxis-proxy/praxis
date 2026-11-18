@@ -357,6 +357,109 @@ mod tests {
     }
 
     #[test]
+    fn scaled_power_of_two_prefers_more_capacity_at_equal_load() {
+        let p2c = PowerOfTwoChoices::new(vec![ep("10.0.0.1:80", 1), ep("10.0.0.2:80", 1)]);
+        let weights = EffectiveWeights::from_scaled(&[("10.0.0.1:80", 1_000_000), ("10.0.0.2:80", 250_000)]);
+
+        assert_eq!(&*p2c.select_weighted(None, &[], Some(&weights)).unwrap(), "10.0.0.1:80");
+        assert_eq!(p2c.counter_for("10.0.0.1:80").load(Ordering::Relaxed), 1);
+        assert_eq!(p2c.counter_for("10.0.0.2:80").load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn scaled_power_of_two_accounts_for_relative_load() {
+        let p2c = PowerOfTwoChoices::new(vec![ep("10.0.0.1:80", 1), ep("10.0.0.2:80", 1)]);
+        let weights = EffectiveWeights::from_scaled(&[("10.0.0.1:80", 1_000_000), ("10.0.0.2:80", 250_000)]);
+        p2c.counter_for("10.0.0.1:80").store(4, Ordering::Relaxed);
+
+        assert_eq!(&*p2c.select_weighted(None, &[], Some(&weights)).unwrap(), "10.0.0.2:80");
+        assert_eq!(p2c.counter_for("10.0.0.1:80").load(Ordering::Relaxed), 4);
+        assert_eq!(p2c.counter_for("10.0.0.2:80").load(Ordering::Relaxed), 1);
+        p2c.release("10.0.0.2:80");
+        assert_eq!(p2c.counter_for("10.0.0.2:80").load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn scaled_power_of_two_breaks_equal_cost_by_configured_weight() {
+        let p2c = PowerOfTwoChoices::new(vec![ep("10.0.0.1:80", 3), ep("10.0.0.2:80", 1)]);
+        let weights = EffectiveWeights::from_scaled(&[("10.0.0.1:80", 1_500_000), ("10.0.0.2:80", 500_000)]);
+
+        assert_eq!(&*p2c.select_weighted(None, &[], Some(&weights)).unwrap(), "10.0.0.1:80");
+        assert_eq!(p2c.counter_for("10.0.0.1:80").load(Ordering::Relaxed), 1);
+        assert_eq!(p2c.counter_for("10.0.0.2:80").load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn scaled_power_of_two_skips_unhealthy_and_retry_excluded() {
+        let p2c = PowerOfTwoChoices::new(vec![ep("10.0.0.1:80", 1), ep("10.0.0.2:80", 1), ep("10.0.0.3:80", 1)]);
+        let weights = EffectiveWeights::from_scaled(&[
+            ("10.0.0.1:80", 1_000_000),
+            ("10.0.0.2:80", 500_000),
+            ("10.0.0.3:80", 250_000),
+        ]);
+        let health = health_state(3);
+        health.endpoints()[0].mark_unhealthy();
+        let excluded = [Arc::from("10.0.0.2:80")];
+
+        assert_eq!(
+            &*p2c.select_weighted(Some(&health), &excluded, Some(&weights)).unwrap(),
+            "10.0.0.3:80"
+        );
+        assert_eq!(p2c.counter_for("10.0.0.1:80").load(Ordering::Relaxed), 0);
+        assert_eq!(p2c.counter_for("10.0.0.2:80").load(Ordering::Relaxed), 0);
+        assert_eq!(p2c.counter_for("10.0.0.3:80").load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn scaled_power_of_two_returns_none_when_healthy_candidate_is_excluded() {
+        let p2c = PowerOfTwoChoices::new(vec![ep("10.0.0.1:80", 1), ep("10.0.0.2:80", 1)]);
+        let weights = EffectiveWeights::from_scaled(&[("10.0.0.1:80", 1_000_000), ("10.0.0.2:80", 500_000)]);
+        let health = health_state(2);
+        health.endpoints()[0].mark_unhealthy();
+
+        assert!(
+            p2c.select_weighted(Some(&health), &[Arc::from("10.0.0.2:80")], Some(&weights))
+                .is_none()
+        );
+        assert_eq!(p2c.counter_for("10.0.0.1:80").load(Ordering::Relaxed), 0);
+        assert_eq!(p2c.counter_for("10.0.0.2:80").load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn scaled_power_of_two_empty_selector_returns_none() {
+        let p2c = PowerOfTwoChoices::new(vec![]);
+        let weights = EffectiveWeights::from_scaled(&[]);
+
+        assert!(p2c.select_weighted(None, &[], Some(&weights)).is_none());
+        assert!(p2c.select(None, &[]).is_none());
+    }
+
+    #[test]
+    fn strategy_uses_configured_p2c_when_only_zero_ramp_remains() {
+        let strategy = super::super::strategy::Strategy::PowerOfTwoChoices(PowerOfTwoChoices::new(vec![
+            ep("10.0.0.1:80", 1),
+            ep("10.0.0.2:80", 1),
+        ]));
+        let weights = EffectiveWeights::from_scaled(&[("10.0.0.1:80", 1_000_000), ("10.0.0.2:80", 0)]);
+        let health = health_state(2);
+        let excluded = [Arc::from("10.0.0.1:80")];
+        let super::super::strategy::Strategy::PowerOfTwoChoices(p2c) = &strategy else {
+            panic!("expected P2C strategy");
+        };
+
+        assert!(p2c.select_weighted(Some(&health), &excluded, Some(&weights)).is_none());
+
+        assert_eq!(
+            &*strategy
+                .select_weighted(None, Some(&health), &excluded, Some(&weights))
+                .unwrap(),
+            "10.0.0.2:80"
+        );
+        assert_eq!(p2c.counter_for("10.0.0.1:80").load(Ordering::Relaxed), 0);
+        assert_eq!(p2c.counter_for("10.0.0.2:80").load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
     fn single_endpoint_always_selected() {
         let p2c = PowerOfTwoChoices::new(vec![ep("10.0.0.1:80", 1)]);
         for _ in 0..10 {
