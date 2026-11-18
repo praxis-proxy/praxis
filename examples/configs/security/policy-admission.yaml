@@ -5,9 +5,9 @@
 # in the chain. Here `json_body_field` buffers each request body to promote its
 # `model` field, yet an unauthenticated or over-limit request is rejected
 # before a byte of its body is read. Authenticated requests reach the
-# classifier and then the backend. The policy declares no entity routes, so
-# its whole admission happens at the head; entity-aware policies run the limit
-# and baseline identity there and authorize once the body is classified.
+# classifier and then the backend. The policy declares no entity routes: it
+# rate-limits and authenticates at the head and applies its `global` rule on
+# that identity; entity-aware policies authorize once the body is classified.
 #
 # The policy document at /etc/praxis/admission-policy.yaml must be provisioned
 # before startup; see tests/integration/fixtures/admission-policy.yaml for a

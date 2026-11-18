@@ -3265,10 +3265,6 @@ mod tests {
         );
     }
 
-    // -------------------------------------------------------------------------
-    // Test Utilities
-    // -------------------------------------------------------------------------
-
     #[test]
     fn head_admitting_policy_first_in_the_chain_warns_about_nothing() {
         let filters = vec![head_filter("policy"), security_noop_filter("ip_acl", vec![])];
@@ -3325,6 +3321,10 @@ mod tests {
             assert!(warnings.is_empty(), "{case}: {warnings:?}");
         }
     }
+
+    // -------------------------------------------------------------------------
+    // Test Utilities
+    // -------------------------------------------------------------------------
 
     /// Build a [`PipelineFilter`] with the given conditions.
     fn make_pf(conditions: Vec<Condition>) -> PipelineFilter {

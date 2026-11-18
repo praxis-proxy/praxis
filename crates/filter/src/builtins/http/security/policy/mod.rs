@@ -218,11 +218,13 @@
 //! then; each limiter charges a request once.
 //!
 //! The head resolves identity only when the global resolver is the one that
-//! judges every route. When an entity default, bundle, group or route adds to
-//! or replaces the global `authentication:`, the head runs the pre-identity
+//! judges every route. When an entity default, group or route adds to or
+//! replaces the global `authentication:`, the head runs the pre-identity
 //! limiter only, identity waits for the route, and the request body is
-//! buffered until the route decides. A policy with `context_headers` keeps
-//! today's timing: those values can come from filters that run after the head.
+//! buffered (up to `max_buffer_bytes`) until the route decides. A policy with
+//! `context_headers` keeps today's timing: those values can come from filters
+//! that run after the head. A CORS preflight skips head admission, so an
+//! earlier `cors` filter can still answer it.
 //!
 //! The head judges the request as the client sent it plus the trusted header
 //! mutations of earlier head filters. Head admission also changes order: it

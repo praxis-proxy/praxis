@@ -60,7 +60,6 @@ fn an_authenticated_request_is_classified_and_forwarded() {
 fn the_pre_identity_limit_rejects_at_the_head() {
     let backend = start_header_echo_backend();
     let proxy = start_proxy(&load_example(free_port(), backend.port(), None));
-    // The harness's readiness probe spends part of the per-client budget.
     let mut statuses = Vec::new();
     while statuses.last() != Some(&429) && statuses.len() < 5 {
         statuses.push(status_without_body(proxy.addr(), None, 64));
@@ -68,7 +67,8 @@ fn the_pre_identity_limit_rejects_at_the_head() {
     assert_eq!(statuses.last(), Some(&429), "{statuses:?}");
     assert!(
         statuses.iter().rev().skip(1).all(|status| *status == 401),
-        "every request under the limit reached identity: {statuses:?}"
+        "every request under the limit reached identity (the harness's readiness probe spends \
+         part of the budget): {statuses:?}"
     );
     assert_eq!(
         status_without_body(proxy.addr(), Some(&mint_fixture_jwt("alice")), 64),
@@ -99,8 +99,6 @@ fn an_earlier_ip_acl_rejects_only_after_head_admission() {
         401,
         "policy authenticates before the earlier ip_acl runs"
     );
-    // Admitted, the request goes on to the pre-read, so ip_acl's request
-    // phase answers only once the body arrives.
     let body = r#"{"model":"m1"}"#;
     let raw = http_send(
         proxy.addr(),
@@ -111,7 +109,11 @@ fn an_earlier_ip_acl_rejects_only_after_head_admission() {
             body.len()
         ),
     );
-    assert_eq!(parse_status(&raw), 403, "{raw}");
+    assert_eq!(
+        parse_status(&raw),
+        403,
+        "admitted, the request is pre-read before ip_acl's request phase rejects it: {raw}"
+    );
 }
 
 #[test]
@@ -136,11 +138,12 @@ fn a_route_that_replaces_global_authentication_judges_its_own_credential() {
         200,
         "the global JWT resolver must not judge a route that replaced it"
     );
-    assert_ne!(
+    assert_eq!(
         send(&format!("Authorization: Bearer {}\r\n", mint_fixture_jwt("alice"))),
-        200,
+        401,
         "the replaced global credential is not accepted on the route"
     );
+    assert_eq!(send(""), 401, "a missing key is denied by the route");
 }
 
 // -----------------------------------------------------------------------------

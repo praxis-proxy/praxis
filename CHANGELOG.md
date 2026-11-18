@@ -55,8 +55,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   entity default, bundle, group or route extends or replaces the global
   `authentication:`, the head runs the limiter only, and header-first entity
   requests no longer pass the global gate: the route judges the credential,
-  and the body is buffered until it does. Policies with `context_headers`
-  keep the previous timing. Pipeline construction warns about an earlier
+  and the body is buffered (up to `max_buffer_bytes`) until it does.
+  Policies with `context_headers` keep the previous timing, and CORS
+  preflights skip head admission so an earlier `cors` filter still answers
+  them. Pipeline construction warns about an earlier
   security filter and about request conditions on a head-admitting policy.
 - Temporarily disable KIND rollout acceptance in CI and local commands
   because the cluster exhausts the shared inotify instance budget, pending
