@@ -756,16 +756,15 @@ async fn tls_probe_exchange(
     Box::pin(read_tls_probe(&mut tls, observed)).await
 }
 
-/// Classify a failed write, preferring an alert the peer sent before closing.
+/// Classify a failed TLS probe write, preferring a pending peer alert.
 ///
-/// In TLS 1.3 the client finishes its handshake before the server verifies
-/// the client certificate, so a rejecting server may send its alert and close
-/// while the probe is still writing. The write then fails with a reset or
-/// broken pipe, and the alert is still waiting to be read.
+/// Returns the original error classification when no peer alert is available.
 async fn alert_after_write_failure(
     stream: &mut tokio_rustls::client::TlsStream<AsyncTcpStream>,
     error: &std::io::Error,
 ) -> TlsProbeOutcome {
+    // TLS 1.3 can reject client authentication after the client's handshake
+    // completes, leaving a peer alert unread when a write fails.
     let transport = matches!(
         error.kind(),
         std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted

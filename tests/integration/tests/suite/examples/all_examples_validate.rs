@@ -197,7 +197,6 @@ fn ca_file_exception_respects_loader_context() {
     ))
     .expect("read actual upstream mTLS example");
     let mut config: serde_yaml::Value = serde_yaml::from_str(&yaml).expect("parse actual mTLS example");
-    // Host identity-file permissions must not mask the CA error under test.
     let certificates = praxis_test_utils::TestCertificates::generate();
     let cert_path = certificates.cert_path.to_str().expect("UTF-8 certificate path");
     let key_path = certificates.key_path.to_str().expect("UTF-8 key path");

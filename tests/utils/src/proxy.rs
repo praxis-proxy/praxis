@@ -411,12 +411,14 @@ fn binary_profile_matches(path: &Path) -> Result<(), String> {
     policy_version_matches(path, &stdout)
 }
 
-/// Run `path --version`, retrying while the executable is busy.
+/// Run `path --version`, retrying when the executable is busy.
 ///
-/// A binary written just before it runs can fail with `ETXTBSY` when another
-/// thread forks while the file is still open for writing: the child holds the
-/// descriptor until it execs. The window is brief, so a short retry clears it.
+/// # Errors
+///
+/// Returns an I/O error when retries are exhausted or another error occurs.
 fn version_output(path: &Path) -> std::io::Result<std::process::Output> {
+    // A concurrent fork can inherit a writable descriptor for this binary;
+    // the executable may stay busy until the child execs.
     let mut attempts = 0_u32;
     loop {
         match Command::new(path).arg("--version").output() {
