@@ -9,13 +9,7 @@
 //! listener configures it, and serves each connection with hyper-util's
 //! auto builder (HTTP/1.1, or HTTP/2 by prior knowledge or ALPN).
 
-use std::{
-    fmt, io,
-    net::SocketAddr,
-    pin::Pin,
-    sync::{Arc, Once},
-    time::Duration,
-};
+use std::{fmt, io, net::SocketAddr, pin::Pin, sync::Arc, time::Duration};
 
 use arc_swap::ArcSwap;
 use hyper::{Request, Response, body::Incoming, service::Service};
@@ -33,7 +27,7 @@ use praxis_core::{
     },
 };
 use praxis_filter::FilterPipeline;
-use praxis_tls::CachedCaCerts;
+use praxis_tls::{CachedCaCerts, TlsPeerIdentity};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     net::{TcpSocket, TcpStream},
@@ -79,10 +73,6 @@ const H2_MAX_HEADER_LIST_SIZE: u32 = 65_536; // 64 KiB
 
 /// Most concurrent streams an HTTP/2 client may open, as on Pingora.
 const H2_MAX_CONCURRENT_STREAMS: u32 = 128; // streams
-
-/// Whether this process has logged that client certificates do not reach
-/// the filters as a peer identity.
-static PEER_IDENTITY_NOTED: Once = Once::new();
 
 /// How long a client may take to complete the TLS handshake, as on Pingora.
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60); // 60 s
@@ -168,6 +158,9 @@ pub(super) struct ConnectionFacts {
 
     /// Whether the connection is TLS.
     pub(super) tls: bool,
+
+    /// Identity derived from the successfully authenticated TLS leaf.
+    pub(super) peer_identity: Option<Arc<TlsPeerIdentity>>,
 }
 
 // -----------------------------------------------------------------------------
@@ -400,18 +393,22 @@ impl Connection {
     async fn serve(mut self, stream: TcpStream) {
         let Some(acceptor) = self.acceptor.clone() else {
             if self.first_bytes(&stream).await {
-                self.serve_http(stream, false).await;
+                self.serve_http(stream, false, None).await;
             }
             return;
         };
         let handshake = Box::pin(tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(stream)));
         match handshake.await {
             Ok(Ok(mut tls)) => {
-                if tls.get_ref().1.peer_certificates().is_some() {
-                    note_unmapped_peer_identity();
-                }
+                let peer_identity = match verified_peer_identity(&tls) {
+                    Ok(identity) => identity,
+                    Err(err) => {
+                        error!(peer = %self.peer, error = err, "could not extract authenticated TLS peer identity");
+                        return;
+                    },
+                };
                 if tls_holds_data(&mut tls) || self.first_bytes(tls.get_ref().0).await {
-                    self.serve_http(tls, true).await;
+                    self.serve_http(tls, true, peer_identity).await;
                 }
             },
             Ok(Err(err)) if handshake_abandoned(&err) => {
@@ -424,12 +421,21 @@ impl Connection {
 
     /// Serve HTTP on `io` until the client closes it, the lifecycle starts
     /// draining, or the listener shuts down.
-    fn serve_http<I>(self, io: I, tls: bool) -> Pin<Box<dyn Future<Output = ()> + Send>>
+    fn serve_http<I>(
+        self,
+        io: I,
+        tls: bool,
+        peer_identity: Option<Arc<TlsPeerIdentity>>,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send>>
     where
         I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
         let service = ProxyService {
-            connection: Arc::new(ConnectionFacts { peer: self.peer, tls }),
+            connection: Arc::new(ConnectionFacts {
+                peer: self.peer,
+                tls,
+                peer_identity,
+            }),
             shared: Arc::clone(&self.shared),
         };
         let connection = Box::pin(
@@ -537,12 +543,14 @@ fn handshake_abandoned(err: &io::Error) -> bool {
     )
 }
 
-/// Log, once per process, that client certificates do not reach the filters
-/// as a peer identity on this backend yet.
-fn note_unmapped_peer_identity() {
-    PEER_IDENTITY_NOTED.call_once(|| {
-        debug!("the hyper backend does not map client certificates to a TLS peer identity yet; filters see none");
-    });
+/// Extract only the leaf from a completed, verified rustls handshake.
+fn verified_peer_identity(tls: &TlsStream<TcpStream>) -> Result<Option<Arc<TlsPeerIdentity>>, &'static str> {
+    tls.get_ref()
+        .1
+        .peer_certificates()
+        .and_then(|chain| chain.first())
+        .map(|leaf| TlsPeerIdentity::from_verified_der(leaf.as_ref()).map(Arc::new))
+        .transpose()
 }
 
 /// Whether the TLS session already holds what the client sent with its last

@@ -22,7 +22,7 @@ use serde::Deserialize;
 use tracing::{trace, warn};
 
 use crate::{
-    FilterAction, FilterError, Rejection,
+    FilterAction, FilterError, FilterMetadata, Rejection,
     filter::{HttpFilter, HttpFilterContext},
     parse_filter_config,
 };
@@ -192,7 +192,9 @@ impl GrpcTimeoutFilter {
         ctx.extensions
             .insert(GrpcDeadline::new(deadline, clamped, self.propagate));
 
-        ctx.set_metadata("grpc.deadline_ms", remaining.as_millis().to_string());
+        ctx.filter_metadata
+            .insert("grpc.deadline_ms", remaining.as_millis().to_string())
+            .unwrap_or_else(FilterMetadata::log_loss);
         trace!(
             deadline_ms = remaining.as_millis(),
             clamped, "gRPC deadline established"

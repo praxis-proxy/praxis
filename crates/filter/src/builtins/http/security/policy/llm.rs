@@ -856,12 +856,21 @@ impl ParsedLlmResponse {
 
         if let Some(choices) = self.0.get("choices").and_then(serde_json::Value::as_array) {
             for choice in choices {
-                if let Some(content) = choice.get("message").and_then(|message| message.get("content")) {
-                    push_text(&mut parts, content);
+                if let Some(message) = choice.get("message") {
+                    if let Some(content) = message.get("content") {
+                        push_text(&mut parts, content);
+                    }
+                    push_call_arguments(&mut parts, message);
                 }
                 if let Some(text) = choice.get("text") {
                     push_text(&mut parts, text);
                 }
+            }
+        }
+
+        if let Some(output) = self.0.get("output").and_then(serde_json::Value::as_array) {
+            for item in output {
+                push_response_output_text(&mut parts, item);
             }
         }
 
@@ -870,6 +879,29 @@ impl ParsedLlmResponse {
         }
 
         parts
+    }
+}
+
+/// Append recognized text from one Responses output item.
+fn push_response_output_text(parts: &mut Vec<ContentPart>, item: &serde_json::Value) {
+    match item.get("type").and_then(serde_json::Value::as_str) {
+        Some("message") => {
+            if let Some(content) = item.get("content").and_then(serde_json::Value::as_array) {
+                for part in content {
+                    if part.get("type").and_then(serde_json::Value::as_str) == Some("output_text")
+                        && let Some(text) = part.get("text")
+                    {
+                        push_text(parts, text);
+                    }
+                }
+            }
+        },
+        Some("function_call") => {
+            if let Some(arguments) = item.get("arguments") {
+                push_text(parts, arguments);
+            }
+        },
+        Some(_) | None => {},
     }
 }
 
@@ -1677,6 +1709,18 @@ mod tests {
             texts(&response(r#"{"content":[{"type":"text","text":"anthropic"}]}"#).content()),
             vec!["anthropic"],
         );
+    }
+
+    #[test]
+    fn recognized_response_text_preserves_choice_and_item_order() {
+        let chat = response(
+            r#"{"choices":[{"message":{"content":"first","tool_calls":[{"function":{"arguments":"second"}}],"function_call":{"arguments":"third"}},"text":"fourth"},{"message":{"content":"fifth"}}]}"#,
+        );
+        assert_eq!(texts(&chat.content()), ["first", "second", "third", "fourth", "fifth"]);
+        let responses = response(
+            r#"{"output":[{"type":"message","content":[{"type":"output_text","text":"one"},{"type":"output_image","text":"ignored"},{"type":"output_text","text":"two"}]},{"type":"function_call","arguments":"three"},{"type":"message","content":[{"type":"output_text","text":"four"}]}]}"#,
+        );
+        assert_eq!(texts(&responses.content()), ["one", "two", "three", "four"]);
     }
 
     #[test]

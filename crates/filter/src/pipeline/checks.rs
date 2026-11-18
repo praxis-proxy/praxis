@@ -516,56 +516,49 @@ pub(super) fn check_skip_to_bypasses_security(filters: &[PipelineFilter], errors
     }
 }
 
-/// `Terminal` branches that select a cluster and bypass later security filters.
+/// Detect top-level `Terminal` paths that can select an endpoint and skip security.
 ///
-/// When a branch rejoins at `Terminal` and its sub-chain selects a cluster,
-/// the pipeline forwards the request upstream immediately, skipping every
-/// top-level filter after the branch's host filter. A security filter placed
-/// after such a branch is silently bypassed for requests that take the branch,
-/// the same hazard [`check_skip_to_bypasses_security`] guards for `SkipTo`.
+/// The executor snapshots the upstream address after the host hook and before
+/// evaluating that host's branches. An earlier `Next` sibling or the Terminal
+/// sub-chain can change it. Selection by an earlier host or the host hook
+/// itself cannot make this Terminal forward.
 pub(super) fn check_terminal_rejoin_bypasses_security(filters: &[PipelineFilter], errors: &mut Vec<String>) {
-    // Tracks whether any filter up to and including the branch host can
-    // select a cluster. The runtime forwards a Terminal branch upstream
-    // whenever ctx.cluster is set — by the branch sub-chain OR by a router
-    // earlier in the pipeline — so a terminal branch after a selector
-    // bypasses later security filters even when the sub-chain itself
-    // selects nothing. Reachability-blind over-approximation, consistent
-    // with the module's other ordering checks.
-    let mut cluster_selected_before = false;
     for (i, pf) in filters.iter().enumerate() {
-        // The host filter runs before its branches are evaluated, so its own
-        // selection counts for its branches too — as does a selection made
-        // inside any branch sub-chain reached so far (a router in an earlier
-        // Next-rejoin branch sets ctx.cluster just like a top-level one).
-        cluster_selected_before = cluster_selected_before
-            || pf.filter.selects_cluster()
-            || pf.branches.iter().any(|b| branch_selects_cluster(&b.filters));
-        let terminal_selects_cluster = pf.branches.iter().any(|branch| {
-            matches!(branch.rejoin, RejoinTarget::Terminal)
-                && (cluster_selected_before || branch_selects_cluster(&branch.filters))
-        });
-        if !terminal_selects_cluster {
-            continue;
-        }
-        for (later_idx, later) in filters.iter().enumerate().skip(i + 1) {
-            if later.is_security {
-                let name = later.filter.name();
-                errors.push(format!(
-                    "filter at position {i} has a Terminal branch that forwards upstream (a \
-                     cluster is selected in the sub-chain or earlier in the pipeline), \
-                     bypassing security filter '{name}' at position {later_idx}; \
-                     place the security filter before the routing branch"
-                ));
+        let mut earlier_next_selects_endpoint = false;
+        for branch in &pf.branches {
+            let selects_endpoint = branch_selects_endpoint(&branch.filters);
+            if matches!(branch.rejoin, RejoinTarget::Terminal) && (earlier_next_selects_endpoint || selects_endpoint) {
+                push_terminal_security_errors(filters, i, &branch.name, errors);
+            }
+            if matches!(branch.rejoin, RejoinTarget::Next) {
+                earlier_next_selects_endpoint |= selects_endpoint;
             }
         }
     }
 }
 
-/// Whether any filter in a branch sub-chain (recursively) selects a cluster.
-fn branch_selects_cluster(filters: &[PipelineFilter]) -> bool {
-    filters
-        .iter()
-        .any(|pf| pf.filter.selects_cluster() || pf.branches.iter().any(|b| branch_selects_cluster(&b.filters)))
+/// Report the later security filters that a forwarding Terminal could skip.
+fn push_terminal_security_errors(filters: &[PipelineFilter], host: usize, branch: &str, errors: &mut Vec<String>) {
+    for (position, later) in filters.iter().enumerate().skip(host + 1) {
+        if later.is_security {
+            errors.push(format!(
+                "filter at position {host} has Terminal branch '{branch}' that can select an \
+                 endpoint during this host's branches, bypassing security filter '{}' at \
+                 position {position}; place the security filter before the branch host",
+                later.filter.name(),
+            ));
+        }
+    }
+}
+
+/// Whether a branch can reach an endpoint setter and return to its parent.
+fn branch_selects_endpoint(filters: &[PipelineFilter]) -> bool {
+    filters.iter().any(|pf| {
+        pf.filter.selects_upstream_endpoint()
+            || pf.branches.iter().any(|branch| {
+                !matches!(branch.rejoin, RejoinTarget::Terminal) && branch_selects_endpoint(&branch.filters)
+            })
+    })
 }
 
 /// Body-access filters inside branch chains.
@@ -3434,6 +3427,39 @@ mod tests {
         PipelineFilter::new(0, AnyFilter::Http(Box::new(ClusterSelectingFilter)), vec![], vec![])
     }
 
+    /// Assigns a fresh upstream endpoint during its request hook.
+    struct EndpointSelectingFilter;
+
+    #[async_trait::async_trait]
+    impl crate::filter::HttpFilter for EndpointSelectingFilter {
+        fn name(&self) -> &'static str {
+            "endpoint_selector"
+        }
+
+        fn selects_upstream_endpoint(&self) -> bool {
+            true
+        }
+
+        async fn on_request(
+            &self,
+            ctx: &mut crate::HttpFilterContext<'_>,
+        ) -> Result<crate::FilterAction, crate::FilterError> {
+            ctx.upstream = Some(praxis_core::connectivity::Upstream {
+                address: Arc::from("127.0.0.1:8000"),
+                authority: None,
+                base_path: None,
+                connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
+                tls: None,
+            });
+            Ok(crate::FilterAction::Continue)
+        }
+    }
+
+    /// A fixture that actually replaces the selected endpoint address.
+    fn endpoint_selecting_filter() -> PipelineFilter {
+        PipelineFilter::new(0, AnyFilter::Http(Box::new(EndpointSelectingFilter)), vec![], vec![])
+    }
+
     /// Build a [`ResolvedBranch`] with a [`Terminal`] rejoin target.
     ///
     /// [`Terminal`]: RejoinTarget::Terminal
@@ -3450,7 +3476,7 @@ mod tests {
     #[test]
     fn terminal_routing_branch_before_security_filter_errors() {
         let mut host = named_noop_filter("classifier", vec![]);
-        host.branches = vec![make_terminal_branch("route", vec![cluster_selecting_filter()])];
+        host.branches = vec![make_terminal_branch("route", vec![endpoint_selecting_filter()])];
         let ip_acl = security_noop_filter("ip_acl", vec![]);
         let filters = vec![host, ip_acl];
         let mut errors = Vec::new();
@@ -3480,13 +3506,26 @@ mod tests {
         check_terminal_rejoin_bypasses_security(&filters, &mut errors);
         assert!(
             errors.is_empty(),
-            "a terminal branch that selects no cluster does not forward, so no bypass: {errors:?}"
+            "a terminal branch that selects no endpoint does not forward, so no bypass: {errors:?}"
         );
     }
 
     #[test]
-    fn terminal_branch_after_upstream_selector_errors() {
-        let selector = cluster_selecting_filter();
+    fn terminal_branch_with_cluster_only_does_not_claim_forwarding() {
+        let mut host = named_noop_filter("classifier", vec![]);
+        host.branches = vec![make_terminal_branch("route", vec![cluster_selecting_filter()])];
+        let filters = vec![host, security_noop_filter("ip_acl", vec![])];
+        let mut errors = Vec::new();
+        check_terminal_rejoin_bypasses_security(&filters, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "cluster selection alone cannot satisfy Terminal forwarding: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn terminal_branch_after_prior_endpoint_does_not_claim_forwarding() {
+        let selector = endpoint_selecting_filter();
         let mut host = named_noop_filter("classifier", vec![]);
         host.branches = vec![make_terminal_branch(
             "br",
@@ -3496,24 +3535,18 @@ mod tests {
         let filters = vec![selector, host, ip_acl];
         let mut errors = Vec::new();
         check_terminal_rejoin_bypasses_security(&filters, &mut errors);
-        assert_eq!(
-            errors.len(),
-            1,
-            "a terminal branch after an upstream selector forwards and must error: {errors:?}"
-        );
         assert!(
-            errors[0].contains("ip_acl"),
-            "the bypassed security filter should be named: {}",
-            errors[0]
+            errors.is_empty(),
+            "an endpoint selected before this host cannot make its Terminal forward: {errors:?}"
         );
     }
 
     #[test]
-    fn terminal_branch_after_earlier_branch_selector_errors() {
+    fn terminal_branch_after_prior_host_branch_does_not_claim_forwarding() {
         let mut selector_host = named_noop_filter("classifier", vec![]);
         selector_host.branches = vec![ResolvedBranch {
             condition: None,
-            filters: vec![cluster_selecting_filter()],
+            filters: vec![endpoint_selecting_filter()],
             max_iterations: None,
             name: Arc::from("route"),
             rejoin: RejoinTarget::Next,
@@ -3524,15 +3557,9 @@ mod tests {
         let filters = vec![selector_host, terminal_host, ip_acl];
         let mut errors = Vec::new();
         check_terminal_rejoin_bypasses_security(&filters, &mut errors);
-        assert_eq!(
-            errors.len(),
-            1,
-            "a selection inside an earlier branch also forwards a later terminal branch: {errors:?}"
-        );
         assert!(
-            errors[0].contains("ip_acl"),
-            "the bypassed security filter should be named: {}",
-            errors[0]
+            errors.is_empty(),
+            "a selection in another host's branches predates this host's snapshot: {errors:?}"
         );
     }
 
@@ -3540,7 +3567,7 @@ mod tests {
     fn terminal_routing_branch_after_security_filter_no_error() {
         let ip_acl = security_noop_filter("ip_acl", vec![]);
         let mut host = named_noop_filter("classifier", vec![]);
-        host.branches = vec![make_terminal_branch("route", vec![cluster_selecting_filter()])];
+        host.branches = vec![make_terminal_branch("route", vec![endpoint_selecting_filter()])];
         let filters = vec![ip_acl, host];
         let mut errors = Vec::new();
         check_terminal_rejoin_bypasses_security(&filters, &mut errors);
@@ -3553,7 +3580,7 @@ mod tests {
     #[test]
     fn terminal_routing_branch_before_custom_security_filter_errors() {
         let mut host = named_noop_filter("classifier", vec![]);
-        host.branches = vec![make_terminal_branch("route", vec![cluster_selecting_filter()])];
+        host.branches = vec![make_terminal_branch("route", vec![endpoint_selecting_filter()])];
         let my_auth = security_noop_filter("my_auth", vec![]);
         let filters = vec![host, my_auth];
         let mut errors = Vec::new();

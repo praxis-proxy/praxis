@@ -160,6 +160,9 @@ impl TryFrom<RawInlineCredential> for InlineCredential {
         if raw.username.trim().is_empty() {
             return Err("username must not be empty".to_owned());
         }
+        if raw.username.contains(':') {
+            return Err(format!("username '{}' must not contain ':'", raw.username));
+        }
 
         Ok(Self {
             username: raw.username,

@@ -110,6 +110,9 @@ pub struct FilterPipeline {
     /// Pre-computed body processing capabilities for this pipeline.
     body_capabilities: BodyCapabilities,
 
+    /// Whether any top-level or branch HTTP filter requests terminal observation.
+    has_request_completion_observer: bool,
+
     /// Compression configuration, if a compression filter is present.
     compression: Option<CompressionConfig>,
 
@@ -195,6 +198,27 @@ pub struct FilterPipeline {
     allow_private_upstreams: bool,
     /// Indices into `filters` of filters declaring response-trailer access.
     response_trailer_filter_indices: Vec<usize>,
+}
+
+/// Final response-hook decisions for request-completion observers.
+#[derive(Default)]
+struct CompletionResponseHooks(Vec<Option<bool>>);
+
+impl CompletionResponseHooks {
+    /// Record whether one final response hook was eligible.
+    fn mark(&mut self, filter_id: usize, eligible: bool) {
+        if self.0.len() <= filter_id {
+            self.0.resize(filter_id.saturating_add(1), None);
+        }
+        if let Some(decision) = self.0.get_mut(filter_id) {
+            *decision = Some(eligible);
+        }
+    }
+
+    /// The final response decision, or none if no final hook reached it.
+    fn decision(&self, filter_id: usize) -> Option<bool> {
+        self.0.get(filter_id).copied().flatten()
+    }
 }
 
 #[expect(
@@ -551,19 +575,55 @@ impl FilterPipeline {
             .any(|pf| crate::condition::should_execute_bound_selected(&pf.conditions, ctx.request, bound, selected))
     }
 
-    /// Ask each filter to emit its end-of-request record, returning
-    /// whether any did.
+    /// Let the first eligible access-log instance claim an incomplete
+    /// request's one fallback record.
+    pub fn emit_deferred_access_record(&self, ctx: &mut crate::HttpFilterContext<'_>, status: u16) -> bool {
+        for entry in self.filters.iter().filter(|entry| entry.filter.name() == "access_log") {
+            let eligible = crate::condition::should_execute_bound_selected(
+                &entry.conditions,
+                ctx.request,
+                ctx.bound_upstream_view(),
+                http_utils::ctx_selected_upstream(ctx),
+            );
+            if !eligible {
+                continue;
+            }
+            let previous_filter_id = ctx.current_filter_id.replace(entry.filter_id);
+            let claimed = entry.filter.emit_deferred_record(ctx, status);
+            ctx.current_filter_id = previous_filter_id;
+            return claimed;
+        }
+        false
+    }
+
+    /// Notify executed HTTP filter invocations that the request has ended.
     ///
-    /// Used by the protocol layer's logging phase for requests that never
-    /// reached a filter's own completion hooks. Filters that log nothing
-    /// are no-ops, so this is cheap for pipelines without an access log.
-    pub fn emit_deferred_records(&self, ctx: &crate::HttpFilterContext<'_>, status: u16) -> bool {
-        // Short-circuits on the first filter that claims the record: one
-        // access record per request, matching the completion hooks, which
-        // mark the request logged after the first emit.
-        self.filters
-            .iter()
-            .any(|pf| pf.filter.emit_deferred_record(ctx, status))
+    /// Branch filters retain their own invocation IDs and execution bits.
+    /// A final response hook's eligible or skipped decision is retained.
+    /// If no final hook reached an observer, only status-only response scope
+    /// can be checked from the written status. Header-dependent scope and
+    /// unknown status fail closed without final response evidence.
+    pub fn emit_request_completion(&self, ctx: &mut crate::HttpFilterContext<'_>, status: u16) {
+        if !self.has_request_completion_observer {
+            return;
+        }
+        for (index, entry) in self.filters.iter().enumerate() {
+            if ctx.executed_filter_indices.get(index) == Some(&true) {
+                emit_completion_entry(entry, ctx, status);
+            }
+            for branch in &entry.branches {
+                for_each_pipeline_filter(&branch.filters, &mut |child| {
+                    if branch::branch_filter_executed(&ctx.executed_branch_filters, child.filter_id) {
+                        emit_completion_entry(child, ctx, status);
+                    }
+                });
+            }
+        }
+    }
+
+    /// Whether this pipeline needs terminal request-completion dispatch.
+    pub fn has_request_completion_observer(&self) -> bool {
+        self.has_request_completion_observer
     }
 
     /// Whether any filter in this pipeline rewrites response trailers.
@@ -642,6 +702,7 @@ impl FilterPipeline {
     /// Set the shared [`crate::SessionStoreRegistry`] for this pipeline.
     pub fn set_session_stores(&mut self, stores: Arc<crate::SessionStoreRegistry>) {
         self.visit_nested_pipelines(&mut |pipeline| pipeline.set_session_stores(Arc::clone(&stores)));
+        for_each_pipeline_filter(&self.filters, &mut |filter| filter.filter.bind_session_stores(&stores));
         self.session_stores = Some(stores);
     }
 
@@ -864,6 +925,56 @@ fn for_each_pipeline_filter(filters: &[PipelineFilter], visit: &mut dyn FnMut(&P
             for_each_pipeline_filter(&branch.filters, visit);
         }
     }
+}
+
+/// Cache whether any resolved filter, including branch filters, needs completion.
+fn pipeline_has_request_completion_observer(filters: &[PipelineFilter]) -> bool {
+    let mut has_observer = false;
+    for_each_pipeline_filter(filters, &mut |entry| {
+        has_observer |= entry.filter.observes_request_completion();
+    });
+    has_observer
+}
+
+/// Deliver one terminal hook with the entry's invocation identity bound.
+#[expect(
+    clippy::too_many_lines,
+    reason = "final response evidence and fallback scope are checked together"
+)]
+fn emit_completion_entry(entry: &PipelineFilter, ctx: &mut crate::HttpFilterContext<'_>, status: u16) {
+    if !entry.filter.observes_request_completion() {
+        return;
+    }
+    let decision = ctx
+        .extensions
+        .get::<CompletionResponseHooks>()
+        .and_then(|hooks| hooks.decision(entry.filter_id));
+    if decision == Some(false) {
+        return;
+    }
+    if decision.is_none() && !entry.response_conditions.is_empty() {
+        let needs_unknown_headers = entry.response_conditions.iter().any(|condition| {
+            let (praxis_core::config::ResponseCondition::When(scope)
+            | praxis_core::config::ResponseCondition::Unless(scope)) = condition;
+            scope.headers.is_some() || scope.headers_present.is_some()
+        });
+        if needs_unknown_headers {
+            return;
+        }
+        let Ok(written) = ::http::StatusCode::from_u16(status) else {
+            return;
+        };
+        if !crate::condition::should_execute_response_ref(
+            &entry.response_conditions,
+            written,
+            &::http::HeaderMap::new(),
+        ) {
+            return;
+        }
+    }
+    let previous_filter_id = ctx.current_filter_id.replace(entry.filter_id);
+    entry.filter.on_request_complete(ctx, status);
+    ctx.current_filter_id = previous_filter_id;
 }
 
 /// Collect every filter's cluster application-metadata declarations,

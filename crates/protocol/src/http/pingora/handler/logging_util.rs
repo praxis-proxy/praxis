@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2024 Praxis Contributors
 
-//! Fallback access log emission and response filter cleanup.
+//! Terminal filter observers and response filter cleanup.
 //!
 //! Emits access log records for requests that ended before the
 //! `access_log` filter's normal completion hooks could run (early
@@ -14,24 +14,22 @@ use praxis_filter::FilterPipeline;
 
 use crate::http::pingora::context::PingoraRequestCtx;
 
-/// Emit a fallback access record for requests whose lifecycle ended
-/// before the access log filter's completion hooks could run.
+/// Notify request-completion observers and emit an eligible fallback access record.
 ///
-/// Covers pre-upstream rejections, upstream connect and read failures,
-/// and streamed responses aborted mid-body: none of these reach the
-/// bodyless response phase or body end-of-stream where the filter
-/// emits. Only fires when the pipeline configures an `access_log`
-/// filter; these records bypass the filter's sampling because
-/// incomplete requests are always worth a record.
-pub(in crate::http) fn maybe_emit_fallback_access_log(
-    pipeline: &FilterPipeline,
-    status: u16,
-    ctx: &mut PingoraRequestCtx,
-) {
-    if ctx.response_delivery_complete || ctx.connection_upgraded || !pipeline.contains_filter("access_log") {
+/// Completion observers run for successful and failed requests. The access
+/// record fallback covers only requests whose normal access-log completion
+/// hook did not run; it bypasses sampling for incomplete requests.
+pub(in crate::http) fn emit_completion_observers(pipeline: &FilterPipeline, status: u16, ctx: &mut PingoraRequestCtx) {
+    let needs_access_fallback =
+        !ctx.response_delivery_complete && !ctx.connection_upgraded && pipeline.contains_filter("access_log");
+    if !pipeline.has_request_completion_observer() && !needs_access_fallback {
         return;
     }
-    if let Some(filter_ctx) = ctx.filter_context_for(pipeline, None) {
+    if let Some(mut filter_ctx) = ctx.filter_context_for(pipeline, None) {
+        pipeline.emit_request_completion(&mut filter_ctx, status);
+        if !needs_access_fallback {
+            return;
+        }
         // The access_log filter already logged this request (e.g. a bodyless
         // response whose on_response emitted before a later filter rejected):
         // no fallback record, or it would duplicate.
@@ -52,7 +50,7 @@ pub(in crate::http) fn maybe_emit_fallback_access_log(
         // configured `fields`, and so late facts — the gRPC completion
         // status captured from the response trailers — reach it. Only
         // fall back to the fixed shape if no filter claimed the record.
-        if !pipeline.emit_deferred_records(&filter_ctx, status) {
+        if !pipeline.emit_deferred_access_record(&mut filter_ctx, status) {
             praxis_filter::emit_access_record(&filter_ctx, status);
         }
     }

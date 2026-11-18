@@ -1,7 +1,7 @@
 # Retry Policy
 #
-# Automatically retries failed upstream requests with exponential backoff
-# and a token-bucket budget to prevent retry storms.
+# Retries connection failures and resets up to two times per request,
+# with exponential backoff between attempts.
 #
 # Usage:
 #   cargo run -p praxis-proxy -- -c examples/configs/traffic-management/retry-policy.yaml

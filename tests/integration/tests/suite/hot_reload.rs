@@ -3,7 +3,17 @@
 
 //! Integration tests for hot config reload.
 
-use std::time::{Duration, Instant};
+use std::{
+    io::{BufRead as _, BufReader, Write as _},
+    net::TcpListener,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver},
+    },
+    thread::JoinHandle,
+    time::{Duration, Instant},
+};
 
 use praxis_test_utils::{
     PraxisProcess,
@@ -13,6 +23,12 @@ use praxis_test_utils::{
         port::free_port,
     },
     start_reloadable_proxy,
+};
+#[cfg(all(feature = "pingora", feature = "hedged-requests"))]
+use praxis_test_utils::{
+    TestCertificates,
+    net::http_client::{http_send, parse_body, parse_header, parse_status},
+    start_counting_tls_backend,
 };
 
 /// Poll `GET path` until `pred(status, body)` holds, returning the last
@@ -62,7 +78,7 @@ fn reload_route_change_shifts_traffic() {
 
 #[test]
 fn reload_adding_health_checks_restarts_health_tasks() {
-    let backend = start_backend_with_shutdown("healthy-backend");
+    let (backend, probe_events) = ProbeBackend::start();
     let proxy_port = free_port();
     let proxy = start_reloadable_proxy(&proxy_yaml(proxy_port, backend.port()));
     let addr = format!("127.0.0.1:{proxy_port}");
@@ -70,8 +86,15 @@ fn reload_adding_health_checks_restarts_health_tasks() {
     let (status, body) = http_get(&addr, "/", None);
     assert_eq!(status, 200, "initial request should succeed");
     assert_eq!(body, "healthy-backend", "initial route should hit the backend");
+    assert!(
+        probe_events.try_recv().is_err(),
+        "no health probes should run before reload"
+    );
 
     proxy.write_config(&health_checked_yaml(proxy_port, backend.port()));
+    probe_events
+        .recv_timeout(Duration::from_secs(15))
+        .expect("reload must start the dedicated HTTP health probe");
 
     let (status, body) = get_eventually(&addr, "/", |code, b| code == 200 && b == "healthy-backend");
     assert_eq!(
@@ -284,24 +307,41 @@ fn reload_mid_flight_old_request_completes_with_old_pipeline() {
 
 #[test]
 fn reload_resets_rate_limit_bucket() {
-    let backend = start_backend_with_shutdown("ok");
+    let backend = start_backend_with_shutdown("before-reload");
+    let reloaded_backend = start_backend_with_shutdown("after-reload");
     let proxy_port = free_port();
 
-    let yaml = rate_limit_yaml(proxy_port, backend.port(), 5);
+    let yaml = rate_limit_yaml(proxy_port, backend.port(), 0.001, 5);
     let proxy = start_reloadable_proxy(&yaml);
 
     for i in 0..4 {
-        let (s, _) = http_get(proxy.addr(), "/", None);
+        let (s, body) = http_get(proxy.addr(), "/", None);
         assert_eq!(s, 200, "request {i} should be within burst");
+        assert_eq!(body, "before-reload", "initial burst must use the original backend");
     }
 
     let (s_limited, _) = http_get(proxy.addr(), "/", None);
     assert_eq!(s_limited, 429, "should be rate limited after burst exhausted");
 
-    proxy.write_config(&rate_limit_yaml(proxy_port, backend.port(), 5));
+    proxy.write_config(&rate_limit_yaml(proxy_port, reloaded_backend.port(), 0.001, 5));
 
-    let (s_after, _) = get_eventually(proxy.addr(), "/", |s, _| s == 200);
+    let (s_after, body_after) = get_eventually(proxy.addr(), "/", |s, body| s == 200 && body == "after-reload");
     assert_eq!(s_after, 200, "after reload, rate limit bucket should be fresh");
+    assert_eq!(
+        body_after, "after-reload",
+        "fresh token must come from the reloaded pipeline"
+    );
+
+    for i in 0..4 {
+        let (status, body) = http_get(proxy.addr(), "/", None);
+        assert_eq!(status, 200, "fresh bucket must have four remaining tokens: request {i}");
+        assert_eq!(body, "after-reload", "remaining burst must use the reloaded backend");
+    }
+    let (s_limited_after, _) = http_get(proxy.addr(), "/", None);
+    assert_eq!(
+        s_limited_after, 429,
+        "fresh bucket must still enforce its five-token burst"
+    );
 }
 
 #[test]
@@ -573,6 +613,85 @@ insecure_options:
     assert_eq!(body, "health-ok", "new health route should work after reload");
 }
 
+#[cfg(all(feature = "pingora", feature = "hedged-requests"))]
+#[test]
+fn hedged_private_ca_survives_reload() {
+    use std::sync::atomic::Ordering;
+
+    let certs = TestCertificates::generate();
+    let other = TestCertificates::generate();
+    let (first_port, first_accepts) = start_counting_tls_backend(&certs, "private-ca-ok");
+    let (second_port, second_accepts) = start_counting_tls_backend(&certs, "private-ca-ok");
+    let proxy_port = free_port();
+    let proxy_addr = format!("127.0.0.1:{proxy_port}");
+    let yaml = |generation: &str, global_ca: &std::path::Path, cluster_ca: Option<&std::path::Path>| {
+        hedged_tls_yaml(proxy_port, first_port, second_port, global_ca, cluster_ca, generation)
+    };
+    let proxy = start_reloadable_proxy(&yaml("first", &certs.ca_cert_path, None));
+    let (status, body) = http_get(&proxy_addr, "/", None);
+    assert_eq!(
+        (status, body.as_str()),
+        (200, "private-ca-ok"),
+        "startup hedge trusts global CA"
+    );
+
+    for (generation, path) in [
+        ("second", certs.ca_cert_path.as_path()),
+        ("third", other.ca_cert_path.as_path()),
+    ] {
+        let before = first_accepts.load(Ordering::Relaxed) + second_accepts.load(Ordering::Relaxed);
+        let response = proxy.reload_until(
+            &yaml(generation, path, None),
+            || hedged_response(&proxy_addr),
+            |raw| parse_header(raw, "x-test-generation").as_deref() == Some(generation),
+        );
+        assert_eq!(
+            parse_header(&response, "x-test-generation").as_deref(),
+            Some(generation),
+            "the hedged response itself must carry the applied generation: {response}"
+        );
+        assert_eq!(
+            (parse_status(&response), parse_body(&response)),
+            (200, "private-ca-ok".to_owned()),
+            "fresh hedged HTTPS requests retain startup global CA after {generation} reload"
+        );
+        let after = first_accepts.load(Ordering::Relaxed) + second_accepts.load(Ordering::Relaxed);
+        assert!(
+            after > before,
+            "{generation} request must open a fresh backend TLS connection"
+        );
+    }
+
+    let override_proxy_port = free_port();
+    let override_addr = format!("127.0.0.1:{override_proxy_port}");
+    let override_yaml = |generation: &str| {
+        hedged_tls_yaml(
+            override_proxy_port,
+            first_port,
+            second_port,
+            &other.ca_cert_path,
+            Some(&certs.ca_cert_path),
+            generation,
+        )
+    };
+    let override_proxy = start_reloadable_proxy(&override_yaml("first"));
+    let response = override_proxy.reload_until(
+        &override_yaml("second"),
+        || hedged_response(&override_addr),
+        |raw| parse_header(raw, "x-test-generation").as_deref() == Some("second"),
+    );
+    assert_eq!(
+        parse_header(&response, "x-test-generation").as_deref(),
+        Some("second"),
+        "cluster override must be exercised on the reloaded hedged pipeline: {response}"
+    );
+    assert_eq!(
+        (parse_status(&response), parse_body(&response)),
+        (200, "private-ca-ok".to_owned()),
+        "cluster CA must override the wrong global CA after reload"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Test Utilities
 // ---------------------------------------------------------------------------
@@ -648,7 +767,7 @@ insecure_options:
     )
 }
 
-/// Proxy YAML whose cluster carries an active TCP health check.
+/// Proxy YAML whose cluster carries an observable HTTP health check.
 fn health_checked_yaml(proxy_port: u16, backend_port: u16) -> String {
     format!(
         r#"
@@ -664,7 +783,8 @@ clusters:
     endpoints:
       - "127.0.0.1:{backend_port}"
     health_check:
-      type: tcp
+      type: http
+      path: /_praxis_health_probe
       interval_ms: 1000
       timeout_ms: 500
       healthy_threshold: 1
@@ -685,6 +805,76 @@ filter_chains:
     )
 }
 
+struct ProbeBackend {
+    port: u16,
+    stop: Arc<AtomicBool>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl ProbeBackend {
+    fn start() -> (Self, Receiver<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind probe backend");
+        let port = listener.local_addr().expect("backend address").port();
+        listener.set_nonblocking(true).expect("nonblocking backend listener");
+        let (probe_tx, probe_rx) = mpsc::channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        let worker = std::thread::spawn(move || {
+            while !worker_stop.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(2)))
+                            .expect("backend read timeout");
+                        stream
+                            .set_write_timeout(Some(Duration::from_secs(2)))
+                            .expect("backend write timeout");
+                        let mut reader = BufReader::new(stream);
+                        let mut request_line = String::new();
+                        if reader.read_line(&mut request_line).is_err() {
+                            continue;
+                        }
+                        if request_line.split_whitespace().nth(1) == Some("/_praxis_health_probe") {
+                            let _probe_sent = probe_tx.send(());
+                        }
+                        let response =
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 15\r\nConnection: close\r\n\r\nhealthy-backend";
+                        reader.get_mut().write_all(response).expect("backend response");
+                    },
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    },
+                    Err(error) => panic!("probe backend accept: {error}"),
+                }
+            }
+        });
+        (
+            Self {
+                port,
+                stop,
+                worker: Some(worker),
+            },
+            probe_rx,
+        )
+    }
+
+    fn port(&self) -> u16 {
+        self.port
+    }
+}
+
+impl Drop for ProbeBackend {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(worker) = self.worker.take() {
+            let result = worker.join();
+            if !std::thread::panicking() {
+                result.expect("probe backend worker");
+            }
+        }
+    }
+}
+
 fn static_yaml(proxy_port: u16, body: &str) -> String {
     format!(
         r#"
@@ -702,7 +892,7 @@ filter_chains:
     )
 }
 
-fn rate_limit_yaml(proxy_port: u16, backend_port: u16, burst: u32) -> String {
+fn rate_limit_yaml(proxy_port: u16, backend_port: u16, rate: f64, burst: u32) -> String {
     format!(
         r#"
 listeners:
@@ -714,7 +904,7 @@ filter_chains:
     filters:
       - filter: rate_limit
         scope: local
-        rate: 1
+        rate: {rate}
         burst: {burst}
         mode: global
       - filter: router
@@ -729,5 +919,65 @@ filter_chains:
 insecure_options:
   allow_private_endpoints: true
 "#
+    )
+}
+
+/// Keep the generation header and private-CA backend body from the same request.
+#[cfg(all(feature = "pingora", feature = "hedged-requests"))]
+fn hedged_response(addr: &str) -> String {
+    http_send(addr, "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+}
+
+#[cfg(all(feature = "pingora", feature = "hedged-requests"))]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "listener and two backend ports plus TLS fixture paths and generation"
+)]
+fn hedged_tls_yaml(
+    proxy_port: u16,
+    first_port: u16,
+    second_port: u16,
+    global_ca: &std::path::Path,
+    cluster_ca: Option<&std::path::Path>,
+    generation: &str,
+) -> String {
+    let tls = cluster_ca.map_or_else(
+        || "sni: localhost".to_owned(),
+        |path| format!("sni: localhost, ca: {{ca_path: '{}'}}", path.display()),
+    );
+    format!(
+        r#"
+insecure_options:
+  allow_private_endpoints: true
+runtime:
+  upstream_ca_file: "{global_ca}"
+listeners:
+  - name: hedged
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains: [hedged]
+filter_chains:
+  - name: hedged
+    filters:
+      - filter: headers
+        response_set:
+          - name: X-Test-Generation
+            value: "{generation}"
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+            hedge_policy:
+              initial_requests: 2
+              max_attempts: 2
+              budget_percent: 100
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            tls: {{{tls}}}
+            endpoints:
+              - "127.0.0.1:{first_port}"
+              - "127.0.0.1:{second_port}"
+"#,
+        global_ca = global_ca.display(),
     )
 }

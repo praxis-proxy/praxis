@@ -127,6 +127,7 @@ mod ring_hash;
 mod round_robin;
 mod route_on_promoted_header;
 mod route_templates;
+mod routing_health;
 mod security_examples;
 mod selected_upstream_conditions;
 mod session_affinity;
@@ -140,6 +141,7 @@ mod tcp_byte_counters;
 mod tcp_connection_metrics;
 mod tcp_connections_total;
 mod timeout;
+mod tls_examples;
 mod trace_context;
 #[cfg(feature = "otel")]
 mod tracing_otlp;

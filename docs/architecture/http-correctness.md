@@ -22,8 +22,8 @@ production experience.
 
 ## What Pingora Handles
 
-Pingora 0.8.x handles several correctness concerns at
-the framework level:
+The pinned renamed Pingora 0.11.4 fork handles several
+correctness concerns at the framework level:
 
 - **Request smuggling**: Content-Length vs
   Transfer-Encoding validation per
@@ -50,10 +50,12 @@ the framework level:
   (`upstream_request_filter`) and response
   (`response_filter`) paths per
   [RFC 9110 Section 7.6.1].
-- **Host header validation**: Praxis rejects requests
-  with conflicting `Host` headers (400) and
-  canonicalizes duplicate identical values. Missing
-  `Host` on HTTP/1.1 is rejected per
+- **Host header validation**: The pinned Pingora parser
+  rejects multiple `Host` fields on H1 and H2 ingress
+  (400), even when their values match. Praxis also
+  validates an already constructed header map and
+  canonicalizes identical duplicates as a defensive
+  fallback. Missing `Host` on HTTP/1.1 is rejected per
   [RFC 9112](https://datatracker.ietf.org/doc/html/rfc9112).
 - **Proxy headers**: Pingora adds no `X-Forwarded-For`,
   `X-Forwarded-Proto`, or similar headers. Praxis

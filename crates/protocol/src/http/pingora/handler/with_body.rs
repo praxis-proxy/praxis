@@ -32,7 +32,7 @@ use super::{
     connected_to_upstream, fail_to_proxy,
     health_util::{ended_by_client, record_passive_health},
     hop_by_hop::{self, RemoveHeader as _},
-    logging_util::{logging_cleanup, maybe_emit_fallback_access_log},
+    logging_util::{emit_completion_observers, logging_cleanup},
     metrics_util::emit_request_metrics,
     request_body_filter, request_filter, response_body_filter, response_filter, response_trailer_filter,
     response_trailers,
@@ -352,7 +352,7 @@ impl ProxyHttp for PingoraHttpHandler {
 
     async fn response_trailer_filter(
         &self,
-        _session: &mut Session,
+        session: &mut Session,
         upstream_trailers: &mut http::HeaderMap,
         ctx: &mut Self::CTX,
     ) -> Result<Option<Bytes>>
@@ -360,17 +360,24 @@ impl ProxyHttp for PingoraHttpHandler {
         Self::CTX: Send + Sync,
     {
         let pipeline = ctx.pipeline(&self.pipeline);
-        if !pipeline.needs_response_trailers() {
-            let produced = response_trailer_filter::dispatch_synthetic_eof(&pipeline, ctx)
-                .map_err(|error| pingora_core::Error::explain(pingora_core::ErrorType::InternalError, error))?;
-            return Ok(produced);
-        }
         let span = ctx.request_span.clone();
         let _entered = span.enter();
-        let produced = response_trailer_filter::execute(&pipeline, upstream_trailers, ctx)
-            .map_err(|error| pingora_core::Error::explain(pingora_core::ErrorType::InternalError, error))?;
+        let produced = if pipeline.needs_response_trailers() {
+            response_trailer_filter::execute(&pipeline, upstream_trailers, ctx)
+        } else {
+            response_trailer_filter::dispatch_synthetic_eof(&pipeline, ctx)
+                .map(response_trailer_filter::TrailerOutcome::Forward)
+        };
+        let produced = match produced {
+            Ok(produced) => produced,
+            Err(error) => {
+                debug!(%error, "synthetic response EOF failed; aborting downstream");
+                abort_trailer_delivery(session, ctx).await;
+                return Ok(None);
+            },
+        };
         hop_by_hop::strip_reserved_internal_header_map(upstream_trailers);
-        Ok(produced)
+        Ok(complete_trailer_task(session, upstream_trailers, ctx, produced).await)
     }
 
     async fn response_body_filter(
@@ -534,6 +541,10 @@ impl ProxyHttp for PingoraHttpHandler {
         via::append_request_via(upstream_request, client_ver);
         #[cfg(feature = "otel")]
         inject_upstream_trace_context(upstream_request, &ctx.upstream_client_span)?;
+        if let Some(upstream) = ctx.upstream_for_retry.as_ref() {
+            ctx.extensions
+                .insert(praxis_filter::UpstreamForwardedEndpoint(Arc::clone(&upstream.address)));
+        }
         Ok(())
     }
 
@@ -623,7 +634,7 @@ impl ProxyHttp for PingoraHttpHandler {
             release_retry_state(ctx);
             ctx.ended_by_client = ended_by_client(e, ctx.upstream_response_status);
             logging_cleanup(&pipeline, ctx).await;
-            maybe_emit_fallback_access_log(&pipeline, written_status, ctx);
+            emit_completion_observers(&pipeline, written_status, ctx);
         }
         .instrument(span)
         .await;
@@ -662,6 +673,32 @@ fn inject_upstream_trace_context(
 // -----------------------------------------------------------------------------
 // Utilities
 // -----------------------------------------------------------------------------
+
+/// Complete the one task Pingora allows this callback to return.
+async fn complete_trailer_task(
+    session: &mut Session,
+    trailers: &http::HeaderMap,
+    ctx: &mut PingoraRequestCtx,
+    outcome: response_trailer_filter::TrailerOutcome,
+) -> Option<Bytes> {
+    match outcome {
+        response_trailer_filter::TrailerOutcome::Forward(Some(bytes)) if !bytes.is_empty() && !trailers.is_empty() => {
+            debug!("synthetic EOF bytes and trailers require separate Pingora tasks; aborting downstream");
+            abort_trailer_delivery(session, ctx).await;
+            None
+        },
+        response_trailer_filter::TrailerOutcome::Forward(Some(bytes)) if bytes.is_empty() => None,
+        response_trailer_filter::TrailerOutcome::Forward(bytes) => bytes,
+        response_trailer_filter::TrailerOutcome::Convert(bytes) => Some(bytes),
+    }
+}
+
+/// Mark trailer delivery incomplete and terminate the downstream message.
+async fn abort_trailer_delivery(session: &mut Session, ctx: &mut PingoraRequestCtx) {
+    ctx.response_delivery_complete = false;
+    ctx.stamp_error_type(metrics::ERROR_TYPE_INTERNAL);
+    session.as_downstream_mut().shutdown().await;
+}
 
 /// Write a 503 response with `Retry-After` and return the corresponding error.
 ///

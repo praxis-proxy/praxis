@@ -1,8 +1,9 @@
 # Logging: Request IDs and Access Logs
 #
 # request_id — ensures every request has a correlation ID.
-#   Forwards client-supplied IDs; generates one when absent. Echoed in
-#   the response. The header_name field controls which header is used
+#   Forwards client-supplied IDs; generates one when absent. Only a
+#   client-supplied ID is echoed by this filter in the response.
+#   The header_name field controls which header is used
 #   (defaults to X-Request-ID).
 #
 # access_log — structured log line per request (method, path) and

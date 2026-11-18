@@ -1,8 +1,9 @@
 # Upstream TLS
 #
-# Plain HTTP on the listener; TLS to the upstream. Set sni
-# when the upstream expects a specific hostname for certificate
-# validation (defaults to the request's Host header).
+# Plain HTTP on the listener; TLS to the upstream. Verified TLS
+# needs a configured SNI name or an endpoint-derived authority.
+# If allow_tls_without_sni is enabled explicitly, Praxis can use
+# a fixed authority before falling back to the client's Host.
 #
 #   Client ──HTTP──► Praxis :8080 ──TLS──► Backend :8443
 #
