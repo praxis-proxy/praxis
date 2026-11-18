@@ -44,7 +44,7 @@ use crate::{
 // -----------------------------------------------------------------------------
 
 /// A tool route with a post-identity limiter keyed by subject.
-const TOOL_SUBJECT_LIMIT: &str = "plugins:
+pub(super) const TOOL_SUBJECT_LIMIT: &str = "plugins:
   - name: who
     kind: {kind}
     hooks: [identity.resolve]
@@ -101,7 +101,7 @@ routes:
 
 /// Pre- and post-identity host limiters around a host resolver; `{deny}` is
 /// the pre limiter's extra config.
-const HOST_LIMITERS: &str = "plugins:
+pub(super) const HOST_LIMITERS: &str = "plugins:
   - name: who
     kind: {kind}
     hooks: [identity.resolve]
@@ -377,7 +377,7 @@ async fn threading_the_table_raises_no_skipped_stage_alarm() {
 // -----------------------------------------------------------------------------
 
 /// What the host plugins saw: `(plugin, entity_type, subject)` per call.
-type Calls = Arc<Mutex<Vec<(String, String, String)>>>;
+pub(super) type Calls = Arc<Mutex<Vec<(String, String, String)>>>;
 
 /// A host identity resolver that takes the subject from `x-user`, and a host
 /// limiter that records each call and denies with sentinel text when its
@@ -486,7 +486,7 @@ impl PluginFactory for RecorderFactory {
 }
 
 /// Register a recorder under `kind` and write `yaml` with `{kind}` filled in.
-fn recorded_policy(kind: &'static str, yaml: &str) -> (TempDir, String, Calls) {
+pub(super) fn recorded_policy(kind: &'static str, yaml: &str) -> (TempDir, String, Calls) {
     let calls: Calls = Arc::new(Mutex::new(Vec::new()));
     let record = Arc::clone(&calls);
     register_policy_plugin_factory(kind, Arc::new(move || Box::new(RecorderFactory(Arc::clone(&record)))));
@@ -503,7 +503,7 @@ fn write_policy(yaml: &str) -> (TempDir, String) {
 }
 
 /// A filter over `path`.
-fn filter(path: String) -> PolicyFilter {
+pub(super) fn filter(path: String) -> PolicyFilter {
     filter_behind(path, vec![])
 }
 
@@ -511,25 +511,33 @@ fn filter(path: String) -> PolicyFilter {
 fn filter_behind(path: String, trusted_proxies: Vec<String>) -> PolicyFilter {
     PolicyFilter::new(
         PolicyFilterConfig {
-            config_path: path,
-            allow_private_idp: false,
-            trusted_private_endpoints: vec![],
             trusted_proxies,
-            body_access: BodyAccessMode::ReadOnly,
-            require_protocol_metadata: true,
-            init_timeout_secs: 30,
-            max_buffer_bytes: 10_485_760,
-            llm: super::config::LlmOptions::default(),
-            context_headers: HashMap::default(),
-            context_meta: ContextMetaConfig::default(),
+            ..filter_config(path)
         },
         None,
     )
     .unwrap()
 }
 
+/// The filter config over `path` the tests start from.
+pub(super) fn filter_config(path: String) -> PolicyFilterConfig {
+    PolicyFilterConfig {
+        config_path: path,
+        allow_private_idp: false,
+        trusted_private_endpoints: vec![],
+        trusted_proxies: vec![],
+        body_access: BodyAccessMode::ReadOnly,
+        require_protocol_metadata: true,
+        init_timeout_secs: 30,
+        max_buffer_bytes: 10_485_760, // 10 MiB
+        llm: super::config::LlmOptions::default(),
+        context_headers: HashMap::default(),
+        context_meta: ContextMetaConfig::default(),
+    }
+}
+
 /// A request from `peer` as `user`.
-fn request(user: Option<&str>) -> crate::Request {
+pub(super) fn request(user: Option<&str>) -> crate::Request {
     let mut req = make_request(Method::POST, "/tools");
     if let Some(user) = user {
         req.headers.insert("x-user", HeaderValue::from_str(user).unwrap());
@@ -538,7 +546,7 @@ fn request(user: Option<&str>) -> crate::Request {
 }
 
 /// A context for `req` from `peer`, as filter instance 0.
-fn context(req: &crate::Request, peer: u8) -> HttpFilterContext<'_> {
+pub(super) fn context(req: &crate::Request, peer: u8) -> HttpFilterContext<'_> {
     let mut ctx = make_filter_context(req);
     ctx.client_addr = Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, peer)));
     ctx.current_filter_id = Some(0);
@@ -553,7 +561,7 @@ async fn header_phase(filter: &PolicyFilter, user: Option<&str>, peer: u8) -> Fi
 }
 
 /// The rejection in `action`.
-fn rejection(action: FilterAction) -> Rejection {
+pub(super) fn rejection(action: FilterAction) -> Rejection {
     match action {
         FilterAction::Reject(rejection) => rejection,
         other => panic!("expected a rejection, got {other:?}"),
@@ -575,7 +583,7 @@ fn body(rejection: &Rejection) -> serde_json::Value {
 }
 
 /// The plugins `calls` recorded, in order.
-fn plugins(calls: &Calls) -> Vec<String> {
+pub(super) fn plugins(calls: &Calls) -> Vec<String> {
     calls.lock().unwrap().iter().map(|(name, ..)| name.clone()).collect()
 }
 

@@ -74,6 +74,8 @@ enum Admission {
     /// No baseline identity is held and the request is not admitted.
     #[default]
     Pending,
+    /// The head ran the limiter only; identity waits for the route.
+    Deferred,
     /// The baseline identity is resolved; the final admission is still due.
     Held(Box<IdentityPayload>),
     /// The request is admitted.
@@ -133,6 +135,19 @@ impl RequestState {
     /// Whether the request is admitted.
     pub(super) fn is_admitted(&self) -> bool {
         matches!(self.admission, Admission::Admitted)
+    }
+
+    /// Whether the early identity gate has run or was deliberately deferred to
+    /// the route, so a later phase must not run it again.
+    pub(super) fn gate_done(&self) -> bool {
+        !matches!(self.admission, Admission::Pending)
+    }
+
+    /// Record that identity waits for the route, once the head limiter passed.
+    pub(super) fn defer_identity(&mut self) {
+        if matches!(self.admission, Admission::Pending) {
+            self.admission = Admission::Deferred;
+        }
     }
 
     /// Hold the baseline identity until the final admission. An admitted
@@ -244,6 +259,28 @@ mod tests {
         assert!(state.is_admitted(), "an admitted request stays admitted");
         assert!(state.take_held_identity().is_none());
         assert!(state.is_admitted(), "taking leaves the admission in place");
+    }
+
+    #[test]
+    fn deferring_marks_the_gate_done_without_admitting() {
+        let mut state = RequestState::default();
+        assert!(!state.gate_done());
+        state.defer_identity();
+        assert!(state.gate_done() && !state.is_admitted());
+        assert!(state.take_held_identity().is_none());
+        state.admit();
+        assert!(state.is_admitted());
+    }
+
+    #[test]
+    fn deferring_after_the_gate_ran_changes_nothing() {
+        let mut state = RequestState::default();
+        state.hold_identity(identity());
+        state.defer_identity();
+        assert!(state.take_held_identity().is_some(), "the held identity survives");
+        state.admit();
+        state.defer_identity();
+        assert!(state.is_admitted());
     }
 
     #[test]

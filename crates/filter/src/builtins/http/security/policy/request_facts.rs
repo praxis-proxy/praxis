@@ -5,11 +5,13 @@
 
 use std::{collections::HashMap, net::IpAddr, sync::Arc};
 
-use http::HeaderMap;
+use http::{HeaderMap, HeaderName, HeaderValue};
 use ppe::praxis_policy_core::extensions::{HttpExtension, http::SecretHeaderProvenance};
 use praxis_core::connectivity::CidrRange;
 
-use crate::{Request, client_address::resolve_client_address, filter::HttpFilterContext};
+use crate::{
+    Request, client_address::resolve_client_address, context::TrustedHeaderMutation, filter::HttpFilterContext,
+};
 
 // -----------------------------------------------------------------------------
 // RequestFacts
@@ -45,7 +47,24 @@ impl RequestFacts {
     /// The scheme comes from the connection, never `X-Forwarded-Proto`; the
     /// client address is resolved against `trusted_proxies`.
     pub(super) fn capture(ctx: &HttpFilterContext<'_>, trusted_proxies: &[CidrRange]) -> Self {
-        let request = ctx.request;
+        Self::of(ctx, ctx.request, trusted_proxies)
+    }
+
+    /// Capture the request as the earlier head filters left it.
+    ///
+    /// Their header mutations are applied only after the whole head phase, so
+    /// `ctx.request` still holds the client's values while head filters run.
+    pub(super) fn capture_head(ctx: &HttpFilterContext<'_>, trusted_proxies: &[CidrRange]) -> Self {
+        let request = Request {
+            method: ctx.request.method.clone(),
+            uri: ctx.request.uri.clone(),
+            headers: head_headers(ctx),
+        };
+        Self::of(ctx, &request, trusted_proxies)
+    }
+
+    /// The facts of `request` on `ctx`'s connection.
+    fn of(ctx: &HttpFilterContext<'_>, request: &Request, trusted_proxies: &[CidrRange]) -> Self {
         Self {
             method: request.method.as_str().to_owned(),
             path: request.uri.path().to_owned(),
@@ -56,6 +75,11 @@ impl RequestFacts {
                 .map(|address| address.ip),
             headers: snapshot_headers(&request.headers),
         }
+    }
+
+    /// The captured headers.
+    pub(super) fn headers(&self) -> HashMap<String, String> {
+        self.headers.clone()
     }
 
     /// The captured headers, with the reserved-prefix headers of `current`
@@ -134,6 +158,44 @@ impl RequestView {
 // -----------------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------------
+
+/// The request headers with this pass's queued trusted mutations applied,
+/// with the precedence the head phase applies them: the ordered log, else the
+/// grouped queues.
+fn head_headers(ctx: &HttpFilterContext<'_>) -> HeaderMap {
+    let mut headers = ctx.request.headers.clone();
+    if ctx.pre_read_mutations.is_empty() {
+        for name in &ctx.request_headers_to_remove {
+            headers.remove(name);
+        }
+        for (name, value) in &ctx.request_headers_to_set {
+            headers.insert(name.clone(), value.clone());
+        }
+        for (name, value) in &ctx.extra_request_headers {
+            append(&mut headers, name.as_bytes(), value);
+        }
+        return headers;
+    }
+    for mutation in &ctx.pre_read_mutations {
+        match mutation {
+            TrustedHeaderMutation::Remove(name) => {
+                headers.remove(name);
+            },
+            TrustedHeaderMutation::Set(name, value) => {
+                headers.insert(name.clone(), value.clone());
+            },
+            TrustedHeaderMutation::Add(name, value) => append(&mut headers, name.as_str().as_bytes(), value),
+        }
+    }
+    headers
+}
+
+/// Append `value` under `name`; the head phase skips an invalid pair too.
+fn append(headers: &mut HeaderMap, name: &[u8], value: &str) {
+    if let (Ok(name), Ok(value)) = (HeaderName::from_bytes(name), HeaderValue::from_str(value)) {
+        headers.append(name, value);
+    }
+}
 
 /// The bare request host, ASCII-lowercased and without a port: the URI's
 /// (HTTP/2 `:authority`, or an absolute-form target admission matched against

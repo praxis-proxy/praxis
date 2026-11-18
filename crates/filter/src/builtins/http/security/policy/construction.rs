@@ -118,6 +118,15 @@ pub(super) fn require_dpop_external_base_url(policy: &PolicyConfig) -> Result<()
     Ok(())
 }
 
+/// Whether global authentication is the only authentication in the document.
+///
+/// Entity defaults, bundles, groups and routes can extend or replace the
+/// global resolvers, and the entity route is unknown until the body is
+/// classified, so only then does the global resolver judge every request.
+pub(super) fn only_global_authentication(policy: &PolicyConfig) -> bool {
+    policy.global.authentication.is_some() && authentication_blocks(policy).nth(1).is_none()
+}
+
 /// Every `authentication:` block in the document: global, entity defaults,
 /// groups and routes.
 fn authentication_blocks(policy: &PolicyConfig) -> impl Iterator<Item = &RouteIdentityConfig> {
