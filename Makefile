@@ -1135,7 +1135,7 @@ publish: ## publish the release crates to crates.io
 # The benchmark package is excluded from this coverage run; its untimed
 # fixture tests run in test-integration. Conformance needs the external h2spec
 # binary and xtask is a dev tool, so both are excluded here too.
-COVERAGE_MIN  := 96
+COVERAGE_MIN  := 97
 LLVM_COV_ARGS := --workspace \
 	--exclude praxis-tests-benches \
 	--exclude praxis-tests-conformance \

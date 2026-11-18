@@ -430,7 +430,7 @@ in `praxis-proxy/conventions`:
 - `benchmarks.yaml`: comparative benchmarks (Praxis
   vs Envoy) on push to main
 - `coverage.yaml`: coverage workflow on push/PR;
-  the repository's `make coverage-check` floor is 96%
+  the repository's `make coverage-check` floor is 97%
 - `codeql.yaml`: CodeQL security analysis on push/PR
   and weekly schedule
 - `documentation.yaml`: rustdoc generation on push/PR
