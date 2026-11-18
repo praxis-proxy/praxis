@@ -10,6 +10,8 @@ CONTAINER_ENGINE ?= $(shell command -v podman 2>/dev/null || command -v docker 2
 # The dated nightly that rustfmt runs on. CI's lint job pins the same date in
 # the conventions repo's setup-rust-lint action; bump the two together.
 NIGHTLY_VERSION  := nightly-2026-03-28
+# cargo-fuzz version fuzz.yaml installs; bump the two together.
+CARGO_FUZZ_VERSION := 0.13.2
 V                ?=
 
 UNAME_S := $(shell uname -s | tr A-Z a-z)
@@ -40,6 +42,7 @@ RUST_TARGETS := all build release check \
 	test-security-hyper test-resilience-hyper \
 	run-echo run-debug
 NIGHTLY_FMT_TARGETS  := lint lint-fips lint-hyper fmt
+NIGHTLY_FUZZ_TARGETS := fuzz fuzz-build
 CMAKE_TARGETS := all build release check \
 	test test-unit test-harness \
 	test-schema test-integration test-conformance \
@@ -48,7 +51,8 @@ CMAKE_TARGETS := all build release check \
 	test-config-validation test-config \
 	bench \
 	lint doc coverage coverage-check \
-	run-echo run-debug
+	run-echo run-debug \
+	fuzz fuzz-build
 
 ifneq ($(V),)
   _NOCAPTURE := -- --nocapture
@@ -63,6 +67,7 @@ LINT_EXTRA_CMDS := typos taplo shellcheck actionlint
 	test-security test-security-suite test-resilience \
 	test-config-validation test-config \
 	bench build-benches \
+	fuzz fuzz-build \
 	lint lint-containers lint-extra generate-filter-docs fmt doc audit semver publish-dry-run publish \
 	mutants \
 	coverage coverage-check \
@@ -81,6 +86,7 @@ LINT_EXTRA_CMDS := typos taplo shellcheck actionlint
 	check-prereqs \
 	check-prereqs-cmake \
 	check-prereqs-extra \
+	check-prereqs-fuzz \
 	check-prereqs-nightly \
 	check-prereqs-nightly-toolchain \
 	setup-hooks \
@@ -117,10 +123,16 @@ check-prereqs-nightly: check-prereqs-nightly-toolchain
 		echo "rustfmt is not installed for $(NIGHTLY_VERSION) — run \"rustup component add --toolchain $(NIGHTLY_VERSION) rustfmt\"" >&2; \
 		exit 1; \
 	}
+check-prereqs-fuzz: check-prereqs-nightly-toolchain
+	@cargo +$(NIGHTLY_VERSION) fuzz --version >/dev/null 2>&1 || { \
+		echo "cargo-fuzz is not installed — run \"cargo install cargo-fuzz --version $(CARGO_FUZZ_VERSION) --locked\" (see docs/developing/getting-started.md)" >&2; \
+		exit 1; \
+	}
 
 $(RUST_TARGETS): check-prereqs
 $(CMAKE_TARGETS): check-prereqs-cmake
 $(NIGHTLY_FMT_TARGETS): check-prereqs-nightly
+$(NIGHTLY_FUZZ_TARGETS): check-prereqs-fuzz
 
 # -------------------------------------------------------------------
 # Build
@@ -1056,6 +1068,25 @@ test-container-run: test-container ## run the test suites in the test container
 ##@ Bench
 bench: $(VEGETA) $(FORTIO_DEP) ## Criterion microbenchmarks
 	PATH="$(BINUTILS_PATH):$(PATH)" cargo bench -p praxis-tests-benches
+
+# -------------------------------------------------------------------
+# Fuzz
+# -------------------------------------------------------------------
+FUZZ_DURATION ?= 120
+
+##@ Fuzz
+fuzz: ## run every fuzz target in tests/fuzz/fuzz_targets for FUZZ_DURATION seconds (needs cargo-fuzz, nightly)
+	@for target_src in tests/fuzz/fuzz_targets/*.rs; do \
+		target=$$(basename "$$target_src" .rs); \
+		mkdir -p "tests/fuzz/corpus/$$target"; \
+		corpus_dirs="tests/fuzz/corpus/$$target"; \
+		[ -d "tests/fuzz/seeds/$$target" ] && corpus_dirs="$$corpus_dirs tests/fuzz/seeds/$$target"; \
+		cargo +$(NIGHTLY_VERSION) fuzz run --fuzz-dir tests/fuzz "$$target" $$corpus_dirs \
+			-- -max_total_time=$(FUZZ_DURATION) || exit 1; \
+	done
+
+fuzz-build: ## build every fuzz target without running it
+	cargo +$(NIGHTLY_VERSION) fuzz build --fuzz-dir tests/fuzz
 
 # -------------------------------------------------------------------
 # Quality

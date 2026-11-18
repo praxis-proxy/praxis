@@ -24,6 +24,9 @@ members = [
     # Praxis Microbenchmarks
     "tests/benches",
 ]
+# Fuzz targets carry their own Cargo.lock (cargo-fuzz's nightly-only
+# dependency tree must not leak into the main workspace lockfile).
+exclude = ["tests/fuzz"]
 
 [workspace.package]
 version = "0.8.0"
@@ -186,9 +189,11 @@ opt-level = 2
 debug = "line-tables-only"
 
 [workspace.lints.rust]
-# `coverage` is set by cargo-llvm-cov; declare it so `#[cfg(coverage)]` gates
-# don't trip the unexpected_cfgs lint under `-D warnings`.
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage)'] }
+# `coverage` is set by cargo-llvm-cov; `fuzzing` is set by cargo-fuzz across
+# the whole dependency graph it builds. Declare both so `#[cfg(coverage)]`
+# and `#[cfg(fuzzing)]` gates don't trip the unexpected_cfgs lint under
+# `-D warnings`.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage)', 'cfg(fuzzing)'] }
 dead_code = "deny"
 # Default is "deny" rather than "forbid" so `praxis-proxy-filter` can inherit
 # this whole lint set while letting its `json_ops::simd_scan` SIMD intrinsics

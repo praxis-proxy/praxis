@@ -434,6 +434,7 @@ in `praxis-proxy/conventions`:
 - `codeql.yaml`: CodeQL security analysis on push/PR
   and weekly schedule
 - `documentation.yaml`: rustdoc generation on push/PR
+- `fuzz.yaml`: fuzz testing on a nightly schedule
 - `msrv.yaml`: minimum supported Rust version check
   on push/PR
 - `nightly.yaml`: comprehensive nightly test runs

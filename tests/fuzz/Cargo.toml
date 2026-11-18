@@ -1,0 +1,23 @@
+[package]
+name = "praxis-fuzz"
+version = "0.0.0"
+edition = "2024"
+# Mirrors workspace.package.rust-version in the root Cargo.toml by hand: this
+# crate is workspace-excluded (its own nightly-only dependency tree), so it
+# cannot inherit via `rust-version.workspace = true`. Bump the two together.
+rust-version = "1.92"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+# default-features = false: the fuzz target only needs json_ops, not the
+# policy engine bundle the filter crate's default set pulls in.
+praxis-filter = { path = "../../crates/filter", package = "praxis-proxy-filter", default-features = false }
+
+[[bin]]
+name = "fuzz_simd_scan"
+path = "fuzz_targets/fuzz_simd_scan.rs"
+doc = false

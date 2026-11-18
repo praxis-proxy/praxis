@@ -14,6 +14,12 @@ target
 # Cargo mutants output
 **/mutants.out*/
 
+# tests/fuzz/corpus/ holds test inputs the fuzzer saves while it runs
+# tests/fuzz/corpus/ is where the fuzzer saves the exact bytes that
+# caused a crash
+tests/fuzz/artifacts/
+tests/fuzz/corpus/
+
 # LLVM coverage artifacts
 coverage/
 coverage.json
