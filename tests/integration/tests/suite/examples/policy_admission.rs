@@ -90,29 +90,43 @@ fn a_declared_body_over_the_limit_is_judged_after_admission() {
 }
 
 #[test]
-fn an_earlier_ip_acl_rejects_only_after_head_admission() {
+fn an_earlier_ip_acl_still_rejects_before_admission() {
     let backend = start_header_echo_backend();
     let ip_acl = "      - filter: ip_acl\n        deny:\n          - \"127.0.0.0/8\"\n\n";
-    let proxy = start_proxy(&load_example(free_port(), backend.port(), Some(ip_acl)));
-    assert_eq!(
-        status_without_body(proxy.addr(), None, 64),
-        401,
-        "policy authenticates before the earlier ip_acl runs"
-    );
-    let body = r#"{"model":"m1"}"#;
+    let proxy = start_proxy(&without_classifier(&load_example_yaml(
+        free_port(),
+        backend.port(),
+        Some(ip_acl),
+    )));
+    for token in [None, Some(mint_fixture_jwt("alice"))] {
+        assert_eq!(
+            post_json(proxy.addr(), token.as_deref()),
+            403,
+            "policy admits in the request phase after ip_acl, so ip_acl answers first (token: {})",
+            token.is_some()
+        );
+    }
+}
+
+#[test]
+fn an_earlier_static_response_still_answers_without_credentials() {
+    let backend = start_header_echo_backend();
+    let health = "      - filter: static_response\n        conditions:\n          - when:\n              path: \
+                  \"/healthz\"\n        status: 200\n        body: \"ok\"\n\n";
+    let proxy = start_proxy(&without_classifier(&load_example_yaml(
+        free_port(),
+        backend.port(),
+        Some(health),
+    )));
     let raw = http_send(
         proxy.addr(),
-        &format!(
-            "POST /v1/chat HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nContent-Type: \
-             application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            mint_fixture_jwt("alice"),
-            body.len()
-        ),
+        "GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
     );
+    assert_eq!(parse_status(&raw), 200, "{raw}");
     assert_eq!(
-        parse_status(&raw),
-        403,
-        "admitted, the request is pre-read before ip_acl's request phase rejects it: {raw}"
+        post_json(proxy.addr(), None),
+        401,
+        "other paths still need a credential"
     );
 }
 
@@ -153,6 +167,22 @@ fn a_route_that_replaces_global_authentication_judges_its_own_credential() {
 /// Load the example with its policy at the in-repo fixture, `prefix` filters
 /// inserted at the head of the chain, and ports patched.
 fn load_example(proxy_port: u16, backend_port: u16, prefix: Option<&str>) -> Config {
+    let yaml = load_example_yaml(proxy_port, backend_port, prefix);
+    Config::from_yaml(&yaml).unwrap_or_else(|e| panic!("parse security/policy-admission.yaml: {e}"))
+}
+
+/// The example without its body-buffering classifier, so nothing pre-reads the
+/// body and the chain's request phase runs in order before any body hook.
+fn without_classifier(yaml: &str) -> Config {
+    let classifier = "      - filter: json_body_field\n        field: model\n        header: X-Model\n        \
+                      max_body_bytes: 65536 # 64 KiB\n";
+    assert!(yaml.contains(classifier), "the example's classifier entry moved");
+    Config::from_yaml(&yaml.replace(classifier, "")).unwrap()
+}
+
+/// The example YAML with its policy at the in-repo fixture, `prefix` filters
+/// inserted at the head of the chain, and ports patched.
+fn load_example_yaml(proxy_port: u16, backend_port: u16, prefix: Option<&str>) -> String {
     let path = example_config_path("security/policy-admission.yaml");
     let policy = format!("{}/fixtures/admission-policy.yaml", env!("CARGO_MANIFEST_DIR"));
     let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
@@ -160,8 +190,7 @@ fn load_example(proxy_port: u16, backend_port: u16, prefix: Option<&str>) -> Con
     if let Some(prefix) = prefix {
         yaml = yaml.replacen("    filters:\n", &format!("    filters:\n{prefix}"), 1);
     }
-    let patched = patch_yaml(&yaml, proxy_port, &HashMap::from([("127.0.0.1:3000", backend_port)]));
-    Config::from_yaml(&patched).unwrap_or_else(|e| panic!("parse security/policy-admission.yaml: {e}"))
+    patch_yaml(&yaml, proxy_port, &HashMap::from([("127.0.0.1:3000", backend_port)]))
 }
 
 /// A proxy whose only filter before routing is an inference policy: a global
@@ -234,6 +263,22 @@ insecure_options:
         policy_path.display()
     );
     Config::from_yaml(&yaml).unwrap()
+}
+
+/// The status of a JSON POST that sends its body, with `token` if any.
+fn post_json(addr: &str, token: Option<&str>) -> u16 {
+    let authorization = token
+        .map(|token| format!("Authorization: Bearer {token}\r\n"))
+        .unwrap_or_default();
+    let body = r#"{"model":"m1"}"#;
+    parse_status(&http_send(
+        addr,
+        &format!(
+            "POST /v1/chat HTTP/1.1\r\nHost: localhost\r\n{authorization}Content-Type: \
+             application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        ),
+    ))
 }
 
 /// The status of a POST that declares `content_length` body bytes and sends

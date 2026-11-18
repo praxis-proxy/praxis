@@ -208,7 +208,7 @@
 //! # Admission at the request head
 //!
 //! The filter runs in the request-head phase, before any filter reads the
-//! body and wherever it sits in the chain, so an over-limit or
+//! body, even one listed before it, so an over-limit or
 //! unauthenticated request is rejected before a classifier parses or buffers
 //! its body. There it runs `ratelimit.pre_identity`, then resolves the
 //! baseline identity on the `http` coordinates. A policy without entity routes
@@ -219,20 +219,19 @@
 //!
 //! The head resolves identity only when the global resolver is the one that
 //! judges every route. When an entity default, group or route adds to or
-//! replaces the global `authentication:`, the head runs the pre-identity
-//! limiter only, identity waits for the route, and the request body is
-//! buffered (up to `max_buffer_bytes`) until the route decides. A policy with
-//! `context_headers` keeps today's timing: those values can come from filters
-//! that run after the head. A CORS preflight skips head admission, so an
-//! earlier `cors` filter can still answer it.
+//! replaces the global `authentication:`, the policy never runs the global
+//! gate: the head runs the pre-identity limiter only, identity waits for the
+//! route, and the request body is buffered (up to `max_buffer_bytes`) until
+//! the route decides. A policy with `context_headers` keeps today's timing:
+//! those values can come from filters that run after the head.
 //!
 //! The head judges the request as the client sent it plus the trusted header
-//! mutations of earlier head filters. Head admission also changes order: it
-//! precedes an earlier security filter's request phase (such as `ip_acl`), the
-//! declared-body-size 413, and inference body denials. Pipeline construction
-//! warns about an earlier security filter and about request conditions on a
-//! head-admitting policy. In a branch chain the filter has no head phase and
-//! admits in the request phase.
+//! mutations of earlier head filters, and it precedes the declared-body-size
+//! 413 and inference body denials. Behind an earlier filter that can answer or
+//! reject the request, such as `cors`, `ip_acl` or `static_response`, the
+//! policy admits in the request phase instead, so that filter still runs
+//! first; pipeline construction warns when it does. In a branch chain the
+//! filter has no head phase and admits in the request phase.
 //!
 //! # Request and response phases
 //!

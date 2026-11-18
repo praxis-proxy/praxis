@@ -49,17 +49,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   unauthenticated requests are rejected without a body read. Entity routes
   still authorize once the request is classified; `http.request` rules still
   run in the request phase, on the head identity. Head denials now come
-  before an earlier security filter's request phase (such as `ip_acl`), the
-  declared-body-size 413, and inference model and body denials. Inference
-  and pre-read MCP requests resolve the global identity once more. When an
-  entity default, bundle, group or route extends or replaces the global
-  `authentication:`, the head runs the limiter only, and header-first entity
-  requests no longer pass the global gate: the route judges the credential,
-  and the body is buffered (up to `max_buffer_bytes`) until it does.
-  Policies with `context_headers` keep the previous timing, and CORS
-  preflights skip head admission so an earlier `cors` filter still answers
-  them. Pipeline construction warns about an earlier
-  security filter and about request conditions on a head-admitting policy.
+  before the declared-body-size 413 and inference model and body denials,
+  and inference and pre-read MCP requests resolve the global identity once
+  more. Behind an earlier filter that can answer or reject the request
+  (`cors`, `ip_acl`, `static_response`, `redirect`, ...), the policy admits
+  in the request phase as before, so that filter still runs first;
+  `HttpFilter::admits_at_request_head` declares a head hook that may reject.
+  When an entity default, group or route extends or replaces the global
+  `authentication:`, the policy never runs the global gate: the route judges
+  the credential, the head runs the limiter only, and the body is buffered
+  (up to `max_buffer_bytes`) until the route decides. Policies with
+  `context_headers` keep the previous timing. Pipeline construction warns
+  when an earlier filter moves admission out of the head and about request
+  conditions on a head-admitting policy.
 - Temporarily disable KIND rollout acceptance in CI and local commands
   because the cluster exhausts the shared inotify instance budget, pending
   migration to [gateway-controller](https://github.com/praxis-proxy/gateway-controller).

@@ -270,23 +270,21 @@ async fn a_deferred_policy_limiter_still_rejects_at_the_head() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_cors_preflight_is_left_to_the_request_phase() {
-    let (_dir, path, calls) = recorded_policy("test/head-preflight", &HOST_LIMITERS.replace("{deny}", "{}"));
+async fn a_route_judged_policy_skips_the_global_gate_when_the_head_did_not_run() {
+    let (_dir, path, calls) = recorded_policy("test/head-route-skipped", ROUTE_REPLACES_GLOBAL);
     let filter = filter(path);
-    let mut req = request(None);
-    req.method = http::Method::OPTIONS;
-    req.headers
-        .insert(http::header::ORIGIN, HeaderValue::from_static("https://app.example"));
-    req.headers.insert(
-        http::header::ACCESS_CONTROL_REQUEST_METHOD,
-        HeaderValue::from_static("POST"),
-    );
+    let req = request(Some("alice"));
     let mut ctx = context(&req, 1);
-    assert!(matches!(head(&filter, &mut ctx).await, FilterAction::Continue));
-    assert!(plugins(&calls).is_empty(), "an earlier cors filter can still answer it");
-    assert!(
-        !state(&ctx).is_some_and(RequestState::gate_done),
-        "the request-phase gate still runs if nothing answers"
+    assert!(matches!(
+        filter.on_request(&mut ctx).await.unwrap(),
+        FilterAction::Continue
+    ));
+    assert!(plugins(&calls).is_empty(), "no global gate in the request phase");
+    assert!(matches!(tool_body(&filter, &mut ctx).await, FilterAction::BodyDone));
+    assert_eq!(
+        plugins(&calls),
+        ["pre", "key"],
+        "the route resolves identity and charges the limiter once"
     );
 }
 

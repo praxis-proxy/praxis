@@ -466,15 +466,6 @@ enum HeadAdmission {
     Gate,
 }
 
-/// Whether `request` is a CORS preflight.
-fn is_cors_preflight(request: &crate::Request) -> bool {
-    request.method == http::Method::OPTIONS
-        && request.headers.contains_key(http::header::ORIGIN)
-        && request
-            .headers
-            .contains_key(http::header::ACCESS_CONTROL_REQUEST_METHOD)
-}
-
 impl HeadAdmission {
     /// The head work for a policy document and filter config.
     fn for_policy(
@@ -1691,8 +1682,13 @@ impl PolicyFilter {
         view: &RequestView,
     ) -> Result<FilterAction, FilterError> {
         // An earlier phase ran the gate, or admitted and possibly stripped the
-        // credentials it read; resolving again would judge stripped headers.
-        if Self::admitted_identity(ctx).is_some() || state(ctx).is_some_and(RequestState::gate_done) {
+        // credentials it read; resolving again would judge stripped headers. A
+        // route-judged policy never runs it: the global resolver may reject a
+        // credential only the route accepts.
+        if self.head == HeadAdmission::Defer
+            || Self::admitted_identity(ctx).is_some()
+            || state(ctx).is_some_and(RequestState::gate_done)
+        {
             tracing::trace!(target: "policy.filter", "identity gate already ran");
             return Ok(FilterAction::Continue);
         }
@@ -2802,12 +2798,11 @@ impl HttpFilter for PolicyFilter {
         self.head != HeadAdmission::Off
     }
 
+    fn admits_at_request_head(&self) -> bool {
+        true
+    }
+
     async fn on_request_head(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        // A preflight carries no credentials. An earlier `cors` filter answers
-        // it in the request phase, where the gate still runs if none does.
-        if is_cors_preflight(ctx.request) {
-            return Ok(FilterAction::Continue);
-        }
         // No facts are captured here: the head phase applies earlier head
         // filters' mutations only after it ends, and later phases must see them.
         let view = self.head_view(ctx);
