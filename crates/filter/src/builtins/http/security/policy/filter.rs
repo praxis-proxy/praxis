@@ -2746,12 +2746,17 @@ impl HttpFilter for PolicyFilter {
         // once at EOS with the full body, and forwards whatever we put
         // back into `body`. `ReadOnly` inherits the default `Stream`.
         //
-        // Inference needs its own buffer because it has no classifier.
+        // Inference needs its own buffer because it has no classifier. A
+        // deferred identity is decided by the route at end of stream, so no
+        // byte may reach the upstream before then.
         match self.cfg.body_access {
-            BodyAccessMode::ReadOnly if !self.llm_routes => BodyMode::Stream,
-            BodyAccessMode::ReadOnly => BodyMode::StreamBuffer {
+            BodyAccessMode::ReadOnly if self.llm_routes => BodyMode::StreamBuffer {
                 max_bytes: Some(self.cfg.llm.max_request_bytes),
             },
+            BodyAccessMode::ReadOnly if self.head == HeadAdmission::Limit => BodyMode::StreamBuffer {
+                max_bytes: Some(self.cfg.max_buffer_bytes),
+            },
+            BodyAccessMode::ReadOnly => BodyMode::Stream,
             // Both halves apply, so take whichever ceiling is lower.
             BodyAccessMode::ReadWrite if self.llm_routes => BodyMode::StreamBuffer {
                 max_bytes: Some(self.cfg.max_buffer_bytes.min(self.cfg.llm.max_request_bytes)),

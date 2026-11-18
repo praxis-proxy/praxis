@@ -12,13 +12,13 @@ use super::{
     construction::only_global_authentication,
     filter::PolicyFilter,
     rate_limit_tests::{
-        Calls, HOST_LIMITERS, TOOL_SUBJECT_LIMIT, context, filter, filter_config, plugins, recorded_policy,
-        rejection, request,
+        Calls, HOST_LIMITERS, TOOL_SUBJECT_LIMIT, context, filter, filter_config, plugins, recorded_policy, rejection,
+        request,
     },
     request_state::{RequestState, state},
 };
 use crate::{
-    FilterAction, FilterEntry, FilterPipeline, FilterRegistry,
+    BodyMode, FilterAction, FilterEntry, FilterPipeline, FilterRegistry,
     context::TrustedHeaderMutation,
     filter::{HttpFilter as _, HttpFilterContext},
     test_utils::make_filter_context,
@@ -90,7 +90,11 @@ async fn an_identity_only_policy_admits_at_the_head() {
         filter.on_request_body(&mut ctx, &mut body, true).await.unwrap(),
         FilterAction::BodyDone
     ));
-    assert_eq!(plugins(&calls), ["pre", "who", "post"], "later phases reuse the head's work");
+    assert_eq!(
+        plugins(&calls),
+        ["pre", "who", "post"],
+        "later phases reuse the head's work"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -113,8 +117,14 @@ async fn an_http_policy_authorizes_with_the_head_identity() {
         calls.lock().unwrap().clear();
         let req = request(Some(user));
         let mut ctx = context(&req, 1);
-        assert!(matches!(head(&filter, &mut ctx).await, FilterAction::Continue), "{user}");
-        assert!(!state(&ctx).is_some_and(RequestState::is_admitted), "{user}: authorization is due");
+        assert!(
+            matches!(head(&filter, &mut ctx).await, FilterAction::Continue),
+            "{user}"
+        );
+        assert!(
+            !state(&ctx).is_some_and(RequestState::is_admitted),
+            "{user}: authorization is due"
+        );
         let action = filter.on_request(&mut ctx).await.unwrap();
         assert_eq!(matches!(action, FilterAction::Reject(_)), denied, "{user}: {action:?}");
         assert_eq!(plugins(&calls), ["pre", "who", "post"], "{user}: one resolution");
@@ -185,6 +195,37 @@ async fn a_route_that_replaces_global_authentication_defers_identity() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_deferred_identity_buffers_the_body_until_the_route_decides() {
+    let (_dir, path, _calls) = recorded_policy("test/head-deferred-buffer", ROUTE_REPLACES_GLOBAL);
+    assert!(matches!(
+        filter(path).request_body_mode(),
+        BodyMode::StreamBuffer { max_bytes: Some(_) }
+    ));
+    let (_dir, path, _calls) = recorded_policy("test/head-gated-stream", TOOL_SUBJECT_LIMIT);
+    assert!(
+        matches!(filter(path).request_body_mode(), BodyMode::Stream),
+        "a policy gated at the head keeps streaming"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn later_header_mutations_do_not_change_what_the_head_judged() {
+    let yaml = format!("{}{ALICE_ONLY}", HOST_LIMITERS.replace("{deny}", "{}"));
+    let (_dir, path, calls) = recorded_policy("test/head-later-mutation", &yaml);
+    let filter = filter(path);
+    let req = request(Some("bob"));
+    let mut ctx = context(&req, 1);
+    assert!(matches!(head(&filter, &mut ctx).await, FilterAction::Continue));
+    // An earlier request-phase filter queues a change; identity has always
+    // judged the request as it arrived, plus trusted head mutations.
+    ctx.request_headers_to_set
+        .push((HeaderName::from_static("x-user"), HeaderValue::from_static("alice")));
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    assert_eq!(rejection(action).status, 403);
+    assert_eq!(subject_of(&calls, "who"), "bob");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_replaced_global_resolver_without_a_limiter_runs_no_head_phase() {
     let yaml = ROUTE_REPLACES_GLOBAL.replace("  rate_limits: [pre]\n", "").replace(
         "  - name: pre\n    kind: {kind}\n    hooks: [ratelimit.pre_identity]\n    capabilities: [read_headers]\n",
@@ -209,20 +250,18 @@ async fn the_head_judges_headers_as_earlier_head_filters_left_them() {
     let (_dir, path, calls) = recorded_policy("test/head-mutations", &HOST_LIMITERS.replace("{deny}", "{}"));
     let filter = filter(path);
     let x_user = HeaderName::from_static("x-user");
-    let cases: [(&str, Mutate, &str); 4] = [
-        ("ordered set", |ctx, name| ctx.pre_read_mutations.push(set(name)), "carol"),
-        ("ordered remove", |ctx, name| ctx.pre_read_mutations.push(TrustedHeaderMutation::Remove(name.clone())), ""),
-        ("grouped set", |ctx, name| ctx.request_headers_to_set.push((name.clone(), value())), "carol"),
-        ("grouped remove", |ctx, name| ctx.request_headers_to_remove.push(name.clone()), ""),
-    ];
-    for (case, mutate, expected) in cases {
+    for (case, mutate, expected) in head_mutations() {
         calls.lock().unwrap().clear();
         let req = request(Some("mallory"));
         let mut ctx = context(&req, 1);
         mutate(&mut ctx, &x_user);
         let _admitted = head(&filter, &mut ctx).await;
         assert_eq!(subject_of(&calls, "who"), expected, "{case}");
-        assert_eq!(subject_of(&calls, "post"), expected, "{case}: the post-identity limiter sees the head's subject");
+        assert_eq!(
+            subject_of(&calls, "post"),
+            expected,
+            "{case}: the post-identity limiter sees the head's subject"
+        );
     }
 }
 
@@ -284,7 +323,9 @@ fn authentication_layouts() -> [(&'static str, String, bool); 6] {
         ),
         (
             "a group",
-            format!("{global}groups:\n  keyed:\n    authentication: [key]\nroutes:\n  - tool: echo\n    groups: keyed\n"),
+            format!(
+                "{global}groups:\n  keyed:\n    authentication: [key]\nroutes:\n  - tool: echo\n    groups: keyed\n"
+            ),
             false,
         ),
     ]
@@ -302,6 +343,32 @@ const PLUGINS: &str = "plugins:
     kind: builtin/noop
     hooks: [identity.resolve]
 ";
+
+/// Head-filter mutations of `x-user`, and the subject the head should see.
+fn head_mutations() -> [(&'static str, Mutate, &'static str); 4] {
+    [
+        (
+            "ordered set",
+            |ctx, name| ctx.pre_read_mutations.push(set(name)),
+            "carol",
+        ),
+        (
+            "ordered remove",
+            |ctx, name| ctx.pre_read_mutations.push(TrustedHeaderMutation::Remove(name.clone())),
+            "",
+        ),
+        (
+            "grouped set",
+            |ctx, name| ctx.request_headers_to_set.push((name.clone(), value())),
+            "carol",
+        ),
+        (
+            "grouped remove",
+            |ctx, name| ctx.request_headers_to_remove.push(name.clone()),
+            "",
+        ),
+    ]
+}
 
 /// Run the head phase.
 async fn head(filter: &PolicyFilter, ctx: &mut HttpFilterContext<'_>) -> FilterAction {
