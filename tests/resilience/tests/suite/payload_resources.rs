@@ -845,13 +845,13 @@ fn stalled_download_resumes_and_client_cancellation_stops_producer() {
                 let receipt = backend.receipt.recv_timeout(WAIT).unwrap();
                 assert!(!receipt.complete && receipt.written_bytes < length, "{receipt:?}");
             } else {
+                // Release the source before draining: waiting for the full
+                // prefix in the reader can exhaust the source's pause deadline.
+                backend.resume();
                 let mut received = 0;
                 let response = read_h1_response(&mut BufReader::new(stream), false, length, |chunk| {
                     assert_eq!(spec.mismatch(received, chunk), None);
                     received += chunk.len() as u64;
-                    if received >= 16 * MIB {
-                        backend.resume();
-                    }
                     Ok(())
                 });
                 assert_eq!(response.status, Some(200));
