@@ -766,21 +766,39 @@ async fn tls_probe_exchange(
         Err(error) => return classify_tls_probe_error(&error, Vec::new()),
     };
     if let Some(data) = data {
-        if let Err(error) = tokio::io::AsyncWriteExt::write_all(&mut tls, data).await {
-            return classify_tls_probe_error(&error, Vec::new());
-        }
-        if let Err(error) = tokio::io::AsyncWriteExt::shutdown(&mut tls).await {
-            return classify_tls_probe_error(&error, Vec::new());
-        }
+        return exchange_tls_probe(&mut tls, data, observed).await;
     }
     Box::pin(read_tls_probe(&mut tls, observed)).await
 }
+/// Read after a failed TLS 1.3 write: the server's identity-rejection alert can
+/// arrive after the client considers its handshake complete. Generic write
+/// errors must not replace an observed clean close or application delivery.
+async fn exchange_tls_probe<S>(stream: &mut S, data: &[u8], observed: &mut Vec<u8>) -> TlsProbeOutcome
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let send_error = match tokio::io::AsyncWriteExt::write_all(stream, data).await {
+        Ok(()) => tokio::io::AsyncWriteExt::shutdown(stream).await.err(),
+        Err(error) => Some(error),
+    };
+    let outcome = Box::pin(read_tls_probe(stream, observed)).await;
+    let meaningful_send_error = send_error
+        .map(|error| classify_tls_probe_error(&error, Vec::new()))
+        .filter(|error| {
+            matches!(
+                error,
+                TlsProbeOutcome::PeerAlert(_) | TlsProbeOutcome::LocalTrustFailure(_)
+            )
+        });
+    match (&outcome, meaningful_send_error) {
+        (TlsProbeOutcome::OtherFailure(_), Some(error)) => error,
+        (TlsProbeOutcome::ApplicationData { bytes, .. }, Some(error)) if bytes.is_empty() => error,
+        _ => outcome,
+    }
+}
 
 /// Retain a small bounded application response and its final read outcome.
-async fn read_tls_probe(
-    stream: &mut tokio_rustls::client::TlsStream<AsyncTcpStream>,
-    bytes: &mut Vec<u8>,
-) -> TlsProbeOutcome {
+async fn read_tls_probe<S: tokio::io::AsyncRead + Unpin>(stream: &mut S, bytes: &mut Vec<u8>) -> TlsProbeOutcome {
     let mut buffer = [0_u8; 4096];
     loop {
         match tokio::io::AsyncReadExt::read(stream, &mut buffer).await {
@@ -1340,19 +1358,95 @@ mod serial_tests {
 mod tests {
     use super::*;
 
-    #[test]
-    fn negative_probe_reads_authentication_alert_despite_a_large_failed_write() {
-        let certs = TestCertificates::generate();
-        let trusted = certs.raw_tls_client_config();
-        let payload = vec![b'x'; 1_048_576]; // Exceed transport buffering after rejection.
-        for _ in 0..4 {
-            let (addr, server) = probe_server(&certs, ProbeServerMode::RequireClientCert);
-            let outcome = tls_negative_probe(&addr, "localhost", &payload, &trusted);
+    /// Inject a transport write failure before a separately observable read.
+    struct FailedWriteThenRead {
+        /// Result returned by the first read; subsequent reads close cleanly.
+        read: Option<std::io::Result<Vec<u8>>>,
+        /// Prove the exchange encountered the intended non-alert send error.
+        failed_write: bool,
+        /// Prove the peer response was read after that failure.
+        read_after_failure: bool,
+    }
+
+    impl tokio::io::AsyncWrite for FailedWriteThenRead {
+        fn poll_write(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            self.failed_write = true;
+            std::task::Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()))
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    impl tokio::io::AsyncRead for FailedWriteThenRead {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buffer: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            self.read_after_failure = self.failed_write;
+            std::task::Poll::Ready(
+                self.read
+                    .take()
+                    .unwrap_or_else(|| Ok(Vec::new()))
+                    .map(|bytes| buffer.put_slice(&bytes)),
+            )
+        }
+    }
+
+    #[tokio::test]
+    async fn negative_probe_reads_authentication_alert_after_non_alert_write_failure() {
+        let mut stream = FailedWriteThenRead {
+            read: Some(Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                rustls::Error::AlertReceived(rustls::AlertDescription::CertificateRequired),
+            ))),
+            failed_write: false,
+            read_after_failure: false,
+        };
+        let outcome = exchange_tls_probe(&mut stream, b"ping", &mut Vec::new()).await;
+        assert!(
+            stream.failed_write && stream.read_after_failure,
+            "must read after the injected BrokenPipe"
+        );
+        assert!(
+            outcome.is_client_auth_alert(),
+            "the read must recover the peer authentication alert: {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn negative_probe_preserves_clean_close_and_bytes_after_generic_write_failure() {
+        for bytes in [Vec::new(), b"accepted".to_vec()] {
+            let mut stream = FailedWriteThenRead {
+                read: Some(Ok(bytes.clone())),
+                failed_write: false,
+                read_after_failure: false,
+            };
+            let outcome = exchange_tls_probe(&mut stream, b"ping", &mut Vec::new()).await;
             assert!(
-                outcome.is_client_auth_alert(),
-                "peer alert must survive failed application writes: {outcome:?}"
+                stream.failed_write && stream.read_after_failure,
+                "must exercise failed-send/read recovery"
             );
-            server.join().unwrap();
+            assert!(
+                matches!(outcome, TlsProbeOutcome::ApplicationData { bytes: received, end: TlsProbeEnd::CleanClose } if received == bytes),
+                "a generic send failure must preserve the read result"
+            );
         }
     }
 

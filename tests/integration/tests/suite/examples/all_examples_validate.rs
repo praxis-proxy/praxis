@@ -198,10 +198,7 @@ fn ca_file_exception_respects_loader_context() {
     .expect("read actual upstream mTLS example");
     let mut config: serde_yaml::Value = serde_yaml::from_str(&yaml).expect("parse actual mTLS example");
     let directory = tempfile::tempdir().expect("temporary example directory");
-    // Every intentionally missing path must have a searchable parent. Spoofed
-    // filenames below /etc/ssl/private can return EACCES instead of ENOENT.
-    let cert = directory.path().join("expected-client.pem");
-    let key = directory.path().join("expected-client-key.pem");
+    let (cert, key) = missing_identity_paths(directory.path());
     let cert_name = cert.to_str().unwrap();
     let key_name = key.to_str().unwrap();
     let tls = &mut config["filter_chains"][0]["filters"][1]["clusters"][0]["tls"];
@@ -435,6 +432,15 @@ fn feature_exception_respects_config_phase() {
 // ---------------------------------------------------------------------------
 // Test Utilities
 // ---------------------------------------------------------------------------
+
+/// Keep intentionally missing paths below a searchable parent: filenames under
+/// `/etc/ssl/private` can fail with EACCES before the loader can observe ENOENT.
+fn missing_identity_paths(directory: &std::path::Path) -> (PathBuf, PathBuf) {
+    (
+        directory.join("expected-client.pem"),
+        directory.join("expected-client-key.pem"),
+    )
+}
 
 /// Built-in filters that exist only behind a build feature, so an example
 /// using one is skipped when this test binary lacks the feature.

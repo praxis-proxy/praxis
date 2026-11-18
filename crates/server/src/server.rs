@@ -367,7 +367,7 @@ fn try_run_server_with_composition_and_shutdown(
 
     #[cfg(feature = "config-reload")]
     {
-        tasks.watcher = spawn_watcher(config_file, config, registry, state);
+        tasks.watcher = spawn_watcher(config_file, config, registry, state)?;
     }
     // Without the config-reload feature there is no file watcher; consume the
     // now-unused startup values so the server still runs, just without reload.
@@ -569,6 +569,10 @@ impl Drop for ServerBackgroundTasks {
         let deadline = Instant::now()
             .checked_add(BACKGROUND_DRAIN_TIMEOUT)
             .unwrap_or_else(Instant::now);
+        self.health.root.cancel();
+        if let Some((shutdown, _handle)) = self.housekeeping.as_ref() {
+            shutdown.cancel();
+        }
         if let Some(mut watcher) = self.watcher.take() {
             watcher.stop_until(deadline);
         }
@@ -857,14 +861,16 @@ fn spawn_watcher(
     config: Config,
     registry: FilterRegistry,
     state: ServerState,
-) -> Option<ConfigWatcher> {
-    let params = watcher_params(config_file, config, registry, state)?;
+) -> Result<Option<ConfigWatcher>, StartupError> {
+    let Some(params) = watcher_params(config_file, config, registry, state)? else {
+        return Ok(None);
+    };
     let shutdown = params.shutdown.clone();
-    Some(ConfigWatcher {
+    Ok(Some(ConfigWatcher {
         shutdown,
         pipelines: Arc::clone(&params.pipelines),
         thread: Some(crate::watcher::spawn_config_watcher(params)),
-    })
+    }))
 }
 
 /// Revoke live state and bound shutdown even if downstream reload code stalls.
@@ -911,8 +917,10 @@ fn watcher_params(
     config: Config,
     registry: FilterRegistry,
     state: ServerState,
-) -> Option<crate::watcher::WatcherParams> {
-    let ConfigFile { path, content } = config_file?;
+) -> Result<Option<crate::watcher::WatcherParams>, StartupError> {
+    let Some(ConfigFile { path, content }) = config_file else {
+        return Ok(None);
+    };
     // Documents the configured filters read, asked of the pipelines that were just
     // built rather than reconstructed here: building a filter to interrogate it
     // would load its document and open network connections as a side effect.
@@ -931,7 +939,7 @@ fn watcher_params(
     // An edit to one between its filter loading it and this read is therefore
     // missed until the next change to any watched file triggers a reload.
     let initial_content_hash = crate::watcher::composite_hash(&content, &referenced_files);
-    Some(crate::watcher::WatcherParams {
+    Ok(Some(crate::watcher::WatcherParams {
         config_path: path,
         health_shutdown: state.health_shutdown,
         health_lifecycle: Some(state.health_lifecycle),
@@ -942,14 +950,14 @@ fn watcher_params(
         cluster_meta: state.cluster_meta,
         session_stores: state.session_stores,
         slow_start_registry: state.slow_start_registry,
-        pipelines: Arc::new(crate::reload::WatcherReloadTarget::new(state.pipelines)),
+        pipelines: Arc::new(crate::reload::WatcherReloadTarget::try_new(state.pipelines)?),
         referenced_files,
         registry: Arc::new(registry),
         shutdown: CancellationToken::new(),
         subrequest_client: state.subrequest_client,
         log_level: state.log_level,
         pipeline_composition: state.pipeline_composition,
-    })
+    }))
 }
 
 // -----------------------------------------------------------------------------
@@ -1269,12 +1277,10 @@ fn overload_gauge_loop(
         let mut tracker = praxis_core::overload::TransitionTracker::default();
         let mut prev_actions = praxis_core::overload::EngagedActions::default();
         let mut purge = None;
-        let mut interval = overload_interval();
-        interval.tick().await;
         log_overload_mode(actions_enabled);
 
         loop {
-            interval.tick().await;
+            overload_sample_delay().await;
             prev_actions = sample_overload(
                 &mut monitor,
                 &mut tracker,
@@ -1288,10 +1294,8 @@ fn overload_gauge_loop(
 }
 
 /// Count observations at least one period apart after a delayed tick.
-fn overload_interval() -> tokio::time::Interval {
-    let mut interval = tokio::time::interval(praxis_core::overload::SAMPLE_INTERVAL);
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    interval
+fn overload_sample_delay() -> tokio::time::Sleep {
+    tokio::time::sleep(praxis_core::overload::SAMPLE_INTERVAL)
 }
 
 /// One overload sample: publish pressure, log transitions, and apply actions.
@@ -2052,6 +2056,48 @@ filter_chains:
     }
 
     #[test]
+    fn server_cancels_all_roots_before_joining_a_blocked_watcher() {
+        let health = Arc::new(HealthTaskLifecycle::new());
+        let observed_health = health.new_token();
+        let housekeeping = CancellationToken::new();
+        let observed_housekeeping = housekeeping.clone();
+        let watcher_shutdown = CancellationToken::new();
+        let waiting = watcher_shutdown.clone();
+        let (entered, blocked) = std::sync::mpsc::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let watcher = spawn_on_dedicated_runtime("blocked watcher", async move {
+            waiting.cancelled().await;
+            entered.send(()).unwrap();
+            wait.recv().unwrap();
+        });
+        let owner = ServerBackgroundTasks {
+            health,
+            housekeeping: Some((housekeeping, std::thread::spawn(|| {}))),
+            watcher: Some(ConfigWatcher {
+                shutdown: watcher_shutdown,
+                #[cfg(feature = "config-reload")]
+                pipelines: Arc::new(crate::reload::WatcherReloadTarget::new(Arc::new(
+                    ListenerPipelines::new(std::collections::HashMap::default()),
+                ))),
+                thread: Some(watcher),
+            }),
+        };
+        let cleanup = std::thread::spawn(move || drop(owner));
+        let reached_join = blocked.recv_timeout(Duration::from_secs(1));
+        let cancelled = observed_health.is_cancelled() && observed_housekeeping.is_cancelled();
+        release.send(()).unwrap();
+        cleanup.join().unwrap();
+        assert!(
+            reached_join.is_ok(),
+            "the watcher must reach its deliberately blocked cleanup"
+        );
+        assert!(
+            cancelled,
+            "health and housekeeping must be cancelled before watcher joins consume the cleanup budget"
+        );
+    }
+
+    #[test]
     fn server_registration_failure_stops_owned_tasks() {
         praxis_tls::provider::install();
         let (observer, events) = std::sync::mpsc::channel();
@@ -2160,7 +2206,9 @@ runtime:
         let (state, registry) = startup_state(&config);
         let pipelines = Arc::clone(&state.pipelines);
         let started_with = Arc::as_ptr(&pipelines.get("web").unwrap().load());
-        let params = watcher_params(Some(config_file), config, registry, state).expect("a config file must be watched");
+        let params = watcher_params(Some(config_file), config, registry, state)
+            .unwrap()
+            .expect("a config file must be watched");
         assert_eq!(
             params.initial_content_hash,
             crate::watcher::composite_hash(&static_response_yaml(200), &[]),
@@ -2187,7 +2235,7 @@ runtime:
         let (state, registry) = startup_state(&config);
 
         assert!(
-            watcher_params(None, config, registry, state).is_none(),
+            watcher_params(None, config, registry, state).unwrap().is_none(),
             "the built-in default has no file to watch"
         );
     }
@@ -2203,7 +2251,7 @@ runtime:
             let config = Config::from_config_file(&file).unwrap();
             let (state, registry) = startup_state(&config);
             let controller = Arc::downgrade(&state.pipelines.overload());
-            let watcher = spawn_watcher(Some(file), config, registry, state).unwrap();
+            let watcher = spawn_watcher(Some(file), config, registry, state).unwrap().unwrap();
             assert!(controller.upgrade().is_some());
             drop(watcher);
             assert!(
@@ -2241,7 +2289,7 @@ runtime:
             })
             .into_parts();
         state.pipeline_composition = composition;
-        let params = watcher_params(Some(file), config, registry, state).unwrap();
+        let params = watcher_params(Some(file), config, registry, state).unwrap().unwrap();
         let weak_registry = Arc::downgrade(&params.registry);
         std::fs::write(&path, static_response_yaml(201)).unwrap();
         let watcher = ConfigWatcher {
@@ -2458,32 +2506,46 @@ runtime:
     #[tokio::test(start_paused = true)]
     async fn delayed_overload_ticks_do_not_create_saturation_bursts() {
         use praxis_core::overload::{EngagedActions, Pressures, SAMPLE_INTERVAL, TransitionTracker};
-        let mut interval = overload_interval();
-        interval.tick().await;
-        tokio::time::advance(SAMPLE_INTERVAL.saturating_mul(10)).await;
-        let mut tracker = TransitionTracker::default();
-        let high = Pressures {
-            connections: Some(1.0),
-            cgroup_memory: None,
-            heap: None,
-            cpu: None,
-            file_descriptors: None,
-        };
-        interval.tick().await;
-        drop(tracker.update(high, [None, None, None, Some(true), None]));
-        assert!(!EngagedActions::from_pressures(high, &tracker, EngagedActions::default()).fail_readiness);
-        assert!(
-            tokio::time::timeout(Duration::ZERO, interval.tick()).await.is_err(),
-            "no catch-up sample"
-        );
-        for _ in 0..2 {
-            tokio::time::advance(SAMPLE_INTERVAL).await;
-            interval.tick().await;
+        for delay_after_tick in [false, true] {
+            let delay = overload_sample_delay();
+            tokio::pin!(delay);
+            if !delay_after_tick {
+                tokio::time::advance(SAMPLE_INTERVAL.saturating_mul(10)).await;
+            }
+            delay.await;
+            if delay_after_tick {
+                tokio::time::advance(SAMPLE_INTERVAL.saturating_mul(10)).await;
+            }
+            let mut tracker = TransitionTracker::default();
+            let high = Pressures {
+                connections: Some(1.0),
+                cgroup_memory: None,
+                heap: None,
+                cpu: None,
+                file_descriptors: None,
+            };
             drop(tracker.update(high, [None, None, None, Some(true), None]));
+            assert!(
+                !EngagedActions::from_pressures(high, &tracker, EngagedActions::default()).fail_readiness,
+                "one delayed observation must not saturate"
+            );
+            let next = overload_sample_delay();
+            tokio::pin!(next);
+            assert!(
+                tokio::time::timeout(Duration::ZERO, &mut next).await.is_err(),
+                "no immediate second observation"
+            );
+            tokio::time::advance(SAMPLE_INTERVAL).await;
+            next.await;
+            drop(tracker.update(high, [None, None, None, Some(true), None]));
+            overload_sample_delay().await;
+            drop(tracker.update(high, [None, None, None, Some(true), None]));
+            assert!(
+                EngagedActions::from_pressures(high, &tracker, EngagedActions::default()).fail_readiness,
+                "three genuinely spaced observations must saturate"
+            );
         }
-        assert!(EngagedActions::from_pressures(high, &tracker, EngagedActions::default()).fail_readiness);
     }
-
     #[test]
     fn stopping_one_server_preserves_its_siblings_action_gauges() {
         praxis_protocol::http::metrics::install_prometheus_recorder();

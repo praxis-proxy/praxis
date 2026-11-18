@@ -68,18 +68,49 @@ impl<L: ReloadTarget> ReloadTarget for Arc<L> {
 }
 
 /// Revocable watcher access; a stalled build never holds this lock or its live Arc.
-pub(crate) struct WatcherReloadTarget(Mutex<Option<Arc<ListenerPipelines>>>);
+pub(crate) struct WatcherReloadTarget(
+    Mutex<Option<Arc<ListenerPipelines>>>,
+    Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    Mutex<Option<std::thread::JoinHandle<()>>>,
+);
 
 impl WatcherReloadTarget {
     /// Keep live pipelines available until the serving owner stops the watcher.
+    #[cfg(test)]
+    #[expect(clippy::expect_used, reason = "test fixture requires a cleanup worker")]
     pub(crate) fn new(live: Arc<ListenerPipelines>) -> Self {
-        Self(Mutex::new(Some(live)))
+        Self::try_new(live).expect("start test pipeline cleanup worker")
+    }
+
+    /// Start the cleanup worker before serving, while setup can return an error.
+    pub(crate) fn try_new(live: Arc<ListenerPipelines>) -> std::io::Result<Self> {
+        let (release, wait) = std::sync::mpsc::channel();
+        let retained = Arc::clone(&live);
+        let worker = std::thread::Builder::new()
+            .name("pipeline cleanup".to_owned())
+            .spawn(move || {
+                let _released = wait.recv();
+                drop(retained);
+            })?;
+        Ok(Self(
+            Mutex::new(Some(live)),
+            Mutex::new(Some(release)),
+            Mutex::new(Some(worker)),
+        ))
     }
 
     /// Revoke publication; release user-owned state on a separately joinable thread.
     pub(crate) fn stop(&self) -> Option<std::thread::JoinHandle<()>> {
-        let live = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
-        live.map(|live| std::thread::spawn(move || drop(live)))
+        // The prestarted worker retains a strong reference until after revocation.
+        drop(self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take());
+        drop(self.1.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take());
+        self.2.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take()
+    }
+}
+
+impl Drop for WatcherReloadTarget {
+    fn drop(&mut self) {
+        drop(self.stop());
     }
 }
 
@@ -188,6 +219,13 @@ pub(crate) fn reload_pipelines(
     warn_stateful_filter_reset(new_config);
     log_config_change_audit(old_config, new_config);
 
+    let health = PreparedHealth::new(
+        old_config,
+        new_config,
+        &health_registry,
+        health_lifecycle,
+        subrequest_client.upstream_ca(),
+    )?;
     let publish = || {
         live.with_live(|live| {
             // Removed listeners keep serving through their old bound pipelines. Their
@@ -232,23 +270,15 @@ pub(crate) fn reload_pipelines(
                 new_config,
             )));
 
-            let health_token = replace_health_token(health_shutdown, health_lifecycle);
-            Ok((swapped, skipped, carried, retired, health_token))
+            health.commit(health_shutdown);
+            Ok((swapped, skipped, carried, retired))
         })
     };
-    let (swapped, skipped, carried, retired, health_token) = match log_level {
+    let (swapped, skipped, carried, retired) = match log_level {
         Some(log_level) => log_level.refresh_baseline_with(new_config, publish)?,
         None => publish()?,
     };
     drop(retired);
-    respawn_health_checks(
-        old_config,
-        new_config,
-        &health_registry,
-        health_token,
-        health_lifecycle,
-        subrequest_client.upstream_ca(),
-    );
     if carried > 0 {
         info!(
             endpoints = carried,
@@ -534,100 +564,162 @@ fn health_checked_cluster_names(config: &Config) -> Vec<&str> {
         .collect()
 }
 
-/// Cancel old health check tasks and spawn new ones from the
-/// updated config.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "health generation replacement needs current and root owners"
-)]
-fn respawn_health_checks(
-    old_config: &Config,
-    config: &Config,
-    health_registry: &HealthRegistry,
-    new_token: CancellationToken,
-    health_lifecycle: Option<&HealthTaskLifecycle>,
-    upstream_ca: Option<Arc<praxis_tls::CachedCaCerts>>,
-) {
-    if new_token.is_cancelled() {
-        return;
-    }
-    praxis_protocol::http::metrics::clear_stale_upstream_health_gauges(
-        health_checked_cluster_names(old_config),
-        health_checked_cluster_names(config),
-    );
-    praxis_protocol::http::metrics::seed_upstream_health_gauges(health_registry);
+/// Prepared health generation; no probes or metric callbacks run before commit.
+struct PreparedHealth {
+    /// Root-owned cancellation scope, also used to abandon rejected candidates.
+    token: CancellationToken,
+    /// Nonblocking handoff to the already-running health runtime.
+    activate: Option<tokio::sync::oneshot::Sender<()>>,
+    /// A committed generation is cancelled by its server, not this guard.
+    committed: bool,
+}
 
-    if health_registry.is_empty() {
-        return;
+impl PreparedHealth {
+    /// Prepare fallible runtime resources while the old probes are still active.
+    fn new(
+        old: &Config,
+        config: &Config,
+        registry: &HealthRegistry,
+        owner: Option<&HealthTaskLifecycle>,
+        upstream_ca: Option<Arc<praxis_tls::CachedCaCerts>>,
+    ) -> std::io::Result<Self> {
+        let token = owner.map_or_else(CancellationToken::new, HealthTaskLifecycle::new_token);
+        let mut prepared = Self {
+            token: token.clone(),
+            activate: None,
+            committed: false,
+        };
+        let work = HealthWork::new(old, config, registry, token, upstream_ca);
+        if work.registry.is_empty() && work.old_clusters.is_empty() {
+            return Ok(prepared);
+        }
+        let (activate, wait) = tokio::sync::oneshot::channel();
+        let handle = spawn_health_worker(work, wait)?;
+        if let Some(owner) = owner {
+            owner.track(handle);
+        }
+        prepared.activate = Some(activate);
+        Ok(prepared)
     }
 
-    let clusters: Vec<praxis_core::config::Cluster> = config
-        .clusters
-        .iter()
-        .filter(|cluster| cluster.health_check.is_some())
-        .cloned()
-        .collect();
-    let handle = spawn_health_check_thread(clusters, Arc::clone(health_registry), new_token, upstream_ca);
-    if let Some(owner) = health_lifecycle {
-        owner.track(handle);
+    /// Replace cancellation state and activate probes only after a successful swap.
+    fn commit(mut self, health_shutdown: &Arc<Mutex<CancellationToken>>) {
+        let old = {
+            let mut guard = health_shutdown
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::mem::replace(&mut *guard, self.token.clone())
+        };
+        old.cancel();
+        self.committed = true;
+        if let Some(activate) = self.activate.take() {
+            let _activated = activate.send(());
+        }
     }
 }
 
-/// Replace the generation inside publication; recorder and spawn callbacks run later.
-#[expect(clippy::expect_used, reason = "poisoned mutex is unrecoverable")]
-fn replace_health_token(
-    health_shutdown: &Arc<Mutex<CancellationToken>>,
-    health_lifecycle: Option<&HealthTaskLifecycle>,
-) -> CancellationToken {
-    // One critical section swaps in the fresh token and hands back both
-    // generations; re-locking below just to read the new token again
-    // was a needless second round-trip (reloads are serialized on the
-    // watcher thread, so nothing can interleave).
-    let (old_token, new_token) = {
-        let mut guard = health_shutdown.lock().expect("health shutdown lock poisoned");
-        let old = guard.clone();
-        *guard = health_lifecycle.map_or_else(CancellationToken::new, HealthTaskLifecycle::new_token);
-        (old, guard.clone())
-    };
-    old_token.cancel();
-
-    new_token
+impl Drop for PreparedHealth {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.token.cancel();
+        }
+    }
 }
 
-/// Spawn the reloaded health-check probes on a dedicated thread + runtime.
-///
-/// Degrades gracefully on runtime-build failure (e.g. FD/thread exhaustion)
-/// instead of panicking the thread: a successful pipeline swap must not be
-/// followed by a health-check thread panic. Mirrors startup's
-/// `spawn_on_dedicated_runtime`.
-fn spawn_health_check_thread(
+/// Data owned by the prepared health runtime, with no live-pipeline reference.
+struct HealthWork {
+    /// Health-checked clusters for the new generation.
     clusters: Vec<praxis_core::config::Cluster>,
+    /// Names whose stale gauges need clearing after commitment.
+    old_clusters: Vec<String>,
+    /// New endpoint state, carried over before activation.
     registry: HealthRegistry,
-    new_token: CancellationToken,
+    /// Server root child, already cancelled if shutdown won the race.
+    token: CancellationToken,
+    /// Runtime CA bundle reused by replacement TLS probes.
     upstream_ca: Option<Arc<praxis_tls::CachedCaCerts>>,
-) -> std::thread::JoinHandle<()> {
+}
+
+impl HealthWork {
+    /// Snapshot probe inputs without retaining live pipelines or invoking callbacks.
+    fn new(
+        old: &Config,
+        config: &Config,
+        registry: &HealthRegistry,
+        token: CancellationToken,
+        upstream_ca: Option<Arc<praxis_tls::CachedCaCerts>>,
+    ) -> Self {
+        Self {
+            clusters: config
+                .clusters
+                .iter()
+                .filter(|cluster| cluster.health_check.is_some())
+                .cloned()
+                .collect(),
+            old_clusters: health_checked_cluster_names(old)
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+            registry: Arc::clone(registry),
+            token,
+            upstream_ca,
+        }
+    }
+
+    /// Await commitment without probing; then own all probe tasks until cancellation.
+    async fn run(self, activate: tokio::sync::oneshot::Receiver<()>) {
+        tokio::select! {
+            biased;
+            () = self.token.cancelled() => return,
+            ready = activate => if ready.is_err() { return; },
+        }
+        if self.token.is_cancelled() {
+            return;
+        }
+        praxis_protocol::http::metrics::clear_stale_upstream_health_gauges(
+            self.old_clusters.iter().map(String::as_str),
+            self.clusters.iter().map(|cluster| cluster.name.as_ref()),
+        );
+        praxis_protocol::http::metrics::seed_upstream_health_gauges(&self.registry);
+        if self.token.is_cancelled() || self.registry.is_empty() {
+            return;
+        }
+        praxis_protocol::http::health::runner::spawn_health_checks_with_ca(
+            &self.clusters,
+            &self.registry,
+            &self.token,
+            self.upstream_ca.as_deref(),
+        );
+        self.token.cancelled().await;
+    }
+}
+
+/// Build the runtime before publication; a failed preparation leaves old probes intact.
+fn spawn_health_worker(
+    work: HealthWork,
+    activate: tokio::sync::oneshot::Receiver<()>,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    let (ready, wait) = std::sync::mpsc::sync_channel(1);
     #[cfg(test)]
     let observation = crate::server::background_observation::capture();
-    std::thread::spawn(move || {
-        #[cfg(test)]
-        let _observation = crate::server::background_observation::start("health check runtime", observation);
-        let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-            Ok(rt) => rt,
-            Err(err) => {
-                error!(error = %err, "failed to start health-check runtime after reload; health checks disabled until next reload");
-                return;
-            },
-        };
-        rt.block_on(async {
-            praxis_protocol::http::health::runner::spawn_health_checks_with_ca(
-                &clusters,
-                &registry,
-                &new_token,
-                upstream_ca.as_deref(),
-            );
-            new_token.cancelled().await;
-        });
-    })
+    let handle = std::thread::Builder::new()
+        .name("health check runtime".to_owned())
+        .spawn(move || {
+            #[cfg(test)]
+            let _observation = crate::server::background_observation::start("health check runtime", observation);
+            match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                Ok(runtime) => {
+                    if ready.send(Ok(())).is_ok() {
+                        runtime.block_on(work.run(activate));
+                    }
+                },
+                Err(error) => {
+                    let _failed = ready.send(Err(error));
+                },
+            }
+        })?;
+    wait.recv().map_err(std::io::Error::other)??;
+    Ok(handle)
 }
 
 // -----------------------------------------------------------------------------
@@ -681,8 +773,21 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "synchronous probe polling while another thread holds the destructor"
+    )]
     fn retired_pipeline_destructors_do_not_hold_publication() {
         let (live, config, registry, shutdown, meta, cluster_meta) = setup_live_pipelines();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let mut next = config.clone();
+        next.clusters = serde_yaml::from_str(&format!(
+            "- name: checked\n  endpoints: ['{}']\n  health_check:\n    type: tcp\n    interval_ms: 60000\n",
+            listener.local_addr().unwrap()
+        ))
+        .unwrap();
+        let health_shutdown = Arc::clone(&shutdown);
         let (started, entered) = std::sync::mpsc::channel();
         let (release, wait) = std::sync::mpsc::channel();
         let mut old = praxis_filter::FilterPipeline::build(&mut [], &registry).unwrap();
@@ -695,7 +800,7 @@ mod tests {
         let reload_target = Arc::clone(&target);
         let worker = std::thread::spawn(move || {
             reload_pipelines(
-                &config,
+                &next,
                 &config,
                 &registry,
                 &reload_target,
@@ -713,16 +818,31 @@ mod tests {
             .unwrap();
         });
         entered.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let probed = loop {
+            match listener.accept() {
+                Ok(_) => break true,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                },
+                _ => break false,
+            }
+        };
+        let publication_unlocked = target.0.try_lock().is_ok();
+        release.send(()).unwrap();
+        worker.join().unwrap();
+        health_shutdown.lock().unwrap().cancel();
         assert!(
-            target.0.try_lock().is_ok(),
-            "user destructors must run outside publication"
+            probed,
+            "replacement probes must start while the retired pipeline destructor is blocked"
         );
+        assert!(publication_unlocked, "user destructors must run outside publication");
         if let Some(cleanup) = target.stop() {
             cleanup.join().unwrap();
         }
         assert!(target.with_live(|_| Ok(())).is_err());
-        release.send(()).unwrap();
-        worker.join().unwrap();
     }
 
     #[test]

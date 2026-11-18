@@ -77,6 +77,11 @@ const H2_MAX_CONCURRENT_STREAMS: u32 = 128; // streams
 /// How long a client may take to complete the TLS handshake, as on Pingora.
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60); // 60 s
 
+tokio::task_local! {
+    /// Carry the first-byte wait into this connection's first HTTP/1 header timer.
+    static INITIAL_HEADER_DEADLINE: std::cell::Cell<Option<tokio::time::Instant>>;
+}
+
 // -----------------------------------------------------------------------------
 // ListenerShared
 // -----------------------------------------------------------------------------
@@ -286,7 +291,7 @@ impl AcceptLoop {
                     shared: Arc::clone(&self.shared),
                     shutdown: shutdown.clone(),
                 };
-                connections.spawn(connection.serve(stream));
+                connections.spawn(INITIAL_HEADER_DEADLINE.scope(std::cell::Cell::new(None), connection.serve(stream)));
             },
             Err(err) => {
                 warn!(name = %self.shared.name, error = %err, "failed to accept an HTTP connection");
@@ -378,8 +383,12 @@ impl Connection {
     /// keep-alive handling applies.
     async fn first_bytes(&mut self, socket: &TcpStream) -> bool {
         let mut probe = [0_u8; 1];
+        let deadline = tokio::time::Instant::now() + self.shared.overload.scale_timeout(self.shared.header_timeout);
+        if self.shared.overload.is_enabled() {
+            let _stored = INITIAL_HEADER_DEADLINE.try_with(|initial| initial.set(Some(deadline)));
+        }
         let peeked = tokio::select! {
-            peeked = tokio::time::timeout(self.shared.overload.scale_timeout(self.shared.header_timeout), socket.peek(&mut probe)) => peeked,
+            peeked = tokio::time::timeout_at(deadline, socket.peek(&mut probe)) => peeked,
             _stopping = self.shutdown.wait_for(|stopping| *stopping) => return false,
         };
         match peeked {
@@ -583,17 +592,26 @@ struct HeaderTimer(Arc<praxis_core::overload::Signal>);
 
 impl hyper::rt::Timer for HeaderTimer {
     fn sleep(&self, duration: Duration) -> Pin<Box<dyn hyper::rt::Sleep>> {
-        hyper::rt::Timer::sleep(&TokioTimer::new(), self.0.scale_timeout(duration))
+        let scaled = self.0.scale_timeout(duration);
+        let initial = INITIAL_HEADER_DEADLINE.try_with(std::cell::Cell::take).ok().flatten();
+        let remaining = initial.map_or(scaled, |deadline| {
+            scaled.min(deadline.saturating_duration_since(tokio::time::Instant::now()))
+        });
+        hyper::rt::Timer::sleep(&TokioTimer::new(), remaining)
     }
 
     fn sleep_until(&self, deadline: std::time::Instant) -> Pin<Box<dyn hyper::rt::Sleep>> {
-        self.sleep(deadline.saturating_duration_since(std::time::Instant::now()))
+        self.sleep(deadline.saturating_duration_since(self.now()))
     }
 
     fn reset(&self, sleep: &mut Pin<Box<dyn hyper::rt::Sleep>>, new_deadline: std::time::Instant) {
-        let now = std::time::Instant::now();
+        let now = self.now();
         let scaled = now + self.0.scale_timeout(new_deadline.saturating_duration_since(now));
         hyper::rt::Timer::reset(&TokioTimer::new(), sleep, scaled);
+    }
+
+    fn now(&self) -> std::time::Instant {
+        hyper::rt::Timer::now(&TokioTimer::new())
     }
 }
 

@@ -775,7 +775,7 @@ pub fn start_proxy_with_registry(config: &Config, registry: &FilterRegistry) -> 
 
 /// Build a backend [`Runtime`] with HTTP and TCP protocols
 /// and spawn background health check probes.
-fn build_full_server(config: &Config) -> (Runtime, Option<HealthRuntime>, FixtureCertWatchers) {
+fn build_full_server(config: &Config) -> FullServer {
     let registry = praxis::build_full_registry();
     build_full_server_with_registry(config, &registry, KvStoreRegistry::new())
 }
@@ -788,7 +788,7 @@ fn build_full_server_with_registry(
     config: &Config,
     registry: &FilterRegistry,
     kv_stores: KvStoreRegistry,
-) -> (Runtime, Option<HealthRuntime>, FixtureCertWatchers) {
+) -> FullServer {
     // Every full-proxy start builds a `SubRequestConnector`, which constructs a
     // rustls `ClientConfig`. Hooking the certificate fixtures is not enough: a test
     // that starts a proxy without TLS reaches rustls with no provider installed.
@@ -879,7 +879,7 @@ fn build_full_server_with_registry(
     }
 
     let health = spawn_test_health_checks(config, &health_registry);
-    (runtime, health, cert_watchers)
+    (runtime, health, cert_watchers, pipelines.overload())
 }
 
 /// Spawn background health check tasks for tests.
@@ -935,6 +935,27 @@ pub fn start_full_proxy(config: &Config) -> ProxyGuard {
     start_full_proxy_runtime(config, runtime)
 }
 
+/// Start HTTP/TCP protocols with a caller-controlled overload signal, without
+/// sampling host resources, so transport admission and recovery are deterministic.
+///
+/// # Panics
+///
+/// Panics if the config has no listeners or cannot be resolved or registered.
+pub fn start_full_proxy_with_overload<Configure>(
+    config: &Config,
+    configure: Configure,
+) -> (ProxyGuard, Arc<praxis_core::overload::Signal>)
+where
+    Configure: FnOnce(&Arc<praxis_core::overload::Signal>),
+{
+    let server = build_full_server(config);
+    let signal = Arc::clone(&server.3);
+    configure(&signal);
+    let guard = start_full_proxy_runtime(config, server);
+    crate::net::wait::wait_for_tcp(guard.addr());
+    (guard, signal)
+}
+
 /// Start a full proxy server with a caller-supplied filter registry.
 ///
 /// Unlike [`start_proxy_with_registry`], this path wires the shared
@@ -967,10 +988,7 @@ pub fn start_full_proxy_with_kv_stores(config: &Config, kv_stores: &KvStoreRegis
 }
 
 /// Spawn a fully configured proxy runtime in a background thread.
-fn start_full_proxy_runtime(
-    config: &Config,
-    server: (Runtime, Option<HealthRuntime>, FixtureCertWatchers),
-) -> ProxyGuard {
+fn start_full_proxy_runtime(config: &Config, server: FullServer) -> ProxyGuard {
     let addr = config
         .listeners
         .first()
@@ -979,6 +997,14 @@ fn start_full_proxy_runtime(
         .clone();
     spawn_runtime(addr, server.0, server.1, server.2)
 }
+
+/// Runtime and all background fixture resources, plus its controlled signal.
+type FullServer = (
+    Runtime,
+    Option<HealthRuntime>,
+    FixtureCertWatchers,
+    Arc<praxis_core::overload::Signal>,
+);
 
 // -----------------------------------------------------------------------------
 // Reloadable Proxy Guard

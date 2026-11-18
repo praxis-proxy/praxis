@@ -136,6 +136,8 @@ impl LogLevelInner {
 
 /// Shared runtime log-level overlay state and reload handle.
 pub struct LogLevelState {
+    /// Serialize filter changes through completion of tracing's cache rebuild.
+    updates: Mutex<()>,
     /// Serializes overlay mutation, baseline refresh, and filter reload.
     inner: Mutex<LogLevelInner>,
 }
@@ -148,6 +150,7 @@ impl LogLevelState {
         reload_handle: reload::Handle<EnvFilter, tracing_subscriber::Registry>,
     ) -> Arc<Self> {
         Arc::new(Self {
+            updates: Mutex::new(()),
             inner: Mutex::new(LogLevelInner {
                 baseline_directive,
                 overlays: HashMap::new(),
@@ -181,10 +184,10 @@ impl LogLevelState {
         validate_put_request(request.module.as_deref(), &request.level, duration_secs)?;
 
         let target = overlay_target_key(request.module.as_deref());
-        let level = normalize_level(&request.level);
         let ttl = chrono::Duration::seconds(i64::try_from(duration_secs).unwrap_or(i64::MAX));
         let expires_at = Utc::now().checked_add_signed(ttl).unwrap_or(DateTime::<Utc>::MAX_UTC);
 
+        let _update = self.updates.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut guard = self.inner.lock().expect("log level state lock poisoned");
         let previous = guard.overlays.remove(&target);
 
@@ -194,7 +197,7 @@ impl LogLevelState {
         guard.overlays.insert(
             target.clone(),
             OverlayEntry {
-                level,
+                level: normalize_level(&request.level),
                 expires_at,
                 revert_abort: abort_handle,
                 generation,
@@ -249,6 +252,7 @@ impl LogLevelState {
             ));
         }
 
+        let _update = self.updates.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut guard = self.inner.lock().expect("log level state lock poisoned");
 
         if all {
@@ -305,6 +309,7 @@ impl LogLevelState {
         Publish: FnOnce() -> Result<T, E>,
     {
         let baseline = build_baseline_directive(config).map_err(E::from)?;
+        let _update = self.updates.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut guard = self.inner.lock().expect("log level state lock poisoned");
         let directive = build_effective_directive(&baseline, &guard.overlays);
         let filter = env_filter_from_directive(&directive).map_err(E::from)?;
@@ -331,6 +336,7 @@ impl LogLevelState {
     /// have lost the race against its own wakeup) becomes a no-op instead of
     /// evicting the newer overlay.
     fn revert_target(self: &Arc<Self>, target: &str, generation: u64) {
+        let _update = self.updates.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let Ok(mut guard) = self.inner.lock() else {
             return;
         };
@@ -519,7 +525,10 @@ mod tests {
         let result: Result<(), ProxyError> = state.refresh_baseline_with(&publication_config(), || {
             Err(ProxyError::Config("publication revoked".to_owned()))
         });
-        assert!(result.is_err());
+        assert!(
+            matches!(&result, Err(ProxyError::Config(error)) if error == "publication revoked"),
+            "the publication callback must run and its rejection must propagate"
+        );
         assert_eq!(state.snapshot().baseline_directive, "warn");
         assert_eq!(handle.clone_current().unwrap().to_string(), "warn");
     }
@@ -555,13 +564,15 @@ mod tests {
             started,
             wait: Mutex::new(wait),
         });
+        let dispatch = tracing::Dispatch::new(subscriber);
+        let worker_dispatch = dispatch.clone();
         let state = LogLevelState::new("warn".to_owned(), handle);
         let worker_state = Arc::clone(&state);
         let worker_gate = Arc::clone(&gate);
         let worker = std::thread::Builder::new()
             .name("baseline-publication".to_owned())
             .spawn(move || {
-                tracing::subscriber::with_default(subscriber, || {
+                tracing::dispatcher::with_default(&worker_dispatch, || {
                     tracing::warn!("seed registration before arming publication probe");
                     worker_state
                         .refresh_baseline_with(&publication_config(), || {
@@ -574,15 +585,56 @@ mod tests {
             })
             .unwrap();
         observed.recv_timeout(Duration::from_secs(5)).unwrap();
-        assert!(
-            gate.try_lock().is_ok(),
-            "a stalled subscriber must not hold publication"
-        );
-        assert!(state.snapshot().baseline_directive.contains("praxis_test=debug"));
+        let publication_unlocked = gate.try_lock().is_ok();
+        let (snapshot_sent, snapshot_received) = mpsc::channel();
+        let snapshot_state = Arc::clone(&state);
+        let probe = std::thread::spawn(move || {
+            let _sent = snapshot_sent.send(snapshot_state.snapshot());
+        });
+        let snapshot = snapshot_received.recv_timeout(Duration::from_secs(1));
+        let (updating, attempted) = mpsc::channel();
+        let (updated, completed) = mpsc::channel();
+        let overlay_state = Arc::clone(&state);
+        let admin = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let _started = updating.send(());
+            let result = runtime.block_on(async {
+                overlay_state.apply_put(&PutLogLevelRequest {
+                    level: "debug".to_owned(),
+                    module: Some("overlay_test".to_owned()),
+                    duration_secs: Some(300),
+                })
+            });
+            let _sent = updated.send(result);
+        });
+        attempted.recv_timeout(Duration::from_secs(5)).unwrap();
+        let early_update = completed.recv_timeout(Duration::from_millis(50));
         release.send(()).unwrap();
         worker.join().unwrap();
+        probe.join().unwrap();
+        admin.join().unwrap();
+        assert!(publication_unlocked, "a stalled subscriber must not hold publication");
+        let snapshot = snapshot.expect("snapshot must finish before the callback is released");
+        assert!(
+            snapshot.baseline_directive.contains("praxis_test=debug"),
+            "snapshot must see committed baseline"
+        );
+        assert!(
+            snapshot.overlays.is_empty(),
+            "overlay mutation must wait for the earlier cache rebuild"
+        );
+        assert!(
+            matches!(early_update, Err(mpsc::RecvTimeoutError::Timeout)),
+            "cache rebuilds must not overlap"
+        );
+        assert!(
+            completed.recv_timeout(Duration::from_secs(5)).unwrap().is_ok(),
+            "queued overlay must complete"
+        );
     }
-
     /// Stall one interest-cache callback only after the worker commits.
     struct BlockingRegistration {
         /// One-shot flag armed by publication.
