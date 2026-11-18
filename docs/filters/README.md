@@ -93,6 +93,12 @@ runs once at ingress, never inside an iterative exchange. Facts it publishes
 (extensions, metadata, filter results, trusted header mutations) are visible
 both during a later `stream_buffer` pre-read and the request phase.
 
+The `policy` filter uses the head phase for admission: it rate-limits and
+authenticates before any filter reads the body, even one listed before it, and
+authorizes later phases on that admission. Because it runs first, an earlier
+security filter's request phase (such as `ip_acl`) now follows it; see
+[`policy`](http/security/policy.md).
+
 Request `conditions` gate the request and ordinary body hooks. Response
 `response_conditions` gate only the response hooks. A filter skipped on
 request is also skipped on response and on every body hook, ordinary and

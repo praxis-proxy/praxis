@@ -205,6 +205,33 @@
 //! the same id under a different subject is a different bucket and taint
 //! never crosses principals.
 //!
+//! # Admission at the request head
+//!
+//! The filter runs in the request-head phase, before any filter reads the
+//! body and wherever it sits in the chain, so an over-limit or
+//! unauthenticated request is rejected before a classifier parses or buffers
+//! its body. There it runs `ratelimit.pre_identity`, then resolves the
+//! baseline identity on the `http` coordinates. A policy without entity routes
+//! finishes admission there, or, with `http.request` rules, authorizes in the
+//! request phase on that identity. A policy with entity routes holds it and
+//! authorizes once the request is classified, resolving the route's identity
+//! then; each limiter charges a request once.
+//!
+//! The head resolves identity only when the global resolver is the one that
+//! judges every route. When an entity default, bundle, group or route adds to
+//! or replaces the global `authentication:`, the head runs the pre-identity
+//! limiter only, identity waits for the route, and the request body is
+//! buffered until the route decides. A policy with `context_headers` keeps
+//! today's timing: those values can come from filters that run after the head.
+//!
+//! The head judges the request as the client sent it plus the trusted header
+//! mutations of earlier head filters. Head admission also changes order: it
+//! precedes an earlier security filter's request phase (such as `ip_acl`), the
+//! declared-body-size 413, and inference body denials. Pipeline construction
+//! warns about an earlier security filter and about request conditions on a
+//! head-admitting policy. In a branch chain the filter has no head phase and
+//! admits in the request phase.
+//!
 //! # Request and response phases
 //!
 //! - Request phase: after the body is buffered, the filter dispatches the pre-invoke CMF hook for the route's entity.

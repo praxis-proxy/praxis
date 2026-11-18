@@ -43,6 +43,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- The `policy` filter admits at the request head: it runs
+  `ratelimit.pre_identity` and the baseline identity check before any filter
+  reads the body, even one listed before it, so over-limit and
+  unauthenticated requests are rejected without a body read. Entity routes
+  still authorize once the request is classified; `http.request` rules still
+  run in the request phase, on the head identity. Head denials now come
+  before an earlier security filter's request phase (such as `ip_acl`), the
+  declared-body-size 413, and inference model and body denials. Inference
+  and pre-read MCP requests resolve the global identity once more. When an
+  entity default, bundle, group or route extends or replaces the global
+  `authentication:`, the head runs the limiter only, and header-first entity
+  requests no longer pass the global gate: the route judges the credential,
+  and the body is buffered until it does. Policies with `context_headers`
+  keep the previous timing. Pipeline construction warns about an earlier
+  security filter and about request conditions on a head-admitting policy.
 - Temporarily disable KIND rollout acceptance in CI and local commands
   because the cluster exhausts the shared inotify instance budget, pending
   migration to [gateway-controller](https://github.com/praxis-proxy/gateway-controller).
