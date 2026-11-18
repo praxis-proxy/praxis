@@ -188,8 +188,9 @@ where
     let hard_deadline = state.hard_deadline;
     let relay = relay_loop(downstream, upstream, &mut state, idle_timeout);
     // The loop's deadline arm cannot fire while an arm's handler awaits (a
-    // half-close passed on to either peer); bounding the whole loop keeps
-    // the hard deadline there too.
+    // half-close passed on to either peer). Each such await carries the
+    // idle deadline itself; bounding the whole loop keeps the hard deadline
+    // there too.
     let reason = match hard_deadline {
         Some(deadline) => timeout_at(deadline, relay)
             .await
@@ -303,11 +304,17 @@ where
         },
         Ok(None) => {
             // Client half-close: propagate it so the destination can finish.
+            // Bounded like every other write: a shutdown that must flush
+            // into a peer that stopped reading makes no progress.
             state.downstream_done = true;
             state.idle_deadline = Instant::now() + idle_timeout;
-            if let Err(error) = upstream.shutdown().await {
-                warn!(error = %error, phase = "destination_shutdown", "tunnel_error");
-                return Some(TunnelCloseReason::Error);
+            match timeout_at(state.idle_deadline, upstream.shutdown()).await {
+                Ok(Ok(())) => {},
+                Ok(Err(error)) => {
+                    warn!(error = %error, phase = "destination_shutdown", "tunnel_error");
+                    return Some(TunnelCloseReason::Error);
+                },
+                Err(_elapsed) => return Some(TunnelCloseReason::IdleTimeout),
             }
         },
         Err(error) => {
@@ -369,11 +376,16 @@ where
     match read {
         Ok(0) => {
             // The destination read waits on every chunk before it, so none
-            // is queued and the client has received all it was sent.
+            // is queued and the client has received all it was sent. On a
+            // TLS listener the half-close writes a close_notify, which a
+            // client that stopped reading never accepts, so it is bounded
+            // like any other write toward the client.
             state.upstream_done = true;
             state.idle_deadline = Instant::now() + idle_timeout;
-            downstream.close_write().await;
-            None
+            timeout_at(state.idle_deadline, downstream.close_write())
+                .await
+                .err()
+                .map(|_elapsed| TunnelCloseReason::IdleTimeout)
         },
         Ok(_) => {
             state.idle_deadline = Instant::now() + idle_timeout;
@@ -453,6 +465,11 @@ mod tests {
 
         /// Whether a chunk is queued.
         writing: bool,
+
+        /// Whether [`close_write`](TunnelDownstream::close_write) never
+        /// finishes, as a TLS `close_notify` written to a client that
+        /// stopped reading never does.
+        close_blocks: bool,
     }
 
     impl DuplexDownstream {
@@ -462,6 +479,7 @@ mod tests {
                 stream,
                 queued: Bytes::new(),
                 writing: false,
+                close_blocks: false,
             }
         }
 
@@ -496,6 +514,9 @@ mod tests {
         }
 
         async fn close_write(&mut self) {
+            if self.close_blocks {
+                std::future::pending::<()>().await;
+            }
             // A duplex shutdown ends only this end's writes; it keeps reading.
             let _closed = self.stream.shutdown().await;
         }
@@ -740,6 +761,80 @@ mod tests {
             "only the bytes the destination accepted are counted: {}",
             stats.bytes_in
         );
+    }
+
+    #[tokio::test]
+    async fn blocked_half_close_toward_the_client_closes_at_idle_timeout() {
+        // On TLS the half-close writes a close_notify, which a client that
+        // stopped reading never accepts. The idle timeout must still close
+        // the tunnel, with no max_duration configured.
+        let (client, pump_side) = tokio::io::duplex(64);
+        let (upstream_side, mut server) = tokio::io::duplex(64);
+        let mut downstream = DuplexDownstream::new(pump_side);
+        downstream.close_blocks = true;
+        let mut upstream = upstream_side;
+        server.shutdown().await.unwrap();
+
+        let stats = timeout(
+            Duration::from_secs(2),
+            pump(&mut downstream, &mut upstream, Duration::from_millis(200), None),
+        )
+        .await
+        .expect("the idle timeout must close a tunnel stuck passing on a half-close");
+        assert_eq!(stats.reason, TunnelCloseReason::IdleTimeout);
+        drop((client, server));
+    }
+
+    #[tokio::test]
+    async fn blocked_half_close_toward_the_destination_closes_at_idle_timeout() {
+        // A destination shutdown that cannot flush must not outlive the idle
+        // timeout either.
+        let (mut client, pump_side) = tokio::io::duplex(64);
+        let (upstream_side, server) = tokio::io::duplex(64);
+        let mut downstream = DuplexDownstream::new(pump_side);
+        let mut upstream = ShutdownBlocks(upstream_side);
+        client.shutdown().await.unwrap();
+
+        let stats = timeout(
+            Duration::from_secs(2),
+            pump(&mut downstream, &mut upstream, Duration::from_millis(200), None),
+        )
+        .await
+        .expect("the idle timeout must close a tunnel stuck passing on a half-close");
+        assert_eq!(stats.reason, TunnelCloseReason::IdleTimeout);
+        drop((client, server));
+    }
+
+    /// A destination stream whose shutdown never finishes, as one that must
+    /// flush into a peer that stopped reading.
+    struct ShutdownBlocks(DuplexStream);
+
+    impl AsyncRead for ShutdownBlocks {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.0).poll_read(cx, buf)
+        }
+    }
+
+    impl AsyncWrite for ShutdownBlocks {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Pin::new(&mut self.0).poll_write(cx, buf)
+        }
+
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.0).poll_flush(cx)
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut std::task::Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Pending
+        }
     }
 
     #[tokio::test]
