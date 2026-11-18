@@ -197,6 +197,13 @@ fn ca_file_exception_respects_loader_context() {
     ))
     .expect("read actual upstream mTLS example");
     let mut config: serde_yaml::Value = serde_yaml::from_str(&yaml).expect("parse actual mTLS example");
+    // Host identity-file permissions must not mask the CA error under test.
+    let certificates = praxis_test_utils::TestCertificates::generate();
+    let cert_path = certificates.cert_path.to_str().expect("UTF-8 certificate path");
+    let key_path = certificates.key_path.to_str().expect("UTF-8 key path");
+    let client_cert = &mut config["filter_chains"][0]["filters"][1]["clusters"][0]["tls"]["client_cert"];
+    client_cert["cert_path"] = cert_path.into();
+    client_cert["key_path"] = key_path.into();
     let directory = tempfile::tempdir().expect("temporary example directory");
     let copied = directory.path().join("tls-mtls-upstream.yaml");
     let permitted = directory.path().join("expected-upstream-ca.pem");
@@ -225,7 +232,16 @@ fn ca_file_exception_respects_loader_context() {
         );
     }
 
-    let files = external_files(std::path::Path::new("protocols/tls-mtls-upstream.yaml"));
+    let files = [
+        ExternalFile {
+            path: cert_path,
+            loader: FileLoader::ClientCert("backend"),
+        },
+        ExternalFile {
+            path: key_path,
+            loader: FileLoader::ClientKey("backend"),
+        },
+    ];
     for (field, suffix) in [
         ("cert_path", ": failed to read cert"),
         ("key_path", ": failed to read key"),
@@ -239,7 +255,7 @@ fn ca_file_exception_respects_loader_context() {
         assert_file_classification(
             &copied,
             &config,
-            files,
+            &files,
             ExternalFile {
                 path: &missing,
                 loader: FileLoader::Ca("backend"),
