@@ -15,7 +15,7 @@ use super::{
         Calls, HOST_LIMITERS, TOOL_SUBJECT_LIMIT, context, filter, filter_config, plugins, recorded_policy, rejection,
         request,
     },
-    request_state::{RequestState, state},
+    request_state::{RequestState, state, state_mut},
 };
 use crate::{
     BodyMode, FilterAction, FilterEntry, FilterPipeline, FilterRegistry,
@@ -172,6 +172,27 @@ async fn an_entity_policy_holds_the_head_identity_for_the_route() {
     assert_eq!(plugins(&calls), ["who"], "the request phase does not resolve again");
     assert!(matches!(tool_body(&filter, &mut ctx).await, FilterAction::BodyDone));
     assert_eq!(plugins(&calls), ["who", "who"], "the route resolution");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_context_table_lost_after_the_head_fails_the_body_closed() {
+    let (_dir, path, _calls) = recorded_policy("test/head-lost-table", TOOL_SUBJECT_LIMIT);
+    let filter = filter(path);
+    let req = request(Some("alice"));
+    let mut ctx = context(&req, 1);
+    assert!(matches!(head(&filter, &mut ctx).await, FilterAction::Continue));
+    assert!(matches!(state_mut(&mut ctx).take_table(), Ok(Some(_))));
+    let mut body = Some(Bytes::from_static(TOOL_CALL));
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
+    assert!(
+        filter.on_request_body(&mut ctx, &mut body, true).await.is_err(),
+        "no hook runs on a fresh table after the head's was lost"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

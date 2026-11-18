@@ -13,13 +13,15 @@ use std::{
     collections::HashMap,
     io::{Read as _, Write as _},
     net::TcpStream,
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use praxis_core::config::Config;
+use praxis_filter::{FilterAction, FilterError, FilterFactory, FilterRegistry, HttpFilter, HttpFilterContext};
 use praxis_test_utils::{
     example_config_path, free_port, http_send, parse_body, parse_status, patch_yaml, start_header_echo_backend,
-    start_proxy,
+    start_proxy, start_proxy_with_registry, start_reloadable_proxy,
 };
 
 // Identity parameters mirrored from
@@ -158,6 +160,77 @@ fn a_route_that_replaces_global_authentication_judges_its_own_credential() {
         "the replaced global credential is not accepted on the route"
     );
     assert_eq!(send(""), 401, "a missing key is denied by the route");
+}
+
+#[test]
+fn a_classified_tool_call_is_authorized_after_head_admission() {
+    let backend = start_header_echo_backend();
+    let dir = tempfile::TempDir::new().unwrap();
+    let proxy = start_proxy_with_registry(&mcp_config(&dir, free_port(), backend.port()), &tagging_registry());
+    assert_eq!(
+        status_without_body(proxy.addr(), None, 64),
+        401,
+        "an unauthenticated tool call is denied at the head, before classification"
+    );
+    let allowed = tool_call(proxy.addr(), "echo", &mint_fixture_jwt("alice"));
+    assert_eq!(parse_status(&allowed), 200, "{allowed}");
+    assert!(!allowed.contains("-32001"), "the backend answered: {allowed}");
+    let denied = tool_call(proxy.addr(), "admin", &mint_fixture_jwt("alice"));
+    assert_eq!(
+        parse_status(&denied),
+        200,
+        "a tool denial is a JSON-RPC error: {denied}"
+    );
+    assert!(
+        denied.contains("-32001") && denied.contains("admin_closed"),
+        "the route denied it after the head admitted it: {denied}"
+    );
+}
+
+#[test]
+fn a_request_admitted_before_a_reload_finishes_on_its_pipeline() {
+    let backend = start_header_echo_backend();
+    let dir = tempfile::TempDir::new().unwrap();
+    let port = free_port();
+    let open = load_example_yaml(port, backend.port(), None);
+    let fixture = format!("{}/fixtures/admission-policy.yaml", env!("CARGO_MANIFEST_DIR"));
+    let closed_policy = dir.path().join("closed-policy.yaml");
+    let closed_rules = std::fs::read_to_string(&fixture)
+        .unwrap()
+        .replace("\"require(authenticated)\"", "\"deny('closed', 'closed')\"");
+    std::fs::write(&closed_policy, closed_rules).unwrap();
+    let closed = open.replace(&fixture, closed_policy.to_str().unwrap());
+    let proxy = start_reloadable_proxy(&open);
+
+    let body = r#"{"model":"m1"}"#;
+    let mut held = TcpStream::connect(proxy.addr()).unwrap();
+    held.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    write!(
+        held,
+        "POST /v1/chat HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nContent-Type: \
+         application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        mint_fixture_jwt("alice"),
+        body.len(),
+        body.get(..1).unwrap()
+    )
+    .unwrap();
+    held.flush().unwrap();
+
+    let after = proxy.reload_until(
+        &closed,
+        || post_json(proxy.addr(), Some(&mint_fixture_jwt("alice"))),
+        |status| *status == 403,
+    );
+    assert_eq!(after, 403, "new requests use the reloaded policy");
+
+    held.write_all(body.get(1..).unwrap().as_bytes()).unwrap();
+    let mut response = String::new();
+    let _read = held.read_to_string(&mut response);
+    assert_eq!(
+        parse_status(&response),
+        200,
+        "the held request keeps its pipeline and head admission: {response}"
+    );
 }
 
 // -----------------------------------------------------------------------------
@@ -317,4 +390,114 @@ fn mint_fixture_jwt(subject: &str) -> String {
         "exp": now + 300,
     });
     super::jwt::hs256(&claims, None, FIXTURE_SECRET.as_bytes())
+}
+
+/// The MCP policy: global JWT authentication, an `echo` tool any
+/// authenticated caller may use, and an `admin` tool no one may.
+fn mcp_config(dir: &tempfile::TempDir, proxy_port: u16, backend_port: u16) -> Config {
+    let admission = format!("{}/fixtures/admission-policy.yaml", env!("CARGO_MANIFEST_DIR"));
+    let fixture = std::fs::read_to_string(admission).unwrap();
+    let jwt_plugin = fixture
+        .split("  - name: jwt-user")
+        .nth(1)
+        .and_then(|rest| rest.split("\nglobal:").next())
+        .unwrap();
+    let policy = format!(
+        "engine_settings:\n  dispatch: policy\n\nplugins:\n  - name: jwt-user{jwt_plugin}
+global:
+  authentication:
+    - jwt-user
+
+routes:
+  - tool: echo
+    authorization:
+      pre_invocation:
+        - \"require(authenticated)\"
+  - tool: admin
+    authorization:
+      pre_invocation:
+        - \"deny('admin is closed', 'admin_closed')\"
+"
+    );
+    let policy_path = dir.path().join("mcp-policy.yaml");
+    std::fs::write(&policy_path, policy).unwrap();
+    let yaml = format!(
+        "listeners:
+  - name: default
+    address: \"127.0.0.1:{proxy_port}\"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: tool_tagger
+      - filter: policy
+        config_path: {}
+      - filter: router
+        routes:
+          - path_prefix: \"/\"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints: [\"127.0.0.1:{backend_port}\"]
+insecure_options:
+  allow_private_endpoints: true
+",
+        policy_path.display()
+    );
+    Config::from_yaml(&yaml).unwrap()
+}
+
+/// `POST` a `tools/call` for `tool` with `token`.
+fn tool_call(addr: &str, tool: &str, token: &str) -> String {
+    let body =
+        format!(r#"{{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{{"name":"{tool}","arguments":{{}}}}}}"#);
+    http_send(
+        addr,
+        &format!(
+            "POST /mcp HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\nX-Tool: {tool}\r\n\
+             Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        ),
+    )
+}
+
+/// Stands in for the protocol classifier: tags each request as a
+/// `tools/call` for the tool named in `X-Tool`, after the head phase.
+struct ToolTagger;
+
+#[async_trait::async_trait]
+impl HttpFilter for ToolTagger {
+    fn name(&self) -> &'static str {
+        "tool_tagger"
+    }
+
+    async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        let tool = ctx
+            .request
+            .headers
+            .get("x-tool")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("echo")
+            .to_owned();
+        ctx.filter_metadata
+            .insert("mcp.method", "tools/call")
+            .expect("entry must fit in the filter's metadata");
+        ctx.filter_metadata
+            .insert("mcp.name", &tool)
+            .expect("entry must fit in the filter's metadata");
+        Ok(FilterAction::Continue)
+    }
+}
+
+/// The builtins plus `tool_tagger`.
+fn tagging_registry() -> FilterRegistry {
+    let mut registry = FilterRegistry::with_builtins();
+    registry
+        .register(
+            "tool_tagger",
+            FilterFactory::Http(Arc::new(|_| Ok(Box::new(ToolTagger)))),
+        )
+        .expect("register the tagger");
+    registry
 }
