@@ -1618,9 +1618,23 @@ fn h2_tiny_frame_flood_is_bounded_by_transport_guard() {
     );
     let before = sample_process(process.pid()).unwrap();
     let (_, samples) = measure(process.pid(), || {
-        let client = start_h2_paused_uploads(&addr, spec.clone(), 1, 128, false);
+        let mut client = praxis_test_utils::start_h2_upload_paused_after_prefix(&addr, spec.clone());
+        assert_eq!(
+            client.ready.recv_timeout(WAIT).unwrap().unwrap(),
+            16_384,
+            "the initial body prefix must be queued before the guard is exercised"
+        );
+        backend
+            .accepted
+            .recv_timeout(WAIT)
+            .expect("upstream must accept the staged request");
+        backend
+            .first_byte
+            .recv_timeout(WAIT)
+            .expect("upstream must receive the staged body");
+        client.resume();
         let failure = client
-            .ready
+            .result
             .recv_timeout(WAIT)
             .unwrap()
             .expect_err("unpaced flood must hit the transport guard");

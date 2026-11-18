@@ -33,6 +33,7 @@ pub use http_client::{
 pub use http1::{H1Completion, H1Response, assert_buffered_response_rejected, read_h1_response};
 pub use http2::{
     H2PausedResult, H2PausedUploads, H2Response, H2Upload, read_h2_response, send_h2_payload, start_h2_paused_uploads,
+    start_h2_upload_paused_after_prefix,
 };
 pub use port::{
     PortGuard, bind_unique_port, bind_unique_port_on, free_port, free_port_guard, free_port_v6, ipv6_available,
