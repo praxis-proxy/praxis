@@ -51,8 +51,7 @@ CMAKE_TARGETS := all build release check \
 	test-config-validation test-config \
 	bench \
 	lint doc coverage coverage-check \
-	run-echo run-debug \
-	fuzz fuzz-build
+	run-echo run-debug
 
 ifneq ($(V),)
   _NOCAPTURE := -- --nocapture

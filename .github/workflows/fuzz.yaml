@@ -22,6 +22,10 @@ on:
     paths:
       - "tests/fuzz/**"
       - "crates/filter/src/json_ops/**"
+      - "crates/filter/Cargo.toml"
+      - "Cargo.toml"
+      - "Makefile"
+      - ".github/workflows/fuzz.yaml"
 
 permissions: {}
 
@@ -54,10 +58,13 @@ jobs:
           cache-suffix: fuzz
 
       - name: Install cargo-fuzz
-        # setup-rust-lint's rust-cache also restores ~/.cargo/bin, so the
-        # binary may already be present. Install only when it is absent;
-        # otherwise `cargo install` aborts with "binary already exists".
-        run: command -v cargo-fuzz > /dev/null || cargo install cargo-fuzz --version 0.13.2 --locked
+        # setup-rust-lint's rust-cache also restores ~/.cargo/bin, so a
+        # binary may already be present — possibly a different version.
+        # Keep it only when it matches the pin; otherwise replace it.
+        run: |
+          if [ "$(cargo fuzz --version 2>/dev/null)" != "cargo-fuzz 0.13.2" ]; then
+            cargo install cargo-fuzz --version 0.13.2 --locked --force
+          fi
 
       - name: Run fuzz targets
         run: make fuzz
@@ -99,7 +106,12 @@ jobs:
           cache-suffix: fuzz
 
       - name: Install cargo-fuzz
-        run: command -v cargo-fuzz > /dev/null || cargo install cargo-fuzz --version 0.13.2 --locked
+        # Same version check as the fuzz job above: a cached binary of a
+        # different version is replaced, a matching one is kept.
+        run: |
+          if [ "$(cargo fuzz --version 2>/dev/null)" != "cargo-fuzz 0.13.2" ]; then
+            cargo install cargo-fuzz --version 0.13.2 --locked --force
+          fi
 
       - name: Build fuzz targets
         run: make fuzz-build

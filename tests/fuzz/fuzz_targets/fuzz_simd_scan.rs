@@ -3,10 +3,10 @@
 use libfuzzer_sys::fuzz_target;
 use praxis_filter::json_ops::find_json_string_delim;
 
-/// Slow byte-by-byte scan, used as the trusted answer. In a JSON string, a
-/// delimiter is `"`, `\`, or a control character (< 0x20). Written fresh
-/// here, not copied from `simd_scan/generic.rs`, so a bug that exists in
-/// both versions cannot hide from the fuzzer.
+/// Slow byte-by-byte scan, used as the trusted answer: in a JSON string, a
+/// delimiter is `"`, `\`, or a control character (< 0x20). The assertion
+/// below checks the SIMD result against this simpler implementation of the
+/// same contract.
 fn scalar_find(haystack: &[u8]) -> Option<usize> {
     haystack.iter().position(|&bb| bb == b'"' || bb == b'\\' || bb < 0x20)
 }
