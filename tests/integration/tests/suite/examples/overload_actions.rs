@@ -263,14 +263,16 @@ fn keepalive_request(port: u16) -> TcpStream {
 /// A fifth response then proves reuse of the original downstream HTTP/2 connection.
 #[cfg(feature = "overload-actions")]
 fn gated_backend() -> GatedBackend {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let (listener, port) = praxis_test_utils::bind_unique_port();
     listener.set_nonblocking(true).unwrap();
-    let port = listener.local_addr().unwrap().port();
     let (release, wait) = std::sync::mpsc::channel();
+    let (stage, waiting) = std::sync::mpsc::channel();
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let cancelled = std::sync::Arc::clone(&stop);
     let thread = std::thread::spawn(move || {
-        let streams: Option<Vec<_>> = (0..4).map(|_| accept_gated(&listener, &cancelled)).collect();
+        let streams: Option<Vec<_>> = (1..=4)
+            .map(|count| accept_gated(&listener, &cancelled, (count == 4).then_some((&stage, 4))))
+            .collect();
         let Some(streams) = streams else {
             return;
         };
@@ -280,13 +282,14 @@ fn gated_backend() -> GatedBackend {
         for mut stream in streams {
             complete_backend_response(&mut stream);
         }
-        if let Some(mut stream) = accept_gated(&listener, &cancelled) {
+        if let Some(mut stream) = accept_gated(&listener, &cancelled, Some((&stage, 5))) {
             complete_backend_response(&mut stream);
         }
     });
     GatedBackend {
         port,
         release: Some(release),
+        waiting,
         stop,
         thread: Some(thread),
     }
@@ -299,6 +302,8 @@ struct GatedBackend {
     port: u16,
     /// Gate released only after pressure engages.
     release: Option<std::sync::mpsc::Sender<()>>,
+    /// Notification sent only after the fourth or fifth accept would block.
+    waiting: std::sync::mpsc::Receiver<usize>,
     /// Cancel either accept stage when this fixture drops.
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Worker joined by the fixture.
@@ -321,12 +326,19 @@ impl Drop for GatedBackend {
 
 /// Bound every accept and observe fixture cancellation while it is pending.
 #[cfg(feature = "overload-actions")]
-fn accept_gated(listener: &std::net::TcpListener, stop: &std::sync::atomic::AtomicBool) -> Option<TcpStream> {
+fn accept_gated(
+    listener: &std::net::TcpListener,
+    stop: &std::sync::atomic::AtomicBool,
+    mut stage: Option<(&std::sync::mpsc::Sender<usize>, usize)>,
+) -> Option<TcpStream> {
     let deadline = Instant::now() + WAIT;
     while !stop.load(std::sync::atomic::Ordering::Relaxed) && Instant::now() < deadline {
         match listener.accept() {
             Ok((stream, _)) => return Some(stream),
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if let Some((notify, count)) = stage.take() {
+                    let _notified = notify.send(count);
+                }
                 std::thread::sleep(Duration::from_millis(10));
             },
             Err(error) => panic!("backend accept failed: {error}"),
@@ -363,6 +375,17 @@ fn overload_gated_backend_cancels_both_accept_stages() {
                 let mut response = String::new();
                 stream.read_to_string(&mut response).unwrap();
                 assert!(response.ends_with("complete"));
+            }
+        }
+        let expected = if count == 3 { 4 } else { 5 };
+        let deadline = Instant::now() + WAIT;
+        loop {
+            let stage = backend
+                .waiting
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .unwrap();
+            if stage == expected {
+                break;
             }
         }
         let start = Instant::now();
@@ -474,6 +497,16 @@ async fn server_scoped_transport_actions_preserve_body_reads_and_other_servers()
     );
     signal.update(EngagedActions::default(), 0.0);
     assert_eq!(http_get(proxy.addr(), "/", None).0, 200, "admission must recover");
+    let request = http::Request::builder()
+        .uri(format!("http://{}/", proxy.addr()))
+        .body(())
+        .unwrap();
+    let (recovered, _) = sender.send_request(request, true).unwrap();
+    assert_eq!(
+        tokio::time::timeout(WAIT, recovered).await.unwrap().unwrap().status(),
+        200,
+        "the same HTTP/2 connection must admit a new stream after pressure clears"
+    );
     connection.abort();
 }
 
@@ -503,12 +536,11 @@ fn overload_header_deadline_spans_probe_and_drip_reads() {
         "    downstream_keepalive_timeout_ms: 4000\n    filter_chains:",
     );
     let (proxy, signal) = praxis_test_utils::start_proxy_with_overload(&Config::from_yaml(&yaml).unwrap(), |_| {});
-    signal.update(EngagedActions::default(), 1.0); // One 400 ms budget.
+    signal.update(EngagedActions::default(), 1.0);
     let mut socket = TcpStream::connect(proxy.addr()).unwrap();
     socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
-    socket.write_all(b"G").unwrap();
     std::thread::sleep(Duration::from_millis(250));
-    socket.write_all(b"ET / HTTP/1.1\r\nHost: x\r\n").unwrap();
+    socket.write_all(b"GET / HTTP/1.1\r\nHost: x\r\n").unwrap();
     std::thread::sleep(Duration::from_millis(250));
     let _late_write = socket.write_all(b"\r\n");
     let mut byte = [0_u8; 1];
@@ -521,17 +553,65 @@ fn overload_header_deadline_spans_probe_and_drip_reads() {
     let mut socket = TcpStream::connect(proxy.addr()).unwrap();
     socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
     socket.write_all(b"GET / HTTP/1.1\r\nHost: x\r\nX-Drip: ").unwrap();
-    for _ in 0..8 {
-        std::thread::sleep(Duration::from_millis(100));
-        if socket.write_all(b"x").is_err() {
-            break;
+    socket.set_nonblocking(true).unwrap();
+    let deadline = Instant::now() + Duration::from_millis(700);
+    let mut closed = false;
+    while Instant::now() < deadline {
+        let _drip = socket.write_all(b"x");
+        match socket.read(&mut byte) {
+            Ok(0) => {
+                closed = true;
+                break;
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {
+                closed = true;
+                break;
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {},
+            other => panic!("incomplete header must close without an application response: {other:?}"),
         }
+        std::thread::sleep(Duration::from_millis(50));
     }
-    let end = socket.read(&mut byte);
     assert!(
-        matches!(&end, Ok(0)) || matches!(&end, Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset),
-        "individual reads must not renew the total deadline: {end:?}"
+        closed,
+        "the total header deadline must close while drips are still being sent"
     );
+}
+
+#[cfg(feature = "overload-actions")]
+#[test]
+fn tcp_admission_recovers_when_controlled_pressure_clears() {
+    use praxis_core::{config::Config, overload::EngagedActions};
+    let backend = praxis_test_utils::start_tcp_echo_backend();
+    let port = free_port();
+    let config = Config::from_yaml(&format!(
+        "runtime:\n  overload_actions: true\ninsecure_options:\n  allow_private_upstreams: true\nlisteners:\n  - name: raw\n    protocol: tcp\n    address: '127.0.0.1:{port}'\n    upstream: '127.0.0.1:{backend}'\n"
+    )).unwrap();
+    let (proxy, signal) = praxis_test_utils::start_full_proxy_with_overload(&config, |_| {});
+    let mut admitted = TcpStream::connect(proxy.addr()).unwrap();
+    assert_tcp_echo(&mut admitted);
+    signal.update(
+        EngagedActions {
+            fail_readiness: true,
+            ..Default::default()
+        },
+        1.0,
+    );
+    assert_socket_refused(port);
+    assert_tcp_echo(&mut admitted);
+    signal.update(EngagedActions::default(), 0.0);
+    let mut recovered = TcpStream::connect(proxy.addr()).unwrap();
+    assert_tcp_echo(&mut recovered);
+}
+
+/// Require actual bidirectional forwarding, rather than a successful TCP connect.
+#[cfg(feature = "overload-actions")]
+fn assert_tcp_echo(socket: &mut TcpStream) {
+    socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    socket.write_all(b"live").unwrap();
+    let mut echoed = [0_u8; 4];
+    socket.read_exact(&mut echoed).expect("admitted TCP session must echo");
+    assert_eq!(&echoed, b"live", "recovery must forward application bytes");
 }
 
 #[cfg(feature = "overload-actions")]

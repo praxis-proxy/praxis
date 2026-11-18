@@ -834,16 +834,30 @@ mod overload_keepalive_tests {
         socket
             .write_all(b"GET /overload HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n")
             .unwrap();
-        let mut response = String::new();
-        socket
-            .read_to_string(&mut response)
-            .expect("completed stream must close instead of reusing the socket");
-        assert_eq!(parse_status(&response), 200);
-        assert_eq!(parse_body(&response), "complete");
-        assert_ne!(
-            parse_header(&response, "connection").as_deref(),
-            Some("close"),
+        let mut reader = std::io::BufReader::new(socket);
+        let mut body = Vec::new();
+        let response = praxis_test_utils::read_h1_response(&mut reader, false, 1024, |chunk| {
+            body.extend_from_slice(chunk);
+            Ok(())
+        });
+        assert_eq!(response.status, Some(200), "admitted stream must succeed");
+        assert_eq!(
+            response.completion,
+            Some(praxis_test_utils::H1Completion::Chunked),
+            "terminal chunk and trailers must be complete"
+        );
+        assert_eq!(body, b"complete", "pressure must not truncate the body");
+        assert!(
+            !response
+                .headers
+                .iter()
+                .any(|(name, value)| name.eq_ignore_ascii_case("connection") && value.eq_ignore_ascii_case("close")),
             "headers preceded pressure"
+        );
+        assert_eq!(
+            reader.read(&mut [0_u8; 1]).unwrap(),
+            0,
+            "EOF must follow complete chunked framing"
         );
     }
 

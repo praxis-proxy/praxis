@@ -319,18 +319,18 @@ impl Exchange {
 
 impl Drop for Exchange {
     fn drop(&mut self) {
-        let idle_timeout = self
-            .overload
-            .as_ref()
-            .filter(|signal| signal.is_enabled())
-            .map_or(self.idle_timeout, |signal| {
-                Some(signal.scale_timeout(self.idle_timeout.unwrap_or(Duration::from_secs(60))))
-            });
         self.info.idle.send_if_modified(|state| {
             state.open = state.open.saturating_sub(1);
             if state.open > 0 {
                 return false;
             }
+            let idle_timeout = self
+                .overload
+                .as_ref()
+                .filter(|signal| signal.is_enabled())
+                .map_or(self.idle_timeout, |signal| {
+                    Some(signal.scale_timeout(self.idle_timeout.unwrap_or(Duration::from_secs(60))))
+                });
             state.deadline = idle_timeout.and_then(|timeout| Instant::now().checked_add(timeout));
             state.deadline.is_some()
         });
@@ -667,7 +667,7 @@ mod tests {
     async fn idle_deadline_uses_pressure_at_final_exchange_completion() {
         let driver = tokio::spawn(std::future::pending::<()>());
         let (idle, _receiver) = watch::channel(IdleState {
-            open: 1,
+            open: 2,
             deadline: None,
         });
         let info = Arc::new(ConnectionInfo {
@@ -685,11 +685,27 @@ mod tests {
             info: Arc::clone(&info),
             reused: false,
         };
+        let final_exchange = Exchange {
+            idle_timeout: exchange.idle_timeout,
+            overload: exchange.overload.clone(),
+            info: Arc::clone(&info),
+            reused: true,
+        };
+        drop(exchange);
+        assert_eq!(
+            info.idle.borrow().deadline,
+            None,
+            "another multiplexed exchange is still active"
+        );
         tokio::time::advance(Duration::from_secs(20)).await;
         signal.update(crate::overload::EngagedActions::default(), 1.0);
         let expected = Instant::now() + Duration::from_secs(6);
-        drop(exchange);
-        assert_eq!(info.idle.borrow().deadline, Some(expected));
+        drop(final_exchange);
+        assert_eq!(
+            info.idle.borrow().deadline,
+            Some(expected),
+            "only the final exchange samples the current pressure"
+        );
         signal.clear();
         tokio::time::advance(Duration::from_secs(1)).await;
         assert_eq!(

@@ -138,6 +138,7 @@ where
         let deadline =
             initial.unwrap_or_else(|| tokio::time::Instant::now() + self.signal.scale_timeout(self.header_timeout));
         session.set_keepalive(None);
+        session.set_read_timeout(None);
         let parsed = Arc::new(tokio::sync::Notify::new());
         session.set_connection_user_context(Some(Box::new(HeaderParsed(Arc::clone(&parsed)))));
         let serving = self.inner.process_new_http(session, shutdown);
@@ -221,6 +222,70 @@ mod tests {
         overload::{EngagedActions, Signal},
     };
 
+    /// Report whether Pingora's parser accepted a delayed complete request.
+    #[cfg(feature = "pingora")]
+    struct HeaderReader(std::sync::atomic::AtomicBool);
+
+    #[cfg(feature = "pingora")]
+    #[async_trait::async_trait]
+    impl pingora_core::apps::HttpServerApp for HeaderReader {
+        async fn process_new_http(
+            self: &std::sync::Arc<Self>,
+            mut session: pingora_core::protocols::http::ServerSession,
+            _shutdown: &pingora_core::server::ShutdownWatch,
+        ) -> Option<pingora_core::apps::ReusedHttpStream> {
+            self.0.store(
+                matches!(session.read_request().await, Ok(true)),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            None
+        }
+    }
+
+    #[cfg(feature = "pingora")]
+    #[tokio::test(start_paused = true)]
+    #[expect(
+        clippy::unwrap_used,
+        clippy::too_many_lines,
+        reason = "real socket fixture and paused-clock parser regression"
+    )]
+    async fn configured_header_budget_can_exceed_pingora_native_read_default() {
+        use pingora_core::apps::HttpServerApp as _;
+        use tokio::io::AsyncWriteExt as _;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (client, accepted) = tokio::join!(
+            tokio::net::TcpStream::connect(listener.local_addr().unwrap()),
+            listener.accept()
+        );
+        let mut client = client.unwrap();
+        let (server, _) = accepted.unwrap();
+        let session = pingora_core::protocols::http::ServerSession::new_http1(Box::new(
+            pingora_core::protocols::l4::stream::Stream::from(server),
+        ));
+        let signal = std::sync::Arc::new(Signal::default());
+        signal.update(EngagedActions::default(), 0.0);
+        let reader = std::sync::Arc::new(HeaderReader(std::sync::atomic::AtomicBool::new(false)));
+        let app = std::sync::Arc::new(super::HttpApp {
+            inner: std::sync::Arc::clone(&reader),
+            signal,
+            header_timeout: Duration::from_secs(120),
+            initial_deadlines: std::sync::Arc::default(),
+        });
+        let (_shutdown, watching) = tokio::sync::watch::channel(false);
+        let serving = tokio::spawn(async move {
+            app.process_new_http(session, &watching).await;
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(75)).await;
+        tokio::task::yield_now().await;
+        let _sent = client.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n").await;
+        serving.await.unwrap();
+        assert!(
+            reader.0.load(std::sync::atomic::Ordering::Relaxed),
+            "the configured 120-second header budget must accept a request after the native 60-second default"
+        );
+    }
+
     #[test]
     #[cfg(feature = "pingora")]
     fn old_header_cleanup_preserves_a_recycled_socket_deadline() {
@@ -241,7 +306,8 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .get(&7),
-            Some(&(now, 2))
+            Some(&(now, 2)),
+            "dropping the old guard must preserve the replacement deadline for a reused socket ID"
         );
     }
 
