@@ -402,16 +402,31 @@ const NETWORK_BACKEND: &str = if cfg!(feature = "hyper") { "hyper" } else { "pin
 
 /// Validate the executable's backend and Policy profile from one version run.
 fn binary_profile_matches(path: &Path) -> Result<(), String> {
-    let output = Command::new(path)
-        .arg("--version")
-        .output()
-        .map_err(|err| format!("run {} --version: {err}", path.display()))?;
+    let output = version_output(path).map_err(|err| format!("run {} --version: {err}", path.display()))?;
     if !output.status.success() {
         return Err(format!("{} --version failed with {}", path.display(), output.status));
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
     backend_version_matches(path, &stdout)?;
     policy_version_matches(path, &stdout)
+}
+
+/// Run `path --version`, retrying while the executable is busy.
+///
+/// A binary written just before it runs can fail with `ETXTBSY` when another
+/// thread forks while the file is still open for writing: the child holds the
+/// descriptor until it execs. The window is brief, so a short retry clears it.
+fn version_output(path: &Path) -> std::io::Result<std::process::Output> {
+    let mut attempts = 0_u32;
+    loop {
+        match Command::new(path).arg("--version").output() {
+            Err(err) if err.kind() == std::io::ErrorKind::ExecutableFileBusy && attempts < 50 => {
+                attempts = attempts.saturating_add(1);
+                std::thread::sleep(Duration::from_millis(10));
+            },
+            result => return result,
+        }
+    }
 }
 
 /// Match the network backend line of a successful version response.
