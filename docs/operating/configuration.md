@@ -916,10 +916,13 @@ earlier if SIGINT ends the delay. See
 [Hyper Backend](../architecture/hyper-backend.md#runtime-and-shutdown).
 
 The overload housekeeping runtime stops its periodic loops on shutdown
-and clears its server's action state. An already running jemalloc purge
-is joined after the network runtime's shutdown budget; allocator work
-cannot be interrupted safely, so this final join can extend process exit
-past `shutdown_timeout_secs`.
+and clears its server's action state. After the network runtime's shutdown
+budget, server-owned watcher, pipeline-release, housekeeping, and health tasks
+share a two-second cleanup budget. An active jemalloc purge is joined while
+that budget remains. If it expires, cleanup warns and detaches the runtime;
+allocator work is never forcibly interrupted. Returning from an embedded
+server therefore does not guarantee purge completion. Process exit can end
+any remaining background work.
 
 Once runtime shutdown completes, Praxis flushes queued
 log lines and attempts to export pending OTLP spans, then

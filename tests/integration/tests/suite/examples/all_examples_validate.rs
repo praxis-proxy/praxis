@@ -198,26 +198,19 @@ fn ca_file_exception_respects_loader_context() {
     .expect("read actual upstream mTLS example");
     let mut config: serde_yaml::Value = serde_yaml::from_str(&yaml).expect("parse actual mTLS example");
     let directory = tempfile::tempdir().expect("temporary example directory");
+    // Every intentionally missing path must have a searchable parent. Spoofed
+    // filenames below /etc/ssl/private can return EACCES instead of ENOENT.
+    let cert = directory.path().join("expected-client.pem");
+    let key = directory.path().join("expected-client-key.pem");
+    let cert_name = cert.to_str().unwrap();
+    let key_name = key.to_str().unwrap();
+    let tls = &mut config["filter_chains"][0]["filters"][1]["clusters"][0]["tls"];
+    tls["client_cert"]["cert_path"] = cert_name.into();
+    tls["client_cert"]["key_path"] = key_name.into();
+    let identity = tls["client_cert"].clone();
     let copied = directory.path().join("tls-mtls-upstream.yaml");
     let permitted = directory.path().join("expected-upstream-ca.pem");
     let permitted_name = permitted.to_str().expect("UTF-8 CA path");
-    let cert = directory.path().join("expected-client-cert.pem");
-    let cert_name = cert.to_str().expect("UTF-8 certificate path");
-    let key = directory.path().join("expected-client-key.pem");
-    let key_name = key.to_str().expect("UTF-8 key path");
-    let tls = &mut config["filter_chains"][0]["filters"][1]["clusters"][0]["tls"];
-    assert_eq!(
-        tls["client_cert"]["cert_path"].as_str(),
-        Some("/etc/ssl/certs/proxy-client.pem"),
-        "replace the actual example client certificate"
-    );
-    assert_eq!(
-        tls["client_cert"]["key_path"].as_str(),
-        Some("/etc/ssl/private/proxy-client-key.pem"),
-        "replace the actual example client key"
-    );
-    tls["client_cert"]["cert_path"] = cert_name.into();
-    tls["client_cert"]["key_path"] = key_name.into();
     let files = [ExternalFile {
         path: permitted_name,
         loader: FileLoader::Ca("backend"),
@@ -242,7 +235,7 @@ fn ca_file_exception_respects_loader_context() {
         );
     }
 
-    let identity_files = [
+    let files = [
         ExternalFile {
             path: cert_name,
             loader: FileLoader::ClientCert("backend"),
@@ -252,14 +245,18 @@ fn ca_file_exception_respects_loader_context() {
             loader: FileLoader::ClientKey("backend"),
         },
     ];
-    for (identity_path, suffix) in [(cert_name, ": failed to read cert"), (key_name, ": failed to read key")] {
+    for (field, suffix) in [
+        ("cert_path", ": failed to read cert"),
+        ("key_path", ": failed to read key"),
+    ] {
         let tls = &mut config["filter_chains"][0]["filters"][1]["clusters"][0]["tls"];
+        let identity_path = identity[field].as_str().expect("actual example identity path");
         let missing = format!("{identity_path}{suffix}");
         tls["ca"]["ca_path"] = missing.clone().into();
         assert_file_classification(
             &copied,
             &config,
-            &identity_files,
+            &files,
             ExternalFile {
                 path: &missing,
                 loader: FileLoader::Ca("backend"),
@@ -465,7 +462,8 @@ fn assert_file_classification(
     };
     assert!(
         missing.matches_error(&error),
-        "failure must name the intended missing path and loader: {error}"
+        "failure must name the intended missing path {:?} and loader: {error}",
+        missing.path
     );
     assert_eq!(
         environmental(&error, permitted, &config),

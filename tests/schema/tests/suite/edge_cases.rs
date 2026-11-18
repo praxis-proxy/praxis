@@ -225,6 +225,22 @@ fn accept_runtime_overload_actions_enabled() {
 }
 
 #[test]
+fn runtime_overload_purge_defaults_to_enabled() {
+    let config = Config::from_yaml(&test_utils::minimal_valid_yaml()).unwrap();
+    assert!(config.runtime.overload_purge);
+}
+
+#[test]
+fn runtime_overload_purge_can_be_disabled() {
+    let yaml = format!(
+        "runtime:\n  overload_purge: false\n{}",
+        test_utils::minimal_valid_yaml()
+    );
+    let config = Config::from_yaml(&yaml).unwrap();
+    assert!(!config.runtime.overload_purge);
+}
+
+#[test]
 fn runtime_overload_thresholds_preserve_custom_values_and_other_defaults() {
     let yaml = format!(
         "runtime:\n  overload_thresholds:\n    connections: {{ scaling: 0.2, saturation: 0.4 }}\n{}",

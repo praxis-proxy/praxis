@@ -279,17 +279,48 @@ impl LogLevelState {
     /// # Panics
     ///
     /// Panics if the internal mutex is poisoned.
+    pub fn refresh_baseline(self: &Arc<Self>, config: &Config) -> Result<(), ProxyError> {
+        self.refresh_baseline_with(config, || Ok(()))
+    }
+
+    /// Prepare a baseline, then publish it only if `publish` succeeds.
+    ///
+    /// The callback must contain only the short state commit. Tracing invokes
+    /// subscriber callbacks after it returns, outside the caller's publication
+    /// gate. A revoked commit leaves both the filter and baseline unchanged.
+    ///
+    /// # Errors
+    /// Returns a converted configuration/reload error, or the publication error.
+    ///
+    /// # Panics
+    /// Panics if the internal mutex is poisoned.
     #[expect(clippy::expect_used, reason = "poisoned mutex is unrecoverable")]
     #[expect(
         clippy::significant_drop_tightening,
-        reason = "baseline update and reload must share one lock guard"
+        reason = "guard is moved into modify and dropped before subscriber callbacks"
     )]
-    pub fn refresh_baseline(self: &Arc<Self>, config: &Config) -> Result<(), ProxyError> {
-        let baseline = build_baseline_directive(config)?;
+    pub fn refresh_baseline_with<T, E, Publish>(self: &Arc<Self>, config: &Config, publish: Publish) -> Result<T, E>
+    where
+        E: From<ProxyError>,
+        Publish: FnOnce() -> Result<T, E>,
+    {
+        let baseline = build_baseline_directive(config).map_err(E::from)?;
         let mut guard = self.inner.lock().expect("log level state lock poisoned");
-        guard.baseline_directive = baseline;
-        reload_locked(&guard).map_err(|error| ProxyError::Config(error.to_string()))?;
-        Ok(())
+        let directive = build_effective_directive(&baseline, &guard.overlays);
+        let filter = env_filter_from_directive(&directive).map_err(E::from)?;
+        let handle = guard.reload_handle.clone();
+        let mut result = None;
+        handle
+            .modify(|active| {
+                result = Some(publish().inspect(|_published| {
+                    *active = filter;
+                    guard.baseline_directive = baseline;
+                }));
+                // Interest-cache rebuilding happens after this closure returns.
+                drop(guard);
+            })
+            .map_err(|error| E::from(ProxyError::Config(error.to_string())))?;
+        result.expect("tracing modify synchronously executes its closure")
     }
 
     /// Remove one overlay after its revert timer fires (internal).
@@ -469,6 +500,110 @@ mod tests {
     use tracing_subscriber::layer::SubscriberExt as _;
 
     use super::*;
+
+    /// Small valid config whose baseline is distinguishable from the old filter.
+    fn publication_config() -> Config {
+        let mut config = Config::from_yaml("listeners:\n  - name: web\n    address: '127.0.0.1:0'\n    filter_chains: [main]\nfilter_chains:\n  - name: main\n    filters: []\n").unwrap();
+        config
+            .runtime
+            .log_overrides
+            .insert("praxis_test".to_owned(), "debug".to_owned());
+        config
+    }
+
+    #[test]
+    fn revoked_baseline_commit_keeps_filter_and_state_unchanged() {
+        let (layer, handle) = reload::Layer::new(EnvFilter::new("warn"));
+        let _subscriber = tracing_subscriber::registry().with(layer);
+        let state = LogLevelState::new("warn".to_owned(), handle.clone());
+        let result: Result<(), ProxyError> = state.refresh_baseline_with(&publication_config(), || {
+            Err(ProxyError::Config("publication revoked".to_owned()))
+        });
+        assert!(result.is_err());
+        assert_eq!(state.snapshot().baseline_directive, "warn");
+        assert_eq!(handle.clone_current().unwrap().to_string(), "warn");
+    }
+
+    #[test]
+    fn missing_subscriber_does_not_publish_baseline_or_pipelines() {
+        let (layer, handle) = reload::Layer::<EnvFilter, tracing_subscriber::Registry>::new(EnvFilter::new("warn"));
+        drop(layer);
+        let state = LogLevelState::new("warn".to_owned(), handle);
+        let mut published = false;
+        let result: Result<(), ProxyError> = state.refresh_baseline_with(&publication_config(), || {
+            published = true;
+            Ok(())
+        });
+        assert!(result.is_err());
+        assert!(!published);
+        assert_eq!(state.snapshot().baseline_directive, "warn");
+    }
+
+    #[test]
+    fn subscriber_callbacks_run_after_publication_and_state_unlock() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            mpsc,
+        };
+        let (started, observed) = mpsc::channel();
+        let (release, wait) = mpsc::channel();
+        let committed = Arc::new(AtomicBool::new(false));
+        let gate = Arc::new(Mutex::new(()));
+        let (layer, handle) = reload::Layer::new(EnvFilter::new("warn"));
+        let subscriber = tracing_subscriber::registry().with(layer).with(BlockingRegistration {
+            committed: Arc::clone(&committed),
+            started,
+            wait: Mutex::new(wait),
+        });
+        let state = LogLevelState::new("warn".to_owned(), handle);
+        let worker_state = Arc::clone(&state);
+        let worker_gate = Arc::clone(&gate);
+        let worker = std::thread::Builder::new()
+            .name("baseline-publication".to_owned())
+            .spawn(move || {
+                tracing::subscriber::with_default(subscriber, || {
+                    tracing::warn!("seed registration before arming publication probe");
+                    worker_state
+                        .refresh_baseline_with(&publication_config(), || {
+                            let _guard = worker_gate.lock().unwrap();
+                            committed.store(true, Ordering::Relaxed);
+                            Ok::<_, ProxyError>(())
+                        })
+                        .unwrap();
+                });
+            })
+            .unwrap();
+        observed.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(
+            gate.try_lock().is_ok(),
+            "a stalled subscriber must not hold publication"
+        );
+        assert!(state.snapshot().baseline_directive.contains("praxis_test=debug"));
+        release.send(()).unwrap();
+        worker.join().unwrap();
+    }
+
+    /// Stall one interest-cache callback only after the worker commits.
+    struct BlockingRegistration {
+        /// One-shot flag armed by publication.
+        committed: Arc<std::sync::atomic::AtomicBool>,
+        /// Let the test inspect locks while registration is blocked.
+        started: std::sync::mpsc::Sender<()>,
+        /// Release on an explicit signal or sender drop during unwinding.
+        wait: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for BlockingRegistration {
+        fn register_callsite(&self, _metadata: &'static tracing::Metadata<'static>) -> tracing::subscriber::Interest {
+            if std::thread::current().name() == Some("baseline-publication")
+                && self.committed.swap(false, std::sync::atomic::Ordering::Relaxed)
+            {
+                let _sent = self.started.send(());
+                let _released = self.wait.lock().unwrap().recv();
+            }
+            tracing::subscriber::Interest::always()
+        }
+    }
 
     /// Serializes overlay mutation tests that share one global [`LogLevelState`].
     #[allow(

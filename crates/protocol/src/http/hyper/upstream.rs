@@ -168,7 +168,10 @@ async fn connect(
     peer: &PeerSpec,
 ) -> Result<HyperSession, Outcome> {
     match Box::pin(listener.connector.connect(peer, connect_budget(&peer.connection))).await {
-        Ok(session) => {
+        Ok(mut session) => {
+            if listener.overload.is_enabled() {
+                session.set_idle_overload(Arc::clone(&listener.overload));
+            }
             connected(&mut flight.ctx, &session);
             Ok(session)
         },
@@ -307,11 +310,16 @@ fn connect_budget(options: &ConnectionOptions) -> Duration {
 
 /// Materialize Hyper's effective budget before scaling, including its default.
 fn apply_overload_connection(options: &mut Arc<ConnectionOptions>, signal: &praxis_core::overload::Signal) {
+    let idle_baseline = options.idle_timeout;
     if signal.is_enabled() {
         let budget = connect_budget(options);
         Arc::make_mut(options).total_connection_timeout = Some(budget);
     }
     crate::overload::scale_connection(options, signal);
+    // Hyper starts idle retention when the last exchange ends, not at checkout.
+    if signal.is_enabled() {
+        Arc::make_mut(options).idle_timeout = idle_baseline;
+    }
 }
 
 // -----------------------------------------------------------------------------

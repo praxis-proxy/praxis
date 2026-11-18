@@ -76,9 +76,10 @@ impl WatcherReloadTarget {
         Self(Mutex::new(Some(live)))
     }
 
-    /// Revoke publication and release the controller, waiting only for a live-state operation.
-    pub(crate) fn stop(&self) {
-        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+    /// Revoke publication; release user-owned state on a separately joinable thread.
+    pub(crate) fn stop(&self) -> Option<std::thread::JoinHandle<()>> {
+        let live = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+        live.map(|live| std::thread::spawn(move || drop(live)))
     }
 }
 
@@ -136,27 +137,13 @@ pub(crate) fn reload_pipelines(
     info!("building new pipelines from reloaded config");
 
     live.with_live(|live| {
-        if let Err(err) = reject_protocol_changes(new_config, live) {
-            error!(error = %err, "config reload failed: listener protocol changed; requires restart");
-            return Err(err);
-        }
-
-        if let Err(err) = praxis_protocol::tcp::validate_tcp_groups(new_config) {
-            error!(error = %err, "config reload failed: inconsistent TCP listener group");
-            return Err(err.into());
-        }
-
-        if let Err(err) = reject_tcp_group_changes(new_config, old_config) {
-            error!(error = %err, "config reload failed: TCP listener topology changed; requires restart");
-            return Err(err);
-        }
-
-        if let Err(err) = reject_forward_proxy_changes(new_config, old_config, live) {
-            error!(error = %err, "config reload failed: listener forward_proxy changed; requires restart");
-            return Err(err);
-        }
+        reject_protocol_changes(new_config, live)?;
+        praxis_protocol::tcp::validate_tcp_groups(new_config)?;
+        reject_tcp_group_changes(new_config, old_config)?;
+        reject_forward_proxy_changes(new_config, old_config, live)?;
         Ok(())
-    })?;
+    })
+    .inspect_err(|error| error!(%error, "config reload rejected; live state unchanged"))?;
 
     let health_registry = build_health_registry(&new_config.clusters);
 
@@ -201,72 +188,67 @@ pub(crate) fn reload_pipelines(
     warn_stateful_filter_reset(new_config);
     log_config_change_audit(old_config, new_config);
 
-    let (swapped, skipped, carried) = live.with_live(|live| {
-        // Apply the log-level baseline while a failure can still abort the reload
-        // cleanly. This is the last fallible step; it must run before the
-        // irreversible pipeline swap below so a bad logging baseline does not leave
-        // live traffic already moved onto the new pipelines while the caller sees
-        // Err (which would churn a retry loop that re-swaps every cycle). The
-        // refresh only touches the logging subsystem, and the diagnostics above
-        // are infallible, so ordering it here is safe.
-        if let Some(log_level) = log_level
-            && let Err(error) = log_level.refresh_baseline(new_config)
-        {
-            return Err(error.into());
-        }
-
-        // Removed listeners keep serving through their old bound pipelines. Their
-        // stores must remain discoverable for a later reintroduction, even though
-        // the configured candidate has no filter for them in this generation.
-        for name in live.listener_names() {
-            if new_pipelines.get(name).is_none()
-                && let Some(old) = live.get(name)
-            {
-                let old_pipeline = old.load();
-                if let Some(stores) = old_pipeline.session_stores() {
-                    candidate_session_stores.retain_used_from(stores);
+    let publish = || {
+        live.with_live(|live| {
+            // Removed listeners keep serving through their old bound pipelines. Their
+            // stores must remain discoverable for a later reintroduction, even though
+            // the configured candidate has no filter for them in this generation.
+            for name in live.listener_names() {
+                if new_pipelines.get(name).is_none()
+                    && let Some(old) = live.get(name)
+                {
+                    let old_pipeline = old.load();
+                    if let Some(stores) = old_pipeline.session_stores() {
+                        candidate_session_stores.retain_used_from(stores);
+                    }
                 }
             }
-        }
-        session_stores.publish(&candidate_session_stores);
-        slow_start_generation.commit();
+            session_stores.publish(&candidate_session_stores);
+            slow_start_generation.commit();
 
-        // Copy known-down endpoint state into the new registry BEFORE the
-        // swap: afterwards `live` already serves the new pipelines and the
-        // old registry is no longer reachable through them.
-        let carried = carry_over_health_state(live, old_config, new_config, &health_registry);
+            // Copy known-down endpoint state into the new registry BEFORE the
+            // swap: afterwards `live` already serves the new pipelines and the
+            // old registry is no longer reachable through them.
+            let carried = carry_over_health_state(live, old_config, new_config, &health_registry);
 
-        let mut swapped: Vec<&str> = Vec::new();
-        let mut skipped: Vec<&str> = Vec::new();
+            let mut swapped: Vec<&str> = Vec::new();
+            let mut skipped: Vec<&str> = Vec::new();
+            let mut retired = Vec::new();
 
-        for name in new_pipelines.listener_names() {
-            let Some(new_slot) = new_pipelines.get(name) else {
-                continue;
-            };
-            if live.get(name).is_none() {
-                skipped.push(name);
-                continue;
+            for name in new_pipelines.listener_names() {
+                let Some(new_slot) = new_pipelines.get(name) else {
+                    continue;
+                };
+                let Some(slot) = live.get(name) else {
+                    skipped.push(name);
+                    continue;
+                };
+                retired.push(slot.swap(new_slot.load_full()));
+                swapped.push(name);
             }
-            live.swap(name, new_slot.load_full());
-            swapped.push(name);
-        }
 
-        listener_meta.store(Arc::new(merged_listener_meta(new_config, live, listener_meta)));
-        cluster_meta.store(Arc::new(praxis_protocol::http::health::cluster_meta_from_config(
-            new_config,
-        )));
+            listener_meta.store(Arc::new(merged_listener_meta(new_config, live, listener_meta)));
+            cluster_meta.store(Arc::new(praxis_protocol::http::health::cluster_meta_from_config(
+                new_config,
+            )));
 
-        respawn_health_checks(
-            old_config,
-            new_config,
-            &health_registry,
-            health_shutdown,
-            health_lifecycle,
-            subrequest_client.upstream_ca(),
-        );
-
-        Ok((swapped, skipped, carried))
-    })?;
+            let health_token = replace_health_token(health_shutdown, health_lifecycle);
+            Ok((swapped, skipped, carried, retired, health_token))
+        })
+    };
+    let (swapped, skipped, carried, retired, health_token) = match log_level {
+        Some(log_level) => log_level.refresh_baseline_with(new_config, publish)?,
+        None => publish()?,
+    };
+    drop(retired);
+    respawn_health_checks(
+        old_config,
+        new_config,
+        &health_registry,
+        health_token,
+        health_lifecycle,
+        subrequest_client.upstream_ca(),
+    );
     if carried > 0 {
         info!(
             endpoints = carried,
@@ -554,7 +536,6 @@ fn health_checked_cluster_names(config: &Config) -> Vec<&str> {
 
 /// Cancel old health check tasks and spawn new ones from the
 /// updated config.
-#[expect(clippy::expect_used, reason = "poisoned mutex is unrecoverable")]
 #[expect(
     clippy::too_many_arguments,
     reason = "health generation replacement needs current and root owners"
@@ -563,10 +544,41 @@ fn respawn_health_checks(
     old_config: &Config,
     config: &Config,
     health_registry: &HealthRegistry,
-    health_shutdown: &Arc<Mutex<CancellationToken>>,
+    new_token: CancellationToken,
     health_lifecycle: Option<&HealthTaskLifecycle>,
     upstream_ca: Option<Arc<praxis_tls::CachedCaCerts>>,
 ) {
+    if new_token.is_cancelled() {
+        return;
+    }
+    praxis_protocol::http::metrics::clear_stale_upstream_health_gauges(
+        health_checked_cluster_names(old_config),
+        health_checked_cluster_names(config),
+    );
+    praxis_protocol::http::metrics::seed_upstream_health_gauges(health_registry);
+
+    if health_registry.is_empty() {
+        return;
+    }
+
+    let clusters: Vec<praxis_core::config::Cluster> = config
+        .clusters
+        .iter()
+        .filter(|cluster| cluster.health_check.is_some())
+        .cloned()
+        .collect();
+    let handle = spawn_health_check_thread(clusters, Arc::clone(health_registry), new_token, upstream_ca);
+    if let Some(owner) = health_lifecycle {
+        owner.track(handle);
+    }
+}
+
+/// Replace the generation inside publication; recorder and spawn callbacks run later.
+#[expect(clippy::expect_used, reason = "poisoned mutex is unrecoverable")]
+fn replace_health_token(
+    health_shutdown: &Arc<Mutex<CancellationToken>>,
+    health_lifecycle: Option<&HealthTaskLifecycle>,
+) -> CancellationToken {
     // One critical section swaps in the fresh token and hands back both
     // generations; re-locking below just to read the new token again
     // was a needless second round-trip (reloads are serialized on the
@@ -579,31 +591,7 @@ fn respawn_health_checks(
     };
     old_token.cancel();
 
-    praxis_protocol::http::metrics::clear_stale_upstream_health_gauges(
-        health_checked_cluster_names(old_config),
-        health_checked_cluster_names(config),
-    );
-    praxis_protocol::http::metrics::seed_upstream_health_gauges(health_registry);
-
-    if health_registry.is_empty() {
-        return;
-    }
-
-    // The runner probes only health-checked clusters (and only those in
-    // the registry); cloning every routing-only cluster tree pinned it
-    // in the health thread for the reload generation's lifetime.
-    let clusters: Vec<praxis_core::config::Cluster> = config
-        .clusters
-        .iter()
-        .filter(|cluster| cluster.health_check.is_some())
-        .cloned()
-        .collect();
-    let registry = Arc::clone(health_registry);
-
-    let handle = spawn_health_check_thread(clusters, registry, new_token, upstream_ca);
-    if let Some(owner) = health_lifecycle {
-        owner.track(handle);
-    }
+    new_token
 }
 
 /// Spawn the reloaded health-check probes on a dedicated thread + runtime.
@@ -673,6 +661,97 @@ mod tests {
     #[derive(Clone, Debug, Eq, PartialEq)]
     struct ReloadMarker(u8);
 
+    /// Simulate an embedder whose pipeline destructor waits for its worker.
+    struct BlockingPipelineDrop {
+        /// Observe entry into the destructor.
+        started: std::sync::mpsc::Sender<()>,
+        /// Release on a message or sender drop during test unwinding.
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl PipelineExtension for BlockingPipelineDrop {
+        fn prepare(&self, _extensions: &mut RequestExtensions) {}
+    }
+
+    impl Drop for BlockingPipelineDrop {
+        fn drop(&mut self) {
+            let _sent = self.started.send(());
+            let _released = self.release.lock().unwrap().recv();
+        }
+    }
+
+    #[test]
+    fn retired_pipeline_destructors_do_not_hold_publication() {
+        let (live, config, registry, shutdown, meta, cluster_meta) = setup_live_pipelines();
+        let (started, entered) = std::sync::mpsc::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let mut old = praxis_filter::FilterPipeline::build(&mut [], &registry).unwrap();
+        old.add_pipeline_extension(Box::new(BlockingPipelineDrop {
+            started,
+            release: Mutex::new(wait),
+        }));
+        live.swap("web", Arc::new(old));
+        let target = Arc::new(WatcherReloadTarget::new(Arc::new(live)));
+        let reload_target = Arc::clone(&target);
+        let worker = std::thread::spawn(move || {
+            reload_pipelines(
+                &config,
+                &config,
+                &registry,
+                &reload_target,
+                &meta,
+                &cluster_meta,
+                &shutdown,
+                None,
+                &empty_kv_stores(),
+                &empty_session_stores(),
+                &empty_slow_start_registry(),
+                &empty_subrequest_client(),
+                None,
+                &PipelineComposition::default(),
+            )
+            .unwrap();
+        });
+        entered.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert!(
+            target.0.try_lock().is_ok(),
+            "user destructors must run outside publication"
+        );
+        if let Some(cleanup) = target.stop() {
+            cleanup.join().unwrap();
+        }
+        assert!(target.with_live(|_| Ok(())).is_err());
+        release.send(()).unwrap();
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn revocation_does_not_run_downstream_destructors_on_stopping_thread() {
+        let registry = FilterRegistry::with_builtins();
+        let (started, entered) = std::sync::mpsc::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let mut pipeline = praxis_filter::FilterPipeline::build(&mut [], &registry).unwrap();
+        pipeline.add_pipeline_extension(Box::new(BlockingPipelineDrop {
+            started,
+            release: Mutex::new(wait),
+        }));
+        let target = Arc::new(WatcherReloadTarget::new(Arc::new(ListenerPipelines::new(
+            HashMap::from([("web".to_owned(), Arc::new(pipeline))]),
+        ))));
+        let stopping = Arc::clone(&target);
+        let (stopped, observed) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || stopped.send(stopping.stop()).unwrap());
+        let cleanup = observed.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        entered.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert!(
+            target.with_live(|_| Ok(())).is_err(),
+            "revocation precedes slow destruction"
+        );
+        release.send(()).unwrap();
+        cleanup.unwrap().join().unwrap();
+        worker.join().unwrap();
+    }
+
     impl PipelineExtension for ReloadMarker {
         fn prepare(&self, extensions: &mut RequestExtensions) {
             extensions.insert(self.clone());
@@ -700,6 +779,7 @@ mod tests {
         let locked = Arc::new(AtomicUsize::new(0));
         let subscriber = tracing_subscriber::registry().with(PublicationLockProbe {
             diagnostic_target: "startup_checks",
+            level: None,
             target: Arc::clone(&target),
             observations: Arc::clone(&observations),
             locked: Arc::clone(&locked),
@@ -754,6 +834,7 @@ mod tests {
         let locked = Arc::new(AtomicUsize::new(0));
         let subscriber = tracing_subscriber::registry().with(PublicationLockProbe {
             diagnostic_target: "reload_diagnostics",
+            level: None,
             target: Arc::clone(&target),
             observations: Arc::clone(&observations),
             locked: Arc::clone(&locked),
@@ -790,6 +871,53 @@ mod tests {
             !original_token.is_cancelled(),
             "late reload must not restart health checks"
         );
+    }
+
+    #[test]
+    fn rejection_diagnostic_does_not_hold_publication() {
+        let (pipelines, old, registry, shutdown, meta, cluster_meta) = setup_live_pipelines();
+        let pipelines = Arc::new(pipelines);
+        let original = pipelines.get("web").unwrap().load_full();
+        let original_token = shutdown.lock().unwrap().clone();
+        let target = Arc::new(WatcherReloadTarget::new(Arc::clone(&pipelines)));
+        let mut candidate = old.clone();
+        candidate.listeners[0].protocol = ProtocolKind::Tcp;
+        let observations = Arc::new(AtomicUsize::new(0));
+        let locked = Arc::new(AtomicUsize::new(0));
+        let subscriber = tracing_subscriber::registry().with(PublicationLockProbe {
+            diagnostic_target: "reload",
+            level: Some(tracing::Level::ERROR),
+            target: Arc::clone(&target),
+            observations: Arc::clone(&observations),
+            locked: Arc::clone(&locked),
+        });
+        let result = tracing::subscriber::with_default(subscriber, || {
+            reload_pipelines(
+                &candidate,
+                &old,
+                &registry,
+                &target,
+                &meta,
+                &cluster_meta,
+                &shutdown,
+                None,
+                &empty_kv_stores(),
+                &empty_session_stores(),
+                &empty_slow_start_registry(),
+                &empty_subrequest_client(),
+                None,
+                &PipelineComposition::default(),
+            )
+        });
+        assert!(result.unwrap_err().to_string().contains("protocol"));
+        assert!(observations.load(Ordering::Relaxed) > 0);
+        assert_eq!(
+            locked.load(Ordering::Relaxed),
+            0,
+            "rejection logging must not lock publication"
+        );
+        assert!(Arc::ptr_eq(&original, &pipelines.get("web").unwrap().load_full()));
+        assert!(!original_token.is_cancelled());
     }
 
     #[test]
@@ -3487,6 +3615,8 @@ filter_chains:
     struct PublicationLockProbe {
         /// Diagnostic module to observe.
         diagnostic_target: &'static str,
+        /// Restrict observation when testing rejection-only diagnostics.
+        level: Option<tracing::Level>,
         /// The publication target whose lock must remain available.
         target: Arc<WatcherReloadTarget>,
         /// Number of diagnostics observed.
@@ -3497,7 +3627,9 @@ filter_chains:
 
     impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for PublicationLockProbe {
         fn on_event(&self, event: &tracing::Event<'_>, _ctx: tracing_subscriber::layer::Context<'_, S>) {
-            if event.metadata().target().ends_with(self.diagnostic_target) {
+            if event.metadata().target().ends_with(self.diagnostic_target)
+                && self.level.is_none_or(|level| *event.metadata().level() == level)
+            {
                 self.observations.fetch_add(1, Ordering::Relaxed);
                 if let Ok(mut live) = self.target.0.try_lock() {
                     live.take();

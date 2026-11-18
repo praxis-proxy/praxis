@@ -154,6 +154,11 @@ pub struct HyperSession {
 }
 
 impl HyperSession {
+    /// Sample this controller when the final exchange ends and starts idle retention.
+    pub fn set_idle_overload(&mut self, signal: Arc<crate::overload::Signal>) {
+        self.exchange.set_idle_overload(signal);
+    }
+
     /// Start an exchange on `connection` for `peer`, to return to `key`.
     pub(super) fn new(connection: Connection, key: PoolKey, peer: &PeerSpec) -> Self {
         let exchange = connection.begin_exchange(peer.connection.idle_timeout);

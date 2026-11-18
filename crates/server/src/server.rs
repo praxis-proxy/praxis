@@ -893,9 +893,13 @@ impl ConfigWatcher {
     fn stop_until(&mut self, deadline: Instant) {
         self.shutdown.cancel();
         #[cfg(feature = "config-reload")]
-        self.pipelines.stop();
+        let release = self.pipelines.stop();
         if let Some(thread) = self.thread.take() {
             join_background_thread(thread, deadline, "config watcher");
+        }
+        #[cfg(feature = "config-reload")]
+        if let Some(release) = release {
+            join_background_thread(release, deadline, "retired pipelines");
         }
     }
 }
@@ -1265,7 +1269,7 @@ fn overload_gauge_loop(
         let mut tracker = praxis_core::overload::TransitionTracker::default();
         let mut prev_actions = praxis_core::overload::EngagedActions::default();
         let mut purge = None;
-        let mut interval = tokio::time::interval(praxis_core::overload::SAMPLE_INTERVAL);
+        let mut interval = overload_interval();
         interval.tick().await;
         log_overload_mode(actions_enabled);
 
@@ -1281,6 +1285,13 @@ fn overload_gauge_loop(
             .await;
         }
     })
+}
+
+/// Count observations at least one period apart after a delayed tick.
+fn overload_interval() -> tokio::time::Interval {
+    let mut interval = tokio::time::interval(praxis_core::overload::SAMPLE_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    interval
 }
 
 /// One overload sample: publish pressure, log transitions, and apply actions.
@@ -1308,7 +1319,16 @@ async fn sample_overload(
     let Some(purge) = purge else {
         return prev_actions;
     };
-    apply_overload_actions(action_pressures, tracker, prev_actions, (purge, purge_enabled), signal).await
+    let callback: Option<fn() -> bool> =
+        praxis_core::overload::heap_purge_available().then_some(praxis_core::overload::run_heap_purge);
+    apply_overload_actions(
+        action_pressures,
+        tracker,
+        prev_actions,
+        (purge, purge_enabled, callback),
+        signal,
+    )
+    .await
 }
 
 /// Counts the sampler already has. Kernel files are read inside `observe`.
@@ -1321,17 +1341,24 @@ fn overload_inputs(heap_max_bytes: Option<usize>) -> praxis_core::overload::Inpu
     }
 }
 
+/// In-flight task, runtime switch, and injected allocator callback availability.
+type PurgeControl<'task> = (
+    &'task mut Option<tokio::task::JoinHandle<bool>>,
+    bool,
+    Option<fn() -> bool>,
+);
+
 /// Update the request-path signal, publish action gauges, and purge the heap.
 async fn apply_overload_actions(
     pressures: praxis_core::overload::Pressures,
     tracker: &praxis_core::overload::TransitionTracker,
     prev_actions: praxis_core::overload::EngagedActions,
-    purge: (&mut Option<tokio::task::JoinHandle<bool>>, bool),
+    purge: PurgeControl<'_>,
     signal: &praxis_core::overload::Signal,
 ) -> praxis_core::overload::EngagedActions {
-    let (purge, purge_enabled) = purge;
+    let (purge, purge_enabled, callback) = purge;
     let mut actions = praxis_core::overload::EngagedActions::from_pressures(pressures, tracker, prev_actions);
-    actions.purge_heap = poll_heap_purge(actions.purge_heap && purge_enabled, purge).await;
+    actions.purge_heap = poll_heap_purge(actions.purge_heap && purge_enabled, purge, callback).await;
     publish_overload_actions(actions, signal, tracker.action_pressures(pressures).peak());
     log_action_changes(prev_actions, actions);
     actions
@@ -1367,15 +1394,22 @@ fn reset_overload_actions(signal: &praxis_core::overload::Signal, gauges_enabled
 }
 
 /// Collect completed purge work without blocking samplers or queuing purges.
-async fn poll_heap_purge(requested: bool, task: &mut Option<tokio::task::JoinHandle<bool>>) -> bool {
+async fn poll_heap_purge(
+    requested: bool,
+    task: &mut Option<tokio::task::JoinHandle<bool>>,
+    callback: Option<fn() -> bool>,
+) -> bool {
     let mut succeeded = false;
     if task.as_ref().is_some_and(tokio::task::JoinHandle::is_finished)
         && let Some(completed) = task.take()
     {
         succeeded = completed.await.unwrap_or(false);
     }
-    if requested && task.is_none() && praxis_core::overload::heap_purge_available() {
-        *task = Some(tokio::task::spawn_blocking(praxis_core::overload::run_heap_purge));
+    if requested
+        && task.is_none()
+        && let Some(callback) = callback
+    {
+        *task = Some(tokio::task::spawn_blocking(callback));
     }
     succeeded
 }
@@ -2416,11 +2450,38 @@ runtime:
 
     #[tokio::test]
     async fn missing_allocator_does_not_spawn_empty_purge_work() {
-        if !praxis_core::overload::heap_purge_available() {
-            let mut task = None;
-            assert!(!poll_heap_purge(true, &mut task).await);
-            assert!(task.is_none());
+        let mut task = None;
+        assert!(!poll_heap_purge(true, &mut task, None).await);
+        assert!(task.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn delayed_overload_ticks_do_not_create_saturation_bursts() {
+        use praxis_core::overload::{EngagedActions, Pressures, SAMPLE_INTERVAL, TransitionTracker};
+        let mut interval = overload_interval();
+        interval.tick().await;
+        tokio::time::advance(SAMPLE_INTERVAL.saturating_mul(10)).await;
+        let mut tracker = TransitionTracker::default();
+        let high = Pressures {
+            connections: Some(1.0),
+            cgroup_memory: None,
+            heap: None,
+            cpu: None,
+            file_descriptors: None,
+        };
+        interval.tick().await;
+        drop(tracker.update(high, [None, None, None, Some(true), None]));
+        assert!(!EngagedActions::from_pressures(high, &tracker, EngagedActions::default()).fail_readiness);
+        assert!(
+            tokio::time::timeout(Duration::ZERO, interval.tick()).await.is_err(),
+            "no catch-up sample"
+        );
+        for _ in 0..2 {
+            tokio::time::advance(SAMPLE_INTERVAL).await;
+            interval.tick().await;
+            drop(tracker.update(high, [None, None, None, Some(true), None]));
         }
+        assert!(EngagedActions::from_pressures(high, &tracker, EngagedActions::default()).fail_readiness);
     }
 
     #[test]
@@ -2467,7 +2528,6 @@ runtime:
     #[tokio::test]
     async fn disabling_heap_purge_preserves_other_overload_actions() {
         use praxis_core::overload::{EngagedActions, Pressures, TransitionTracker};
-        praxis_core::overload::set_heap_purge(|| true);
         let pressures = Pressures {
             cgroup_memory: Some(1.0),
             heap: None,
@@ -2486,7 +2546,7 @@ runtime:
             pressures,
             &tracker,
             EngagedActions::default(),
-            (&mut task, false),
+            (&mut task, false, Some(|| true)),
             &signal,
         )
         .await;
@@ -2505,13 +2565,13 @@ runtime:
             true
         }));
         let original = task.as_ref().expect("purge task").id();
-        assert!(!poll_heap_purge(true, &mut task).await);
+        assert!(!poll_heap_purge(true, &mut task, Some(|| true)).await);
         assert_eq!(task.as_ref().expect("same in-flight purge").id(), original);
         release.send(()).expect("complete purge");
         while !task.as_ref().expect("purge task").is_finished() {
             tokio::task::yield_now().await;
         }
-        assert!(poll_heap_purge(false, &mut task).await);
+        assert!(poll_heap_purge(false, &mut task, None).await);
         assert!(task.is_none(), "completed purge must be reaped");
     }
 

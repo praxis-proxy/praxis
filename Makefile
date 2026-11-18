@@ -1006,7 +1006,7 @@ build-test-proxy:
 # The integration suites run in a single pass with their optional features
 # enabled. The benchmark package adds untimed fixture tests; Criterion bench
 # targets are not selected. Conformance is separate (test-conformance).
-test-integration: build-test-proxy ## schema, security, resilience and integration suites
+test-integration: ## schema, security, resilience and integration suites
 	$(call require-features,$(call package-features,$(SUITE_PACKAGES)))
 	$(call require-features,$(call package-features,praxis-proxy))
 	if [ -z "$${PRAXIS_BIN:-}" ]; then $(call build-test-binary,-p praxis-proxy --features $(call package-features,praxis-proxy)) fi; \

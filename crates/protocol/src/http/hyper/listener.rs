@@ -589,6 +589,12 @@ impl hyper::rt::Timer for HeaderTimer {
     fn sleep_until(&self, deadline: std::time::Instant) -> Pin<Box<dyn hyper::rt::Sleep>> {
         self.sleep(deadline.saturating_duration_since(std::time::Instant::now()))
     }
+
+    fn reset(&self, sleep: &mut Pin<Box<dyn hyper::rt::Sleep>>, new_deadline: std::time::Instant) {
+        let now = std::time::Instant::now();
+        let scaled = now + self.0.scale_timeout(new_deadline.saturating_duration_since(now));
+        hyper::rt::Timer::reset(&TokioTimer::new(), sleep, scaled);
+    }
 }
 
 #[cfg(test)]

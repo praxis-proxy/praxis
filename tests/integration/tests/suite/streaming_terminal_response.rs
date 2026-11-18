@@ -771,6 +771,82 @@ fn h2c_get(addr: &str, path: &str) -> (http::Response<()>, String) {
 mod overload_keepalive_tests {
     use super::*;
 
+    /// Engage pressure only after response headers and the data chunk were sent.
+    struct LatePressureFilter;
+
+    #[async_trait]
+    impl HttpFilter for LatePressureFilter {
+        fn name(&self) -> &'static str {
+            "late_pressure"
+        }
+
+        async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+            if ctx.request.uri.path() != "/overload" {
+                return Ok(FilterAction::Continue);
+            }
+            let body = LatePressureBody {
+                signal: Arc::clone(ctx.extensions.get::<Arc<praxis_core::overload::Signal>>().unwrap()),
+                chunk: Some(Bytes::from_static(b"complete")),
+            };
+            Ok(FilterAction::StreamingTerminalResponse(Box::new(
+                StreamingTerminalResponse::new(200, Box::new(body)),
+            )))
+        }
+    }
+
+    /// Delay the latch until the source announces successful completion.
+    struct LatePressureBody {
+        signal: Arc<praxis_core::overload::Signal>,
+        chunk: Option<Bytes>,
+    }
+
+    #[async_trait]
+    impl StreamingResponseBody for LatePressureBody {
+        async fn next_chunk(&mut self) -> Result<Option<Bytes>, FilterError> {
+            if let Some(chunk) = self.chunk.take() {
+                return Ok(Some(chunk));
+            }
+            self.signal.update(
+                praxis_core::overload::EngagedActions {
+                    disable_keepalive: true,
+                    ..Default::default()
+                },
+                1.0,
+            );
+            Ok(None)
+        }
+
+        async fn suppress(&mut self) -> Result<(), FilterError> {
+            Ok(())
+        }
+
+        async fn cancel(&mut self) {}
+    }
+
+    #[test]
+    fn overload_at_stream_completion_closes_without_truncating_body() {
+        let backend = start_echo_backend();
+        let config = Config::from_yaml(&custom_filter_yaml(free_port(), backend.port(), "late_pressure")).unwrap();
+        let registry = registry_with("late_pressure", || Box::new(LatePressureFilter));
+        let proxy = start_proxy_with_registry(&config, &registry);
+        let mut socket = TcpStream::connect(proxy.addr()).unwrap();
+        socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        socket
+            .write_all(b"GET /overload HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n")
+            .unwrap();
+        let mut response = String::new();
+        socket
+            .read_to_string(&mut response)
+            .expect("completed stream must close instead of reusing the socket");
+        assert_eq!(parse_status(&response), 200);
+        assert_eq!(parse_body(&response), "complete");
+        assert_ne!(
+            parse_header(&response, "connection").as_deref(),
+            Some("close"),
+            "headers preceded pressure"
+        );
+    }
+
     /// Raises pressure after admission, then returns a buffered or streaming answer.
     struct OverloadTerminalFilter {
         status: u16,

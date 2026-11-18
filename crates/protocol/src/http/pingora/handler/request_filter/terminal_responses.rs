@@ -342,10 +342,12 @@ pub(super) async fn run_streaming_terminal_response(
                     session.as_downstream_mut().shutdown().await;
                     return;
                 }
+                close_keepalive_under_overload(session, ctx.overload.as_deref());
                 if let Err(e) = session.write_response_body(completion_body, true).await {
                     debug!(error = %e, "failed to finish streaming terminal response");
                     session.as_downstream_mut().shutdown().await;
                 }
+                close_keepalive_under_overload(session, ctx.overload.as_deref());
                 return;
             },
             Err(e) => {
