@@ -113,8 +113,9 @@ pub struct ForwardProxyConfig {
     /// How long the tunnel may stay idle before it is closed, in
     /// milliseconds.
     ///
-    /// Progress in either direction resets the deadline. Defaults to
-    /// 300,000 (5 minutes); bounded to 1 hour.
+    /// Progress in either direction resets the deadline. A forwarded
+    /// absolute-form request gets it as the read and write timeout toward
+    /// its destination. Defaults to 300,000 (5 minutes); bounded to 1 hour.
     pub idle_timeout_ms: u64,
 
     /// Maximum total tunnel duration in seconds, regardless of activity.

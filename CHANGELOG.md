@@ -336,8 +336,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `HTTP_PROXY` clients send for `http://` URLs) run the same pipeline, pass
   the same destination rules, and are forwarded to their origin
   (TLS-originated with SNI for `https`), with private and reserved
-  IP-literal destinations refused unless
-  `insecure_options.allow_private_upstreams` is set. Origin-form requests
+  destinations, literal or resolved, refused unless
+  `insecure_options.allow_private_upstreams` is set. A destination name
+  resolves under the same bounded per-call DNS limits as a CONNECT's and
+  never enters the shared DNS cache; the connect is bounded to 10 s and
+  each read and write by `idle_timeout_ms`, and every destination shares
+  the `endpoint="forward_proxy"` metrics label. Origin-form requests
   keep using the reverse-proxy pipeline when it selects an upstream, and are
   answered with 400 when it does not. Tunneled payloads are opaque to
   body-inspecting filters. On a listener that also reverse-proxies, a
