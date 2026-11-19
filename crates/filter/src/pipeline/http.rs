@@ -203,8 +203,8 @@ impl FilterPipeline {
     /// response fails closed with a 500 rather than forwarding
     /// upstream.
     ///
-    /// A rejection held from the pre-read is returned when the walk reaches
-    /// its filter, or at the end if the walk skipped it.
+    /// A rejection held from the pre-read is returned when the walk reaches or
+    /// skips past its filter, before any later filter runs, or at the end.
     ///
     /// # Errors
     ///
@@ -219,8 +219,8 @@ impl FilterPipeline {
         })
     }
 
-    /// Run the request filters in order, returning `held` when the walk reaches
-    /// the filter that rejected during the pre-read.
+    /// Run the request filters in order, returning `held` once the walk
+    /// reaches or passes the filter that rejected during the pre-read.
     #[expect(clippy::indexing_slicing, reason = "while loop bounds idx")]
     #[expect(clippy::too_many_lines, reason = "filter identity tracking adds lines per branch")]
     async fn run_request_filters(
@@ -241,8 +241,8 @@ impl FilterPipeline {
         let (mut staged_results, mut pre_read_results) = take_pre_request_results(ctx);
         let mut idx = 0;
         while idx < self.filters.len() {
-            if let Some(held) = held.take_if(|held| held.index == idx) {
-                ctx.executed_filter_indices[idx] = true;
+            if let Some(held) = held.take_if(|held| held.index <= idx) {
+                ctx.executed_filter_indices[held.index] = true;
                 return Ok(FilterAction::Reject(held.rejection));
             }
             let pf = &self.filters[idx];

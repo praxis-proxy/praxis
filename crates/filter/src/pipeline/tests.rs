@@ -10425,7 +10425,12 @@ async fn a_held_rejection_skipped_by_a_branch_still_rejects() {
         .branches
         .push(unwind_branch("skip", RejoinTarget::SkipTo(2), vec![]));
     let mut pipeline = held_pipeline(earlier);
-    pipeline.filters.push(named_noop_pf(2, "router"));
+    pipeline.filters.push(PipelineFilter::new(
+        2,
+        AnyFilter::Http(Box::new(RejectFilter)),
+        vec![],
+        vec![],
+    ));
     let pipeline = with_body_indices(pipeline);
     let req = crate::test_utils::make_request(Method::POST, "/");
     let mut ctx = crate::test_utils::make_filter_context(&req);
@@ -10433,8 +10438,9 @@ async fn a_held_rejection_skipped_by_a_branch_still_rejects() {
     let action = pipeline.execute_http_request(&mut ctx).await.unwrap();
     assert!(
         matches!(&action, FilterAction::Reject(rejection) if rejection.status == 401),
-        "{action:?}"
+        "the filter the branch skipped to must not answer instead: {action:?}"
     );
+    assert_eq!(ctx.executed_filter_indices, vec![true, true, false]);
 }
 
 #[tokio::test]
