@@ -72,6 +72,10 @@ config-reload = ["dep:notify", "praxis-protocol/config-reload"]
 admin-api = ["praxis-protocol/admin-api"]
 dev = ["basic-auth-filter"]
 basic-auth-filter = ["praxis-filter/basic-auth-filter", "experimental"]
+# The `jobs:` config section and its not-yet-read startup warning. Off by
+# default; experimental. The bounds land before the background job runtime
+# that reads them, so an end-to-end review precedes promotion.
+jobs-config = ["praxis-core/jobs-config", "experimental"]
 cloud-events-filter = ["praxis-filter/cloud-events-filter", "experimental"]
 # Logical upstream binding (`bound_upstream` conditions, bound load balancers).
 # Off by default; experimental. Implied by `iterative-request-router` and

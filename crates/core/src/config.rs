@@ -130,6 +130,11 @@ pub struct Config {
     pub insecure_options: InsecureOptions,
 
     /// Background job queue settings. Absent means no job runtime is started.
+    ///
+    /// Requires the `jobs-config` Cargo feature, which is off by default:
+    /// without it the key is unknown, and a build that enables the feature
+    /// warns at startup because nothing reads the section yet.
+    #[cfg_attr(not(feature = "jobs-config"), serde(skip))]
     #[serde(default)]
     pub jobs: Option<JobsConfig>,
 

@@ -222,7 +222,8 @@ impl TryFrom<u64> for JobQueuedBytes {
 ///
 /// Present only when the operator configures a `jobs:` section; absent means
 /// no job runtime is started. Every bound has a default, so an empty section
-/// is valid and yields the defaults below.
+/// is valid and yields the defaults below. Use `jobs: {}` to select all
+/// defaults; a bare `jobs:` parses as null and is treated as absent.
 ///
 /// ```
 /// use praxis_core::config::JobsConfig;
@@ -341,6 +342,45 @@ max_queued_bytes: 2048
         assert!(
             JobQueuedBytes::try_from(MAX_QUEUED_BYTES.saturating_add(1)).is_err(),
             "max_queued_bytes above the ceiling should be rejected"
+        );
+    }
+
+    /// The section is only a known key with the feature enabled; without it
+    /// the config loader rejects the file, which is the anti-silent-no-op
+    /// guarantee the `serde(skip)` provides.
+    /// A minimal config that passes validation, so the tests below observe
+    /// the `jobs` key rather than an unrelated rejection.
+    const MINIMAL_CONFIG: &str = r#"listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+jobs: {}
+"#;
+
+    /// The section is only a known key with the feature enabled; without it
+    /// the config loader rejects the file, which is the anti-silent-no-op
+    /// guarantee the `serde(skip)` provides.
+    #[test]
+    #[cfg(not(feature = "jobs-config"))]
+    fn the_section_is_an_unknown_key_without_the_feature() {
+        let parsed = crate::config::Config::from_yaml(MINIMAL_CONFIG);
+        assert!(parsed.is_err(), "jobs must be an unknown key without the feature");
+    }
+
+    /// With the feature enabled the section parses and selects the defaults.
+    #[test]
+    #[cfg(feature = "jobs-config")]
+    fn the_section_parses_with_the_feature() {
+        let parsed =
+            crate::config::Config::from_yaml(MINIMAL_CONFIG).expect("jobs should be a known key with the feature");
+        assert!(
+            parsed.jobs.is_some_and(|jobs| jobs.queue_size.get() == 100),
+            "an empty section should select the defaults"
         );
     }
 

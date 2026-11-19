@@ -19,6 +19,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Add the `jobs:` config section behind the off-by-default `jobs-config`
+  feature: bounded queue capacity, worker count, per-job timeout, and a
+  queued-payload byte ceiling for the coming background job runtime, each
+  validated at config load with a message naming the field and its accepted
+  range. The settings are not read yet; a build with the feature enabled
+  warns at startup when the section is configured, and without the feature
+  the section is an unknown key.
+
 - Add `shutdown_drain_delay_secs` for readiness-first SIGTERM handoff. The
   process becomes unready, waits for the configured delay, then begins
   graceful connection shutdown; HTTP/1 responses during the drain advertise
