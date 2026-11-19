@@ -12,7 +12,7 @@ name: Coding Conventions
 on:
   pull_request_target:
     branches: [main]
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, edited, synchronize, reopened, ready_for_review]
 
 permissions: {}
 
@@ -21,7 +21,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
-    uses: praxis-proxy/conventions/.github/workflows/pr-conventions.yaml@2a0d28ddd3690ed73347ddbe59d08dac02f604ce # v0.5.0
+    uses: praxis-proxy/conventions/.github/workflows/pr-conventions.yaml@dcf79c3b0dedf35f7038c87849826901bd877ead # conventions PR 47
     with:
       max-additions: 500
       conventions-doc: docs/developing/conventions.md
