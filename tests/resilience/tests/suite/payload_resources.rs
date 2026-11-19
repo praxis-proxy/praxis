@@ -29,6 +29,10 @@ const MIB: u64 = 1_048_576;
 /// Deadline for an individual socket or backend receipt.
 const WAIT: Duration = Duration::from_secs(30);
 
+/// Bound allocator arena reservations independently of the runner's CPU count.
+pub(super) const LIMITED_ALLOCATOR_ENV: &[(&str, &str)] =
+    &[("_RJEM_MALLOC_CONF", "narenas:2"), ("MALLOC_ARENA_MAX", "2")];
+
 /// Prevent resource tests in this binary from perturbing each other's samples.
 static RESOURCE_LOCK: Mutex<()> = Mutex::new(());
 
@@ -1846,7 +1850,8 @@ fn bodyless_huge_lengths_stay_bounded_and_preserve_connection_framing() {
     let addr = format!("127.0.0.1:{port}");
     let yaml =
         config(port, peer.port, clean.port(), "", "").replace("max_response_bytes: null", "max_response_bytes: 1024");
-    let mut process = PraxisProcess::spawn_with_ulimit(&yaml, &addr, Some("-S -v 983040"));
+    let mut process =
+        PraxisProcess::spawn_with_ulimit_and_env(&yaml, &addr, Some("-S -v 983040"), LIMITED_ALLOCATOR_ENV);
     let baseline_vm = assert_metadata_limit(&process);
     let before = sample_process(process.pid()).expect("proxy must survive startup");
     let (_, samples) = measure(process.pid(), || {
@@ -1944,7 +1949,8 @@ fn oversized_trailer_failures_preserve_resources_and_never_dispatch() {
     let yaml = config(port, backend.port, clean.port(), filters, "")
         .replace("max_request_bytes: 67108864", "max_request_bytes: 16")
         .replace("max_response_bytes: null", "max_response_bytes: 1024");
-    let mut process = PraxisProcess::spawn_with_ulimit(&yaml, &addr, Some("-S -v 983040"));
+    let mut process =
+        PraxisProcess::spawn_with_ulimit_and_env(&yaml, &addr, Some("-S -v 983040"), LIMITED_ALLOCATOR_ENV);
     let baseline_vm = assert_metadata_limit(&process);
     let before = sample_process(process.pid()).expect("proxy must survive startup");
     let (_, samples) = measure(process.pid(), || {
