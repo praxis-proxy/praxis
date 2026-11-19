@@ -911,9 +911,12 @@ pub(crate) mod tests {
     use http::HeaderMap;
     use praxis_core::subrequest::{StreamLimits, SubRequest, SubRequestClient, SubRequestError};
 
-    use super::{CalloutResponseTooLarge, CalloutStreamingBody, FilteredStreamingBody, std_instant_to_tokio};
     #[cfg(feature = "bandwidth")]
-    use super::{CompletionOutput, OutputLimitScope, PendingOutput};
+    use super::OutputLimitScope;
+    use super::{
+        CalloutResponseTooLarge, CalloutStreamingBody, CompletionOutput, FilteredStreamingBody, PendingOutput,
+        std_instant_to_tokio,
+    };
 
     #[cfg(feature = "bandwidth")]
     #[tokio::test]
@@ -1581,6 +1584,44 @@ pub(crate) mod tests {
         body.remaining_limit = Some((10, 50));
         let error = body.release_pending().await.unwrap_err();
         assert_eq!(error.downcast_ref::<CalloutResponseTooLarge>().unwrap().limit, 50);
+    }
+
+    #[tokio::test]
+    async fn generated_completion_obeys_the_callout_ceiling_and_finishes() {
+        for limit in [3, 4] {
+            let output = PendingOutput::generated(Bytes::from_static(b"done"), &crate::RequestExtensions::default());
+            let mut body = CalloutStreamingBody {
+                inner: None,
+                pending: VecDeque::new(),
+                pending_completion: Some(CompletionOutput {
+                    chunks: VecDeque::from([output]),
+                    deadline: Instant::now() + Duration::from_secs(1),
+                    releasing: false,
+                }),
+                held_extensions: None,
+                deferred_error: None,
+                emitted_bytes: 0,
+                max_response_bytes: limit,
+                finished: true,
+            };
+            let result = crate::StreamingResponseBody::next_chunk(&mut body).await;
+            if limit == 3 {
+                let error = result.expect_err("oversized completion must not be emitted");
+                assert_eq!(error.downcast_ref::<CalloutResponseTooLarge>().unwrap().limit, limit);
+                assert_eq!(body.emitted_bytes, 0, "rejected output must not advance delivery");
+            } else {
+                assert_eq!(result.unwrap(), Some(Bytes::from_static(b"done")));
+                assert_eq!(body.emitted_bytes, 4);
+            }
+            assert!(
+                crate::StreamingResponseBody::next_chunk(&mut body)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(body.pending_completion.is_none());
+            drop(body);
+        }
     }
 
     #[test]

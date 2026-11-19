@@ -98,6 +98,20 @@ impl PraxisProcess {
         Self::spawn_inner(config_yaml, ready_addr, None, env)
     }
 
+    /// Like [`PraxisProcess::spawn_with_ulimit`], with a child-only environment.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the process cannot be spawned or never becomes ready.
+    pub fn spawn_with_ulimit_and_env(
+        config_yaml: &str,
+        ready_addr: &str,
+        ulimit: Option<&str>,
+        env: &[(&str, &str)],
+    ) -> Self {
+        Self::spawn_inner(config_yaml, ready_addr, ulimit, env)
+    }
+
     /// Process ID of the running `praxis`.
     ///
     /// # Panics

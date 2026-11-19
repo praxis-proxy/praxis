@@ -168,15 +168,32 @@ mod tests {
     use super::*;
     use crate::egress::{Completion, EgressError, RequestHead, ResponseHead};
 
+    #[derive(Clone, Copy, Debug)]
+    enum Admission {
+        Reject,
+        Stall,
+        Prefix(usize),
+    }
+
     #[derive(Debug, Default)]
-    struct Control(Mutex<Vec<usize>>);
+    struct Control {
+        sent: Mutex<Vec<usize>>,
+        admission: Option<Admission>,
+    }
     impl UploadControl for Control {
         fn prepare(&self, available: usize) -> Pin<Box<dyn Future<Output = Result<usize, String>> + Send + '_>> {
-            Box::pin(async move { Ok(available.min(3)) })
+            Box::pin(async move {
+                match self.admission {
+                    Some(Admission::Reject) => Err("admission denied".to_owned()),
+                    Some(Admission::Stall) => std::future::pending().await,
+                    Some(Admission::Prefix(bytes)) => Ok(bytes),
+                    None => Ok(available.min(3)),
+                }
+            })
         }
 
         fn sent(&self, bytes: usize) {
-            self.0.lock().unwrap().push(bytes);
+            self.sent.lock().unwrap().push(bytes);
         }
     }
     #[derive(Default)]
@@ -257,7 +274,7 @@ mod tests {
             .await
             .is_err()
         );
-        assert_eq!(*control.0.lock().unwrap(), vec![3]);
+        assert_eq!(*control.sent.lock().unwrap(), vec![3]);
     }
 
     #[tokio::test]
@@ -276,8 +293,93 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert_eq!(*control.0.lock().unwrap(), vec![3]);
+        assert_eq!(*control.sent.lock().unwrap(), vec![3]);
     }
+    fn assert_admission_failure(
+        admission: Admission,
+        error: SubRequestError,
+        session: &PartialSession,
+        control: &Control,
+    ) {
+        match admission {
+            Admission::Reject => {
+                assert!(matches!(error, SubRequestError::Io(reason) if reason == "admission denied"));
+            },
+            Admission::Stall => assert!(matches!(error, SubRequestError::DeadlineExceeded)),
+            Admission::Prefix(_) => assert!(matches!(error, SubRequestError::InvalidRequest(_))),
+        }
+        assert_eq!(session.sent, 0, "failed admission cannot forward body bytes");
+        let expected = if matches!(admission, Admission::Prefix(_)) {
+            vec![0]
+        } else {
+            vec![]
+        };
+        assert_eq!(
+            *control.sent.lock().unwrap(),
+            expected,
+            "only a prepared prefix needs settlement"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rejected_timed_out_or_invalid_admission_never_writes_body() {
+        for admission in [
+            Admission::Reject,
+            Admission::Stall,
+            Admission::Prefix(0),
+            Admission::Prefix(11),
+        ] {
+            let control = Arc::new(Control {
+                admission: Some(admission),
+                ..Control::default()
+            });
+            let observer: Arc<dyn UploadControl> = Arc::<Control>::clone(&control);
+            let mut session = PartialSession::default();
+            let error = send_controlled(
+                &mut session,
+                Bytes::from_static(b"abcdefghij"),
+                &observer,
+                Instant::now() + Duration::from_secs(1),
+                Some(Duration::from_millis(1)),
+            )
+            .await
+            .unwrap_err();
+            assert_admission_failure(admission, error, &session, &control);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn controlled_write_timeouts_settle_only_accepted_progress() {
+        for (remaining, write_timeout, accepted) in [
+            (Duration::ZERO, None, 0),
+            (Duration::from_secs(1), None, 3),
+            (Duration::from_secs(1), Some(Duration::from_millis(1)), 3),
+        ] {
+            let control = Control::default();
+            let mut session = PartialSession::default();
+            let error = send_prefix(
+                &mut session,
+                Bytes::from_static(b"abcdefghij"),
+                &control,
+                Instant::now() + remaining,
+                write_timeout,
+            )
+            .await
+            .unwrap_err();
+            if write_timeout.is_some() {
+                assert!(matches!(error, SubRequestError::Io(reason) if reason == "upstream write timeout"));
+            } else {
+                assert!(matches!(error, SubRequestError::DeadlineExceeded));
+            }
+            assert_eq!(
+                *control.sent.lock().unwrap(),
+                vec![accepted],
+                "each prefix settles once"
+            );
+            assert_eq!(session.sent, u64::try_from(accepted).unwrap());
+        }
+    }
+
     #[cfg(any(feature = "pingora", feature = "hyper"))]
     #[tokio::test]
     #[expect(
@@ -318,7 +420,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.body, "ok");
-        assert_eq!(*control.0.lock().unwrap(), vec![3, 3, 3, 1]);
+        assert_eq!(*control.sent.lock().unwrap(), vec![3, 3, 3, 1]);
         backend.await.unwrap();
     }
 }
