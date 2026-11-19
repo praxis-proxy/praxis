@@ -164,7 +164,8 @@ pub trait HttpFilter: Send + Sync {
     /// Defaults to `true`, so a filter that says nothing keeps its precedence.
     /// A filter whose request phase only continues overrides this; an error
     /// under `failure_mode: closed` and a rejection from a body hook don't
-    /// count.
+    /// count. A filter whose `on_request` has an effect a later rejection must
+    /// not skip, such as publishing an event, keeps `true`.
     ///
     /// [`on_request`]: HttpFilter::on_request
     /// [`admits_at_request_head`]: HttpFilter::admits_at_request_head

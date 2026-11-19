@@ -685,8 +685,10 @@ impl HttpFilter for CloudEventsFilter {
         "cloud_events"
     }
 
+    // An `on: request` event is published in `on_request`, so a later head
+    // rejection must not skip it; the request phase runs it first.
     fn may_end_request(&self) -> bool {
-        false
+        self.on == CloudEventsPhase::Request
     }
 
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
@@ -1232,6 +1234,17 @@ mod tests {
         let yaml = config(&format!("on: {phase}"));
         let cfg: CloudEventsFilterConfig = serde_yaml::from_value(yaml).unwrap();
         CloudEventsFilter::build(cfg).unwrap()
+    }
+
+    #[test]
+    fn only_request_events_keep_a_later_head_admission_waiting() {
+        let request = CloudEventsFilter::from_config(&config("on: request")).unwrap();
+        assert!(
+            request.may_end_request(),
+            "the event must not be skipped by a head rejection"
+        );
+        let complete = CloudEventsFilter::from_config(&config("on: response_complete")).unwrap();
+        assert!(!complete.may_end_request());
     }
 
     #[test]
