@@ -227,8 +227,10 @@
 //! buffer holds at least `max_buffer_bytes`, more if another filter asks for
 //! more, within the global `body_limits.max_buffer_bytes`; a larger body gets
 //! 413, where a `read_only` policy used to stream it. A request the route
-//! never judged, because the body hook was skipped, is rejected with 500. A policy with `context_headers` keeps today's
-//! timing: those values can come from filters that run after the head.
+//! never judged, because the body hook was skipped, is rejected with 500. A
+//! policy with `context_headers` has no head phase, since those values can
+//! come from filters that run after the head; its replacing routes still
+//! judge identity alone.
 //!
 //! The head judges the request as the client sent it plus the trusted header
 //! mutations of earlier head filters, and it precedes the declared-body-size

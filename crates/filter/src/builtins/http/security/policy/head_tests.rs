@@ -364,6 +364,26 @@ async fn context_headers_keep_admission_out_of_the_head() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn context_headers_still_leave_a_replacing_route_to_judge_alone() {
+    let (_dir, path, calls) = recorded_policy("test/head-context-route", ROUTE_REPLACES_GLOBAL);
+    let cfg = PolicyFilterConfig {
+        context_headers: [(ContextField::AgentConversationId, "x-praxis-conversation".to_owned())].into(),
+        ..filter_config(path)
+    };
+    let filter = PolicyFilter::new(cfg, None).unwrap();
+    assert!(!filter.runs_request_head());
+    assert!(matches!(filter.request_body_mode(), BodyMode::StreamBuffer { .. }));
+    let req = request(Some("alice"));
+    let mut ctx = context(&req, 1);
+    assert!(matches!(tool_body(&filter, &mut ctx).await, FilterAction::BodyDone));
+    assert!(matches!(
+        filter.on_request(&mut ctx).await.unwrap(),
+        FilterAction::Continue
+    ));
+    assert_eq!(plugins(&calls), ["pre", "key"], "only the route resolver judged it");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn the_head_judges_headers_as_earlier_head_filters_left_them() {
     let (_dir, path, calls) = recorded_policy("test/head-mutations", &HOST_LIMITERS.replace("{deny}", "{}"));
     let filter = filter(path);
@@ -433,7 +453,11 @@ async fn only_an_earlier_filter_that_can_end_the_request_moves_admission_out_of_
 
 #[test]
 fn only_dropped_or_head_only_steps_keep_the_global_resolver_from_the_head() {
-    for (case, yaml, blocker) in additive_layouts().into_iter().chain(blocking_layouts()) {
+    for (case, yaml, blocker) in additive_layouts()
+        .into_iter()
+        .chain(blocking_layouts())
+        .chain(http_group_layouts())
+    {
         let yaml = format!("{PLUGINS}{yaml}");
         let config = ppe::praxis_policy_core::config::parse_config(&yaml).unwrap();
         let found = head_identity_blocker(&config);
@@ -507,6 +531,18 @@ fn blocking_layouts() -> [(&'static str, String, Option<&'static str>); 4] {
             Some("global.defaults.http"),
         ),
     ]
+}
+
+/// An `http:` route joining a group whose steps the head would run, alongside
+/// an entity route that doesn't join it.
+fn http_group_layouts() -> [(&'static str, String, Option<&'static str>); 1] {
+    [(
+        "an http route joining an additive group",
+        "global:\n  authentication: [who]\ngroups:\n  keyed:\n    authentication: [key]\nroutes:\n  - http:\n      \
+         path_prefix: /admin\n    groups: keyed\n  - tool: echo\n"
+            .to_owned(),
+        Some("`routes[0]` joins `groups.keyed`"),
+    )]
 }
 
 /// Queue one head-filter mutation of a header on a context.

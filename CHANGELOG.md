@@ -62,9 +62,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `HttpFilter::admits_at_request_head` declares a head hook that may reject,
   and `HttpFilter::may_end_request` (default true) whether a filter's request
   phase can reject or answer; built-ins that only continue, such as
-  `forwarded_headers`, `credential_injection` and `headers`, declare false.
+  `forwarded_headers`, `credential_injection` and `headers`, declare false;
+  `cloud_events` with `on: request` keeps true, so its event is still
+  published when the policy would deny the request.
   When an entity default, group or route sets `replace_inherited`, or
-  `global.defaults.http` or an `http:` route adds authentication, the policy
+  `global.defaults.http`, an `http:` route or a group one joins adds
+  authentication, the policy
   never runs the global gate: the route judges the credential, the head runs
   the limiter only, the body is buffered until the route decides, and a
   startup warning names the section. The buffer holds at least
@@ -74,7 +77,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   request because the policy's body hook was skipped (a request condition
   that changes after the body is read, or `failure_mode: open`), the request
   phase rejects it with 500 instead of forwarding it. Policies with
-  `context_headers` or request conditions keep the previous timing.
+  `context_headers` or request conditions keep the previous timing, but
+  their replacing routes also judge identity alone.
   Pipeline construction warns when an earlier filter or request conditions
   move admission out of the head.
 - Routes with `replace_inherited` are now judged by their own

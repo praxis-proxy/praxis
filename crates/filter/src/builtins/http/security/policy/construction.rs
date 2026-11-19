@@ -7,7 +7,7 @@
 
 use ppe::praxis_policy_core::{
     CRYPTO_FAILED_CODE,
-    config::{PolicyConfig, PolicyGroup},
+    config::{PolicyConfig, PolicyGroup, route_bundle_names},
     delegation::HOOK_TOKEN_DELEGATE,
     error::PluginError,
     identity::RouteIdentityConfig,
@@ -124,9 +124,10 @@ pub(super) fn require_dpop_external_base_url(policy: &PolicyConfig) -> Result<()
 /// A section's `authentication:` steps are appended to the ones it inherits,
 /// so a global step that denies at the head denies on every route that keeps
 /// it. Only a section that sets `replace_inherited` drops them. The head
-/// resolves on the `http` coordinates, so `global.defaults.http` and `http:`
-/// routes add steps there that entity routes never run. This assumes a global
-/// step decides the same on the `http` coordinates as inside a route's chain.
+/// resolves on the `http` coordinates, so `global.defaults.http`, `http:`
+/// routes and the groups they join add steps there that entity routes never
+/// run. This assumes a global step decides the same on the `http` coordinates
+/// as inside a route's chain.
 pub(super) fn head_identity_blocker(policy: &PolicyConfig) -> Option<String> {
     let global = &policy.global;
     let sections = sorted(&global.defaults, "global.defaults")
@@ -139,14 +140,45 @@ pub(super) fn head_identity_blocker(policy: &PolicyConfig) -> Option<String> {
             .as_ref()
             .map(|auth| (format!("routes[{index}]"), auth, route.http.is_some()))
     });
-    sections.chain(routes).find_map(|(section, auth, http_route)| {
-        if http_route || section == "global.defaults.http" {
-            Some(format!("`{section}` adds authentication on the http coordinates"))
-        } else {
-            auth.replace_inherited
-                .then(|| format!("`{section}` sets `authentication.replace_inherited`"))
-        }
-    })
+    sections
+        .chain(routes)
+        .find_map(|(section, auth, http_route)| {
+            if http_route || section == "global.defaults.http" {
+                Some(format!("`{section}` adds authentication on the http coordinates"))
+            } else {
+                auth.replace_inherited
+                    .then(|| format!("`{section}` sets `authentication.replace_inherited`"))
+            }
+        })
+        .or_else(|| http_route_group_blocker(policy))
+}
+
+/// An `http:` route that joins a group with `authentication:`, whose steps PPE
+/// folds into that route's chain on the `http` coordinates.
+fn http_route_group_blocker(policy: &PolicyConfig) -> Option<String> {
+    let authenticates = |name: &str| {
+        policy
+            .global
+            .bundles
+            .get(name)
+            .or_else(|| policy.groups.get(name))
+            .is_some_and(|group| group.authentication.is_some())
+    };
+    policy
+        .routes
+        .iter()
+        .enumerate()
+        .filter(|(_, route)| route.http.is_some())
+        .find_map(|(index, route)| {
+            route_bundle_names(route)
+                .into_iter()
+                .find(|name| authenticates(name))
+                .map(|name| {
+                    format!(
+                        "`routes[{index}]` joins `groups.{name}`, which adds authentication on the http coordinates"
+                    )
+                })
+        })
 }
 
 /// The named sections of `map` as `prefix.name`, in name order.

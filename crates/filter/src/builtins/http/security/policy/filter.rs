@@ -430,6 +430,9 @@ pub struct PolicyFilter {
     limit_post: bool,
     /// What this policy does in the request-head phase.
     head: HeadAdmission,
+    /// Whether only the route judges identity, because a section can drop
+    /// or add global steps the request-head coordinates would not match.
+    route_judges_identity: bool,
     /// Whether `http.request` has work: a handler or request assertions.
     /// Without entity routes, the filter is a pure L7 policy authorized at
     /// `on_request`; unclassified inference fallbacks use the same rules in
@@ -497,9 +500,8 @@ impl HeadAdmission {
         };
         tracing::warn!(
             target: "policy.filter",
-            "policy: {}: {blocker}, so the request head runs only the pre-identity limiter and \
-             unauthenticated requests are rejected once the route resolves identity, after the \
-             body is read{buffering}",
+            "policy: {}: {blocker}, so only the route judges identity and unauthenticated \
+             requests are rejected once it does, after the body is read{buffering}",
             cfg.config_path,
         );
     }
@@ -779,7 +781,7 @@ impl PolicyFilter {
         let limit_pre = mgr.has_hooks_for(HOOK_RATELIMIT_PRE_IDENTITY);
         let blocker = entity_routes.then(|| head_identity_blocker(&policy_config)).flatten();
         let head = HeadAdmission::for_policy(&cfg, blocker.as_deref());
-        if let Some(blocker) = blocker.as_deref().filter(|_| head == HeadAdmission::Defer) {
+        if let Some(blocker) = blocker.as_deref() {
             HeadAdmission::warn_on_defer(&cfg, blocker, llm_routes);
         }
         let llm_route_table = llm_routes.then(|| Arc::new(policy_config));
@@ -797,6 +799,7 @@ impl PolicyFilter {
             limit_pre,
             limit_post,
             head,
+            route_judges_identity: blocker.is_some(),
             http_request_policy,
             request_assertions,
             response_assertions,
@@ -1702,7 +1705,7 @@ impl PolicyFilter {
         // credentials it read; resolving again would judge stripped headers. A
         // route-judged policy never runs it: the global resolver may reject a
         // credential only the route accepts.
-        if self.head == HeadAdmission::Defer
+        if self.route_judges_identity
             || Self::admitted_identity(ctx).is_some()
             || state(ctx).is_some_and(RequestState::gate_done)
         {
@@ -2781,7 +2784,7 @@ impl HttpFilter for PolicyFilter {
             BodyAccessMode::ReadOnly if self.llm_routes => BodyMode::StreamBuffer {
                 max_bytes: Some(self.cfg.llm.max_request_bytes),
             },
-            BodyAccessMode::ReadOnly if self.head == HeadAdmission::Defer => BodyMode::StreamBuffer {
+            BodyAccessMode::ReadOnly if self.route_judges_identity => BodyMode::StreamBuffer {
                 max_bytes: Some(self.cfg.max_buffer_bytes),
             },
             BodyAccessMode::ReadOnly => BodyMode::Stream,
@@ -2854,7 +2857,7 @@ impl HttpFilter for PolicyFilter {
         // Only the route judges a deferred identity, and its buffered body
         // hook runs first. Getting here unadmitted means that hook was skipped
         // or failed open, so nothing has authenticated the request.
-        if self.head == HeadAdmission::Defer {
+        if self.route_judges_identity {
             tracing::warn!(target: "policy.filter", "deferred identity was never judged by the route; rejecting");
             return Ok(FilterAction::Reject(undecided_identity_rejection()));
         }
