@@ -509,9 +509,10 @@ fn sampled_remote_parent_overrides_zero_root_rate() {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+        // Raw tracing logs can interrupt libtest's per-test progress line.
+        // The summary still proves --exact ran one test rather than zero.
         assert!(
-            String::from_utf8_lossy(&output.stdout)
-                .contains("test sampled_remote_parent_overrides_zero_root_rate ... ok"),
+            String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed; 0 failed;"),
             "child test did not execute:\n{}",
             String::from_utf8_lossy(&output.stdout)
         );
@@ -601,8 +602,7 @@ fn response_attempt_client_spans_record_final_status_and_actual_close() {
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(
-            String::from_utf8_lossy(&output.stdout)
-                .contains("test response_attempt_client_spans_record_final_status_and_actual_close ... ok"),
+            String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed; 0 failed;"),
             "child test did not execute:\n{}",
             String::from_utf8_lossy(&output.stdout)
         );
@@ -919,8 +919,7 @@ fn cloud_events_delivery_keeps_the_request_span_as_parent() {
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(
-            String::from_utf8_lossy(&output.stdout)
-                .contains("test cloud_events_delivery_keeps_the_request_span_as_parent ... ok"),
+            String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed; 0 failed;"),
             "child test did not execute:\n{}",
             String::from_utf8_lossy(&output.stdout)
         );
@@ -1074,8 +1073,7 @@ fn cloud_events_fallback_dispatch_keeps_the_request_span_as_parent() {
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(
-            String::from_utf8_lossy(&output.stdout)
-                .contains("test cloud_events_fallback_dispatch_keeps_the_request_span_as_parent ... ok"),
+            String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed; 0 failed;"),
             "fallback CloudEvents child did not execute:\n{}",
             String::from_utf8_lossy(&output.stdout)
         );

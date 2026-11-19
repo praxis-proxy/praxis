@@ -321,6 +321,7 @@ fn tcp_context() -> TcpFilterContext<'static> {
         local_addr: "127.0.0.1:8080",
         sni: None,
         upstream_addr: None,
+        lb_selection: None,
         cluster: None,
         health_registry: None,
         kv_stores: None,

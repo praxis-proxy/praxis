@@ -7,7 +7,13 @@
 #   cargo run -p praxis-proxy -- -c examples/configs/observability/filter-resource-metrics.yaml
 #
 # Exercise:
-#   curl -X POST http://localhost:8080/ -H 'Content-Type: application/json' -d '{"message":"hello","secret":"remove"}'
+#   # Throttle the upload so the first scrape observes retained request bytes.
+#   curl --http1.1 --limit-rate 2 -X POST http://localhost:8080/ -H 'Content-Type: application/json' --data-binary '{"message":"hello","secret":"remove"}' &
+#   upload_pid=$!
+#   sleep 2
+#   curl -s http://localhost:9902/metrics | grep -E 'praxis_filter_active|praxis_body_buffer_bytes'
+#   # Wait for completion, then verify retained bytes have returned to zero.
+#   wait "$upload_pid"
 #   curl -s http://localhost:9902/metrics | grep -E 'praxis_filter_active|praxis_body_buffer_bytes'
 
 admin:
