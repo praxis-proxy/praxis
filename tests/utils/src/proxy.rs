@@ -402,10 +402,20 @@ const NETWORK_BACKEND: &str = if cfg!(feature = "hyper") { "hyper" } else { "pin
 
 /// Validate the executable's backend and Policy profile from one version run.
 fn binary_profile_matches(path: &Path) -> Result<(), String> {
-    let output = Command::new(path)
-        .arg("--version")
-        .output()
-        .map_err(|err| format!("run {} --version: {err}", path.display()))?;
+    let probe = || Command::new(path).arg("--version").output();
+    let mut result = probe();
+    // Linux can briefly retain a writable reference to a freshly built executable.
+    for _attempt in 0..10 {
+        if !result
+            .as_ref()
+            .is_err_and(|err| err.kind() == std::io::ErrorKind::ExecutableFileBusy)
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+        result = probe();
+    }
+    let output = result.map_err(|err| format!("run {} --version: {err}", path.display()))?;
     if !output.status.success() {
         return Err(format!("{} --version failed with {}", path.display(), output.status));
     }
