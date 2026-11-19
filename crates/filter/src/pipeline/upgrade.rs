@@ -46,6 +46,8 @@ struct UpgradeRequirementState {
     upgrade_requested: bool,
     /// First required body operation selected by the pipeline.
     first_required: Option<RequiredBodyProcessing>,
+    /// Response obligations whose conditions require final response headers.
+    pending_response: Vec<(RequiredBodyProcessing, Vec<praxis_core::config::ResponseCondition>)>,
 }
 
 impl UpgradeRequirementState {
@@ -90,6 +92,9 @@ pub(super) fn select_filter_requirements(
     ctx: &mut HttpFilterContext<'_>,
     pf: &super::filter::PipelineFilter,
 ) -> Option<Rejection> {
+    if !tracking_active(&ctx.extensions) {
+        return None;
+    }
     let AnyFilter::Http(filter) = &pf.filter else {
         return incompatible_upgrade_rejection(&ctx.extensions);
     };
@@ -101,14 +106,37 @@ pub(super) fn select_filter_requirements(
         request_body_phase,
         request_body_access,
     );
-    record_if_required(
-        &mut ctx.extensions,
-        pf.filter_id,
-        filter.name(),
-        "response_body",
-        filter.response_body_access(),
-    );
+    select_response_requirement(ctx, pf, filter.as_ref());
     incompatible_upgrade_rejection(&ctx.extensions)
+}
+
+/// Retain conditional obligations until response headers are known.
+fn select_response_requirement(
+    ctx: &mut HttpFilterContext<'_>,
+    pf: &super::filter::PipelineFilter,
+    filter: &dyn HttpFilter,
+) {
+    let response_access = filter.response_body_access();
+    if response_access.is_required() && !pf.response_conditions.is_empty() {
+        if let Some(state) = ctx.extensions.get_mut::<UpgradeRequirementState>() {
+            let evidence = RequiredBodyProcessing {
+                filter_id: pf.filter_id,
+                filter_name: filter.name(),
+                phase: "response_body",
+            };
+            if !state.pending_response.iter().any(|(existing, _)| *existing == evidence) {
+                state.pending_response.push((evidence, pf.response_conditions.clone()));
+            }
+        }
+    } else {
+        record_if_required(
+            &mut ctx.extensions,
+            pf.filter_id,
+            filter.name(),
+            "response_body",
+            response_access,
+        );
+    }
 }
 
 /// Record and check request-body processing when its body-phase invocation is selected.
@@ -117,6 +145,9 @@ pub(super) fn select_request_body_requirement(
     filter_id: usize,
     filter: &dyn HttpFilter,
 ) -> Option<Rejection> {
+    if !tracking_active(&ctx.extensions) {
+        return None;
+    }
     record_if_required(
         &mut ctx.extensions,
         filter_id,
@@ -133,6 +164,9 @@ pub(super) fn select_selected_upstream_requirement(
     filter_id: usize,
     filter: &dyn HttpFilter,
 ) -> Option<Rejection> {
+    if !tracking_active(&ctx.extensions) {
+        return None;
+    }
     record_if_required(
         &mut ctx.extensions,
         filter_id,
@@ -150,6 +184,9 @@ pub(super) fn select_bound_upstream_requirement(
     filter_id: usize,
     filter: &dyn HttpFilter,
 ) -> Option<Rejection> {
+    if !tracking_active(&ctx.extensions) {
+        return None;
+    }
     record_if_required(
         &mut ctx.extensions,
         filter_id,
@@ -158,6 +195,27 @@ pub(super) fn select_bound_upstream_requirement(
         filter.bound_upstream_request_body_access(),
     );
     incompatible_upgrade_rejection(&ctx.extensions)
+}
+
+/// Whether admission tracking was enabled by the protocol adapter.
+fn tracking_active(extensions: &RequestExtensions) -> bool {
+    extensions
+        .get::<UpgradeRequirementState>()
+        .is_some_and(|state| state.upgrade_requested)
+}
+
+/// Resolve selected conditional response obligations against final response headers.
+pub(super) fn final_response_requirement(
+    extensions: &RequestExtensions,
+    response: &crate::context::Response,
+) -> Option<RequiredBodyProcessing> {
+    let state = extensions.get::<UpgradeRequirementState>()?;
+    state.first_required.or_else(|| {
+        state.pending_response.iter().find_map(|(evidence, conditions)| {
+            crate::condition::should_execute_response_ref(conditions, response.status, &response.headers)
+                .then_some(*evidence)
+        })
+    })
 }
 
 /// Record one requirement without allowing optional declarations to affect admission.
@@ -189,6 +247,32 @@ pub(super) fn record_if_required(
 #[allow(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
 mod tests {
     use super::*;
+
+    /// Status-gated response work must not reject an unrelated upgrade status.
+    #[test]
+    fn conditional_response_requirements_use_final_status() {
+        let mut extensions = RequestExtensions::new();
+        mark_upgrade_requested(&mut extensions);
+        let evidence = RequiredBodyProcessing {
+            filter_id: 0,
+            filter_name: "required",
+            phase: "response_body",
+        };
+        let conditions = serde_yaml::from_str("- when:\n    status: [200]\n").unwrap();
+        extensions
+            .get_mut::<UpgradeRequirementState>()
+            .unwrap()
+            .pending_response
+            .push((evidence, conditions));
+        let mut response = crate::context::Response {
+            headers: http::HeaderMap::new(),
+            status: http::StatusCode::SWITCHING_PROTOCOLS,
+        };
+        assert_eq!(final_response_requirement(&extensions, &response), None);
+        assert!(!has_incompatible_upgrade_requirement(&extensions));
+        response.status = http::StatusCode::OK;
+        assert_eq!(final_response_requirement(&extensions, &response), Some(evidence));
+    }
 
     #[test]
     fn ordinary_requests_do_not_allocate_upgrade_requirement_state() {

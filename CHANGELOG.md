@@ -143,6 +143,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Reject explicit listener `upgrade_policy` settings until protocol admission
+  enforcement is available, rather than silently accepting unenforced denials.
+
 - Return gRPC `DEADLINE_EXCEEDED` when Pingora's rounded upstream timeout fires just before the call's exact deadline, while preserving earlier transport timeouts.
 - Strip reserved and hop-by-hop headers from preformatted gRPC rejections while retaining safe gRPC fields, and frame empty HTTP/1 responses with one correct zero length even when filters supply stale or conflicting lengths.
 - Preserve final body-filter bytes with forwarded trailers on Hyper; abort Pingora delivery when both outputs cannot be represented or EOF filtering fails, while retaining ordinary trailers and deliberate conversion.
@@ -229,8 +232,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   and `ring_hash` instead of silently hashing by request path.
 - **Breaking:** Reject HTTP-only downstream read and keepalive timeouts on TCP
   listeners instead of silently ignoring them.
-- Reject explicit listener `upgrade_policy` settings until protocol admission
-  enforcement is available, rather than silently accepting unenforced denials.
 
 - **Breaking:** statically buffered request pipelines now reject a finite
   `body_limits.max_request_bytes` above `body_limits.max_buffer_bytes` at

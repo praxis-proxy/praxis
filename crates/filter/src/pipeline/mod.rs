@@ -267,6 +267,15 @@ impl FilterPipeline {
         upgrade::required_body_processing(extensions)
     }
 
+    /// Resolve required processing using the final response before admitting an opaque tunnel.
+    #[must_use]
+    pub fn required_body_processing_for_response(
+        extensions: &RequestExtensions,
+        response: &crate::context::Response,
+    ) -> Option<RequiredBodyProcessing> {
+        upgrade::final_response_requirement(extensions, response)
+    }
+
     /// Apply global body size ceilings.
     ///
     /// When no filter requires body access (mode is [`Stream`]),

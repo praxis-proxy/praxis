@@ -166,9 +166,9 @@ fn validate_single_listener(listener: &mut Listener) -> Result<(), ProxyError> {
     validate_upgrade_policy(listener)?;
 
     if listener.protocol == ProtocolKind::Tcp {
+        reject_http_only_fields(listener)?;
         reject_forward_proxy_on_tcp(listener)?;
         reject_http_timeouts_on_tcp(listener)?;
-        reject_http_only_fields(listener)?;
         validate_tcp_routing(listener)?;
     } else {
         reject_tcp_only_fields(listener)?;
@@ -408,6 +408,18 @@ upgrade_policy:
             policy.action_for("websocket"),
             crate::config::UpgradeAction::Passthrough
         );
+    }
+
+    /// Failed validation must preserve overrides on every retry.
+    #[test]
+    fn invalid_upgrade_policy_preserves_rules() {
+        let mut policy: crate::config::UpgradePolicy =
+            serde_yaml::from_str("protocols:\n  h2c: passthrough\n  websocket: deny\n").unwrap();
+        let original = policy.clone();
+        assert!(policy.validate().is_err());
+        assert_eq!(policy, original);
+        assert!(policy.validate().is_err());
+        assert_eq!(policy, original);
     }
 
     #[test]

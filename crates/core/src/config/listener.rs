@@ -261,8 +261,8 @@ impl UpgradePolicy {
     /// contain duplicate identifiers.
     pub fn validate(&mut self) -> Result<(), String> {
         let mut normalized = BTreeMap::new();
-        for (protocol, action) in std::mem::take(&mut self.protocols) {
-            let Some(protocol) = normalize_upgrade_protocol(&protocol) else {
+        for (protocol, &action) in &self.protocols {
+            let Some(protocol) = normalize_upgrade_protocol(protocol) else {
                 return Err(format!("invalid upgrade protocol identifier '{protocol}'"));
             };
             if action == UpgradeAction::Passthrough && protocol != "websocket" {
