@@ -100,7 +100,9 @@ filter in one of its branches, can end the request in its request phase (a
 security filter, or one that answers like `static_response` or `redirect`),
 and the filter admits in `on_request` instead, so the earlier filter still
 runs first. A pre-read runs body hooks before any request phase, so there the
-head hook is kept. The `policy` filter uses the head phase this way: it rate-limits and
+head hook is kept. A filter with request `conditions` always admits in
+`on_request`, where its conditions see the headers that head filters publish.
+The `policy` filter uses the head phase this way: it rate-limits and
 authenticates before any filter reads the body; see
 [`policy`](http/security/policy.md).
 

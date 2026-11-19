@@ -145,6 +145,26 @@ fn an_earlier_static_response_still_answers_without_credentials() {
 }
 
 #[test]
+fn a_conditional_policy_sees_headers_a_later_head_filter_publishes() {
+    let backend = start_header_echo_backend();
+    let proxy = start_proxy(&exempting_head_class_config(free_port(), backend.port()));
+    let raw = http_send(
+        proxy.addr(),
+        "GET /public/page HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(
+        parse_status(&raw),
+        200,
+        "the head class exempts the request from policy: {raw}"
+    );
+    assert_eq!(
+        post_json(proxy.addr(), None),
+        401,
+        "unexempted requests still need a credential"
+    );
+}
+
+#[test]
 fn a_route_that_replaces_global_authentication_judges_its_own_credential() {
     let backend = start_header_echo_backend();
     let dir = tempfile::TempDir::new().unwrap();
@@ -285,6 +305,29 @@ fn load_example_yaml(proxy_port: u16, backend_port: u16, prefix: Option<&str>) -
         yaml = yaml.replacen("    filters:\n", &format!("    filters:\n{prefix}"), 1);
     }
     patch_yaml(&yaml, proxy_port, &HashMap::from([("127.0.0.1:3000", backend_port)]))
+}
+
+/// The example without its classifier, with a policy that skips requests a
+/// later `head_classifier` puts in the `public` class.
+fn exempting_head_class_config(proxy_port: u16, backend_port: u16) -> Config {
+    let yaml = load_example_yaml(proxy_port, backend_port, None);
+    let policy = yaml
+        .split("      - filter: policy\n")
+        .nth(1)
+        .and_then(|rest| rest.split("\n\n").next())
+        .map(|entry| format!("      - filter: policy\n{entry}\n"))
+        .unwrap();
+    let exempting = format!(
+        "{policy}        conditions:\n          - unless:\n              headers:\n                \
+         x-praxis-head-class: public\n\n      - filter: head_classifier\n        rules:\n          - \
+         path_prefix: \"/public/\"\n            class: public\n        default_class: other\n"
+    );
+    let yaml = yaml.replacen(&policy, &exempting, 1).replacen(
+        "insecure_options:\n",
+        "insecure_options:\n  skip_pipeline_checks:\n    conditional_security: true\n",
+        1,
+    );
+    without_classifier(&yaml)
 }
 
 /// A proxy whose only filter before routing is an inference policy: a global

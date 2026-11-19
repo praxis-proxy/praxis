@@ -64,9 +64,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   never runs the global gate: the route judges the credential, the head runs
   the limiter only, the body is buffered (up to `max_buffer_bytes`) until the
   route decides, and a startup warning names the section. Policies with
-  `context_headers` keep the previous timing. Pipeline construction warns
-  when an earlier filter moves admission out of the head and about request
-  conditions on a head-admitting policy.
+  `context_headers` or request conditions keep the previous timing.
+  Pipeline construction warns when an earlier filter or request conditions
+  move admission out of the head.
 - Temporarily disable KIND rollout acceptance in CI and local commands
   because the cluster exhausts the shared inotify instance budget, pending
   migration to [gateway-controller](https://github.com/praxis-proxy/gateway-controller).

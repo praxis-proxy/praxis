@@ -114,11 +114,8 @@ pub(super) fn body_filter_indices(filters: &[PipelineFilter]) -> (Vec<usize>, Ve
 /// opts in by overriding [`runs_request_head`].
 ///
 /// Top-level only: branch filters never run the head hook, matching the
-/// body-phase precompute helpers. Without a `pre_read`, a filter that
-/// [`admits_at_request_head`] is left out when an earlier filter can end the
-/// request first, so that filter still answers or rejects before admission.
-/// A pre-read runs every body hook before any request phase, so there the
-/// earlier filter runs after admission either way, and the head is kept.
+/// body-phase precompute helpers. A filter that [`admits_at_request_head`]
+/// is left out when it [`admits_in_request_phase`].
 ///
 /// [`on_request_head`]: crate::HttpFilter::on_request_head
 /// [`runs_request_head`]: crate::HttpFilter::runs_request_head
@@ -128,12 +125,24 @@ pub(super) fn request_head_filter_indices(filters: &[PipelineFilter], pre_read: 
     for (idx, pf) in filters.iter().enumerate() {
         if let AnyFilter::Http(f) = &pf.filter
             && f.runs_request_head()
-            && !(!pre_read && f.admits_at_request_head() && first_request_ender(filters, idx).is_some())
+            && !(f.admits_at_request_head() && admits_in_request_phase(filters, idx, pre_read))
         {
             indices.push(idx);
         }
     }
     indices
+}
+
+/// Whether the admitting filter at `position` must wait for the request phase.
+///
+/// Its request conditions would see the request as the client sent it at the
+/// head, not the headers head filters publish. Without a `pre_read`, an earlier
+/// filter that can end the request must also answer or reject first. A pre-read
+/// runs every body hook before any request phase, so there the earlier filter
+/// runs after admission either way.
+pub(super) fn admits_in_request_phase(filters: &[PipelineFilter], position: usize, pre_read: bool) -> bool {
+    filters.get(position).is_some_and(|pf| !pf.conditions.is_empty())
+        || (!pre_read && first_request_ender(filters, position).is_some())
 }
 
 /// The first filter before `position` that can end the request in its request
@@ -1292,6 +1301,38 @@ mod tests {
             vec![1],
             "a pre-read runs admission before any request phase, so the head is kept"
         );
+    }
+
+    #[test]
+    fn a_conditional_admitting_head_filter_is_left_out() {
+        use crate::pipeline::test_filters::{admitting_head_filter, head_filter};
+
+        let conditional = |mut pf: PipelineFilter| {
+            pf.conditions = vec![praxis_core::config::Condition::When(
+                praxis_core::config::ConditionMatch {
+                    grpc: None,
+                    path: None,
+                    path_prefix: Some("/api".to_owned()),
+                    methods: None,
+                    headers: None,
+                    headers_present: None,
+                    bound_upstream: None,
+                    selected_upstream: None,
+                },
+            )];
+            pf
+        };
+        for pre_read in [false, true] {
+            let filters = [
+                conditional(admitting_head_filter("policy")),
+                conditional(head_filter("classifier")),
+            ];
+            assert_eq!(
+                request_head_filter_indices(&filters, pre_read),
+                vec![1],
+                "pre_read {pre_read}: the conditional policy admits in the request phase"
+            );
+        }
     }
 
     #[test]

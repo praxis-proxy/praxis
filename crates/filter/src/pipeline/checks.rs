@@ -977,13 +977,11 @@ pub(super) fn check_selected_upstream_condition_pre_read(
 /// earlier filter's request phase.
 ///
 /// Behind an earlier filter that can end the request (an answering filter, or
-/// a security filter that may reject), the head hook is skipped and the filter
-/// admits in the request phase instead, so it rejects nothing before the body
-/// is read; this warns so the lost early rejection is visible. Otherwise its
-/// request conditions (only reachable on the `conditional_security` opt-out)
-/// are evaluated at the head against the request as the client sent it, so
-/// headers an earlier filter sets are invisible to that evaluation. Branch
-/// filters never run at the head and are not checked.
+/// a security filter that may reject), or with request conditions (only
+/// reachable on the `conditional_security` opt-out), the head hook is skipped
+/// and the filter admits in the request phase instead, so it rejects nothing
+/// before the body is read; this warns so the lost early rejection is visible.
+/// Branch filters never run at the head and are not checked.
 pub(super) fn check_head_admission_ordering(filters: &[PipelineFilter], pre_read: bool, warnings: &mut Vec<String>) {
     for (position, pf) in filters.iter().enumerate() {
         if !admits_at_request_head(pf) {
@@ -997,11 +995,11 @@ pub(super) fn check_head_admission_ordering(filters: &[PipelineFilter], pre_read
                  request head: '{ender}' can answer or reject the request before it, so \
                  requests are not rejected before their body is read"
             ));
-        } else if !pf.conditions.is_empty() && position > 0 {
+        } else if !pf.conditions.is_empty() {
             warnings.push(format!(
-                "filter '{name}' at position {position} admits at the request head, where its \
-                 request conditions see the request as the client sent it, not headers that \
-                 earlier filters set; the head and request phases may evaluate them differently"
+                "filter '{name}' at position {position} admits in the request phase, not at the \
+                 request head: its request conditions must see the headers that head filters \
+                 publish, so requests are not rejected before their body is read"
             ));
         }
     }
@@ -3292,15 +3290,18 @@ mod tests {
     }
 
     #[test]
-    fn a_conditional_head_policy_after_a_fact_publishing_filter_warns() {
-        for earlier in [head_filter("head_classifier"), make_pf(vec![])] {
+    fn a_conditional_admitting_filter_admits_in_the_request_phase() {
+        for earlier in [vec![], vec![head_filter("head_classifier")], vec![make_pf(vec![])]] {
             let mut policy = admitting_head_filter("policy");
             policy.conditions = vec![make_condition()];
-            let filters = vec![earlier, policy];
+            let filters: Vec<_> = earlier.into_iter().chain([policy]).collect();
             let mut warnings = Vec::new();
-            check_head_admission_ordering(&filters, false, &mut warnings);
+            check_head_admission_ordering(&filters, true, &mut warnings);
             assert_eq!(warnings.len(), 1, "{warnings:?}");
-            assert!(warnings[0].contains("request conditions"), "{warnings:?}");
+            assert!(
+                warnings[0].contains("admits in the request phase") && warnings[0].contains("request conditions"),
+                "{warnings:?}"
+            );
         }
     }
 
@@ -3308,8 +3309,6 @@ mod tests {
     fn head_admission_warnings_skip_filters_that_do_not_admit_at_the_head() {
         let mut conditional_classifier = head_filter("head_classifier");
         conditional_classifier.conditions = vec![make_condition()];
-        let mut conditional_policy = admitting_head_filter("policy");
-        conditional_policy.conditions = vec![make_condition()];
         let cases = [
             (
                 "a policy without a head phase",
@@ -3322,7 +3321,6 @@ mod tests {
                 "a head filter that only publishes facts",
                 vec![security_noop_filter("ip_acl", vec![]), conditional_classifier],
             ),
-            ("a conditional head policy first in the chain", vec![conditional_policy]),
         ];
         for (case, filters) in cases {
             let mut warnings = Vec::new();

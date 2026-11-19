@@ -146,8 +146,9 @@ pub trait HttpFilter: Send + Sync {
     /// admission check does.
     ///
     /// Such a hook must not run ahead of an earlier filter that can end the
-    /// request in its request phase, by answering or rejecting it: pipeline
-    /// construction skips the hook there, and the filter admits in
+    /// request in its request phase, by answering or rejecting it, nor judge
+    /// request conditions before head filters publish their headers: pipeline
+    /// construction skips the hook in either case, and the filter admits in
     /// [`on_request`] as it would without a head phase. A filter that only
     /// publishes facts from the head leaves the default.
     ///
