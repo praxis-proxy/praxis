@@ -147,11 +147,8 @@ impl FilterPipeline {
             .enumerate()
             .filter_map(|(idx, pf)| (pf.filter.name() == "trace_context").then_some(idx))
             .collect();
-        let pre_read = matches!(
-            body_capabilities.request_body_mode,
-            crate::BodyMode::StreamBuffer { .. }
-        );
-        let request_head_filter_indices = request_head_filter_indices(&filters, pre_read);
+        let request_head_filter_indices = request_head_filter_indices(&filters);
+        let shielded_admitter_indices = super::body::shielded_admitter_indices(&filters);
         let (request_body_filter_indices, response_body_filter_indices) = body_filter_indices(&filters);
         let selected_upstream_request_body_filter_indices = selected_upstream_request_body_indices(&filters);
         #[cfg(feature = "bound-upstream-request-body")]
@@ -165,6 +162,7 @@ impl FilterPipeline {
             compression,
             filters,
             request_head_filter_indices,
+            shielded_admitter_indices,
             request_body_filter_indices,
             response_body_filter_indices,
             selected_upstream_request_body_filter_indices,
@@ -402,11 +400,7 @@ impl FilterPipeline {
         super::checks::check_router_without_lb(&self.filters, &names, &mut warnings);
         super::checks::check_all_routers_conditional(&names, &self.filters, &mut warnings);
         super::checks::check_security_filter_in_conditional_branch(&self.filters, &mut warnings);
-        let pre_read = matches!(
-            self.body_capabilities.request_body_mode,
-            crate::BodyMode::StreamBuffer { .. }
-        );
-        super::checks::check_head_admission_ordering(&self.filters, pre_read, &mut warnings);
+        super::checks::check_head_admission_ordering(&self.filters, &mut warnings);
 
         warnings
     }

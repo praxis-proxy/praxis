@@ -54,10 +54,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   before the declared-body-size 413 and inference model and body denials,
   and inference and pre-read MCP requests resolve the global identity once
   more. Behind an earlier filter that can answer or reject the request
-  (`cors`, `ip_acl`, `static_response`, `redirect`, ...), in a pipeline that
-  does not pre-read the body, the policy admits in the request phase as
-  before, so that filter still runs first (a pre-read already runs the
-  policy's body hook before any request phase, so there the head is kept);
+  (`cors`, `ip_acl`, `static_response`, `redirect`, ...), the policy admits
+  in the request phase as before, so that filter still runs first. With a
+  pre-read, the pipeline holds the policy's body-phase denial until the
+  request phase reaches it, so the earlier filter answers or rejects first
+  here too, where it used to lose to the policy.
   `HttpFilter::admits_at_request_head` declares a head hook that may reject,
   and `HttpFilter::may_end_request` (default true) whether a filter's request
   phase can reject or answer; built-ins that only continue, such as

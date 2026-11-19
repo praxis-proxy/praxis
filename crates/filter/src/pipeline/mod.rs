@@ -173,6 +173,11 @@ pub struct FilterPipeline {
     /// [`execute_http_request_head`]: FilterPipeline::execute_http_request_head
     request_head_filter_indices: Vec<usize>,
 
+    /// Indices into `filters` of top-level admitting filters behind an earlier
+    /// filter that can end the request, whose pre-read rejections wait for the
+    /// request phase.
+    shielded_admitter_indices: Vec<usize>,
+
     /// Indices into `filters` of filters declaring request-body access.
     request_body_filter_indices: Vec<usize>,
 

@@ -111,15 +111,56 @@ fn an_earlier_ip_acl_still_rejects_before_admission() {
 }
 
 #[test]
-fn a_pre_reading_pipeline_keeps_head_admission_behind_an_earlier_ip_acl() {
+fn a_pre_reading_pipeline_still_lets_an_earlier_ip_acl_reject_first() {
     let backend = start_header_echo_backend();
     let ip_acl = "      - filter: ip_acl\n        deny:\n          - \"127.0.0.0/8\"\n\n";
     let proxy = start_proxy(&load_example(free_port(), backend.port(), Some(ip_acl)));
     assert_eq!(
-        status_without_body(proxy.addr(), None, 64),
-        401,
-        "the pre-read would run policy before ip_acl anyway, so the head still rejects first"
+        post_json(proxy.addr(), None),
+        403,
+        "policy's pre-read rejection waits for ip_acl's request phase"
     );
+}
+
+#[test]
+fn a_pre_reading_pipeline_keeps_head_admission_behind_forwarded_headers() {
+    let backend = start_header_echo_backend();
+    let forwarded = "      - filter: forwarded_headers\n\n";
+    let proxy = start_proxy(&load_example(free_port(), backend.port(), Some(forwarded)));
+    assert_eq!(status_without_body(proxy.addr(), None, 64), 401);
+}
+
+#[test]
+fn an_earlier_cors_answers_a_preflight_before_a_buffering_policy() {
+    let backend = start_header_echo_backend();
+    let dir = tempfile::TempDir::new().unwrap();
+    let cors = "      - filter: cors\n        allow_origins: [\"https://app.example.com\"]\n        allow_methods: \
+                [POST]\n        allow_headers: [Content-Type, Authorization]\n";
+    let proxy = start_proxy(&route_replacing_config(&dir, free_port(), backend.port(), cors));
+    let raw = http_send(
+        proxy.addr(),
+        "OPTIONS /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nOrigin: https://app.example.com\r\n\
+         Access-Control-Request-Method: POST\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+    );
+    assert!(
+        matches!(parse_status(&raw), 200 | 204),
+        "cors answers the preflight before policy asks for a key: {raw}"
+    );
+    assert!(
+        raw.to_ascii_lowercase()
+            .contains("access-control-allow-origin: https://app.example.com"),
+        "{raw}"
+    );
+    let body = r#"{"model":"m1","messages":[{"role":"user","content":"hi"}]}"#;
+    let denied = http_send(
+        proxy.addr(),
+        &format!(
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nOrigin: https://app.example.com\r\n\
+             Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        ),
+    );
+    assert_eq!(parse_status(&denied), 401, "{denied}");
 }
 
 #[test]
@@ -203,7 +244,7 @@ fn an_earlier_grpc_timeout_still_answers_a_malformed_deadline() {
 fn a_route_that_replaces_global_authentication_judges_its_own_credential() {
     let backend = start_header_echo_backend();
     let dir = tempfile::TempDir::new().unwrap();
-    let config = route_replacing_config(&dir, free_port(), backend.port());
+    let config = route_replacing_config(&dir, free_port(), backend.port(), "");
     let proxy = start_proxy(&config);
     let send = |authorization: &str| {
         let body = r#"{"model":"m1","messages":[{"role":"user","content":"hi"}]}"#;
@@ -367,7 +408,7 @@ fn exempting_head_class_config(proxy_port: u16, backend_port: u16) -> Config {
 
 /// A proxy whose only filter before routing is an inference policy: a global
 /// JWT resolver that every inference route replaces with API keys.
-fn route_replacing_config(dir: &tempfile::TempDir, proxy_port: u16, backend_port: u16) -> Config {
+fn route_replacing_config(dir: &tempfile::TempDir, proxy_port: u16, backend_port: u16, prefix: &str) -> Config {
     let keys = format!("{}/fixtures/api-keys.yaml", env!("CARGO_MANIFEST_DIR"));
     let admission = format!("{}/fixtures/admission-policy.yaml", env!("CARGO_MANIFEST_DIR"));
     let jwt = std::fs::read_to_string(&admission).unwrap();
@@ -419,7 +460,7 @@ routes:
 filter_chains:
   - name: main
     filters:
-      - filter: policy
+{prefix}      - filter: policy
         config_path: {}
       - filter: router
         routes:

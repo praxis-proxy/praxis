@@ -50,6 +50,16 @@ use crate::{actions::BoundUpstreamBodyOutcome, condition::SelectedUpstream, exte
 // FilterPipeline HTTP
 // -----------------------------------------------------------------------------
 
+/// A pre-read rejection from an admitting filter behind an earlier filter that
+/// can end the request. The request phase returns it on reaching that filter,
+/// so the earlier filter still answers or rejects first.
+struct HeldRejection {
+    /// Pipeline index of the rejecting filter.
+    index: usize,
+    /// The rejection to send.
+    rejection: Rejection,
+}
+
 /// Pre-request results and participation owned by resolved filter instances.
 #[derive(Default)]
 struct PreRequestResults {
@@ -193,12 +203,31 @@ impl FilterPipeline {
     /// response fails closed with a 500 rather than forwarding
     /// upstream.
     ///
+    /// A rejection held from the pre-read is returned when the walk reaches
+    /// its filter, or at the end if the walk skipped it.
+    ///
     /// # Errors
     ///
     /// Returns [`FilterError`] if any filter fails.
+    pub async fn execute_http_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        let mut held = ctx.extensions.remove::<HeldRejection>();
+        let action = self.run_request_filters(ctx, &mut held).await?;
+        // A branch that skipped past the holder must not admit the request.
+        Ok(match held {
+            Some(held) if matches!(action, FilterAction::Continue) => FilterAction::Reject(held.rejection),
+            _ => action,
+        })
+    }
+
+    /// Run the request filters in order, returning `held` when the walk reaches
+    /// the filter that rejected during the pre-read.
     #[expect(clippy::indexing_slicing, reason = "while loop bounds idx")]
     #[expect(clippy::too_many_lines, reason = "filter identity tracking adds lines per branch")]
-    pub async fn execute_http_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+    async fn run_request_filters(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+        held: &mut Option<HeldRejection>,
+    ) -> Result<FilterAction, FilterError> {
         if self.enables_trace_propagation(ctx.request) {
             ensure_trace_context(ctx);
         }
@@ -212,6 +241,10 @@ impl FilterPipeline {
         let (mut staged_results, mut pre_read_results) = take_pre_request_results(ctx);
         let mut idx = 0;
         while idx < self.filters.len() {
+            if let Some(held) = held.take_if(|held| held.index == idx) {
+                ctx.executed_filter_indices[idx] = true;
+                return Ok(FilterAction::Reject(held.rejection));
+            }
             let pf = &self.filters[idx];
             let http_filter = match &pf.filter {
                 AnyFilter::Http(f) => f.as_ref(),
@@ -469,7 +502,10 @@ impl FilterPipeline {
 
     /// Run all HTTP request body filters in order.
     ///
-    /// Filters that previously returned [`BodyDone`] are skipped.
+    /// Filters that previously returned [`BodyDone`] are skipped. During a
+    /// `StreamBuffer` pre-read, a rejection from an admitting filter behind an
+    /// earlier filter that can end the request is held for the request phase,
+    /// and no later body hook runs.
     ///
     /// # Errors
     ///
@@ -486,6 +522,9 @@ impl FilterPipeline {
         ensure_body_done_indices(ctx, self.filters.len());
         accumulate_body_bytes(&mut ctx.request_body_bytes, body.as_ref());
         let request_phase_tracked = request_phase_tracked(ctx, self.filters.len());
+        if !request_phase_tracked && ctx.extensions.get::<HeldRejection>().is_some() {
+            return Ok(FilterAction::Continue);
+        }
         let mut released = false;
         // Walk only filters that declared request-body access; declared
         // access is a per-filter constant, so non-body filters cost
@@ -538,6 +577,12 @@ impl FilterPipeline {
                     if let Some(done) = ctx.body_done_indices.get_mut(idx) {
                         *done = true;
                     }
+                },
+                BodyFilterOutcome::Rejected(rejection)
+                    if !request_phase_tracked && self.shielded_admitter_indices.contains(&idx) =>
+                {
+                    ctx.extensions.insert(HeldRejection { index: idx, rejection });
+                    return Ok(FilterAction::Continue);
                 },
                 BodyFilterOutcome::Rejected(r) => return Ok(FilterAction::Reject(r)),
             }

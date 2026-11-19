@@ -231,10 +231,11 @@
 //! mutations of earlier head filters, and it precedes the declared-body-size
 //! 413 and inference body denials. Behind an earlier filter that can answer or
 //! reject the request, such as `cors`, `ip_acl`, `router` or
-//! `static_response`, in a pipeline that does not pre-read the body, the
-//! policy admits in the request phase instead, so that filter still runs
-//! first; pipeline construction warns when it does. A pre-read already runs the policy's body hook before
-//! any request phase, so there the head is kept. A policy with request
+//! `static_response`, the policy admits in the request phase instead, so that
+//! filter still runs first; pipeline construction warns when it does. When the
+//! body is pre-read, a denial from the policy's body hook waits until the
+//! request phase reaches the policy, and no later body hook sees the body. A
+//! policy with request
 //! conditions admits in the request phase too, where they see the headers head
 //! filters publish. In a branch chain the filter has no head phase and admits
 //! in the request phase.
