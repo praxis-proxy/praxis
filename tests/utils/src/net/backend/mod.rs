@@ -13,7 +13,7 @@ mod simple;
 mod specialized;
 mod websocket;
 
-pub use counting::{BackendReceipt, CountingBackend, start_counting_backend};
+pub use counting::{BackendReceipt, CountingBackend, start_counting_backend, start_counting_backend_with_read_timeout};
 pub use echo::{
     start_echo_backend, start_header_echo_backend, start_tagged_header_echo_backend, start_uri_echo_backend,
 };

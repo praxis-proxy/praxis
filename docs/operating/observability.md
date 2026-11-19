@@ -164,8 +164,9 @@ pinned by session affinity bypass the ceiling and are never counted.
 Smoothed pressure from 0 to 1 for one resource, published only when
 `runtime.overload_gauges` is true. Scrape it from `/metrics` on
 `admin.metrics_address`; `admin.address` answers `/metrics` with 404, and
-`/api/stats` omits these gauges. The gauge does not refuse work. Each series carries a process-local `server`
-slot so embedded servers with different threshold bands retain distinct values.
+`/api/stats` omits these gauges. The gauge does not refuse work. Each series
+carries a process-local `server` slot so embedded servers with different
+threshold bands retain distinct values.
 
 | Label | Values |
 | ---------- | -------------------------------------------------------- |

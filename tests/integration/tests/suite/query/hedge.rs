@@ -3,7 +3,7 @@
 
 //! QUERY body replay through configured hedged requests.
 
-use std::sync::{Arc, mpsc};
+use std::sync::{Mutex, mpsc};
 
 use praxis_test_utils::{http_send, parse_body, parse_status, start_recording_backend};
 
@@ -12,8 +12,11 @@ use super::{QUERY_BODY, assert_query, observed, request, response, start, yaml};
 #[test]
 fn query_hedging_replays_the_body_and_returns_the_successful_endpoint() {
     let (release, ready) = mpsc::channel();
-    let ready = Arc::new(std::sync::Mutex::new(ready));
+    let ready = Mutex::new(ready);
+    let (primary_arrived, wait_for_primary) = mpsc::channel();
+    let wait_for_primary = Mutex::new(wait_for_primary);
     let (primary, primary_log) = start_recording_backend(move |_| {
+        primary_arrived.send(()).unwrap();
         ready
             .lock()
             .unwrap()
@@ -22,6 +25,12 @@ fn query_hedging_replays_the_body_and_returns_the_successful_endpoint() {
         response(503, "unavailable")
     });
     let (copy, copy_log) = start_recording_backend(move |_| {
+        // A winning hedge can cancel its primary before that request is recorded.
+        wait_for_primary
+            .lock()
+            .unwrap()
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the primary must receive its complete QUERY before the copy responds");
         release.send(()).unwrap();
         response(200, "results")
     });

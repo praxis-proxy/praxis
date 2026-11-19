@@ -548,7 +548,7 @@ mod tests {
     #[test]
     fn grouped_listeners_forward_to_the_static_upstream() {
         let echo = echo_backend();
-        let (first, second) = (free_addr(), free_addr());
+        let [first, second] = free_addrs();
         let config = tcp_config(&format!(
             "{}{}",
             tcp_listener("db-a", &first, &echo, ""),
@@ -569,8 +569,7 @@ mod tests {
 
     #[test]
     fn grouped_listener_startup_failure_stops_the_runtime() {
-        let address = free_addr();
-        let blocked_address = free_addr();
+        let [address, blocked_address] = free_addrs();
         let config = tcp_config(&format!(
             "{}{}",
             tcp_listener("first", &address, "127.0.0.1:1", ""),
@@ -701,7 +700,7 @@ mod tests {
 
     #[test]
     fn register_rejects_inconsistent_groups() {
-        let (first, second) = (free_addr(), free_addr());
+        let [first, second] = free_addrs();
         let config = tcp_config(&format!(
             "{}{}",
             tcp_listener("db-a", &first, "127.0.0.1:9", "    max_connections: 1\n"),
@@ -855,8 +854,14 @@ mod tests {
 
     /// A loopback address with a port nothing is listening on right now.
     fn free_addr() -> String {
-        let probe = StdTcpListener::bind("127.0.0.1:0").unwrap();
-        probe.local_addr().unwrap().to_string()
+        let [address] = free_addrs();
+        address
+    }
+
+    /// Hold every reservation until selection completes so addresses stay distinct.
+    fn free_addrs<const N: usize>() -> [String; N] {
+        let probes: [_; N] = std::array::from_fn(|_| StdTcpListener::bind("127.0.0.1:0").unwrap());
+        probes.each_ref().map(|probe| probe.local_addr().unwrap().to_string())
     }
 
     /// Pipelines with no listener entries, so every group runs the fallback.

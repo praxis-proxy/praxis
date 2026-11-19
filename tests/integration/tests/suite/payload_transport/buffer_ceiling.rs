@@ -12,6 +12,7 @@ use praxis_core::config::DEFAULT_MAX_BUFFER_BYTES;
 use praxis_filter::{
     BodyAccess, BodyMode, FilterAction, FilterError, FilterFactory, FilterRegistry, HttpFilter, HttpFilterContext,
 };
+use praxis_test_utils::start_counting_backend_with_read_timeout;
 
 use super::{
     DEADLINE, PayloadSpec, SEED, assert_receipt, assert_rejected_receipt, connect, free_port, probe, response,
@@ -150,7 +151,7 @@ fn finite_preread_limit_cannot_bypass_the_hard_ceiling() {
 /// Exercise one request without collecting the generated payload in the test client.
 fn request_boundary(at: BufferAt, cap: usize, length: usize, chunked: bool, explicit: bool) {
     let spec = PayloadSpec::binary(length as u64, SEED);
-    let selected = start_counting_backend(spec.clone(), "selected", spec.len());
+    let selected = start_counting_backend_with_read_timeout(spec.clone(), "selected", spec.len(), DEADLINE);
     let other = start_counting_backend(spec.clone(), "other", spec.len());
     let health = start_backend_with_shutdown("probe");
     let limits = if explicit {
@@ -188,7 +189,8 @@ fn request_boundary(at: BufferAt, cap: usize, length: usize, chunked: bool, expl
     assert_eq!(
         observed.status,
         Some(if succeeds { 200 } else { 413 }),
-        "{at:?}, cap={cap}, length={length}, chunked={chunked}: {observed:?}"
+        "{at:?}, cap={cap}, length={length}, chunked={chunked}: {observed:?}; backend: {:?}",
+        selected.receipt.try_recv()
     );
     assert!(observed.completion.is_some(), "response must finish: {observed:?}");
     if succeeds {

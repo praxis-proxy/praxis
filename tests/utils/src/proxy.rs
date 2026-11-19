@@ -1327,7 +1327,19 @@ mod tests {
     fn fake_proxy(path: &Path, version: &str, exit_code: i32) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let script = format!("#!/bin/sh\ncat <<'PRAXIS_VERSION'\n{version}\nPRAXIS_VERSION\nexit {exit_code}\n");
-        std::fs::write(path, script).unwrap();
+        // Parallel spawns can inherit a writable FD until exec and cause ETXTBSY.
+        // Keep fixture writes out of this process and wait for the writer to exit.
+        assert!(
+            Command::new("/bin/sh")
+                .args(["-c", "printf '%s' \"$2\" > \"$1\"", "fake-proxy"])
+                .arg(path)
+                .arg(script)
+                .status()
+                .unwrap()
+                .success(),
+            "write fake proxy at {}",
+            path.display()
+        );
         let mut permissions = std::fs::metadata(path).unwrap().permissions();
         permissions.set_mode(0o700);
         std::fs::set_permissions(path, permissions).unwrap();
@@ -1405,7 +1417,29 @@ mod tests {
             binary_profile_matches(&binary).unwrap_err();
         }
         fake_proxy(&binary, &matching, 7);
-        assert!(binary_profile_matches(&binary).unwrap_err().contains("failed with"));
+        let error = binary_profile_matches(&binary).unwrap_err();
+        assert!(error.contains("failed with"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fake_proxy_profiles_remain_valid_during_parallel_spawns() {
+        let version = matching_version();
+        std::thread::scope(|scope| {
+            let workers = [(); 8].map(|()| {
+                scope.spawn(|| {
+                    let directory = tempfile::tempdir().unwrap();
+                    let binary = directory.path().join("praxis");
+                    for _ in 0..16 {
+                        fake_proxy(&binary, &version, 0);
+                        binary_profile_matches(&binary).unwrap();
+                    }
+                })
+            });
+            for worker in workers {
+                worker.join().unwrap();
+            }
+        });
     }
 
     #[cfg(unix)]
