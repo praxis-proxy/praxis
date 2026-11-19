@@ -19,7 +19,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
-<<<<<<< HEAD
 - Add the `jobs:` config section behind the off-by-default `jobs-config`
   feature: bounded queue capacity, worker count, per-job timeout, and a
   queued-payload byte ceiling for the coming background job runtime, each
@@ -27,12 +26,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   range. The settings are not read yet; a build with the feature enabled
   warns at startup when the section is configured, and without the feature
   the section is an unknown key.
-=======
 - Core policy-enforcement guide with PPE use cases, integration conditions,
   and links from onboarding, architecture, and security documentation.
 - Expose compact JSON sizing and capped serialization utilities in
   `praxis_filter::json_size` for built-in and external filters.
->>>>>>> upstream/main
 
 - Add `shutdown_drain_delay_secs` for readiness-first SIGTERM handoff. The
   process becomes unready, waits for the configured delay, then begins
