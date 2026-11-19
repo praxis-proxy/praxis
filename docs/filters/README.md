@@ -89,7 +89,8 @@ via `runs_request_head`. It only runs for **top-level** filters: a filter
 nested inside a branch chain never runs its head hook (a `head_classifier`
 placed inside a branch chain silently does nothing), and a head filter inside
 an `iterative_request_router` step is rejected at config build — the head phase
-runs once at ingress, never inside an iterative exchange. Facts it publishes
+runs once at ingress, never inside an iterative exchange — unless it declares
+`repeats_request_head`, because its `on_request` does the same work. Facts it publishes
 (extensions, metadata, filter results, trusted header mutations) are visible
 both during a later `stream_buffer` pre-read and the request phase.
 

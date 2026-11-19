@@ -157,6 +157,16 @@ pub trait HttpFilter: Send + Sync {
         false
     }
 
+    /// Whether [`on_request`] repeats everything the request-head hook does,
+    /// so the filter still works where no head phase runs, such as an
+    /// `iterative_request_router` step. The head hook then only does the same
+    /// work earlier.
+    ///
+    /// [`on_request`]: HttpFilter::on_request
+    fn repeats_request_head(&self) -> bool {
+        false
+    }
+
     /// Whether this filter can assign [`HttpFilterContext::cluster`].
     ///
     /// Pipeline validation uses this to detect `load_balancer`

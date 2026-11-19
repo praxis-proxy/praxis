@@ -431,6 +431,19 @@ impl FilterPipeline {
         !self.request_head_filter_indices.is_empty()
     }
 
+    /// Whether a head filter depends on the request-head phase, rather than
+    /// only [repeating its work in the request phase].
+    ///
+    /// [repeating its work in the request phase]: crate::HttpFilter::repeats_request_head
+    #[must_use]
+    pub fn requires_request_head_phase(&self) -> bool {
+        self.request_head_filter_indices.iter().any(|&idx| {
+            self.filters
+                .get(idx)
+                .is_some_and(|pf| matches!(&pf.filter, AnyFilter::Http(filter) if !filter.repeats_request_head()))
+        })
+    }
+
     /// Number of filters in the pipeline.
     pub fn len(&self) -> usize {
         self.filters.len()

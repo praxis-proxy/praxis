@@ -165,6 +165,19 @@ fn a_conditional_policy_sees_headers_a_later_head_filter_publishes() {
 }
 
 #[test]
+fn an_earlier_grpc_status_shapes_a_head_denial() {
+    let backend = start_header_echo_backend();
+    let grpc_status = "      - filter: grpc_status\n\n";
+    let proxy = start_proxy(&load_example(free_port(), backend.port(), Some(grpc_status)));
+    let head = head_without_body(proxy.addr(), None, "application/grpc", 64).to_ascii_lowercase();
+    assert_eq!(parse_status(&head), 200, "{head}");
+    assert!(
+        head.contains("grpc-status: 16"),
+        "the head denial is UNAUTHENTICATED: {head}"
+    );
+}
+
+#[test]
 fn a_route_that_replaces_global_authentication_judges_its_own_credential() {
     let backend = start_header_echo_backend();
     let dir = tempfile::TempDir::new().unwrap();
@@ -421,6 +434,12 @@ fn post_json(addr: &str, token: Option<&str>) -> u16 {
 /// The status of a POST that declares `content_length` body bytes and sends
 /// none. Only a decision made before the body is read can answer it.
 fn status_without_body(addr: &str, token: Option<&str>, content_length: u64) -> u16 {
+    parse_status(&head_without_body(addr, token, "application/json", content_length))
+}
+
+/// The response head to a POST of `content_type` that declares
+/// `content_length` body bytes and sends none.
+fn head_without_body(addr: &str, token: Option<&str>, content_type: &str, content_length: u64) -> String {
     let authorization = token
         .map(|token| format!("Authorization: Bearer {token}\r\n"))
         .unwrap_or_default();
@@ -428,23 +447,23 @@ fn status_without_body(addr: &str, token: Option<&str>, content_length: u64) -> 
     stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     write!(
         stream,
-        "POST /v1/chat HTTP/1.1\r\nHost: localhost\r\n{authorization}Content-Type: application/json\r\n\
+        "POST /v1/chat HTTP/1.1\r\nHost: localhost\r\n{authorization}Content-Type: {content_type}\r\n\
          Content-Length: {content_length}\r\nConnection: close\r\n\r\n"
     )
     .unwrap();
     stream.flush().unwrap();
-    let mut status_line = Vec::new();
+    let mut head = Vec::new();
     let mut byte = [0_u8; 1];
-    while !status_line.ends_with(b"\r\n") && status_line.len() < 256 {
+    while !head.ends_with(b"\r\n\r\n") && head.len() < 4096 {
         let read = stream
             .read(&mut byte)
             .unwrap_or_else(|e| panic!("no answer without the body; the proxy waited for it: {e}"));
         if read == 0 {
             break;
         }
-        status_line.extend_from_slice(&byte);
+        head.extend_from_slice(&byte);
     }
-    parse_status(&String::from_utf8_lossy(&status_line))
+    String::from_utf8_lossy(&head).into_owned()
 }
 
 /// Signals once per request body chunk it sees. It follows `policy`, so its

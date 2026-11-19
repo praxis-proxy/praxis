@@ -67,6 +67,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `context_headers` or request conditions keep the previous timing.
   Pipeline construction warns when an earlier filter or request conditions
   move admission out of the head.
+- `grpc_status` arms gRPC error responses at the request head, so a later
+  head denial such as `policy` admission reaches gRPC clients as a
+  `grpc-status`. `HttpFilter::repeats_request_head` declares a head hook whose
+  work `on_request` repeats; such a filter may sit in an
+  `iterative_request_router` step.
 - Temporarily disable KIND rollout acceptance in CI and local commands
   because the cluster exhausts the shared inotify instance budget, pending
   migration to [gateway-controller](https://github.com/praxis-proxy/gateway-controller).
