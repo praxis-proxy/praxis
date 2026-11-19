@@ -197,9 +197,14 @@ code `0` (no response written) maps to `unknown`.
 (`401`) from a rate limit (`429`): a gateway running
 both reports them as one `4xx` series. Enabling
 `status_code` splits that series by code while
-leaving `status_class` in place, so existing queries
-keep working. It is off by default and bounded to an
-allowlist; see [Metric Label Sets](#metric-label-sets).
+leaving `status_class` in place, so existing
+`status_class` selectors still match. A query can
+return extra series and create extra alert instances;
+wrap it in
+`sum without (status_code) (rate(praxis_http_requests_total[5m]))`
+to preserve the old grouping. It is off by default
+and bounded to an allowlist; see
+[Metric Label Sets](#metric-label-sets).
 
 #### `praxis_http_request_duration_seconds` (summary)
 
@@ -578,9 +583,13 @@ filters return (`400`, `401`, `403`, `404`, `405`,
 `413`, `429`, `500`, `502`, `503`, `504`) keep their
 own value and everything else collapses to its
 class, so an upstream returning unusual codes cannot
-grow the dimension. Enabling it roughly triples the
-series count of that metric, since `status_class`
-stays alongside it. The duration metric does not
+grow the dimension. The increase depends on the mix
+of responses, not a fixed multiplier: with
+`status_class` enabled alongside it, one existing
+`4xx` series can split into eight when all seven
+listed `4xx` codes and the `4xx` fallback for any
+other code occur. Budget for that bound. The duration
+metric does not
 carry it: that metric is exposed as a summary, and
 summary quantiles cannot be aggregated back across a
 label, so splitting it by code would cost the
