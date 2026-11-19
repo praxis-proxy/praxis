@@ -198,16 +198,26 @@ fn ca_file_exception_respects_loader_context() {
     .expect("read actual upstream mTLS example");
     let mut config: serde_yaml::Value = serde_yaml::from_str(&yaml).expect("parse actual mTLS example");
     let directory = tempfile::tempdir().expect("temporary example directory");
-    let (cert, key) = missing_identity_paths(directory.path());
-    let cert_name = cert.to_str().unwrap();
-    let key_name = key.to_str().unwrap();
-    let tls = &mut config["filter_chains"][0]["filters"][1]["clusters"][0]["tls"];
-    tls["client_cert"]["cert_path"] = cert_name.into();
-    tls["client_cert"]["key_path"] = key_name.into();
-    let identity = tls["client_cert"].clone();
     let copied = directory.path().join("tls-mtls-upstream.yaml");
     let permitted = directory.path().join("expected-upstream-ca.pem");
     let permitted_name = permitted.to_str().expect("UTF-8 CA path");
+    let cert = directory.path().join("expected-client-cert.pem");
+    let cert_name = cert.to_str().expect("UTF-8 certificate path");
+    let key = directory.path().join("expected-client-key.pem");
+    let key_name = key.to_str().expect("UTF-8 key path");
+    let tls = &mut config["filter_chains"][0]["filters"][1]["clusters"][0]["tls"];
+    assert_eq!(
+        tls["client_cert"]["cert_path"].as_str(),
+        Some("/etc/ssl/certs/proxy-client.pem"),
+        "replace the actual example client certificate"
+    );
+    assert_eq!(
+        tls["client_cert"]["key_path"].as_str(),
+        Some("/etc/ssl/private/proxy-client-key.pem"),
+        "replace the actual example client key"
+    );
+    tls["client_cert"]["cert_path"] = cert_name.into();
+    tls["client_cert"]["key_path"] = key_name.into();
     let files = [ExternalFile {
         path: permitted_name,
         loader: FileLoader::Ca("backend"),
@@ -232,7 +242,7 @@ fn ca_file_exception_respects_loader_context() {
         );
     }
 
-    let files = [
+    let identity_files = [
         ExternalFile {
             path: cert_name,
             loader: FileLoader::ClientCert("backend"),
@@ -242,18 +252,14 @@ fn ca_file_exception_respects_loader_context() {
             loader: FileLoader::ClientKey("backend"),
         },
     ];
-    for (field, suffix) in [
-        ("cert_path", ": failed to read cert"),
-        ("key_path", ": failed to read key"),
-    ] {
+    for (identity_path, suffix) in [(cert_name, ": failed to read cert"), (key_name, ": failed to read key")] {
         let tls = &mut config["filter_chains"][0]["filters"][1]["clusters"][0]["tls"];
-        let identity_path = identity[field].as_str().expect("actual example identity path");
         let missing = format!("{identity_path}{suffix}");
         tls["ca"]["ca_path"] = missing.clone().into();
         assert_file_classification(
             &copied,
             &config,
-            &files,
+            &identity_files,
             ExternalFile {
                 path: &missing,
                 loader: FileLoader::Ca("backend"),
@@ -433,15 +439,6 @@ fn feature_exception_respects_config_phase() {
 // Test Utilities
 // ---------------------------------------------------------------------------
 
-/// Keep intentionally missing paths below a searchable parent: filenames under
-/// `/etc/ssl/private` can fail with EACCES before the loader can observe ENOENT.
-fn missing_identity_paths(directory: &std::path::Path) -> (PathBuf, PathBuf) {
-    (
-        directory.join("expected-client.pem"),
-        directory.join("expected-client-key.pem"),
-    )
-}
-
 /// Built-in filters that exist only behind a build feature, so an example
 /// using one is skipped when this test binary lacks the feature.
 const GATED_FILTERS: &[(&str, bool)] = &[
@@ -468,8 +465,7 @@ fn assert_file_classification(
     };
     assert!(
         missing.matches_error(&error),
-        "failure must name the intended missing path {:?} and loader: {error}",
-        missing.path
+        "failure must name the intended missing path and loader: {error}"
     );
     assert_eq!(
         environmental(&error, permitted, &config),
