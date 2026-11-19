@@ -19,6 +19,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Core policy-enforcement guide with PPE use cases, integration conditions,
+  and links from onboarding, architecture, and security documentation.
 - Expose compact JSON sizing and capped serialization utilities in
   `praxis_filter::json_size` for built-in and external filters.
 

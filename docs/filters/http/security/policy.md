@@ -3,7 +3,7 @@
 
 # `policy`
 
-The `policy` filter embeds the [Praxis Policy Engine (PPE)](https://github.com/praxis-proxy/policy) for JWT and API-key authentication, authorization, identity delegation, rate limiting and data protection across HTTP APIs, MCP tools, prompts and resources, and AI inference requests.
+The `policy` filter embeds the Praxis Policy Engine (PPE) for JWT and API-key authentication, authorization, identity delegation, rate limiting and data protection across HTTP APIs, MCP tools, prompts and resources, and AI inference requests.
 
 Requires Cargo feature: `policy-engine`.
 
@@ -11,7 +11,9 @@ Requires Cargo feature: `policy-engine`.
 
 Policies combine shared defaults and route-specific controls, with ordered evaluation that stops on denial.
 
-See the [PPE documentation](https://github.com/praxis-proxy/policy/blob/main/docs/content/index.md) for policy configuration, plugin references and worked examples.
+See the [PPE documentation] for policy configuration, plugin references and worked examples.
+
+Start with [Policy enforcement with PPE] for use cases, filter selection, and the Core integration requirements.
 
 It provides:
 
@@ -135,6 +137,8 @@ llm:
 [Header assertions]: https://github.com/praxis-proxy/policy/blob/main/docs/content/assertions.md
 [Identity configuration]: https://github.com/praxis-proxy/policy/blob/main/docs/content/apl/identity.md
 [OIDC claim mapping]: https://github.com/praxis-proxy/policy/blob/main/docs/content/identity-delegation.md#reading-claims-the-way-your-idp-writes-them
+[PPE documentation]: https://github.com/praxis-proxy/policy/blob/main/docs/content/index.md
+[Policy enforcement with PPE]: https://github.com/praxis-proxy/praxis/blob/main/docs/security/policy-enforcement.md
 [Structured request input]: https://github.com/praxis-proxy/policy/blob/main/docs/content/apl/pdp.md#structured-request-input
 [Vault delegation recipes]: https://github.com/praxis-proxy/policy/blob/main/docs/content/identity-delegation.md#recipe-8-a-users-vault-stored-credential
 [normalized LLM input example]: https://github.com/praxis-proxy/praxis/blob/main/examples/configs/security/policy-llm-input.yaml
