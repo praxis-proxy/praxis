@@ -2851,6 +2851,13 @@ impl HttpFilter for PolicyFilter {
             tracing::trace!(target: "policy.filter", "admission already completed in body phase; skipping header phase");
             return Ok(FilterAction::Continue);
         }
+        // Only the route judges a deferred identity, and its buffered body
+        // hook runs first. Getting here unadmitted means that hook was skipped
+        // or failed open, so nothing has authenticated the request.
+        if self.head == HeadAdmission::Defer {
+            tracing::warn!(target: "policy.filter", "deferred identity was never judged by the route; rejecting");
+            return Ok(FilterAction::Reject(undecided_identity_rejection()));
+        }
 
         // Pure L7 policy (`global` HTTP rules or assertions, no entity routes): authorize
         // here over `http.*` + identity. Authorization is an admission check
@@ -3415,6 +3422,20 @@ pub(super) fn fit_to_original_length(new_bytes: Bytes, original_len: usize, meth
             new_bytes.slice(0..original_len)
         },
     }
+}
+
+/// Rejection for a deferred identity that the route never judged, because the
+/// policy's body hook was skipped by a request condition or failed open. HTTP
+/// 500 because the cause is configuration, not the client.
+fn undecided_identity_rejection() -> Rejection {
+    Rejection::status(500)
+        .with_header("Content-Type", "text/plain")
+        .with_header(VIOLATION_HEADER, "config.identity_not_judged")
+        .with_body(Bytes::from_static(
+            b"policy: the route never judged this request's identity because the \
+              policy's body hook did not run. A request condition that changes \
+              after the body is read, or `failure_mode: open`, skips it.",
+        ))
 }
 
 /// Rejection emitted when `require_protocol_metadata` is on (default) and

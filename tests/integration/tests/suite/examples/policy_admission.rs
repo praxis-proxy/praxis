@@ -241,6 +241,44 @@ fn an_earlier_grpc_timeout_still_answers_a_malformed_deadline() {
 }
 
 #[test]
+fn a_deferred_policy_whose_body_hook_was_skipped_fails_closed() {
+    let backend = start_header_echo_backend();
+    let dir = tempfile::TempDir::new().unwrap();
+    let yaml = route_replacing_yaml(&dir, free_port(), backend.port(), "");
+    let policy = yaml
+        .split("      - filter: policy\n")
+        .nth(1)
+        .and_then(|rest| rest.split("      - filter: router").next())
+        .map(|entry| format!("      - filter: policy\n{entry}"))
+        .unwrap();
+    let flipping = format!(
+        "{policy}        conditions:\n          - when:\n              headers_present: [x-praxis-m]\n      - \
+         filter: json_body_field\n        field: model\n        header: x-praxis-m\n        max_body_bytes: 65536 \
+         # 64 KiB\n"
+    );
+    let yaml = yaml.replacen(&policy, &flipping, 1).replacen(
+        "insecure_options:\n",
+        "insecure_options:\n  skip_pipeline_checks:\n    conditional_security: true\n",
+        1,
+    );
+    let proxy = start_proxy(&Config::from_yaml(&yaml).unwrap());
+    let body = r#"{"model":"m1","messages":[{"role":"user","content":"hi"}]}"#;
+    let raw = http_send(
+        proxy.addr(),
+        &format!(
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        ),
+    );
+    assert_eq!(
+        parse_status(&raw),
+        500,
+        "the condition skipped the pre-read, so nothing judged identity: {raw}"
+    );
+}
+
+#[test]
 fn a_route_that_replaces_global_authentication_judges_its_own_credential() {
     let backend = start_header_echo_backend();
     let dir = tempfile::TempDir::new().unwrap();
@@ -409,6 +447,11 @@ fn exempting_head_class_config(proxy_port: u16, backend_port: u16) -> Config {
 /// A proxy whose only filter before routing is an inference policy: a global
 /// JWT resolver that every inference route replaces with API keys.
 fn route_replacing_config(dir: &tempfile::TempDir, proxy_port: u16, backend_port: u16, prefix: &str) -> Config {
+    Config::from_yaml(&route_replacing_yaml(dir, proxy_port, backend_port, prefix)).unwrap()
+}
+
+/// The YAML behind [`route_replacing_config`].
+fn route_replacing_yaml(dir: &tempfile::TempDir, proxy_port: u16, backend_port: u16, prefix: &str) -> String {
     let keys = format!("{}/fixtures/api-keys.yaml", env!("CARGO_MANIFEST_DIR"));
     let admission = format!("{}/fixtures/admission-policy.yaml", env!("CARGO_MANIFEST_DIR"));
     let jwt = std::fs::read_to_string(&admission).unwrap();
@@ -452,7 +495,7 @@ routes:
     );
     let policy_path = dir.path().join("policy.yaml");
     std::fs::write(&policy_path, policy).unwrap();
-    let yaml = format!(
+    format!(
         "listeners:
   - name: default
     address: \"127.0.0.1:{proxy_port}\"
@@ -474,8 +517,7 @@ insecure_options:
   allow_private_endpoints: true
 ",
         policy_path.display()
-    );
-    Config::from_yaml(&yaml).unwrap()
+    )
 }
 
 /// The status of a JSON POST that sends its body, with `token` if any.

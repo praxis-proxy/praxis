@@ -70,7 +70,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   startup warning names the section. The buffer holds at least
   `max_buffer_bytes`, more if another filter asks for more, within the
   global `body_limits.max_buffer_bytes`; a larger body now gets 413, where a
-  `read_only` policy used to stream it. Policies with
+  `read_only` policy used to stream it. If the route never judges such a
+  request because the policy's body hook was skipped (a request condition
+  that changes after the body is read, or `failure_mode: open`), the request
+  phase rejects it with 500 instead of forwarding it. Policies with
   `context_headers` or request conditions keep the previous timing.
   Pipeline construction warns when an earlier filter or request conditions
   move admission out of the head.

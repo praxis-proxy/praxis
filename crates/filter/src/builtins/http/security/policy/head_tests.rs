@@ -236,17 +236,13 @@ async fn a_route_that_replaces_global_authentication_defers_identity() {
     let mut ctx = context(&req, 1);
     assert!(matches!(head(&filter, &mut ctx).await, FilterAction::Continue));
     assert_eq!(plugins(&calls), ["pre"], "no global resolution at the head");
+    assert!(matches!(tool_body(&filter, &mut ctx).await, FilterAction::BodyDone));
+    assert_eq!(plugins(&calls), ["pre", "key"], "only the route resolver judged it");
     assert!(matches!(
         filter.on_request(&mut ctx).await.unwrap(),
         FilterAction::Continue
     ));
-    assert_eq!(
-        plugins(&calls),
-        ["pre"],
-        "a header-first request phase does not run the global gate either"
-    );
-    assert!(matches!(tool_body(&filter, &mut ctx).await, FilterAction::BodyDone));
-    assert_eq!(plugins(&calls), ["pre", "key"], "only the route resolver judged it");
+    assert_eq!(plugins(&calls), ["pre", "key"], "the request phase runs no gate");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -295,10 +291,6 @@ async fn a_replaced_global_resolver_without_a_limiter_still_defers_identity() {
     let req = request(Some("alice"));
     let mut ctx = context(&req, 1);
     assert!(matches!(head(&filter, &mut ctx).await, FilterAction::Continue));
-    assert!(matches!(
-        filter.on_request(&mut ctx).await.unwrap(),
-        FilterAction::Continue
-    ));
     assert!(plugins(&calls).is_empty(), "the global gate never ran");
     assert!(matches!(tool_body(&filter, &mut ctx).await, FilterAction::BodyDone));
     assert_eq!(plugins(&calls), ["key"]);
@@ -328,17 +320,37 @@ async fn a_route_judged_policy_skips_the_global_gate_when_the_head_did_not_run()
     let filter = filter(path);
     let req = request(Some("alice"));
     let mut ctx = context(&req, 1);
-    assert!(matches!(
-        filter.on_request(&mut ctx).await.unwrap(),
-        FilterAction::Continue
-    ));
-    assert!(plugins(&calls).is_empty(), "no global gate in the request phase");
     assert!(matches!(tool_body(&filter, &mut ctx).await, FilterAction::BodyDone));
     assert_eq!(
         plugins(&calls),
         ["pre", "key"],
         "the route resolves identity and charges the limiter once"
     );
+    assert!(matches!(
+        filter.on_request(&mut ctx).await.unwrap(),
+        FilterAction::Continue
+    ));
+    assert_eq!(plugins(&calls), ["pre", "key"], "no global gate in the request phase");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deferred_identity_the_route_never_judged_fails_closed() {
+    let (_dir, path, calls) = recorded_policy("test/head-route-undecided", ROUTE_REPLACES_GLOBAL);
+    let filter = filter(path);
+    let req = request(None);
+    let mut ctx = context(&req, 1);
+    assert!(matches!(head(&filter, &mut ctx).await, FilterAction::Continue));
+    let denied = rejection(filter.on_request(&mut ctx).await.unwrap());
+    assert_eq!(denied.status, 500);
+    assert!(
+        denied
+            .headers
+            .iter()
+            .any(|(name, value)| name == "X-Policy-Violation" && value == "config.identity_not_judged"),
+        "{:?}",
+        denied.headers
+    );
+    assert_eq!(plugins(&calls), ["pre"], "no resolver admitted the request");
 }
 
 #[tokio::test(flavor = "multi_thread")]
