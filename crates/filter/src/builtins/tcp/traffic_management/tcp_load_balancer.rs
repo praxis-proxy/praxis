@@ -20,7 +20,7 @@ use crate::{
         endpoint::build_weighted_endpoints,
         strategy::{Strategy, build_strategy},
     },
-    tcp_filter::{TcpFilter, TcpFilterContext},
+    tcp_filter::{TcpFilter, TcpFilterContext, TcpLbSelection},
 };
 
 // -----------------------------------------------------------------------------
@@ -80,7 +80,7 @@ struct TcpLoadBalancerConfig {
 /// ```
 pub struct TcpLoadBalancerFilter {
     /// Per-cluster resolved strategy.
-    clusters: HashMap<Arc<str>, Strategy>,
+    clusters: HashMap<Arc<str>, Arc<Strategy>>,
 
     /// Slow-start bindings held for the lifetime of this pipeline.
     ///
@@ -104,7 +104,7 @@ impl TcpLoadBalancerFilter {
                     total_weight,
                     "TCP cluster registered"
                 );
-                let strategy = build_strategy(&c.load_balancer_strategy, endpoints);
+                let strategy = Arc::new(build_strategy(&c.load_balancer_strategy, endpoints));
                 (Arc::clone(&c.name), strategy)
             })
             .collect();
@@ -184,6 +184,33 @@ impl TcpLoadBalancerFilter {
             strategy.select(Some(client_ip), health, &[])
         }
     }
+
+    /// Select and retain the exact strategy claim in the connection context.
+    fn select_upstream(
+        &self,
+        ctx: &mut TcpFilterContext<'_>,
+        cluster: Arc<str>,
+        strategy: Arc<Strategy>,
+    ) -> Result<(), FilterError> {
+        let cluster_name = cluster.as_ref();
+        let health = Self::cluster_health(ctx.health_registry, cluster_name);
+        if let Some(state) = health
+            && state.endpoints().iter().all(|endpoint| !endpoint.is_healthy())
+        {
+            warn!(cluster = %cluster_name, "all endpoints unhealthy, routing to all (panic mode)");
+            crate::metrics::record_lb_panic_mode(SharedString::from(Arc::clone(&cluster)));
+        }
+        let client_ip = ctx.remote_addr.rsplit_once(':').map_or(ctx.remote_addr, |(ip, _)| ip);
+        let weights = self.slow_start_weights(cluster_name, health);
+        let addr =
+            Self::select_address(&strategy, client_ip, health, weights.as_ref()).ok_or_else(|| -> FilterError {
+                format!("tcp_load_balancer: cluster '{cluster_name}' has no available endpoints").into()
+            })?;
+        debug!(cluster = %cluster_name, upstream = %addr, "TCP upstream selected");
+        ctx.upstream_addr = Some(Cow::Owned(addr.to_string()));
+        ctx.lb_selection = Some(TcpLbSelection::new(cluster, strategy, addr));
+        Ok(())
+    }
 }
 
 /// Bindings for clusters that configure a strategy which consumes the ramp.
@@ -209,45 +236,25 @@ impl TcpFilter for TcpLoadBalancerFilter {
     }
 
     async fn on_connect(&self, ctx: &mut TcpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        let Some(cluster) = ctx.cluster.as_ref() else {
-            return Err(
-                "tcp_load_balancer: no cluster set in context (is a cluster configured on the listener?)".into(),
-            );
-        };
+        let cluster = ctx.cluster.clone().ok_or_else(|| -> FilterError {
+            "tcp_load_balancer: no cluster set in context (is a cluster configured on the listener?)".into()
+        })?;
         let cluster_name = cluster.as_ref();
-
-        let strategy = self
-            .clusters
-            .get(cluster_name)
-            .ok_or_else(|| -> FilterError { format!("tcp_load_balancer: unknown cluster '{cluster_name}'").into() })?;
-
-        let health = Self::cluster_health(ctx.health_registry, cluster_name);
-
-        if let Some(h) = health
-            && h.endpoints().iter().all(|ep| !ep.is_healthy())
-        {
-            warn!(cluster = %cluster_name, "all endpoints unhealthy, routing to all (panic mode)");
-            crate::metrics::record_lb_panic_mode(SharedString::from(Arc::clone(cluster)));
-        }
-
-        let client_ip = ctx.remote_addr.rsplit_once(':').map_or(ctx.remote_addr, |(ip, _)| ip);
-        let weights = self.slow_start_weights(cluster_name, health);
-        let addr =
-            Self::select_address(strategy, client_ip, health, weights.as_ref()).ok_or_else(|| -> FilterError {
-                format!("tcp_load_balancer: cluster '{cluster_name}' has no available endpoints").into()
+        let strategy =
+            self.clusters.get(cluster_name).cloned().ok_or_else(|| -> FilterError {
+                format!("tcp_load_balancer: unknown cluster '{cluster_name}'").into()
             })?;
-        debug!(cluster = %cluster_name, upstream = %addr, "TCP upstream selected");
-
-        ctx.upstream_addr = Some(Cow::Owned(addr.to_string()));
-
+        self.select_upstream(ctx, cluster, strategy)?;
         Ok(FilterAction::Continue)
     }
 
     async fn on_disconnect(&self, ctx: &mut TcpFilterContext<'_>) -> Result<(), FilterError> {
-        if let (Some(cluster_name), Some(upstream_addr)) = (&ctx.cluster, &ctx.upstream_addr)
-            && let Some(strategy) = self.clusters.get(cluster_name.as_ref())
+        if ctx
+            .lb_selection
+            .as_ref()
+            .is_some_and(|selection| selection.belongs_to(&self.clusters))
         {
-            strategy.release(upstream_addr);
+            drop(ctx.lb_selection.take());
         }
 
         Ok(())
@@ -321,6 +328,105 @@ mod tests {
             &first,
             "released endpoint should be selected again"
         );
+    }
+
+    #[tokio::test]
+    async fn selection_releases_only_issuing_strategy_after_skipped_filter() {
+        let cluster = cluster_with_strategy(
+            "db",
+            &["10.0.0.1:5432"],
+            LoadBalancerStrategy::Simple(SimpleStrategy::LeastConnections),
+        );
+        let first = TcpLoadBalancerFilter::new(std::slice::from_ref(&cluster));
+        let skipped_later = TcpLoadBalancerFilter::new(&[cluster]);
+        let mut selected = make_ctx("db");
+        first.on_connect(&mut selected).await.unwrap();
+        let address = selected.upstream_addr.as_deref().unwrap().to_owned();
+        skipped_later.on_disconnect(&mut selected).await.unwrap();
+        assert_eq!(
+            least_load(&first, &address),
+            1,
+            "later unexecuted LB cannot release first LB's slot"
+        );
+        selected.cluster = Some(Arc::from("changed"));
+        first.on_disconnect(&mut selected).await.unwrap();
+        assert_eq!(
+            least_load(&first, &address),
+            0,
+            "issuing strategy releases despite cluster mutation"
+        );
+    }
+
+    #[tokio::test]
+    async fn replacing_a_selection_releases_the_previous_strategy_claim() {
+        let cluster = cluster_with_strategy(
+            "db",
+            &["10.0.0.1:5432"],
+            LoadBalancerStrategy::Simple(SimpleStrategy::LeastConnections),
+        );
+        let first = TcpLoadBalancerFilter::new(std::slice::from_ref(&cluster));
+        let second = TcpLoadBalancerFilter::new(&[cluster]);
+        let mut ctx = make_ctx("db");
+        first.on_connect(&mut ctx).await.unwrap();
+        assert_eq!(least_load(&first, "10.0.0.1:5432"), 1);
+        second.on_connect(&mut ctx).await.unwrap();
+        assert_eq!(
+            least_load(&first, "10.0.0.1:5432"),
+            0,
+            "replacing the context claim releases the first strategy"
+        );
+        assert_eq!(least_load(&second, "10.0.0.1:5432"), 1);
+        ctx.cluster = Some(Arc::from("other"));
+        ctx.upstream_addr = Some(Cow::Borrowed("unrelated:1234"));
+        first.on_disconnect(&mut ctx).await.unwrap();
+        assert_eq!(least_load(&second, "10.0.0.1:5432"), 1);
+        second.on_disconnect(&mut ctx).await.unwrap();
+        assert_eq!(least_load(&second, "10.0.0.1:5432"), 0);
+        drop(ctx);
+        assert_eq!(least_load(&second, "10.0.0.1:5432"), 0, "drop cannot double-release");
+    }
+
+    #[tokio::test]
+    async fn static_upstream_without_selection_does_not_release_another_slot() {
+        let cluster = cluster_with_strategy(
+            "db",
+            &["10.0.0.1:5432"],
+            LoadBalancerStrategy::Simple(SimpleStrategy::LeastConnections),
+        );
+        let lb = TcpLoadBalancerFilter::new(&[cluster]);
+        let mut selected = make_ctx("db");
+        lb.on_connect(&mut selected).await.unwrap();
+        let address = selected.upstream_addr.as_deref().unwrap().to_owned();
+        let mut static_only = make_ctx("db");
+        static_only.upstream_addr = Some(Cow::Owned(address.clone()));
+        lb.on_disconnect(&mut static_only).await.unwrap();
+        assert_eq!(least_load(&lb, &address), 1, "static upstream does not own an LB slot");
+        lb.on_disconnect(&mut selected).await.unwrap();
+        assert_eq!(
+            least_load(&lb, &address),
+            0,
+            "selected connection releases its own slot"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_connect_drops_exact_selection_claim() {
+        let cluster = cluster_with_strategy(
+            "db",
+            &["10.0.0.1:5432"],
+            LoadBalancerStrategy::Simple(SimpleStrategy::LeastConnections),
+        );
+        let lb = TcpLoadBalancerFilter::new(&[cluster]);
+        let mut ctx = make_ctx("db");
+        let cancelled = tokio::time::timeout(std::time::Duration::from_millis(20), async {
+            lb.on_connect(&mut ctx).await.unwrap();
+            std::future::pending::<()>().await;
+        })
+        .await;
+        assert!(cancelled.is_err(), "connect future must be cancelled");
+        assert_eq!(least_load(&lb, "10.0.0.1:5432"), 1, "caller still owns selected slot");
+        drop(ctx);
+        assert_eq!(least_load(&lb, "10.0.0.1:5432"), 0, "context drop releases exact claim");
     }
 
     #[tokio::test]
@@ -462,6 +568,7 @@ mod tests {
                 local_addr: "0.0.0.0:6379",
                 sni: None,
                 upstream_addr: None,
+                lb_selection: None,
                 cluster: Some(Arc::from("cache")),
                 health_registry: None,
                 kv_stores: None,
@@ -489,6 +596,7 @@ mod tests {
             local_addr: "0.0.0.0:5432",
             sni: None,
             upstream_addr: None,
+            lb_selection: None,
             cluster: None,
             health_registry: None,
             kv_stores: None,
@@ -592,6 +700,7 @@ clusters:
             local_addr: "0.0.0.0:5432",
             sni: None,
             upstream_addr: Some(Cow::Borrowed("10.0.0.1:5432")),
+            lb_selection: None,
             cluster: None,
             health_registry: None,
             kv_stores: None,
@@ -637,6 +746,7 @@ clusters:
             local_addr: "0.0.0.0:5432",
             sni: None,
             upstream_addr: None,
+            lb_selection: None,
             cluster: Some(Arc::from(cluster)),
             health_registry: None,
             kv_stores: None,
@@ -653,6 +763,7 @@ clusters:
             local_addr: "0.0.0.0:5432",
             sni: None,
             upstream_addr: None,
+            lb_selection: None,
             cluster: Some(Arc::from(cluster)),
             health_registry: Some(registry),
             kv_stores: None,
@@ -660,5 +771,14 @@ clusters:
             bytes_in: 0,
             bytes_out: 0,
         }
+    }
+
+    /// Read the least-connections count for an exact endpoint in tests.
+    fn least_load(filter: &TcpLoadBalancerFilter, address: &str) -> usize {
+        let strategy = filter.clusters.get("db").expect("db strategy");
+        let Strategy::LeastConnections(strategy) = strategy.as_ref() else {
+            panic!("test requires least-connections strategy");
+        };
+        strategy.load_for(address)
     }
 }

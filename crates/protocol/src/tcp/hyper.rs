@@ -41,7 +41,7 @@ use tracing::{debug, error, info, warn};
 
 use super::{
     groups::{self, TcpGroupKey},
-    proxy::{self, PingoraTcpProxy},
+    proxy::{self, PingoraTcpProxy, TcpAdmission},
 };
 use crate::{ListenerPipelines, Protocol};
 
@@ -103,13 +103,13 @@ impl HyperTcp {
             pipelines,
         };
 
-        let mut cert_watcher_shutdowns = Vec::new();
+        let mut cert_watcher_shutdowns = crate::cert_watcher_shutdowns::RegistrationWatchers::default();
         let ordered: BTreeMap<_, _> = grouped.into_iter().collect();
         for (group_key, listeners) in &ordered {
-            group.register(runtime, group_key, listeners, &mut cert_watcher_shutdowns)?;
+            group.register(runtime, group_key, listeners, cert_watcher_shutdowns.senders_mut())?;
         }
 
-        Ok(cert_watcher_shutdowns)
+        Ok(cert_watcher_shutdowns.finish())
     }
 }
 
@@ -316,8 +316,10 @@ async fn accept_until_shutdown(
             Some(joined) = connections.join_next(), if !connections.is_empty() => log_connection_end(&joined),
             accepted = listener.accept() => match accepted {
                 Ok((stream, peer)) => {
-                    let connection = handle_connection(Arc::clone(&proxy), stream, peer, tls.clone(), shutdown.clone());
-                    connections.spawn(connection);
+                    if let Some(admission) = proxy.try_admit(&peer.to_string()) {
+                        let accepted = AcceptedTcp { stream, peer, admission };
+                        connections.spawn(handle_connection(Arc::clone(&proxy), accepted, tls.clone(), shutdown.clone()));
+                    }
                 },
                 Err(err) => accept_failed(&address, &err).await,
             },
@@ -334,31 +336,43 @@ async fn accept_until_shutdown(
 
 /// Serve one accepted connection through `proxy`, completing the TLS
 /// handshake first when the listener terminates TLS.
+struct AcceptedTcp {
+    /// Accepted socket awaiting TLS or shared serving.
+    stream: TcpStream,
+    /// Downstream peer address.
+    peer: SocketAddr,
+    /// Owned group, global and descriptor claims.
+    admission: TcpAdmission,
+}
+
+/// Serve one admitted connection through TLS and the shared proxy.
 async fn handle_connection(
     proxy: Arc<PingoraTcpProxy>,
-    stream: TcpStream,
-    peer: SocketAddr,
+    accepted: AcceptedTcp,
     tls: Option<TlsAcceptor>,
     shutdown: ShutdownWatch,
 ) {
+    let AcceptedTcp {
+        stream,
+        peer,
+        admission,
+    } = accepted;
     // Pingora disables Nagle on every accepted socket; a proxy forwards
     // bytes as they arrive.
     if let Err(err) = stream.set_nodelay(true) {
         debug!(error = %err, "could not set TCP_NODELAY on the client socket");
     }
-    let connection = Connection {
+    Connection {
         local_addr: stream
             .local_addr()
             .map_or_else(|_| UNKNOWN_ADDR.to_owned(), |addr| addr.to_string()),
         proxy,
         remote_addr: peer.to_string(),
         shutdown,
-    };
-
-    match tls {
-        Some(acceptor) => connection.terminate_tls(&acceptor, stream).await,
-        None => connection.serve(stream).await,
+        admission,
     }
+    .run(tls, stream)
+    .await;
 }
 
 /// An accepted connection and what serving it needs.
@@ -374,42 +388,102 @@ struct Connection {
 
     /// Flips when the runtime shuts down; forwarding stops on it.
     shutdown: ShutdownWatch,
+
+    /// Claims acquired before this task and TLS handshake.
+    admission: TcpAdmission,
 }
 
 impl Connection {
+    /// Continue an admitted socket through optional TLS and shared serving.
+    async fn run(self, tls: Option<TlsAcceptor>, stream: TcpStream) {
+        match tls {
+            Some(acceptor) => Box::pin(self.terminate_tls(&acceptor, stream)).await,
+            None => self.serve(stream).await,
+        }
+    }
+
     /// Hand `session` to the proxy.
     ///
     /// The proxy's connection future is large, so it lives on the heap
     /// rather than in the caller's frame.
-    async fn serve<S>(&self, session: S)
+    async fn serve<S>(self, session: S)
     where
         S: AsyncRead + AsyncWrite + Unpin + Send,
     {
-        Box::pin(
-            self.proxy
-                .serve_connection(session, &self.remote_addr, &self.local_addr, &self.shutdown),
-        )
-        .await;
+        let Self {
+            local_addr,
+            proxy,
+            remote_addr,
+            shutdown,
+            admission,
+        } = self;
+        Box::pin(proxy.serve_connection(session, (&remote_addr, &local_addr), &shutdown, admission)).await;
     }
 
     /// Complete the TLS handshake on `stream`, then serve the decrypted
     /// session; a failed or stalled handshake ends the connection.
-    async fn terminate_tls(&self, acceptor: &TlsAcceptor, stream: TcpStream) {
-        // Boxed like the connection future in `serve`: the handshake holds a
-        // whole TLS session.
-        let handshake = Box::pin(tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(stream)));
-        match handshake.await {
-            Ok(Ok(session)) => self.serve(session).await,
-            Ok(Err(err)) if handshake_was_abandoned(&err) => {
-                debug!(remote = %self.remote_addr, error = %err, "downstream TLS handshake abandoned");
-            },
-            Ok(Err(err)) => warn!(remote = %self.remote_addr, error = %err, "downstream TLS handshake failed"),
-            Err(_) => warn!(
-                remote = %self.remote_addr,
-                timeout_secs = TLS_HANDSHAKE_TIMEOUT.as_secs(),
-                "downstream TLS handshake timed out"
-            ),
+    async fn terminate_tls(self, acceptor: &TlsAcceptor, stream: TcpStream) {
+        if let Some(session) = Box::pin(tls_session(
+            acceptor,
+            stream,
+            self.shutdown.clone(),
+            self.admission.deadline(),
+            &self.remote_addr,
+        ))
+        .await
+        {
+            self.serve(session).await;
         }
+    }
+}
+
+/// Bound TLS negotiation by shutdown, admission duration and handshake time.
+async fn tls_session(
+    acceptor: &TlsAcceptor,
+    stream: TcpStream,
+    mut shutdown: ShutdownWatch,
+    deadline: Option<tokio::time::Instant>,
+    remote_addr: &str,
+) -> Option<tokio_rustls::server::TlsStream<TcpStream>> {
+    // Boxed like the connection future in `serve`: the handshake holds a
+    // whole TLS session.
+    let handshake = Box::pin(tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(stream)));
+    tokio::select! {
+        biased;
+        _ = shutdown.changed() => None,
+        _ = async {
+            if let Some(deadline) = deadline {
+                tokio::time::sleep_until(deadline).await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        } => {
+            warn!(remote = %remote_addr, "TCP maximum duration elapsed during TLS handshake");
+            None
+        },
+        result = handshake => completed_handshake(result, remote_addr),
+    }
+}
+
+/// Return a negotiated TLS session or log why negotiation ended.
+fn completed_handshake(
+    result: Result<io::Result<tokio_rustls::server::TlsStream<TcpStream>>, tokio::time::error::Elapsed>,
+    remote_addr: &str,
+) -> Option<tokio_rustls::server::TlsStream<TcpStream>> {
+    match result {
+        Ok(Ok(session)) => Some(session),
+        Ok(Err(err)) if handshake_was_abandoned(&err) => {
+            debug!(remote = %remote_addr, error = %err, "downstream TLS handshake abandoned");
+            None
+        },
+        Ok(Err(err)) => {
+            warn!(remote = %remote_addr, error = %err, "downstream TLS handshake failed");
+            None
+        },
+        Err(elapsed) => {
+            warn!(remote = %remote_addr, error = %elapsed, timeout_secs = TLS_HANDSHAKE_TIMEOUT.as_secs(), "downstream TLS handshake timed out");
+            None
+        },
     }
 }
 

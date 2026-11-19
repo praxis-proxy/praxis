@@ -501,6 +501,7 @@ mod tests {
         Arc::new(ConnectionFacts {
             peer: "127.0.0.1:40000".parse().unwrap(),
             tls: false,
+            peer_identity: None,
         })
     }
 

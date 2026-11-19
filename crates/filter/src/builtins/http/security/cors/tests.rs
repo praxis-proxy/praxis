@@ -493,6 +493,98 @@ async fn preflight_validates_request_headers() {
 }
 
 #[tokio::test]
+async fn preflight_requested_header_field_lines_follow_policy() {
+    let cases: &[(&[&str], bool)] = &[
+        (&["Content-Type"], true),
+        (&["Content-Type, content-type"], true),
+        (&["X-Forbidden"], false),
+        (&["Content-Type", "X-Forbidden"], false),
+        (&["X-Forbidden", "Content-Type"], false),
+        (&["Content-Type", "content-type"], true),
+        (&[], true),
+        (&[""], true),
+        (&["", "Content-Type"], true),
+    ];
+    for reject_mode in [false, true] {
+        let filter = requested_header_policy_filter(reject_mode);
+        for &(fields, allowed) in cases {
+            let mut request = make_preflight_request("https://example.com", "GET", None);
+            for field in fields {
+                request
+                    .headers
+                    .append("access-control-request-headers", field.parse().unwrap());
+            }
+            let mut context = crate::test_utils::make_filter_context(&request);
+            let FilterAction::Reject(response) = filter.on_request(&mut context).await.unwrap() else {
+                panic!("preflight must finish at CORS filter");
+            };
+            assert_requested_header_response(&response, fields, allowed, reject_mode);
+        }
+    }
+}
+
+/// Build the same requested-header policy in omit or reject mode.
+fn requested_header_policy_filter(reject_mode: bool) -> CorsFilter {
+    make_filter(
+        &["https://example.com"],
+        &["GET"],
+        &["Content-Type"],
+        &[],
+        false,
+        false,
+        false,
+        reject_mode,
+    )
+}
+
+/// Check status and CORS headers for one requested-header policy case.
+fn assert_requested_header_response(response: &Rejection, fields: &[&str], allowed: bool, reject_mode: bool) {
+    assert_eq!(
+        response.status,
+        if allowed || !reject_mode { 204 } else { 403 },
+        "fields: {fields:?}"
+    );
+    if allowed {
+        assert_header(response, "Access-Control-Allow-Origin", "https://example.com");
+        assert_header(response, "Access-Control-Allow-Headers", "Content-Type");
+    } else {
+        assert!(
+            !has_header(response, "Access-Control-Allow-Origin"),
+            "fields: {fields:?}"
+        );
+        assert!(
+            !has_header(response, "Access-Control-Allow-Headers"),
+            "fields: {fields:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn preflight_undecodable_requested_headers_follow_policy() {
+    let invalid = HeaderValue::from_bytes(b"X-\x80").unwrap();
+    for reject_mode in [false, true] {
+        let filter = requested_header_policy_filter(reject_mode);
+        for fields in [
+            vec![invalid.clone()],
+            vec![HeaderValue::from_static("Content-Type"), invalid.clone()],
+            vec![invalid.clone(), HeaderValue::from_static("Content-Type")],
+        ] {
+            let mut request = make_preflight_request("https://example.com", "GET", None);
+            for field in fields {
+                request.headers.append("access-control-request-headers", field);
+            }
+            let mut context = crate::test_utils::make_filter_context(&request);
+            let FilterAction::Reject(response) = filter.on_request(&mut context).await.unwrap() else {
+                panic!("preflight must finish at CORS filter");
+            };
+            assert_eq!(response.status, if reject_mode { 403 } else { 204 });
+            assert!(!has_header(&response, "Access-Control-Allow-Origin"));
+            assert!(!has_header(&response, "Access-Control-Allow-Headers"));
+        }
+    }
+}
+
+#[tokio::test]
 async fn preflight_includes_max_age() {
     let f = make_filter(&["https://example.com"], &["GET"], &[], &[], false, false, false, false);
 

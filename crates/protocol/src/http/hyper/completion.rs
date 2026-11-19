@@ -16,7 +16,7 @@ use tracing::{Instrument as _, Span};
 use super::service::Flight;
 use crate::http::pingora::handler::{
     health_util::{ended_by_client_origin, record_passive_health_outcome},
-    logging_util::{logging_cleanup, maybe_emit_fallback_access_log},
+    logging_util::{emit_completion_observers, logging_cleanup},
     metrics_util::emit_request_metrics_for,
     retry_util::release_retry_state,
     span_util::record_response_span_status,
@@ -52,7 +52,7 @@ async fn finish(flight: &mut Flight) {
     release_retry_state(ctx);
     ctx.ended_by_client = ended_by_client_origin(flight.error, ctx.upstream_response_status);
     logging_cleanup(pipeline, ctx).await;
-    maybe_emit_fallback_access_log(pipeline, flight.written_status, ctx);
+    emit_completion_observers(pipeline, flight.written_status, ctx);
 }
 
 // -----------------------------------------------------------------------------

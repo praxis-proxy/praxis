@@ -283,7 +283,7 @@ fn strip_no_content_framing(resp: &mut praxis_filter::Response) -> bool {
 /// Headers were copied out of the Pingora response earlier, so they must
 /// always be written back. When the header name sequence is unchanged the map
 /// is moved straight back; when it changed we rebuild through Pingora's API.
-/// Either way the whole value is replaced, since 0.9.0 removed `DerefMut` on
+/// Either way the whole value is replaced, since Pingora has no `DerefMut` on
 /// `ResponseHeader`.
 ///
 /// The status is written back unconditionally: it lives in the plain
@@ -317,7 +317,11 @@ fn handle_response_result(
             // Bodyless responses skip the body phase, so a successful
             // header phase is their delivery completion. Marking earlier
             // would hide responses the pipeline itself rejects.
-            if is_bodyless {
+            if is_bodyless
+                && !(upstream_response.status.is_informational()
+                    && upstream_response.status != http::StatusCode::SWITCHING_PROTOCOLS)
+                && !(resp.status.is_informational() && resp.status != http::StatusCode::SWITCHING_PROTOCOLS)
+            {
                 ctx.response_delivery_complete = true;
             }
             write_back_response(upstream_response, &mut resp, headers_modified);
@@ -931,6 +935,39 @@ mod tests {
             upstream.status, 418,
             "a status-only edit must reach the response even on the direct write-back path"
         );
+    }
+
+    /// Feed one accepted response head through completion bookkeeping.
+    fn accept_response_head(ctx: &mut PingoraRequestCtx, status: http::StatusCode, is_bodyless: bool) {
+        let mut upstream = pingora_http::ResponseHeader::build(status.as_u16(), None).unwrap();
+        let response = praxis_filter::Response {
+            headers: http::HeaderMap::new(),
+            status,
+        };
+        handle_response_result(
+            Ok(FilterAction::Continue),
+            &mut upstream,
+            response,
+            false,
+            is_bodyless,
+            ctx,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn early_hints_do_not_complete_response_delivery() {
+        let mut ctx = PingoraRequestCtx::default();
+        accept_response_head(&mut ctx, http::StatusCode::EARLY_HINTS, true);
+        assert!(!ctx.response_delivery_complete, "103 has no body but is not final");
+        accept_response_head(&mut ctx, http::StatusCode::OK, false);
+        assert!(!ctx.response_delivery_complete, "streaming 200 waits for EOS");
+        accept_response_head(&mut ctx, http::StatusCode::NO_CONTENT, true);
+        assert!(ctx.response_delivery_complete, "final bodyless response completes");
+
+        let mut upgrade_ctx = PingoraRequestCtx::default();
+        accept_response_head(&mut upgrade_ctx, http::StatusCode::SWITCHING_PROTOCOLS, true);
+        assert!(upgrade_ctx.response_delivery_complete, "101 upgrade remains final");
     }
 
     #[test]

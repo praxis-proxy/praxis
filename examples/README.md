@@ -58,7 +58,8 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | [access-log-syslog.yaml](configs/observability/access-log-syslog.yaml) | Ships access log records to a syslog daemon as RFC 3164 messages, bypassing the tracing subscriber |
 | [access-log-template.yaml](configs/observability/access-log-template.yaml) | Renders a configurable text line for each request |
 | [access-logging.yaml](configs/observability/access-logging.yaml) | Structured JSON logging with sampling; logs ~10% of requests. request_id ensures each log line has a correlation ID. access_log emits method, path, status, and timing |
-| [cloud-events.yaml](configs/observability/cloud-events.yaml) | Publishes a bounded, best-effort CloudEvents 1.0 response event after the upstream response completes |
+| [cloud-events-request-complete.yaml](configs/observability/cloud-events-request-complete.yaml) | Publishes a bounded, best-effort CloudEvent when a request ends, including responses that abort after their headers are sent |
+| [cloud-events.yaml](configs/observability/cloud-events.yaml) | Publishes a bounded, best-effort CloudEvents 1.0 response event after a final bodyless response or response end-of-stream |
 | [errors-total.yaml](configs/observability/errors-total.yaml) | Prometheus counter for proxy errors classified by cause, covering filter rejections, timeouts, unreachable upstreams and internal faults |
 | [grpc-access-log.yaml](configs/observability/grpc-access-log.yaml) | Logs how each gRPC call ended |
 | [grpc-health-check.yaml](configs/observability/grpc-health-check.yaml) | Probes upstream endpoints with `grpc.health.v1.Health/Check` instead of an HTTP GET |
@@ -100,12 +101,12 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | [body-size-limit-with-extraction.yaml](configs/payload-processing/body-size-limit-with-extraction.yaml) | Combines body_limits.max_buffer_bytes with json_body_field to enforce a buffering cap while still performing body-based routing |
 | [compression.yaml](configs/payload-processing/compression.yaml) | Enables transparent response compression using Pingora's built-in compression module |
 | [conditional-field-extraction.yaml](configs/payload-processing/conditional-field-extraction.yaml) | Uses the condition system to apply json_body_field only on specific request paths |
-| [field-extraction-access-control.yaml](configs/payload-processing/field-extraction-access-control.yaml) | Extracts the "tenant_id" field from the JSON request body and promotes it to an X-Tenant-Id header |
+| [field-extraction-access-control.yaml](configs/payload-processing/field-extraction-access-control.yaml) | Extracts the "tenant_id" field from the JSON request body and promotes it to a client-unspoofable X-Praxis-Tenant-Id header |
 | [grpc-web.yaml](configs/payload-processing/grpc-web.yaml) | Lets a browser call a gRPC backend |
 | [json-body.yaml](configs/payload-processing/json-body.yaml) | Rewrites a JSON request body with JSON Pointer extract, replace, add, and remove, and the response body with remove and extract |
 | [json-rpc.yaml](configs/payload-processing/json-rpc.yaml) | Extracts JSON-RPC 2.0 envelope metadata from request bodies and promotes method, id, and kind to request headers |
 | [multi-field-extraction.yaml](configs/payload-processing/multi-field-extraction.yaml) | A single json_body_field filter extracts multiple top-level JSON fields into separate request headers in one pass |
-| [multi-listener-body-pipeline.yaml](configs/payload-processing/multi-listener-body-pipeline.yaml) | Three listeners, each with a different body processing strategy |
+| [multi-listener-body-pipeline.yaml](configs/payload-processing/multi-listener-body-pipeline.yaml) | Three listeners with different field extraction and routing behavior |
 | [stream-buffer.yaml](configs/payload-processing/stream-buffer.yaml) | json_body_field inspects request body chunks as they arrive and defers upstream forwarding until the field is extracted (or end-of-stream) |
 
 ### Pipeline
@@ -214,7 +215,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | [rate-limiting-shadow.yaml](configs/traffic-management/rate-limiting-shadow.yaml) | Observe a rate limit before enforcing it |
 | [rate-limiting.yaml](configs/traffic-management/rate-limiting.yaml) | Token bucket rate limiter with per-IP or global modes |
 | [redirect.yaml](configs/traffic-management/redirect.yaml) | Returns a 3xx redirect without contacting any upstream |
-| [retry-policy.yaml](configs/traffic-management/retry-policy.yaml) | Automatically retries failed upstream requests with exponential backoff and a token-bucket budget to prevent retry storms |
+| [retry-policy.yaml](configs/traffic-management/retry-policy.yaml) | Retries connection failures and resets up to two times per request, with exponential backoff between attempts |
 | [ring-hash.yaml](configs/traffic-management/ring-hash.yaml) | Routes requests to a stable backend by hashing a configurable request header through a sorted virtual-node ring |
 | [round-robin.yaml](configs/traffic-management/round-robin.yaml) | Default strategy |
 | [session-affinity.yaml](configs/traffic-management/session-affinity.yaml) | Hashes a request header to pin a user's requests to one backend |
@@ -233,6 +234,6 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | ------ | ------------- |
 | [grpc-status-errors.yaml](configs/transformation/grpc-status-errors.yaml) | Answers proxy-generated errors in the shape gRPC clients expect. gRPC carries a call's outcome in a `grpc-status` header on an HTTP 200, not in the HTTP status, so a client that meets Praxis's own 403 or 502 sees a bare transport failure with no usable status |
 | [header-manipulation.yaml](configs/transformation/header-manipulation.yaml) | Add, overwrite, and remove headers on requests and responses |
-| [path-rewriting.yaml](configs/transformation/path-rewriting.yaml) | Rewrite request paths before forwarding to upstream |
+| [path-rewriting.yaml](configs/transformation/path-rewriting.yaml) | Rewrite selected request paths after routing and before forwarding |
 | [url-rewriting-preserve.yaml](configs/transformation/url-rewriting-preserve.yaml) | Drop every query param except the ones listed (allowlist) |
 | [url-rewriting.yaml](configs/transformation/url-rewriting.yaml) | Regex-based path transformation and query string manipulation |

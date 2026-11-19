@@ -165,6 +165,7 @@ fn validate_single_listener(listener: &mut Listener) -> Result<(), ProxyError> {
 
     if listener.protocol == ProtocolKind::Tcp {
         reject_forward_proxy_on_tcp(listener)?;
+        reject_http_timeouts_on_tcp(listener)?;
         validate_tcp_routing(listener)?;
     } else {
         reject_tcp_only_fields(listener)?;
@@ -189,6 +190,26 @@ fn validate_single_listener(listener: &mut Listener) -> Result<(), ProxyError> {
     }
 
     Ok(())
+}
+
+/// Reject HTTP downstream timeout settings that the TCP adapter does not use.
+fn reject_http_timeouts_on_tcp(listener: &Listener) -> Result<(), ProxyError> {
+    let http_only = [
+        (
+            "downstream_read_timeout_ms",
+            listener.downstream_read_timeout_ms.is_some(),
+        ),
+        (
+            "downstream_keepalive_timeout_ms",
+            listener.downstream_keepalive_timeout_ms.is_some(),
+        ),
+    ];
+    http_only.iter().find(|(_, set)| *set).map_or(Ok(()), |(field, _)| {
+        Err(ProxyError::Config(format!(
+            "listener '{name}': '{field}' only applies to protocol: http",
+            name = listener.name
+        )))
+    })
 }
 
 /// Reject `forward_proxy` on a TCP listener: CONNECT handling is an

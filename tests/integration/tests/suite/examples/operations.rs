@@ -234,6 +234,7 @@ fn production_gateway_example_serves_https_and_http() {
         "the security chain should set X-Content-Type-Options"
     );
 
+    wait_for_admin(&metrics, 200, "the production gateway must report ready before SIGTERM");
     proxy.signal("TERM");
     wait_for_admin(&metrics, 503, "the production gateway must report the draining phase");
 
@@ -280,12 +281,7 @@ fn drain_handoff_example_reports_draining_and_exits_cleanly() {
     let proxy_addr = format!("127.0.0.1:{proxy_port}");
     let mut proxy = PraxisProcess::spawn(&yaml, &admin);
 
-    assert_eq!(
-        http_get(&admin, "/ready", None).0,
-        200,
-        "the example must report ready before SIGTERM"
-    );
-
+    wait_for_admin(&admin, 200, "the example must report ready before SIGTERM");
     proxy.signal("TERM");
     wait_for_admin(&admin, 503, "the example must report the draining phase");
 
@@ -311,14 +307,25 @@ fn drain_handoff_example_reports_draining_and_exits_cleanly() {
     );
 }
 
-/// Poll `admin`'s `/ready` until it reports `expected`.
+/// Wait for readiness before SIGTERM or the draining phase after it.
 fn wait_for_admin(admin: &str, expected: u16, context: &str) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        if http_get(admin, "/ready", None).0 == expected {
+        let (status, body) = http_get(admin, "/ready", None);
+        if status == 503 {
+            let response: serde_json::Value = serde_json::from_str(&body).expect("readiness must report its phase");
+            let phase = if expected == 200 { "initializing" } else { "draining" };
+            assert_eq!(response["status"], phase, "{context}: {body}");
+        } else {
+            assert_eq!(status, 200, "{context}: {body}");
+        }
+        if status == expected {
             return;
         }
-        assert!(Instant::now() < deadline, "{context}");
+        assert!(
+            Instant::now() < deadline,
+            "{context}: last /ready returned {status} {body}"
+        );
         std::thread::sleep(Duration::from_millis(20));
     }
 }

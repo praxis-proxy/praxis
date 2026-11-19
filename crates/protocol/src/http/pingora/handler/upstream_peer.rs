@@ -329,7 +329,8 @@ pub(super) async fn build_peer(upstream: &Upstream, allow_private: bool) -> ping
     peer_utils::apply_connection_options(&mut peer, &upstream.connection);
 
     if let Some(tls) = &upstream.tls {
-        peer_utils::apply_cached_tls(&mut peer, tls, &upstream.address);
+        peer_utils::apply_cached_tls(&mut peer, tls, &upstream.address)
+            .map_err(|error| pingora_core::Error::explain(pingora_core::ErrorType::ConnectError, error))?;
     }
 
     Ok(Box::new(peer))
@@ -912,13 +913,42 @@ mod tests {
         assert!(peer.options.ca.is_some(), "peer should have custom CA set from cache");
     }
 
+    #[tokio::test]
+    async fn build_peer_rejects_failed_client_identity_conversion() {
+        praxis_tls::provider::install();
+        let files = gen_cert_key_files();
+        let tls = ClusterTls {
+            client_cert: Some(praxis_tls::CertKeyPair {
+                cert_path: files.cert_path.to_str().unwrap().to_owned(),
+                default: false,
+                key_path: files.key_path.to_str().unwrap().to_owned(),
+                server_names: Vec::new(),
+            }),
+            sni: Some("api.example.com".to_owned()),
+            ..ClusterTls::default()
+        };
+        let cached = CachedClusterTls::try_from_config(&tls).unwrap();
+        assert_eq!(cached.client_cert().unwrap().converted_or_init(|| 1_u64), Some(&1_u64));
+        let upstream = Upstream {
+            address: Arc::from("127.0.0.1:8443"),
+            authority: None,
+            base_path: None,
+            connection: Arc::new(ConnectionOptions::default()),
+            tls: Some(cached),
+        };
+        assert!(
+            build_peer(&upstream, false).await.is_err(),
+            "peer construction must return an error when mTLS identity conversion fails"
+        );
+    }
+
     #[test]
     fn ca_from_cached_produces_wrapped_x509() {
         let ca = gen_ca_file();
         let ca_path = ca.ca_path.to_str().expect("ca path should be valid UTF-8");
 
         let cached = praxis_tls::CachedCaCerts::from_pem_file(ca_path).expect("valid CA should parse");
-        let wrapped = peer_utils::ca_from_cached(&cached);
+        let wrapped = peer_utils::ca_from_cached(&cached).expect("valid CA should convert");
         assert_eq!(wrapped.len(), 1, "should produce one WrappedX509");
     }
 
@@ -933,7 +963,7 @@ mod tests {
 
         let cached =
             praxis_tls::CachedClientCert::from_pem_files(cert_path, key_path).expect("valid cert+key should parse");
-        let _cert_key = peer_utils::client_cert_from_cached(&cached);
+        let _cert_key = peer_utils::client_cert_from_cached(&cached).expect("valid identity should convert");
     }
 
     // -------------------------------------------------------------------------

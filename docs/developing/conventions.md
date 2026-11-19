@@ -104,7 +104,7 @@ assert_eq!(status, 403, "ACL should block loopback");
 
 #### Coverage Floor
 
-`make coverage-check` enforces a hard floor: **96% line
+`make coverage-check` enforces a hard floor: **97% line
 coverage** across the workspace. Binary entrypoints
 (`src/main.rs`), test crates, and benchmarks are excluded
 from coverage. Keep entrypoints to wiring; all logic

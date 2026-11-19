@@ -115,13 +115,13 @@ impl Relaying {
         }
     }
 
-    /// The upstream body ended after its last chunk: run the trailer hooks,
-    /// then the end-of-stream body filters, and end the client's body.
+    /// The upstream body ended: finish body and trailer filtering, then end
+    /// the client's body with both output channels intact.
     ///
-    /// The trailer hooks come first, as on Pingora, so a filter that turns
-    /// trailers into body bytes (gRPC-Web) has done so when the end of the
-    /// body reaches it. Synthetic EOF dispatch in that hook marks the body
-    /// complete, so it is not run a second time below.
+    /// The shared trailer path dispatches synthetic EOF before trailer
+    /// filters (including gRPC-Web), retaining its output and marking the
+    /// body complete. The check below runs EOF only when that path did not,
+    /// so final bytes are neither discarded nor produced twice.
     async fn deliver_end(&mut self) -> Ended {
         let (produced, trailers) = match self.take_trailers() {
             Ok(value) => value,
@@ -170,8 +170,8 @@ impl Relaying {
     /// or the time to offer the queued body again.
     ///
     /// `due` is when the awaited upstream chunk is overdue. It is kept
-    /// across the turns spent offering the queued body again, so those do
-    /// not restart the read timeout the way every other step does.
+    /// across upload progress and retries. Only an upstream body event
+    /// starts a new read budget.
     async fn next_step(&mut self, due: &mut Option<Due>) -> Step {
         let queued = self.upload.has_outgoing();
         if due.is_none() {
@@ -185,7 +185,7 @@ impl Relaying {
             frame = self.upload.next_live(), if self.upload.is_live() && !queued => Step::Client(frame),
             () = tokio::time::sleep(UPLOAD_RETRY), if queued => Step::Retry,
         };
-        if !matches!(step, Step::Retry) {
+        if matches!(step, Step::Upstream(_)) {
             *due = None;
         }
         step
@@ -196,10 +196,10 @@ impl Relaying {
         if let Some(ended) = self.resume().await {
             return ended;
         }
-        let mut due = None;
+        let mut due = self.read_timeout.and_then(Due::within);
         loop {
-            if self.upload.has_outgoing() && self.push_upload().await {
-                due = None;
+            if self.upload.has_outgoing() {
+                self.push_upload().await;
             }
             let step = Box::pin(self.next_step(&mut due)).await;
             if let Some(ended) = Box::pin(self.take_step(step)).await {
@@ -209,15 +209,12 @@ impl Relaying {
     }
 
     /// Hand what is queued of the client's body to the upstream, for as long
-    /// as it keeps taking it; the response is relayed in between. Returns
-    /// whether the upstream took any of it.
-    async fn push_upload(&mut self) -> bool {
+    /// as it keeps taking it; the response is relayed in between.
+    async fn push_upload(&mut self) {
         match self.upload.flush(&mut self.session, UPLOAD_SLICE).await {
-            Ok(Flush::Done | Flush::Taken) => true,
-            Ok(Flush::Blocked) => false,
+            Ok(Flush::Done | Flush::Taken | Flush::Blocked) => {},
             Err(end) => {
                 self.stop_upload(end);
-                false
             },
         }
     }
@@ -284,8 +281,8 @@ impl Relaying {
         }
     }
 
-    /// The upstream's trailers after the upstream trailer hook, and the body
-    /// bytes a trailer filter turned them into instead, if it did.
+    /// Retain final body bytes alongside forwarded trailers, or replace the
+    /// trailers when a filter deliberately converts them into body bytes.
     fn take_trailers(&mut self) -> Result<(Option<Bytes>, Option<http::HeaderMap>), String> {
         let Some(mut trailers) = self.session.take_trailers() else {
             return Ok((None, None));
@@ -298,8 +295,8 @@ impl Relaying {
         let produced = response_trailer_filter::execute(&self.flight.pipeline, &mut trailers, &mut self.flight.ctx)?;
         strip_reserved_internal_header_map(&mut trailers);
         match produced {
-            Some(body) => Ok((Some(body), None)),
-            None => Ok((None, Some(trailers))),
+            response_trailer_filter::TrailerOutcome::Forward(body) => Ok((body, Some(trailers))),
+            response_trailer_filter::TrailerOutcome::Convert(body) => Ok((Some(body), None)),
         }
     }
 }
@@ -431,14 +428,15 @@ mod tests {
     use http_body_util::BodyExt as _;
     use praxis_core::egress::Connector as _;
     use praxis_filter::{BodyMode, FilterAction, FilterPipeline};
+    use tokio::io::AsyncWriteExt as _;
 
     use super::*;
     use crate::http::hyper::{
-        body::ProxyBody,
+        body::{BodyAborted, ProxyBody},
         downstream::DownstreamBody,
         test_utils::{
-            Script, Upstream, answered, client_request, empty_pipeline, queue_unread_body, scripted_pipeline,
-            session_to, streaming_upload,
+            Script, TrailerHook, Upstream, answered, client_request, empty_pipeline, queue_unread_body,
+            scripted_pipeline, session_to, streaming_upload,
         },
     };
 
@@ -810,32 +808,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn synthetic_eof_outputs_preserve_both_channels_and_conversion_order() {
+        for (mode, expected_body, expected_events) in [
+            (EofTrailerMode::NoHook, "oktail", ["eof"].as_slice()),
+            (EofTrailerMode::Forward, "oktail", ["eof", "trailers"].as_slice()),
+            (
+                EofTrailerMode::Convert,
+                "oktailconverted",
+                ["eof", "trailers"].as_slice(),
+            ),
+            (EofTrailerMode::Fail, "oktail", ["eof", "trailers"].as_slice()),
+        ] {
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let collected = collect_trailer_response(eof_trailer_script(mode, &events))
+                .await
+                .expect("valid EOF output must complete even with a soft trailer error");
+            assert_eof_outputs(mode, collected, expected_body);
+            assert_eq!(
+                events.lock().unwrap().as_slice(),
+                expected_events,
+                "{mode:?}: synthetic EOF runs exactly once before the trailer hook"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn synthetic_eof_error_aborts_client_stream() {
-        let (_upstream, connector, session) =
-            answered(b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n2\r\nok\r\n0\r\nx-checksum: 9\r\n\r\n")
-                .await;
-        let pipeline = scripted_pipeline(Script {
-            response_body: Some((
-                BodyMode::Stream,
-                Arc::new(|_body, end_of_stream| {
-                    if end_of_stream {
-                        return Err("synthetic EOF failed".into());
-                    }
-                    Ok(FilterAction::Continue)
-                }),
-            )),
-            response_trailers: Some(Arc::new(|_trailers| Ok(None))),
-            ..Script::default()
-        });
-        let (relaying, body) = relaying(connector, pipeline, session, Start::Fresh, true).await;
-
-        let relayed = tokio::spawn(relaying.run());
-        let collected = tokio::time::timeout(Duration::from_secs(5), body.collect())
-            .await
-            .expect("the relay finishes");
-        relayed.await.unwrap();
-
-        assert!(collected.is_err(), "synthetic EOF failures abort the client stream");
+        for reject in [false, true] {
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let collected = collect_trailer_response(failing_eof_script(reject, &events)).await;
+            assert!(
+                collected.is_err(),
+                "synthetic EOF errors and rejections abort the client stream"
+            );
+            assert_eq!(
+                events.lock().unwrap().as_slice(),
+                ["eof"],
+                "failed EOF runs once and prevents the trailer hook"
+            );
+        }
     }
 
     #[tokio::test]
@@ -922,9 +933,247 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn client_upload_progress_does_not_extend_upstream_body_timeout() {
+        assert_stalled_upload_times_out().await;
+        assert_timely_upstream_data_arrives().await;
+    }
+
+    /// The stalled upstream, upload writer and hook observations share one lifetime.
+    struct ProgressFixture {
+        /// Keep the upstream accept loop alive while the relay runs.
+        _upstream: Upstream,
+        /// The response-body relay under the read deadline.
+        relaying: Relaying,
+        /// The client side that trickles request-body frames.
+        writer: tokio::io::DuplexStream,
+        /// Number of request-body hook invocations.
+        uploads: Arc<Mutex<usize>>,
+        /// The downstream body whose receiver must stay alive.
+        body: ProxyBody,
+    }
+
+    /// Observe each upload frame so the timeout assertion proves real progress.
+    fn observing_uploads(uploads: &Arc<Mutex<usize>>) -> FilterPipeline {
+        let observed = Arc::clone(uploads);
+        scripted_pipeline(Script {
+            request_body: Some((
+                BodyMode::Stream,
+                Arc::new(move |_body, _ends| {
+                    *observed.lock().unwrap() += 1;
+                    Ok(FilterAction::Continue)
+                }),
+            )),
+            ..Script::default()
+        })
+    }
+
+    /// Build a relay whose upstream sends a head but no response-body bytes.
+    async fn progress_fixture() -> ProgressFixture {
+        let upstream = Upstream::answering(b"HTTP/1.1 200 OK\r\ncontent-length: 10\r\n\r\n").await;
+        let (connector, mut session) = session_to(&upstream, Method::POST).await;
+        session.read_response_head().await.unwrap();
+        let uploads = Arc::new(Mutex::new(0_usize));
+        let mut flight = Flight::for_tests(observing_uploads(&uploads));
+        flight.ctx.request_snapshot = Some(praxis_filter::Request {
+            method: Method::POST,
+            uri: "/".parse().unwrap(),
+            headers: HeaderMap::new(),
+        });
+        let (upload, mut client) = streaming_upload(&flight.ctx).await;
+        let (relay, body) = Relay::new();
+        let relaying = Relaying {
+            connector,
+            flight,
+            read_timeout: Some(Duration::from_millis(250)),
+            relay,
+            session,
+            start: Start::Fresh,
+            upload,
+        };
+        ProgressFixture {
+            _upstream: upstream,
+            relaying,
+            writer: client.stream.take().unwrap(),
+            uploads,
+            body,
+        }
+    }
+
+    /// Repeated upload progress must not renew a stalled response-read deadline.
+    async fn assert_stalled_upload_times_out() {
+        let ProgressFixture {
+            _upstream,
+            mut relaying,
+            mut writer,
+            uploads,
+            body,
+        } = progress_fixture().await;
+        // Establish real sockets first, then run the deadline and recurring
+        // client progress on virtual time. A reset on any upload event now
+        // keeps the pump alive until the distinct two-second watchdog fails.
+        tokio::time::pause();
+        let started = Instant::now();
+        let pumping = tokio::spawn(async move { relaying.pump().await });
+        let writing = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                if writer.write_all(b"1\r\nx\r\n").await.is_err() {
+                    break;
+                }
+            }
+        });
+        let outcome = tokio::time::timeout(Duration::from_secs(2), pumping).await;
+        let elapsed = started.elapsed();
+        writing.abort();
+        tokio::time::resume();
+        let ended = outcome
+            .expect("ongoing upload must not renew the read deadline")
+            .unwrap();
+        assert_stalled_outcome(ended, elapsed, &uploads);
+        drop(body);
+    }
+
+    /// Check both the timeout result and that several upload hooks ran first.
+    fn assert_stalled_outcome(ended: Ended, elapsed: Duration, uploads: &Arc<Mutex<usize>>) {
+        assert!(
+            matches!(ended, Ended::Upstream(failure) if failure.kind == FailureKind::ReadTimeout),
+            "upload progress must not renew the response read deadline"
+        );
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "the deadline must remain near one interval"
+        );
+        assert!(
+            *uploads.lock().unwrap() >= 3,
+            "multiple upload frames must actually pass the request body hook"
+        );
+    }
+
+    /// A timely upstream body remains deliverable under the same read budget.
+    async fn assert_timely_upstream_data_arrives() {
+        let (_upstream, connector, session) = answered(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok").await;
+        let (mut relaying, body) = relaying(connector, empty_pipeline(), session, Start::Fresh, true).await;
+        relaying.read_timeout = Some(Duration::from_millis(250));
+        assert_eq!(
+            run_and_collect(relaying, body).await.unwrap(),
+            "ok",
+            "timely upstream data must still arrive"
+        );
+    }
+
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
+
+    /// Trailer outcomes paired with an EOF body-producing filter.
+    #[derive(Clone, Copy, Debug)]
+    enum EofTrailerMode {
+        /// No trailer hook: EOF must still precede forwarded trailers.
+        NoHook,
+        /// Leave upstream trailers intact.
+        Forward,
+        /// Deliberately replace trailers with a final body suffix.
+        Convert,
+        /// Mutate the trailer map, then fail open.
+        Fail,
+    }
+
+    /// Compare both output channels, including the complete restored trailer map.
+    fn assert_eof_outputs(mode: EofTrailerMode, collected: http_body_util::Collected<Bytes>, expected_body: &str) {
+        let mut expected_trailers = HeaderMap::new();
+        expected_trailers.insert("x-checksum", HeaderValue::from_static("9"));
+        assert_eq!(
+            collected.trailers(),
+            (!matches!(mode, EofTrailerMode::Convert)).then_some(&expected_trailers),
+            "{mode:?}: only deliberate conversion removes trailers; errors restore the entire original map"
+        );
+        assert_eq!(
+            collected.to_bytes(),
+            expected_body,
+            "{mode:?}: preserve every byte in order"
+        );
+    }
+
+    /// Produce a tail at EOF and record both callback order and invocation count.
+    fn eof_trailer_script(mode: EofTrailerMode, events: &Arc<Mutex<Vec<&'static str>>>) -> Script {
+        let body_events = Arc::clone(events);
+        Script {
+            response_body: Some((
+                BodyMode::Stream,
+                Arc::new(move |body, end_of_stream| {
+                    if end_of_stream {
+                        body_events.lock().unwrap().push("eof");
+                        *body = Some(Bytes::from_static(b"tail"));
+                    }
+                    Ok(FilterAction::Continue)
+                }),
+            )),
+            response_trailers: eof_trailer_hook(mode, events),
+            ..Script::default()
+        }
+    }
+
+    /// Exercise each representable shared outcome, including restoration after mutation.
+    fn eof_trailer_hook(mode: EofTrailerMode, events: &Arc<Mutex<Vec<&'static str>>>) -> Option<TrailerHook> {
+        if matches!(mode, EofTrailerMode::NoHook) {
+            return None;
+        }
+        let events = Arc::clone(events);
+        Some(Arc::new(move |trailers| {
+            events.lock().unwrap().push("trailers");
+            match mode {
+                EofTrailerMode::NoHook | EofTrailerMode::Forward => Ok(None),
+                EofTrailerMode::Convert => Ok(Some(Bytes::from_static(b"converted"))),
+                EofTrailerMode::Fail => {
+                    trailers.clear();
+                    trailers.insert("x-partial", HeaderValue::from_static("leak"));
+                    Err("trailer filter failed after mutation".into())
+                },
+            }
+        }))
+    }
+
+    /// Observe EOF errors and rejection without allowing the trailer hook to run.
+    fn failing_eof_script(reject: bool, events: &Arc<Mutex<Vec<&'static str>>>) -> Script {
+        let body_events = Arc::clone(events);
+        let trailer_events = Arc::clone(events);
+        Script {
+            response_body: Some((
+                BodyMode::Stream,
+                Arc::new(move |_body, end_of_stream| {
+                    if end_of_stream {
+                        body_events.lock().unwrap().push("eof");
+                        return if reject {
+                            Ok(FilterAction::Reject(praxis_filter::Rejection::status(451)))
+                        } else {
+                            Err("synthetic EOF failed".into())
+                        };
+                    }
+                    Ok(FilterAction::Continue)
+                }),
+            )),
+            response_trailers: Some(Arc::new(move |_trailers| {
+                trailer_events.lock().unwrap().push("trailers");
+                Ok(None)
+            })),
+            ..Script::default()
+        }
+    }
+
+    /// Drive a real chunked upstream through the relay and retain body and trailer outcomes.
+    async fn collect_trailer_response(script: Script) -> Result<http_body_util::Collected<Bytes>, BodyAborted> {
+        let (_upstream, connector, session) =
+            answered(b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n2\r\nok\r\n0\r\nx-checksum: 9\r\n\r\n")
+                .await;
+        let (relaying, body) = relaying(connector, scripted_pipeline(script), session, Start::Fresh, true).await;
+        let relayed = tokio::spawn(relaying.run());
+        let collected = tokio::time::timeout(Duration::from_secs(5), body.collect())
+            .await
+            .expect("the relay finishes");
+        relayed.await.unwrap();
+        collected
+    }
 
     /// A relay of `session`'s body through `pipeline` from `start`, and the
     /// client's body it feeds; the request had no body when `settled`, else

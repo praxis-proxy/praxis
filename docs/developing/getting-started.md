@@ -33,7 +33,7 @@ See [conventions](conventions.md) for the checks required for your change.
 ## Tools for linting and specialist workflows
 
 Install the tools needed by the targets you plan to run. FIPS, container,
-coverage, and rollout workflows have additional requirements below.
+and coverage workflows have additional requirements below.
 
 - Rust nightly for `rustfmt`, at `NIGHTLY_VERSION` in the Makefile
 - Docker 29.3.0+ or Podman (for container builds; the FIPS image, its
@@ -103,15 +103,17 @@ make check
 ```console
 make test
 make test-integration
-make test-rollout # requires Docker/Podman, KIND, kubectl, and ../operator
+make test-rollout # temporarily disabled; prints SKIPPED
 ```
 
-The rollout target uses the operator-owned `deploy/rollout-test` reference
-base from the adjacent `../operator` checkout. Pass harness options with
-`ROLLOUT_ARGS`, for example `make test-rollout ROLLOUT_ARGS=--keep-cluster`.
-Runtime config-hash convergence remains dependent on config identity issue
-[#1296](https://github.com/praxis-proxy/praxis/issues/1296); the current
-harness verifies hot-reload behavior on each replica.
+KIND rollout acceptance is temporarily disabled in CI and through both
+`make test-rollout` and `cargo xtask rollout`. The four-node rootless
+cluster exhausts the host's shared inotify instance budget before Praxis
+starts. Move the suite to
+[gateway-controller](https://github.com/praxis-proxy/gateway-controller)
+before re-enabling it. The harness and its assertions remain in
+`tests/rollout` for migration; a skipped invocation does not validate
+rollout behavior.
 
 Integration tests wait for the proxy to start accepting connections
 before issuing requests. On slow or heavily loaded runners (notably

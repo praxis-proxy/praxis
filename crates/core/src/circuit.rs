@@ -379,7 +379,7 @@ impl CircuitBreaker {
     /// # Panics
     ///
     /// Panics if the internal mutex is poisoned.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     #[expect(clippy::expect_used, reason = "poisoned mutex is unrecoverable")]
     pub fn in_flight(&self) -> u32 {
         self.inner.lock().expect("circuit breaker lock poisoned").in_flight

@@ -55,7 +55,7 @@ mod types;
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU8, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -64,7 +64,7 @@ use bytes::Bytes;
 use http::HeaderMap;
 use praxis_core::{
     connectivity::Upstream,
-    subrequest::{FrameworkHeaders, StreamLimits, SubRequestError},
+    subrequest::{FrameworkHeaders, RequestProgress, StreamLimits, SubRequestError},
 };
 use tracing::{Instrument as _, warn};
 
@@ -134,6 +134,7 @@ struct ParentUpstreamStates(Vec<ParentUpstreamState>);
 /// cannot take it as its own.
 #[cfg(feature = "upstream-binding")]
 fn enter_nested_upstream_scope(extensions: &mut RequestExtensions, inherits_binding: bool) {
+    enter_nested_transport_scope(extensions);
     let (binding, frozen) = if inherits_binding {
         (
             extensions.get::<BoundUpstream>().cloned(),
@@ -161,12 +162,14 @@ fn enter_nested_upstream_scope(extensions: &mut RequestExtensions, inherits_bind
 /// nested pipeline only starts without the parent's upstream selection.
 #[cfg(not(feature = "upstream-binding"))]
 fn enter_nested_upstream_scope(extensions: &mut RequestExtensions, _inherits_binding: bool) {
+    enter_nested_transport_scope(extensions);
     extensions.remove::<SelectedClusterApplication>();
 }
 
 /// Remove nested routing state and restore the most recent parent checkpoint.
 #[cfg(feature = "upstream-binding")]
 fn restore_parent_upstream_scope(extensions: &mut RequestExtensions) {
+    restore_parent_transport_scope(extensions);
     extensions.remove::<SelectedClusterApplication>();
     let Some(mut states) = extensions.remove::<ParentUpstreamStates>() else {
         return;
@@ -198,6 +201,7 @@ fn restore_parent_upstream_scope(extensions: &mut RequestExtensions) {
 /// the nested pipeline's upstream selection.
 #[cfg(not(feature = "upstream-binding"))]
 fn restore_parent_upstream_scope(extensions: &mut RequestExtensions) {
+    restore_parent_transport_scope(extensions);
     extensions.remove::<SelectedClusterApplication>();
 }
 
@@ -210,6 +214,85 @@ fn restore_parent_upstream_scope(extensions: &mut RequestExtensions) {
 /// The absolute per-step deadline still bounds total duration; this only
 /// caps the gap between upstream chunks so a stalled source is abandoned.
 pub(crate) const STREAMING_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Cancellation-safe outcome of a nested transport phase.
+///
+/// A filter can retain the shared signal while its async response hook is
+/// cancelled. A local timeout leaves it neutral; transport entry is a failure
+/// until the transport supplies an actual response outcome.
+#[derive(Clone)]
+pub(crate) struct NestedTransportOutcome(Arc<AtomicU8>);
+
+/// Test-only suspension after transport classification but before peer setup.
+#[cfg(test)]
+#[derive(Clone)]
+pub(super) struct PeerPreparationGate {
+    /// Signals that the executor reached peer preparation.
+    pub(super) entered: Arc<tokio::sync::Notify>,
+    /// Releases peer preparation when a test chooses to.
+    pub(super) release: Arc<tokio::sync::Notify>,
+}
+
+/// Parent transport signals suspended while a child sub-request executes.
+#[derive(Default)]
+struct ParentTransportOutcomes(Vec<(Option<NestedTransportOutcome>, Option<crate::UpstreamForwardedEndpoint>)>);
+
+/// Keep child cancellation from changing its parent's circuit outcome.
+fn enter_nested_transport_scope(extensions: &mut RequestExtensions) {
+    let parent = extensions.remove::<NestedTransportOutcome>();
+    let mut stack = extensions.remove::<ParentTransportOutcomes>().unwrap_or_default();
+    let forwarded = extensions.remove::<crate::UpstreamForwardedEndpoint>();
+    stack.0.push((parent, forwarded));
+    extensions.insert(stack);
+}
+
+/// Restore the signal owned by the containing sub-request.
+fn restore_parent_transport_scope(extensions: &mut RequestExtensions) {
+    extensions.remove::<NestedTransportOutcome>();
+    extensions.remove::<crate::UpstreamForwardedEndpoint>();
+    let Some(mut stack) = extensions.remove::<ParentTransportOutcomes>() else {
+        return;
+    };
+    if let Some((parent, forwarded)) = stack.0.pop() {
+        if let Some(parent) = parent {
+            extensions.insert(parent);
+        }
+        if let Some(forwarded) = forwarded {
+            extensions.insert(forwarded);
+        }
+    }
+    if !stack.0.is_empty() {
+        extensions.insert(stack);
+    }
+}
+
+impl NestedTransportOutcome {
+    /// Make a neutral signal for the next nested exchange.
+    pub(crate) fn new() -> Self {
+        Self(Arc::new(AtomicU8::new(0)))
+    }
+
+    /// Start an unresolved transport attempt.
+    pub(crate) fn start(&self) {
+        self.0.store(1, Ordering::Release);
+    }
+
+    /// Record the transport's response classification before async hooks run.
+    pub(crate) fn response(&self, status: u16) {
+        self.0
+            .store(u8::from(status >= 500).saturating_add(2), Ordering::Release);
+    }
+
+    /// Whether cancellation should count as an upstream failure.
+    pub(crate) fn failed(&self) -> bool {
+        matches!(self.0.load(Ordering::Acquire), 1 | 3)
+    }
+
+    /// Whether a successful upstream response was observed before cancellation.
+    pub(crate) fn succeeded(&self) -> bool {
+        self.0.load(Ordering::Acquire) == 2
+    }
+}
 
 // -----------------------------------------------------------------------------
 // Retained-State Accounting
@@ -433,6 +516,8 @@ impl FilteredSubrequestExecutor {
     /// the transition-time headers and a pull-based body that keeps applying the
     /// chain's response-body filters as chunks flow; otherwise the fully
     /// filtered response is returned as [`CalloutResponse::Buffered`].
+    /// A pipeline declaring terminal request-completion observers is rejected:
+    /// a subrequest has no listener completion callback for that hook.
     ///
     /// # Errors
     ///
@@ -704,6 +789,14 @@ impl FilteredSubrequestExecutor {
         // Every error below is handed back through `into_parts`, which restores
         // one parent checkpoint, so enter the scope before the first of them.
         enter_nested_upstream_scope(&mut extensions, inherits_binding);
+        if pipeline.has_request_completion_observer() {
+            return Err(FilteredSubrequestError::new(
+                "filtered_subrequest: request-completion observers require a listener request"
+                    .to_owned()
+                    .into(),
+                extensions,
+            ));
+        }
 
         let remaining = deadline
             .checked_duration_since(Instant::now())
@@ -742,6 +835,8 @@ impl FilteredSubrequestExecutor {
         let mut filter_ctx = build_sub_filter_context(pipeline, &sub_req, resources);
         filter_ctx.extensions = std::mem::take(&mut extensions);
         filter_ctx.extensions.insert(RetainedFilterResults::default());
+        let transport_outcome = NestedTransportOutcome::new();
+        filter_ctx.extensions.insert(transport_outcome.clone());
         filter_ctx.enable_stream_chunk_emission(self.max_state_bytes);
         // A callout may stage a pre-resolved upstream (for example a URL prepared
         // via `prepare_url_target`) so the executor dials a specific destination
@@ -775,6 +870,8 @@ impl FilteredSubrequestExecutor {
         let step_deadline = step_started.checked_add(step_budget).unwrap_or(deadline);
         let in_transport = Arc::new(AtomicBool::new(false));
         let in_transport_inner = Arc::clone(&in_transport);
+        let transport_outcome_inner = transport_outcome.clone();
+        let mut forwarding: Option<(Arc<str>, RequestProgress)> = None;
 
         let step_span = tracing::info_span!("filtered_subrequest", step = label, iteration = iteration);
 
@@ -921,6 +1018,12 @@ impl FilteredSubrequestExecutor {
                 .clone()
                 .unwrap_or_else(|| Arc::clone(&destination_authority));
             in_transport_inner.store(true, Ordering::Release);
+            transport_outcome_inner.start();
+            #[cfg(test)]
+            if let Some(gate) = filter_ctx.extensions.get::<PeerPreparationGate>() {
+                gate.entered.notify_one();
+                gate.release.notified().await;
+            }
             // Build one transport peer per validated address so a connection
             // refusal can fall back to the next. With no staged fallback set (or
             // a single address) this is exactly the prior single-peer dial: the
@@ -933,12 +1036,14 @@ impl FilteredSubrequestExecutor {
                 for address in &fallback_addresses {
                     let mut per_address = upstream.clone();
                     per_address.address = Arc::from(address.to_string().as_str());
-                    built.push(build_peer(&per_address, pipeline.allow_private_upstreams()).await);
+                    let peer = build_peer(&per_address, pipeline.allow_private_upstreams()).await;
+                    built.push((Arc::clone(&per_address.address), peer));
                 }
                 built
             } else {
-                vec![build_peer(upstream, pipeline.allow_private_upstreams()).await]
+                vec![(Arc::clone(&upstream.address), build_peer(upstream, pipeline.allow_private_upstreams()).await)]
             };
+            filter_ctx.upstream_reached = true;
             apply_request_header_mutations(&mut sub_headers, &filter_ctx);
             // Mirror the normal proxy path (`apply_authority_override`): a
             // configured authority override becomes the upstream Host,
@@ -1022,7 +1127,7 @@ impl FilteredSubrequestExecutor {
                     };
                     let mut response =
                         Err(SubRequestError::Connect("filtered_subrequest: no addresses to dial".to_owned()));
-                    for peer in &peers {
+                    for (address, peer) in &peers {
                         // Recompute the remaining budget before every fallback
                         // attempt so a slow-but-not-refused earlier address cannot
                         // hand each later attempt the full step budget again; the
@@ -1034,10 +1139,15 @@ impl FilteredSubrequestExecutor {
                         if attempt_budget.is_zero() {
                             break;
                         }
+                        let progress = RequestProgress::default();
+                        forwarding = Some((Arc::clone(address), progress.clone()));
+                        if let Some(selected) = filter_ctx.upstream.as_mut() {
+                            selected.address = Arc::clone(address);
+                        }
                         response = match peer {
                             Ok(peer) => self
                                 .client
-                                .send_streaming(peer, &request, attempt_budget, limits.clone(), Some(&framework_headers))
+                                .send_streaming_with_progress(peer, &request, attempt_budget, limits.clone(), Some(&framework_headers), Some(&progress))
                                 .await,
                             Err(error) => Err(SubRequestError::Connect(error.to_string())),
                         };
@@ -1050,9 +1160,11 @@ impl FilteredSubrequestExecutor {
                         break;
                     }
                     in_transport_inner.store(false, Ordering::Release);
+                    transport::publish_forwarding(&mut filter_ctx, forwarding.as_ref());
                     match response {
                         Ok(response) => {
                             let status = response.status;
+                            transport_outcome_inner.response(status);
                             let mut headers = response.headers;
                             sanitize_subresponse_headers(&mut headers);
                             response_header.status = http::StatusCode::from_u16(status)
@@ -1087,6 +1199,7 @@ impl FilteredSubrequestExecutor {
                         },
                         Err(error) => {
                             let (status, kind) = classify_transport_failure(&error);
+                            transport_outcome_inner.response(status);
                             warn!(step = label, %error, status, "filtered sub-request streaming transport failure");
                             let response = SubResponse { version: http::Version::HTTP_11, status, headers: HeaderMap::new(), body: Bytes::new() };
                             response_header.status = http::StatusCode::from_u16(status)
@@ -1121,7 +1234,7 @@ impl FilteredSubrequestExecutor {
                 },
                 SubRequestResponseMode::Buffered => {
                     let mut attempt = None;
-                    for peer in &peers {
+                    for (address, peer) in &peers {
                         // Recompute the remaining budget before every fallback
                         // attempt (see the streaming arm). If the step deadline is
                         // already reached, stop dialing and fall through to the
@@ -1132,10 +1245,15 @@ impl FilteredSubrequestExecutor {
                         if attempt_budget.is_zero() {
                             break;
                         }
+                        let progress = RequestProgress::default();
+                        forwarding = Some((Arc::clone(address), progress.clone()));
+                        if let Some(selected) = filter_ctx.upstream.as_mut() {
+                            selected.address = Arc::clone(address);
+                        }
                         let outcome = match peer {
                             Ok(peer) => match self
                                 .client
-                                .execute(peer, &request, self.max_response_bytes.min(pipeline.response_buffer_limit()), attempt_budget, Some(&framework_headers))
+                                .execute_with_progress(peer, &request, self.max_response_bytes.min(pipeline.response_buffer_limit()), attempt_budget, Some(&framework_headers), &progress)
                                 .await
                             {
                                 Ok(response) => (response, ResponseOrigin::Upstream, None),
@@ -1177,6 +1295,8 @@ impl FilteredSubrequestExecutor {
                         )
                     });
                     in_transport_inner.store(false, Ordering::Release);
+                    transport::publish_forwarding(&mut filter_ctx, forwarding.as_ref());
+                    transport_outcome_inner.response(response.status);
                     sanitize_subresponse_headers(&mut response.headers);
                     response_header.status = http::StatusCode::from_u16(response.status)
                         .map_err(|error| -> FilterError { error.into() })?;
@@ -1232,6 +1352,8 @@ impl FilteredSubrequestExecutor {
             .instrument(step_span))
             .await;
 
+        transport::publish_forwarding(&mut filter_ctx, forwarding.as_ref());
+        let outer_deadline = timed.is_err();
         let mut raw = match timed {
             Ok(Ok(raw)) => raw,
             Ok(Err(error)) => return Err(FilteredSubrequestError::capture(error, &mut filter_ctx)),
@@ -1315,6 +1437,13 @@ impl FilteredSubrequestExecutor {
                 return Err(error);
             }
             outcome.response.body = completion_body.unwrap_or_default();
+        }
+        if outer_deadline {
+            // The async response-header phase has no remaining budget. Body
+            // completion has already run where applicable; dropping the
+            // remaining per-filter state settles cancellation guards before
+            // the caller receives this completed synthetic response.
+            filter_ctx.filter_state.clear();
         }
         let (kind, response_snapshot, completed) = match raw {
             RawResponse::Complete(outcome) => {

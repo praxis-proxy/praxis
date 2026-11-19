@@ -83,7 +83,13 @@ the attempt loop, the replay buffer, error classification) are its own.
    lines Pingora's HTTP/1 parser allows. Plaintext listeners accept HTTP/2
    prior knowledge. The listener's keep-alive timeout (one minute when
    unset) bounds the wait for a request head on an idle connection; the
-   read timeout bounds every body frame on HTTP/1 and HTTP/2 alike.
+   read timeout bounds every body frame on HTTP/1 and HTTP/2 alike. A
+   successfully authenticated client certificate supplies one immutable
+   connection-scoped peer identity (SHA-256 leaf digest, organization, and
+   hexadecimal serial) to every request on that connection, including
+   HTTP/2 streams. Absent client certificates supply no identity. If any
+   subject organization cannot be decoded by the certificate parser, the
+   digest and serial remain available but organization matching sees no value.
 2. **Admission and validation.** Memory, file-descriptor, global and
    per-listener limits, then the request-validation rules (Host, duplicate
    framing headers, obs-fold, reserved headers, `..` paths,
@@ -204,10 +210,6 @@ hyper.
   lowercase; Pingora keeps the spelling a filter wrote. Header names are
   case-insensitive, so clients are unaffected, but raw-byte comparisons
   differ.
-- **mTLS peer identity.** `TlsPeerIdentity` (certificate digest,
-  organization, serial) is not computed from the client certificate, so
-  filters that authorize by peer identity see none. The protocol crate has
-  no X.509 parser; the one in `praxis-tls` sits behind its `spiffe` feature.
 - **HTTP/1 parsing differences.** hyper's parser serves pipelined
   requests, accepts a chunk size of `u64::MAX` and answers an over-long
   request target with 414 rather than 400. Pingora drops a pipelined

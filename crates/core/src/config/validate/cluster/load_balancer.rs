@@ -31,6 +31,7 @@ pub(in crate::config::validate) fn validate_lb_strategy(cluster: &Cluster) -> Re
     let name = &cluster.name;
     if let LoadBalancerStrategy::Parameterised(param) = &cluster.load_balancer_strategy {
         validate_parameterised(name, param)?;
+        validate_hash_header(name, param)?;
         if let ParameterisedStrategy::RingHash(opts) = param {
             let entries: u64 = cluster
                 .endpoints
@@ -55,6 +56,26 @@ pub(in crate::config::validate) fn validate_lb_strategy(cluster: &Cluster) -> Re
             }
         }
         validate_maglev_replicas(cluster, param)?;
+    }
+    Ok(())
+}
+
+/// Reject configured hash inputs that can never name a request header.
+fn validate_hash_header(name: &str, param: &ParameterisedStrategy) -> Result<(), ProxyError> {
+    let (strategy, header) = match param {
+        ParameterisedStrategy::ConsistentHash(opts) => ("consistent_hash", opts.header.as_deref()),
+        ParameterisedStrategy::Maglev(opts) => ("maglev", opts.header.as_deref()),
+        ParameterisedStrategy::RingHash(opts) => ("ring_hash", opts.header.as_deref()),
+        ParameterisedStrategy::Subset(_) | ParameterisedStrategy::ZoneAware(_) | ParameterisedStrategy::Priority(_) => {
+            return Ok(());
+        },
+    };
+    if let Some(header) = header
+        && header.parse::<http::header::HeaderName>().is_err()
+    {
+        return Err(ProxyError::Config(format!(
+            "cluster '{name}': {strategy}.header {header:?} must be a valid HTTP header name"
+        )));
     }
     Ok(())
 }
@@ -146,9 +167,55 @@ fn validate_parameterised(name: &str, param: &ParameterisedStrategy) -> Result<(
 mod tests {
     use super::validate_lb_strategy;
     use crate::config::{
-        Cluster, ConsistentHashOpts, HashFunction, LoadBalancerStrategy, MaglevOpts, ParameterisedStrategy,
+        Cluster, Config, ConsistentHashOpts, HashFunction, LoadBalancerStrategy, MaglevOpts, ParameterisedStrategy,
         PriorityOpts, RingHashOpts, SimpleStrategy, SubsetFallbackPolicy, SubsetOpts, ZoneAwareOpts,
     };
+
+    #[test]
+    fn hash_header_name_validation() {
+        for (header, accepted) in [
+            (None, true),
+            (Some("X-Tenant"), true),
+            (Some(""), false),
+            (Some("x tenant"), false),
+            (Some("ténant"), false),
+        ] {
+            for (strategy, param) in hash_strategies(header) {
+                let cluster = cluster_with_strategy(LoadBalancerStrategy::Parameterised(param));
+                let result = validate_lb_strategy(&cluster);
+                if accepted {
+                    assert!(result.is_ok(), "{strategy} {header:?} should be valid: {result:?}");
+                } else {
+                    let err = result.unwrap_err();
+                    assert!(
+                        err.to_string().contains(&format!("{strategy}.header"))
+                            && err.to_string().contains("valid HTTP header name"),
+                        "{strategy} {header:?} should be rejected: {err}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn inline_hash_header_name_validation() {
+        for strategy in ["consistent_hash", "maglev", "ring_hash"] {
+            for (header, accepted) in [("", false), ("x tenant", false), ("ténant", false), ("X-Tenant", true)] {
+                let yaml = inline_hash_header_yaml(strategy, header);
+                let result = Config::from_yaml(&yaml);
+                if accepted {
+                    assert!(result.is_ok(), "inline {strategy} {header:?} should load: {result:?}");
+                } else {
+                    let err = result.unwrap_err();
+                    assert!(
+                        err.to_string().contains(&format!("{strategy}.header"))
+                            && err.to_string().contains("valid HTTP header name"),
+                        "inline {strategy} {header:?} should be rejected: {err}"
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn reject_ring_hash_zero_virtual_nodes() {
@@ -358,6 +425,55 @@ mod tests {
     fn simple_strategy_always_valid() {
         let cluster = Cluster::with_defaults("test", vec!["10.0.0.1:80".into()]);
         validate_lb_strategy(&cluster).expect("simple strategies need no validation");
+    }
+
+    /// Build all hash strategies with the same optional header input.
+    fn hash_strategies(header: Option<&str>) -> [(&'static str, ParameterisedStrategy); 3] {
+        let header = header.map(str::to_owned);
+        [
+            (
+                "consistent_hash",
+                ParameterisedStrategy::ConsistentHash(ConsistentHashOpts { header: header.clone() }),
+            ),
+            (
+                "maglev",
+                ParameterisedStrategy::Maglev(MaglevOpts { header: header.clone() }),
+            ),
+            (
+                "ring_hash",
+                ParameterisedStrategy::RingHash(RingHashOpts {
+                    header,
+                    hash_function: HashFunction::default(),
+                    virtual_nodes: 100,
+                }),
+            ),
+        ]
+    }
+
+    /// Inline cluster fixture that exercises whole-config validation.
+    fn inline_hash_header_yaml(strategy: &str, header: &str) -> String {
+        format!(
+            r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints: ["93.184.216.34:80"]
+            load_balancer_strategy:
+              {strategy}:
+                header: {header:?}
+"#
+        )
     }
 
     fn cluster_with_strategy(strategy: LoadBalancerStrategy) -> Cluster {

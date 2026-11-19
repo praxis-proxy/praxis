@@ -39,7 +39,7 @@ pub use self::reselector::EndpointReselector;
 #[cfg(feature = "upstream-binding")]
 use crate::pipeline::catalog::{ClusterApplicationMetadata, ClusterMetadataDeclaration};
 use crate::{
-    FilterError,
+    FilterError, FilterMetadata,
     actions::FilterAction,
     filter::{HttpFilter, HttpFilterContext},
 };
@@ -375,7 +375,9 @@ fn admit_preset(cluster: &Arc<str>, entry: &ClusterEntry, ctx: &mut HttpFilterCo
         return Some(cluster_overloaded());
     };
     ctx.cluster_admission = Some(lease);
-    ctx.set_metadata("lb.admitted", "true");
+    ctx.filter_metadata
+        .insert("lb.admitted", "true")
+        .unwrap_or_else(FilterMetadata::log_loss);
     None
 }
 
@@ -396,6 +398,10 @@ fn slow_start_bindings(clusters: &[Cluster]) -> Vec<crate::load_balancing::slow_
 impl HttpFilter for LoadBalancerFilter {
     fn name(&self) -> &'static str {
         "load_balancer"
+    }
+
+    fn selects_upstream_endpoint(&self) -> bool {
+        true
     }
 
     #[cfg(feature = "slow-start")]
@@ -528,7 +534,9 @@ impl HttpFilter for LoadBalancerFilter {
         debug!(cluster = %cluster_name, upstream = %addr, "upstream selected");
 
         ctx.selected_endpoint_index = health.and_then(|h| h.endpoint_index(&addr)).or(Some(usize::MAX));
-        ctx.set_metadata("lb.selected", "true");
+        ctx.filter_metadata
+            .insert("lb.selected", "true")
+            .unwrap_or_else(FilterMetadata::log_loss);
 
         // Hand the lease to the request: from here the release paths, and the
         // lease's own drop, are what give the slot back.

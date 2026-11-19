@@ -15,7 +15,11 @@
 //! [`BodyAccess`]: crate::body::BodyAccess
 //! [`http_utils`]: super::http_utils
 
-use std::{pin::Pin, sync::Arc};
+use std::{
+    collections::{BTreeSet, HashMap},
+    pin::Pin,
+    sync::Arc,
+};
 
 use bytes::Bytes;
 use tracing::{debug, trace, warn};
@@ -32,7 +36,7 @@ use super::{
     },
 };
 use crate::{
-    FilterError,
+    FilterError, FilterResultSet,
     actions::{FilterAction, Rejection, SelectedUpstreamBodyOutcome},
     any_filter::AnyFilter,
     condition::should_execute_bound_selected,
@@ -45,6 +49,55 @@ use crate::{actions::BoundUpstreamBodyOutcome, condition::SelectedUpstream, exte
 // -----------------------------------------------------------------------------
 // FilterPipeline HTTP
 // -----------------------------------------------------------------------------
+
+/// Pre-request results and participation owned by resolved filter instances.
+#[derive(Default)]
+struct PreRequestResults {
+    /// Captured result set, including no-publication owners, by filter ID.
+    by_id: HashMap<usize, Option<FilterResultSet>>,
+    /// Types that must not use the legacy type-keyed request fallback.
+    owned_types: BTreeSet<&'static str>,
+}
+
+/// Record that this head or pre-read body filter owns its type's staged results.
+fn mark_pre_request_owner(ctx: &mut HttpFilterContext<'_>, pf: &PipelineFilter) {
+    let staged = ctx.extensions.get_or_insert_with(PreRequestResults::default);
+    staged.owned_types.insert(pf.filter.name());
+    staged.by_id.entry(pf.filter_id).or_insert(None);
+}
+
+/// Restore only this instance's previous results before a pre-request hook.
+fn restore_pre_request_results(ctx: &mut HttpFilterContext<'_>, pf: &PipelineFilter) {
+    let previous = ctx
+        .extensions
+        .get_mut::<PreRequestResults>()
+        .and_then(|staged| staged.by_id.get_mut(&pf.filter_id))
+        .and_then(Option::take);
+    ctx.filter_results.remove(pf.filter.name());
+    if let Some(results) = previous {
+        ctx.filter_results.insert(pf.filter.name(), results);
+    }
+}
+
+/// Snapshot writes and removals while leaving public results visible to other types.
+fn capture_pre_request_results(ctx: &mut HttpFilterContext<'_>, pf: &PipelineFilter) {
+    let results = ctx.filter_results.get(pf.filter.name()).cloned();
+    if let Some(staged) = ctx.extensions.get_mut::<PreRequestResults>() {
+        staged.by_id.insert(pf.filter_id, results);
+    }
+}
+
+/// Remove staged ownership and drop legacy type keys claimed by any owner.
+fn take_pre_request_results(
+    ctx: &mut HttpFilterContext<'_>,
+) -> (PreRequestResults, HashMap<&'static str, FilterResultSet>) {
+    let staged = ctx.extensions.remove::<PreRequestResults>().unwrap_or_default();
+    let mut direct_results = std::mem::take(&mut ctx.filter_results);
+    for name in &staged.owned_types {
+        direct_results.remove(name);
+    }
+    (staged, direct_results)
+}
 
 #[expect(
     clippy::multiple_inherent_impl,
@@ -100,6 +153,7 @@ impl FilterPipeline {
             let AnyFilter::Http(http_filter) = &pf.filter else {
                 continue;
             };
+            mark_pre_request_owner(ctx, pf);
             if !pf.conditions.is_empty()
                 && !should_execute_bound_selected(
                     &pf.conditions,
@@ -111,6 +165,7 @@ impl FilterPipeline {
                 trace!(filter = http_filter.name(), "request-head hook skipped by conditions");
                 continue;
             }
+            restore_pre_request_results(ctx, pf);
             ctx.current_filter_id = Some(pf.filter_id);
             let outcome = run_request_head_filter(
                 http_filter.as_ref(),
@@ -120,6 +175,7 @@ impl FilterPipeline {
             )
             .await;
             ctx.current_filter_id = None;
+            capture_pre_request_results(ctx, pf);
             if let Some(rejection) = outcome? {
                 return Ok(FilterAction::Reject(rejection));
             }
@@ -151,12 +207,9 @@ impl FilterPipeline {
         ctx.executed_branch_filters.clear();
         ctx.body_done_indices.clear();
         ctx.body_done_indices.resize(self.filters.len(), false);
-        // Results present now were published during the StreamBuffer
-        // pre-read. Branch evaluation clears the set after every executed
-        // filter, so hold them aside and hand each back to its own filter
-        // just before it runs; otherwise only a promoter at index 0 could
-        // ever branch on its pre-read results.
-        let mut pre_read_results = std::mem::take(&mut ctx.filter_results);
+        // Head and pre-read body results belong to their producer's filter ID.
+        // Preserve type-keyed direct seeds only where no staged owner exists.
+        let (mut staged_results, mut pre_read_results) = take_pre_request_results(ctx);
         let mut idx = 0;
         while idx < self.filters.len() {
             let pf = &self.filters[idx];
@@ -181,7 +234,12 @@ impl FilterPipeline {
                 idx += 1;
                 continue;
             }
-            if let Some(results) = pre_read_results.remove(http_filter.name()) {
+            if let Some(results) = staged_results.by_id.remove(&pf.filter_id) {
+                ctx.filter_results.remove(http_filter.name());
+                if let Some(results) = results {
+                    ctx.filter_results.insert(http_filter.name(), results);
+                }
+            } else if let Some(results) = pre_read_results.remove(http_filter.name()) {
                 ctx.filter_results.insert(http_filter.name(), results);
             }
             ctx.current_filter_id = Some(pf.filter_id);
@@ -365,6 +423,10 @@ impl FilterPipeline {
     ///
     /// Returns [`FilterError`] if the filter fails with a closed
     /// `failure_mode`.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "response hook execution also records terminal observer eligibility"
+    )]
     async fn run_response_hook(
         &self,
         pf: &PipelineFilter,
@@ -373,7 +435,19 @@ impl FilterPipeline {
         let AnyFilter::Http(http_filter) = &pf.filter else {
             return Ok(None);
         };
+        let interim = ctx.response_header.as_ref().is_some_and(|response| {
+            response.status.is_informational() && response.status != http::StatusCode::SWITCHING_PROTOCOLS
+        });
+        let track_completion = self.has_request_completion_observer
+            && ctx.response_header.is_some()
+            && !interim
+            && http_filter.observes_request_completion();
         if skip_by_response_conditions(http_filter.as_ref(), &pf.response_conditions, ctx) {
+            if track_completion {
+                ctx.extensions
+                    .get_or_insert_with(super::CompletionResponseHooks::default)
+                    .mark(pf.filter_id, false);
+            }
             return Ok(None);
         }
         ctx.current_filter_id = Some(pf.filter_id);
@@ -385,7 +459,13 @@ impl FilterPipeline {
         )
         .await;
         ctx.current_filter_id = None;
-        match outcome? {
+        let outcome = outcome?;
+        if track_completion {
+            ctx.extensions
+                .get_or_insert_with(super::CompletionResponseHooks::default)
+                .mark(pf.filter_id, true);
+        }
+        match outcome {
             HeaderFilterOutcome::Continue
             | HeaderFilterOutcome::TerminalResponse(_)
             | HeaderFilterOutcome::StreamingTerminalResponse(_) => Ok(None),
@@ -423,6 +503,9 @@ impl FilterPipeline {
             let Some(pf) = self.filters.get(idx) else {
                 continue;
             };
+            if !request_phase_tracked {
+                mark_pre_request_owner(ctx, pf);
+            }
             if ctx.body_done_indices.get(idx) == Some(&true) {
                 trace!(filter = pf.filter.name(), "skipped body (body_done)");
                 continue;
@@ -437,6 +520,9 @@ impl FilterPipeline {
             let Some(http_filter) = as_request_body_filter(pf, ctx, request_phase_tracked)? else {
                 continue;
             };
+            if !request_phase_tracked {
+                restore_pre_request_results(ctx, pf);
+            }
             ctx.current_filter_id = Some(pf.filter_id);
             let outcome = run_request_body_filter(
                 http_filter,
@@ -448,6 +534,9 @@ impl FilterPipeline {
             )
             .await;
             ctx.current_filter_id = None;
+            if !request_phase_tracked {
+                capture_pre_request_results(ctx, pf);
+            }
             match outcome? {
                 BodyFilterOutcome::Continue => {},
                 BodyFilterOutcome::Released => released = true,

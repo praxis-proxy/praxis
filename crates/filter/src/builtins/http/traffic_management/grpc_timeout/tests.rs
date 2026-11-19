@@ -34,6 +34,28 @@ fn grpc_request(timeout: Option<&str>) -> crate::Request {
     req
 }
 
+/// Add a present timeout header whose value cannot be decoded as text.
+fn with_binary_timeout(mut req: crate::Request) -> crate::Request {
+    let binary = http::HeaderValue::from_bytes(&[0xFF, 0xFE]).unwrap();
+    let _prev = req.headers.insert("grpc-timeout", binary);
+    req
+}
+
+/// Verify that a binary timeout does not affect a non-gRPC request.
+async fn assert_non_grpc_binary_timeout_bypasses_filter() {
+    let req = with_binary_timeout(make_request(http::Method::GET, "/health"));
+    let mut ctx = make_filter_context(&req);
+    let action = filter("max_timeout_ms: 30000").on_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "non-gRPC requests bypass the filter"
+    );
+    assert!(
+        ctx.extensions.get::<GrpcDeadline>().is_none(),
+        "non-gRPC requests get no deadline"
+    );
+}
+
 /// The `grpc-status` a rejection carries, if any.
 fn rejection_status(rejection: &Rejection) -> Option<String> {
     rejection
@@ -246,6 +268,66 @@ async fn malformed_timeout_can_be_ignored() {
         ctx.extensions.get::<GrpcDeadline>().is_some(),
         "the configured default should apply instead"
     );
+}
+
+#[tokio::test]
+async fn binary_timeout_obeys_reject_policy() {
+    for yaml in [
+        "max_timeout_ms: 30000",
+        "max_timeout_ms: 30000\ndefault_timeout_ms: 1000",
+    ] {
+        let req = with_binary_timeout(grpc_request(None));
+        let mut ctx = make_filter_context(&req);
+
+        let action = filter(yaml).on_request(&mut ctx).await.unwrap();
+        let FilterAction::Reject(rejection) = action else {
+            panic!("unreadable grpc-timeout must be rejected with {yaml}, got {action:?}");
+        };
+        assert_eq!(rejection.status, 200, "gRPC failure uses HTTP 200");
+        assert_eq!(
+            rejection_status(&rejection).as_deref(),
+            Some("13"),
+            "malformed timeout is INTERNAL"
+        );
+        assert!(
+            ctx.extensions.get::<GrpcDeadline>().is_none(),
+            "rejection installs no deadline"
+        );
+    }
+
+    assert_non_grpc_binary_timeout_bypasses_filter().await;
+}
+
+#[tokio::test]
+async fn binary_timeout_obeys_ignore_policy() {
+    for (yaml, default) in [
+        ("max_timeout_ms: 30000\non_invalid: ignore", None),
+        (
+            "max_timeout_ms: 30000\ndefault_timeout_ms: 1000\non_invalid: ignore",
+            Some(std::time::Duration::from_secs(1)),
+        ),
+    ] {
+        let req = with_binary_timeout(grpc_request(None));
+        let mut ctx = make_filter_context(&req);
+
+        let action = filter(yaml).on_request(&mut ctx).await.unwrap();
+        assert!(
+            matches!(action, FilterAction::Continue),
+            "ignore policy should continue with {yaml}"
+        );
+        let deadline = ctx.extensions.get::<GrpcDeadline>().copied();
+        assert_eq!(
+            deadline.is_some(),
+            default.is_some(),
+            "deadline presence should follow the default"
+        );
+        if let (Some(deadline), Some(limit)) = (deadline, default) {
+            assert!(
+                deadline.remaining().is_some_and(|remaining| remaining <= limit),
+                "default deadline must be bounded"
+            );
+        }
+    }
 }
 
 #[tokio::test]

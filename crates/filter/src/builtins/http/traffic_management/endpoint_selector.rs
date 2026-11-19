@@ -384,6 +384,10 @@ impl HttpFilter for EndpointSelectorFilter {
         "endpoint_selector"
     }
 
+    fn selects_upstream_endpoint(&self) -> bool {
+        true
+    }
+
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         let resolved = self.resolve_endpoint(ctx);
 

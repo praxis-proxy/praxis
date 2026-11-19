@@ -18,7 +18,7 @@ workspace = true
 [features]
 config-reload = ["dep:arc-swap", "dep:notify", "dep:openssl", "dep:tokio"]
 # SPIFFE X.509-SVID mTLS peer identity. Off by default; experimental.
-spiffe = ["dep:spiffe", "dep:x509-parser"]
+spiffe = ["dep:spiffe"]
 # Expose test utilities for benchmarks.
 bench-utils = ["dep:rcgen", "dep:tempfile"]
 
@@ -38,7 +38,7 @@ tokio = { workspace = true, features = ["sync", "time", "rt"], optional = true }
 tracing = { workspace = true }
 # Parsing only: the `verify`/`ring` features stay off so all crypto goes through
 # the injected rustls provider (FIPS). Do not enable them here.
-x509-parser = { workspace = true, optional = true }
+x509-parser = { workspace = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]

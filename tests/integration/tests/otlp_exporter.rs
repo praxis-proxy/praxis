@@ -59,21 +59,25 @@ use std::{
     path::Path,
     process::{Command, Output},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 
-use opentelemetry_proto::tonic::collector::trace::v1::{
-    ExportTraceServiceRequest, ExportTraceServiceResponse,
-    trace_service_client::TraceServiceClient,
-    trace_service_server::{TraceService, TraceServiceServer},
+use opentelemetry_proto::tonic::{
+    collector::trace::v1::{
+        ExportTraceServiceRequest, ExportTraceServiceResponse,
+        trace_service_client::TraceServiceClient,
+        trace_service_server::{TraceService, TraceServiceServer},
+    },
+    common::v1::any_value::Value,
+    trace::v1::{Span, span::SpanKind},
 };
 use praxis_core::config::Config;
 use praxis_test_utils::{
-    free_port, http_get,
+    example_config_path, free_port, http_get, http_send,
     net::tls::{TestCertificates, ensure_crypto_provider},
-    start_proxy, wait_for_tcp,
+    parse_status, patch_yaml, start_proxy, wait_for_tcp,
 };
 use tonic::transport::{Identity, ServerTlsConfig};
 
@@ -103,6 +107,7 @@ struct CollectorState {
     request_count: AtomicUsize,
     saw_authorization: AtomicBool,
     saw_expected_authorization: AtomicBool,
+    spans: Mutex<Vec<Span>>,
 }
 
 struct FakeCollector {
@@ -134,6 +139,14 @@ impl TraceService for FakeCollector {
             .flat_map(|resource| &resource.scope_spans)
             .map(|scope| scope.spans.len())
             .sum();
+        self.state.spans.lock().expect("collector span lock").extend(
+            message
+                .resource_spans
+                .iter()
+                .flat_map(|resource| &resource.scope_spans)
+                .flat_map(|scope| &scope.spans)
+                .cloned(),
+        );
         self.state.span_count.fetch_add(count, Ordering::Relaxed);
         Ok(tonic::Response::new(ExportTraceServiceResponse {
             partial_success: None,
@@ -178,21 +191,12 @@ fn start_collector(
 /// Run one scenario in a clean test process and return its captured output.
 fn run_child(scenario: &ChildScenario<'_>) -> String {
     let mut command = Command::new(std::env::current_exe().expect("test executable path"));
+    isolate_child_environment(&mut command);
     command
         .args(["--exact", "otlp_exporter_tls_and_plaintext_contract", "--nocapture"])
         .env(CHILD_MODE_ENV, scenario.mode)
         .env_remove(CHILD_ENDPOINT_ENV)
-        .env_remove(CHILD_TLS_ERROR_ENV)
-        .env_remove("SSL_CERT_FILE")
-        .env_remove("SSL_CERT_DIR")
-        .env_remove("OTEL_EXPORTER_OTLP_ENDPOINT")
-        .env_remove("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
-        .env_remove("OTEL_EXPORTER_OTLP_PROTOCOL")
-        .env_remove("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL")
-        .env_remove("OTEL_EXPORTER_OTLP_HEADERS")
-        .env_remove("OTEL_EXPORTER_OTLP_TRACES_HEADERS")
-        .env_remove("OTEL_EXPORTER_OTLP_INSECURE")
-        .env_remove("OTEL_EXPORTER_OTLP_TRACES_INSECURE");
+        .env_remove(CHILD_TLS_ERROR_ENV);
 
     if let Some(endpoint) = scenario.endpoint {
         command.env(CHILD_ENDPOINT_ENV, endpoint);
@@ -228,6 +232,25 @@ fn run_child(scenario: &ChildScenario<'_>) -> String {
         scenario.mode
     );
     text
+}
+
+/// Keep parent telemetry settings from changing the local collector contract.
+fn isolate_child_environment(command: &mut Command) {
+    command.env("RUST_LOG", "info");
+    for variable in [
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_PROTOCOL",
+        "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL",
+        "OTEL_EXPORTER_OTLP_HEADERS",
+        "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+        "OTEL_EXPORTER_OTLP_INSECURE",
+        "OTEL_EXPORTER_OTLP_TRACES_INSECURE",
+    ] {
+        command.env_remove(variable);
+    }
 }
 
 fn captured_output(output: &Output) -> String {
@@ -461,4 +484,126 @@ fn probe_tls_rejection(endpoint: &str) -> String {
         current = source.source();
     }
     chain.join(" | ")
+}
+
+const EXAMPLE_TRACE_ID: &str = "6f8f57715090da2632453988d9a1501b";
+const EXAMPLE_PARENT_ID: &str = "d3c64a4f62a47cd1";
+const EXAMPLE_PATH: &str = "/sampled-example/otlp-config";
+
+#[test]
+fn example_config_delivers_spans() {
+    if std::env::var(CHILD_MODE_ENV).as_deref() == Ok("example-config") {
+        run_example_config_child();
+        return;
+    }
+
+    ensure_crypto_provider();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("collector runtime");
+    let (collector_port, state) = start_collector(&runtime, None);
+    let endpoint = format!("http://127.0.0.1:{collector_port}");
+    let mut command = Command::new(std::env::current_exe().expect("test executable"));
+    isolate_child_environment(&mut command);
+    let output = command
+        .args(["--exact", "example_config_delivers_spans", "--nocapture"])
+        .env(CHILD_MODE_ENV, "example-config")
+        .env(CHILD_ENDPOINT_ENV, &endpoint)
+        .output()
+        .expect("run isolated actual-example exporter child");
+    assert!(
+        output.status.success(),
+        "actual OTLP example child failed: {}",
+        captured_output(&output)
+    );
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let matching = loop {
+        let spans = state.spans.lock().expect("collector span lock");
+        let matching: Vec<_> = spans
+            .iter()
+            .filter(|span| {
+                span.kind == SpanKind::Server as i32
+                    && hex(&span.trace_id) == EXAMPLE_TRACE_ID
+                    && hex(&span.parent_span_id) == EXAMPLE_PARENT_ID
+            })
+            .cloned()
+            .collect();
+        drop(spans);
+        if !matching.is_empty() {
+            break matching;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "sampled example SERVER span was not exported"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    assert_eq!(matching.len(), 1, "one matching sampled request SERVER span expected");
+    let span = &matching[0];
+    assert_eq!(
+        string_attribute(span, "url.path"),
+        Some(EXAMPLE_PATH),
+        "SERVER span must describe the actual example request: {span:?}"
+    );
+    assert_eq!(
+        int_attribute(span, "http.response.status_code"),
+        Some(200),
+        "SERVER span must retain the actual response status"
+    );
+}
+
+fn run_example_config_child() {
+    ensure_crypto_provider();
+    let endpoint = std::env::var(CHILD_ENDPOINT_ENV).expect("example collector endpoint");
+    let proxy_port = free_port();
+    let yaml = fs::read_to_string(example_config_path("observability/tracing-otlp.yaml"))
+        .expect("read actual tracing example");
+    let yaml = patch_yaml(&yaml, proxy_port, &std::collections::HashMap::new());
+    let yaml = yaml.replace("http://localhost:4317", &endpoint);
+    let config = Config::from_yaml(&yaml).expect("parse actual tracing example");
+    assert_eq!(
+        config.telemetry.sampling_rate,
+        Some(0.01),
+        "shipped example must retain its one-percent root sampling"
+    );
+    let tracing_guard = praxis_core::logging::init_tracing(&config).expect("initialize example tracing");
+    let proxy = start_proxy(&config);
+    let request = format!(
+        "GET {EXAMPLE_PATH} HTTP/1.1\r\nHost: localhost\r\ntraceparent: 00-{EXAMPLE_TRACE_ID}-{EXAMPLE_PARENT_ID}-01\r\nConnection: close\r\n\r\n"
+    );
+    let raw = http_send(proxy.addr(), &request);
+    assert_eq!(parse_status(&raw), 200, "actual tracing example request must succeed");
+    drop(proxy);
+    drop(tracing_guard);
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn string_attribute<'span>(span: &'span Span, key: &str) -> Option<&'span str> {
+    span.attributes
+        .iter()
+        .find(|attribute| attribute.key == key)
+        .and_then(|attribute| attribute.value.as_ref())
+        .and_then(|value| value.value.as_ref())
+        .and_then(|value| match value {
+            Value::StringValue(value) => Some(value.as_str()),
+            _ => None,
+        })
+}
+
+fn int_attribute(span: &Span, key: &str) -> Option<i64> {
+    span.attributes
+        .iter()
+        .find(|attribute| attribute.key == key)
+        .and_then(|attribute| attribute.value.as_ref())
+        .and_then(|value| value.value.as_ref())
+        .and_then(|value| match value {
+            Value::IntValue(value) => Some(*value),
+            Value::StringValue(value) => value.parse().ok(),
+            _ => None,
+        })
 }

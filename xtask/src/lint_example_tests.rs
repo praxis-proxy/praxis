@@ -19,11 +19,9 @@ const SKIP: &[&str] = &[
     // Protocols: TLS/mTLS variants requiring cert infrastructure
     "protocols/tls-cipher-suites.yaml",
     "protocols/tls-http-reencrypt.yaml",
-    "protocols/tls-mtls-both.yaml",
     "protocols/tls-mtls-listener-request.yaml",
     "protocols/tls-mtls-listener.yaml",
     "protocols/tls-mtls-spiffe.yaml",
-    "protocols/tls-mtls-upstream.yaml",
     "protocols/tls-multi-cert.yaml",
     "protocols/tls-verify-disabled.yaml",
     "protocols/tls-version-constraint.yaml",

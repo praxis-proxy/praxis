@@ -224,6 +224,190 @@ fn rate_limit_per_ip_isolates_clients() {
     assert_eq!(status, 429, "request exceeding per-IP burst should be rate limited");
 }
 
+/// Distinct bound loopback sockets must receive independent limiter buckets.
+#[cfg(target_os = "linux")]
+#[test]
+fn per_ip_distinct_socket_sources_have_independent_buckets() {
+    use std::{net::Ipv4Addr, sync::mpsc::TryRecvError};
+
+    use praxis_test_utils::{PayloadSpec, parse_body, start_counting_backend};
+
+    let empty = PayloadSpec::binary(0, 7);
+    let a1 = start_counting_backend(empty.clone(), "a1", 0);
+    let a2 = start_counting_backend(empty.clone(), "a2", 0);
+    let b1 = start_counting_backend(empty.clone(), "b1", 0);
+    let b2 = start_counting_backend(empty, "b2", 0);
+    let proxy_port = free_port();
+    let yaml = per_ip_socket_source_yaml(proxy_port, [a1.port, a2.port, b1.port, b2.port]);
+    let config = Config::from_yaml(&yaml).expect("valid two-source rate-limit config");
+    let _proxy = start_full_proxy(&config);
+    wait_for_tcp(&format!("127.0.0.1:{proxy_port}"));
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("source-socket runtime");
+    let responses = runtime
+        .block_on(async {
+            tokio::time::timeout(Duration::from_secs(12), async {
+                let source_a = Ipv4Addr::new(127, 0, 0, 2);
+                let source_b = Ipv4Addr::new(127, 0, 0, 3);
+                let a1 = bound_source_get(proxy_port, source_a, "/a1", "a1").await;
+                let a2 = bound_source_get(proxy_port, source_a, "/a2", "a2").await;
+                let b1 = bound_source_get(proxy_port, source_b, "/b1", "b1").await;
+                let b2 = bound_source_get(proxy_port, source_b, "/b2", "b2").await;
+                [a1, a2, b1, b2]
+            })
+            .await
+        })
+        .expect("four-source exchange must complete before rate refill");
+
+    for (response, id) in [(&responses[0], "a1"), (&responses[2], "b1")] {
+        assert_eq!(parse_status(response), 200, "permitted {id}: {response}");
+        assert_eq!(parse_body(response), "", "exact zero-byte backend response: {response}");
+        assert!(response.ends_with("\r\n\r\n"), "complete backend response: {response}");
+    }
+    for (response, id) in [(&responses[1], "a2"), (&responses[3], "b2")] {
+        assert_eq!(parse_status(response), 429, "repeat {id} must be limited: {response}");
+    }
+    let a1_receipt = a1
+        .receipt
+        .recv_timeout(Duration::from_secs(3))
+        .expect("a1 backend receipt");
+    let b1_receipt = b1
+        .receipt
+        .recv_timeout(Duration::from_secs(3))
+        .expect("b1 backend receipt");
+    assert_eq!(
+        a1_receipt.backend_id, "a1",
+        "source A's first request must reach its backend"
+    );
+    assert_eq!(
+        a1_receipt.request_id.as_deref(),
+        Some("a1"),
+        "source A receipt must identify the allowed request"
+    );
+    assert_eq!(
+        a1_receipt.request_line, "GET /a1 HTTP/1.1",
+        "source A receipt must match the measured path"
+    );
+    assert_eq!(
+        b1_receipt.backend_id, "b1",
+        "source B's first request must reach its backend"
+    );
+    assert_eq!(
+        b1_receipt.request_id.as_deref(),
+        Some("b1"),
+        "source B receipt must identify the allowed request"
+    );
+    assert_eq!(
+        b1_receipt.request_line, "GET /b1 HTTP/1.1",
+        "source B receipt must match the measured path"
+    );
+    for receipt in [&a1_receipt, &b1_receipt] {
+        assert_eq!(receipt.bytes, 0, "{receipt:?}");
+        assert_eq!(receipt.verified_bytes, 0, "{receipt:?}");
+        assert_eq!(receipt.mismatch, None, "{receipt:?}");
+        assert!(receipt.completion.is_some(), "{receipt:?}");
+        assert_eq!(receipt.abort, None, "{receipt:?}");
+    }
+    assert!(
+        matches!(a2.accepted.try_recv(), Err(TryRecvError::Empty)),
+        "source A's second request must not reach a backend"
+    );
+    assert!(
+        matches!(b2.accepted.try_recv(), Err(TryRecvError::Empty)),
+        "source B's second request must not reach a backend"
+    );
+    a1.join();
+    a2.join();
+    b1.join();
+    b2.join();
+}
+
+/// Make one bounded HTTP request from a verified local source address.
+#[cfg(target_os = "linux")]
+async fn bound_source_get(proxy_port: u16, source: std::net::Ipv4Addr, path: &str, id: &str) -> String {
+    use std::net::{IpAddr, SocketAddr};
+
+    use tokio::{
+        io::{AsyncReadExt as _, AsyncWriteExt as _},
+        net::TcpSocket,
+        time::timeout,
+    };
+
+    let socket = TcpSocket::new_v4().expect("create source socket");
+    socket
+        .bind(SocketAddr::new(IpAddr::V4(source), 0))
+        .expect("bind distinct 127/8 source");
+    let destination = SocketAddr::from(([127, 0, 0, 1], proxy_port));
+    let mut stream = timeout(Duration::from_secs(3), socket.connect(destination))
+        .await
+        .expect("bounded source connect")
+        .expect("connect bound source");
+    assert_eq!(
+        stream.local_addr().expect("local socket address").ip(),
+        IpAddr::V4(source),
+        "measured connection must use its assigned transport source IP"
+    );
+    let request = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nX-Request-Id: {id}\r\nConnection: close\r\n\r\n");
+    timeout(Duration::from_secs(3), stream.write_all(request.as_bytes()))
+        .await
+        .expect("bounded source write")
+        .expect("send bound-source request");
+    let mut response = Vec::new();
+    timeout(Duration::from_secs(3), stream.read_to_end(&mut response))
+        .await
+        .expect("bounded source read")
+        .expect("read complete bound-source response");
+    assert!(response.len() < 4096, "bounded response exceeded 4 KiB");
+    String::from_utf8(response).expect("ASCII response")
+}
+
+/// Give each measured request identity its own one-request observing backend.
+#[cfg(target_os = "linux")]
+fn per_ip_socket_source_yaml(proxy_port: u16, ports: [u16; 4]) -> String {
+    let [a1, a2, b1, b2] = ports;
+    format!(
+        r#"
+listeners:
+  - name: default
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: rate_limit
+        scope: local
+        mode: per_ip
+        rate: 0.001
+        burst: 1
+      - filter: router
+        routes:
+          - path_prefix: "/a1"
+            cluster: a1
+          - path_prefix: "/a2"
+            cluster: a2
+          - path_prefix: "/b1"
+            cluster: b1
+          - path_prefix: "/b2"
+            cluster: b2
+      - filter: load_balancer
+        clusters:
+          - name: a1
+            endpoints: ["127.0.0.1:{a1}"]
+          - name: a2
+            endpoints: ["127.0.0.1:{a2}"]
+          - name: b1
+            endpoints: ["127.0.0.1:{b1}"]
+          - name: b2
+            endpoints: ["127.0.0.1:{b2}"]
+insecure_options:
+  allow_private_endpoints: true
+"#
+    )
+}
+
 /// End-to-end IPv6 per-prefix keying through the proxy.
 ///
 /// The loopback interface only offers `::1`, so the harness cannot open

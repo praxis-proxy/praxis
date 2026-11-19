@@ -17,8 +17,8 @@
 //! to reject path traversal (`..` components). Absolute paths like
 //! `/etc/ssl/certs/server.pem` are allowed and common in production. Relative
 //! paths are resolved from the proxy's working directory and must not traverse
-//! upward. Symlinks are permitted but logged as warnings for operators to
-//! review (symlinks can hide traversal or point outside expected boundaries).
+//! upward. Existing symlinks are permitted and logged at debug level because
+//! symlinked secret files are common in deployed configurations.
 //!
 //! # SNI and multi-certificate listeners
 //!

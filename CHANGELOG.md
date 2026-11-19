@@ -32,13 +32,47 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `/ready` also reports the `initializing`, `draining`, and `stopped`
   lifecycle phases with `503` instead of claiming readiness.
 
-- `cargo xtask rollout` and `make test-rollout` exercise Kubernetes pod
-  loss, rollouts, config reloads, TLS rotation, node drain, and upstream
-  failure under continuous HTTP/1.1, HTTP/2, and HTTPS traffic.
+- Experimental CloudEvents `on: request_complete` publishes one best-effort
+  event when a request ends, including aborted responses and early failures.
+- Add a Kubernetes rollout acceptance harness covering pod loss,
+  rollouts, config reloads, TLS rotation, node drain, and upstream failure
+  under continuous HTTP/1.1, HTTP/2, and HTTPS traffic.
 
 ### Changed
 
+- Temporarily disable KIND rollout acceptance in CI and local commands
+  because the cluster exhausts the shared inotify instance budget, pending
+  migration to [gateway-controller](https://github.com/praxis-proxy/gateway-controller).
+- CloudEvents `on: response_complete` publishes only after a final bodyless
+  response or response-body end-of-stream; use `request_complete` to observe
+  terminal failures and aborted streams.
+- **Breaking:** FilterPipeline::emit_deferred_records is replaced by emit_deferred_access_record, which dispatches only eligible access_log instances.
+- **Breaking:** HttpFilterContext now carries request_header_mutations for ordered header operations; custom constructors must initialize the field.
+- **Breaking:** BodyReadError includes TimedOut; exhaustive matches in custom management request implementations must handle it.
+- **Breaking:** SessionStoreRegistry replaces cluster-only get/insert access with explicit candidate generation binding and publication.
+- Reuse owned bytes for nonfinal gRPC-Web response chunks.
+- **Breaking:** Pingora helpers `apply_cached_tls`, `ca_from_cached`,
+  `client_cert_from_cached`, and `http_peer` now return `Result`; embedding
+  callers must handle invalid material.
+- **Breaking:** `TcpFilterContext` now carries `lb_selection`; custom
+  constructors must initialize it to `None`. Built-in TCP load balancing
+  retains each acquired endpoint claim through timeout and cancellation
+  cleanup.
 - Update the Pingora fork dependencies to v0.11.4.
+- **Breaking:** `HttpFilterContext::filter_metadata` is now a
+  `FilterMetadata` instead of a `HashMap<String, String>`. Its `insert`
+  enforces the key, value and entry limits and returns
+  `Result<Option<String>, MetadataRejected>`, so writes through the field can
+  no longer bypass them. A rejection names the `MetadataLimit` it exceeded
+  and hands back the key and value (`MetadataRejected::into_entry`).
+  `get` returns `Option<&str>`, and there is no `entry`, `get_mut` or
+  `iter_mut`. Custom Rust filters that hold large or growing state in
+  `filter_metadata` should move it to `insert_filter_state`.
+- **Breaking:** `HttpFilterContext::get_metadata` and `set_metadata` are
+  removed. Read with `ctx.filter_metadata.get(key)`. Write with
+  `ctx.filter_metadata.insert(key, value)`, adding
+  `.unwrap_or_else(FilterMetadata::log_loss)` to keep `set_metadata`'s
+  behavior of dropping a rejected write with a warning.
 - **Breaking:** `BodyAccess::ReadOnly` and `BodyAccess::ReadWrite` now require
   an explicit `BodyRequirement::Optional` or `BodyRequirement::Required`.
   Custom Rust filters must choose whether their body processing may be skipped
@@ -56,6 +90,91 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Strip reserved and hop-by-hop headers from preformatted gRPC rejections while retaining safe gRPC fields, and frame empty HTTP/1 responses with one correct zero length even when filters supply stale or conflicting lengths.
+- Preserve final body-filter bytes with forwarded trailers on Hyper; abort Pingora delivery when both outputs cannot be represented or EOF filtering fails, while retaining ordinary trailers and deliberate conversion.
+- Keep requests streaming when any repeated Accept field contains text/event-stream.
+- Correct the multi-listener body example description to match its field extraction and routing behavior.
+- Clarify request ID handling, rewrite scope, and routing order in the logging and transformation examples.
+- Record the final response after informational headers, including a fallback access record when a later stream aborts.
+- Preserve every headers.request_add field value in upstream requests, including duplicates and opaque existing values.
+- Clarify that the MaxBodyGuard extension example checks declared Content-Length and point to cumulative request body limits.
+- Describe the retry-policy example as capped connection/reset retries with backoff, without an unconfigured token-bucket budget.
+- Keep Hyper upstream response read deadlines active while a streaming request upload makes progress.
+- Honor final filtered response status in Hyper body delivery and framing, including safe conversion of bodyless 304 responses to 200.
+- Classify failed Hyper terminal EOF sends as downstream disconnects while preserving request state through cancellation and completion.
+- Preserve sticky-session bindings across reloads and conflicting listener bounds while retiring stores no longer used by serving pipelines.
+- Create header affinity only for the selected endpoint with forwarding evidence, including nested and hedged requests; failed dials and local responses cannot establish a binding.
+- Settle nested circuit-breaker tokens on filtered subrequest timeout or cancellation without changing neutral half-open recovery policy.
+- Correct guardrails example commands and documentation to describe request
+  inspection and 403 responses.
+- Configure required client-certificate TLS in the peer identity trust example
+  and verify certificate digest and organization matching end to end.
+- Propagate verified mTLS client identity through Hyper, enabling certificate
+  digest, organization, and serial matching on HTTP/1.1 and HTTP/2.
+- Reject inline Basic Auth usernames containing a colon during configuration
+  loading.
+- Apply CORS requested-header policy to every preflight field line, including
+  undecodable values.
+- Configure active health checks in zone-aware and priority load-balancing
+  examples and verify fallback and recovery.
+- Describe unmatched SNI routing as connection closure without promising a
+  TLS alert.
+- Document session-affinity remapping when endpoint membership changes.
+- Clarify endpoint weight behavior and P2C selection costs in load-balancing
+  guidance.
+- Use reserved metadata in the body-based tenant routing example so client
+  tenant headers cannot override missing or extracted body fields.
+- Correct payload documentation for transfer limits, buffering limits, and
+  reserved metadata headers.
+- Pass through non-native gRPC response media types in the gRPC-Web filter.
+- Prevent JSON body add operations from duplicating an existing member when
+  source metadata is extracted later in the same object.
+- `/api/pipelines` keeps still-bound HTTP listeners visible after their removal
+  from a reloaded config and reports bound transport settings with the applied
+  chains.
+- Reloaded hedged HTTPS requests retain the global upstream CA loaded at
+  startup while applying new response body limits.
+- Returning server calls stop their config watcher, health checks, and
+  housekeeping after shutdown or startup failure.
+- Failed cross-protocol listener registration stops certificate watchers
+  started by earlier successful registrations; returning servers explicitly
+  stop certificate watchers.
+- Reject configured upstream CA bundles with no usable trust anchor during
+  configuration, while retaining valid roots in mixed bundles.
+- Reject malformed upstream mTLS client certificate chains and invalid raw
+  keys before Pingora peer construction can abort the proxy.
+- Expose divergent routed endpoint declarations alongside the endpoint-health
+  view in `/api/stats`.
+- Validate complete initial HTTP/2 SETTINGS frames before reporting a healthy
+  upstream.
+- Apply TCP maximum durations across setup and forwarding, including Hyper
+  TLS setup. Pingora's initial TLS handshake retains its separate timeout.
+- Stop certificate watchers started by earlier listeners when HTTP or TCP
+  listener registration fails.
+- Preserve unmodified MCP request and response bodies, and emit inference
+  mutation warnings only when policy reports a payload change.
+- `cargo xtask fips verify-image --pinned-in` binds the verified image reference
+  to the Containerfile's supported base stage and named digest argument.
+- `cargo xtask sync-example-readme --fix` rejects an unreadable README or
+  missing `## Configs` marker before writing.
+- `cargo xtask benchmark flamegraph` stops and reaps owned child processes on
+  profiling failure or cancellation.
+- Show possible request-head and response hooks in pipeline introspection.
+- Nightly images now require lint and functional-test success before publication.
+- Concurrent new-key KV writes and compiled-regex cache admissions now stay
+  within their capacity limits.
+- Unreadable `grpc-timeout` headers now follow the malformed-header policy;
+  `on_invalid: ignore` still uses the configured fallback.
+- **Breaking:** Reject branch `on_result.key` values over 64 bytes, matching
+  the limit enforced when filters insert results.
+- The `policy` filter's entity-less response fallback now stamps configured
+  `context_meta` and `context_headers`, so response-phase rules see the same
+  operator context as the request path when no request-phase identity was
+  stashed.
+- **Breaking:** Reject invalid header names for `consistent_hash`, `maglev`,
+  and `ring_hash` instead of silently hashing by request path.
+- **Breaking:** Reject HTTP-only downstream read and keepalive timeouts on TCP
+  listeners instead of silently ignoring them.
 - **Breaking:** statically buffered request pipelines now reject a finite
   `body_limits.max_request_bytes` above `body_limits.max_buffer_bytes` at
   startup, config validation, and reload, naming both fields and byte values.
@@ -72,6 +191,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Security
 
+- Keep incomplete-request access logging scoped to one eligible access-log instance and prevent CloudEvents fallback publication outside its configured conditions.
+- Bound total request-body read time for enabled Hyper admin PUT routes and return 408 without applying partial KV or log-level updates.
+- Count pending TCP TLS handshakes against global and listener-group connection
+  limits.
+- Policy content scanners now receive secondary MCP tool text alongside
+  structured results.
+- Inference output policy now inspects recognized Responses text and Chat and
+  Responses function-call arguments.
+- Inference output policy now withholds nonempty malformed declared JSON
+  completions instead of forwarding uninspected content.
+- Inference output policy rejects unsupported encoded declared JSON completions
+  before committing upstream response headers.
+- Early Hints can no longer release a later JSON completion before policy
+  inspection.
+- Reject Terminal branches that can select an upstream endpoint while
+  bypassing later security filters.
+- Keep pre-request results bound to their filter instance so a later
+  classifier cannot suppress an earlier instance's branch-gated security
+  checks.
 - LLM policies now apply HTTP authorization, delegation and request assertions
   to accepted unclassified requests without a model when
   `llm.require_model: false`. Adding a body to a discovery request no longer
