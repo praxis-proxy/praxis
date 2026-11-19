@@ -27,6 +27,7 @@ fn filter_resource_metrics_example_tracks_buffering_and_releases_payload() {
         ]),
     );
     let _proxy = PraxisProcess::spawn(&yaml, &format!("127.0.0.1:{port}"));
+    praxis_test_utils::wait_for_tcp(&format!("127.0.0.1:{metrics}"));
     let payload = br#"{"message":"hello","secret":"remove"}"#;
     let (prefix, suffix) = payload.split_at(12);
     let mut socket = TcpStream::connect(format!("127.0.0.1:{port}")).unwrap();
