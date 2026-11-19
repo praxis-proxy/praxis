@@ -69,4 +69,8 @@ unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 # Temporary exact-revision pin for the upload writer API in praxis-proxy/pingora#11.
 # Remove once the fork publishes the API and Cargo.toml returns to registry versions.
-allow-git = ["https://github.com/rkaplan-hub/pingora.git"]
+allow-git = [
+    "https://github.com/rkaplan-hub/pingora.git",
+    # Exact-revision manifest fix in Cargo.toml; remove with the upstream release.
+    "https://github.com/rkaplan-hub/limitador.git",
+]

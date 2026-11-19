@@ -169,6 +169,11 @@ unicase = "2.10.0"
 url = "2.5.8"
 zeroize = "1.9.2"
 
+[patch.crates-io]
+# Limitador only needs postcard's standard collections. Disable its unused
+# heapless defaults until an upstream release includes the manifest fix.
+limitador = { git = "https://github.com/rkaplan-hub/limitador.git", rev = "27ac93a0504481cde7bfe5e97cc22c165ed8e806" }
+
 [profile.release]
 codegen-units = 1
 lto = true
