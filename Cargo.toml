@@ -118,11 +118,11 @@ jsonwebtoken = { version = "11.1.0", default-features = false }
 openssl = "0.10.82"
 secrecy = { version = "0.10.3", features = ["serde"] }
 serde = { version = "1.0.229", features = ["derive", "rc"] }
-smallvec = "1.16.5"
+smallvec = "1.16.6"
 serde_json = "1.0.154"
 subtle = "2.6.1"
 rcgen = "0.14.10"
-regex = "1.13.1"
+regex = "1.13.2"
 # No built-in provider: praxis-proxy-tls installs the OpenSSL-backed one
 # below at startup (see crates/tls/src/provider.rs). Leaving rustls' defaults
 # on would silently link aws-lc-rs into every build, and

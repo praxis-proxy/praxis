@@ -2088,8 +2088,6 @@ mod tests {
     }
 
     mod tcp_duration_regressions {
-        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-
         use super::*;
 
         #[tokio::test]
