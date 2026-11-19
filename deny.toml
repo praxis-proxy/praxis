@@ -30,6 +30,22 @@ ignore = [
     # engines pull it in through cel and regorus. Remove after those upstream
     # dependencies migrate off chrono-tz.
     "RUSTSEC-2026-0555",
+    # heapless 0.7.17: a 2026-11-18 batch of nine unsound advisories
+    # (use-after-free in `FindMutView::pop`, `Relaxed` ordering in `Spsc::peek`,
+    # `IndexMap` invariant breaks, `SortedLinkedList::zeroize`, `Deque`
+    # construction and `make_contiguous`, a treiber-stack race, and a
+    # panicking `Drop`). Pulled in by regorus through praxis-policy-builtins,
+    # which pins the 0.7 line; no patched 0.7.x release exists. Drop when
+    # regorus moves to heapless 0.9.
+    "RUSTSEC-2026-0574",
+    "RUSTSEC-2026-0575",
+    "RUSTSEC-2026-0576",
+    "RUSTSEC-2026-0577",
+    "RUSTSEC-2026-0578",
+    "RUSTSEC-2026-0579",
+    "RUSTSEC-2026-0580",
+    "RUSTSEC-2026-0581",
+    "RUSTSEC-2026-0582",
 ]
 
 [licenses]
