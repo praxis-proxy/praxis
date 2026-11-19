@@ -13,6 +13,11 @@
 //! The access-record tests check how a tunnel's end is recorded: every
 //! record says how its tunnel closed, and one a peer broke off is written
 //! whatever the sampling, as for any response cut off midway.
+//!
+//! A forward-proxy listener also forwards absolute-form plain requests
+//! (`GET http://host/path`) to their origin. Those tests check that a
+//! client-chosen destination is resolved and bounded the way a CONNECT
+//! destination is.
 
 use std::{
     io::{Read as _, Write as _},
@@ -125,6 +130,55 @@ fn a_tunnel_the_destination_breaks_off_is_recorded_whatever_the_sampling() {
     let records = read_records(&log).unwrap_or(records);
     assert_eq!(records.len(), 1, "only the broken-off tunnel's record: {records:?}");
     assert_eq!(records[0]["metadata.tunnel.close_reason"], "destination_error");
+}
+
+// -----------------------------------------------------------------------------
+// Tests: absolute-form forwarding to a client-chosen destination
+// -----------------------------------------------------------------------------
+
+#[test]
+fn absolute_form_request_reaches_a_named_destination() {
+    // The name resolves through the bounded per-call resolver, and the
+    // checked address is dialed.
+    let origin = praxis_test_utils::start_backend_with_shutdown("from-origin");
+    let proxy = start_forward_listener(origin.port(), 120_000, true);
+
+    let (status, body) = forward_get(proxy.addr(), &format!("http://localhost:{}/", origin.port()));
+    assert_eq!(status, 200, "the request should be forwarded to its origin");
+    assert!(
+        body.ends_with("from-origin"),
+        "the origin's body should come back: {body:?}"
+    );
+}
+
+#[test]
+fn name_answering_with_a_private_address_is_refused() {
+    // `localhost` answers with loopback, which the private-address guard
+    // refuses without allow_private_upstreams, as it refuses a CONNECT to it.
+    let origin = praxis_test_utils::start_backend_with_shutdown("from-origin");
+    let proxy = start_forward_listener(origin.port(), 120_000, false);
+
+    let (status, _body) = forward_get(proxy.addr(), &format!("http://localhost:{}/", origin.port()));
+    assert_eq!(status, 502, "a private answer must not be dialed");
+}
+
+#[test]
+fn destination_that_stops_answering_is_cut_off_at_the_idle_timeout() {
+    // The origin accepts and never answers. Without a read timeout the
+    // request, and the connections it holds, would wait indefinitely.
+    let (silent, port) = praxis_test_utils::bind_unique_port();
+    let holder = std::thread::spawn(move || silent.accept().map(|(stream, _peer)| stream));
+    let proxy = start_forward_listener(port, 500, true);
+
+    let started = Instant::now();
+    let (status, _body) = forward_get(proxy.addr(), &format!("http://localhost:{port}/"));
+    let elapsed = started.elapsed();
+    assert_eq!(status, 504, "a read that times out answers 504");
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "the 500 ms idle timeout must bound the wait, took {elapsed:?}"
+    );
+    drop(holder.join());
 }
 
 // -----------------------------------------------------------------------------
@@ -331,4 +385,60 @@ fn send_connect(proxy: &str, target: &str) -> (TcpStream, u16) {
         .and_then(|code| code.parse().ok())
         .unwrap_or_else(|| panic!("malformed CONNECT response head: {head:?}"));
     (stream, status)
+}
+
+/// Start a forward-proxy listener that allows `localhost:port`, with the
+/// given idle timeout, optionally allowing private destinations.
+fn start_forward_listener(port: u16, idle_timeout_ms: u64, allow_private: bool) -> ProxyGuard {
+    let yaml = format!(
+        r#"
+listeners:
+  - name: egress
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains: [egress]
+    forward_proxy:
+      enabled: true
+      idle_timeout_ms: {idle_timeout_ms}
+      allow_destinations:
+        - host: localhost
+          port: {port}
+
+filter_chains:
+  - name: egress
+    filters:
+      - filter: request_id
+
+insecure_options:
+  allow_private_upstreams: {allow_private}
+"#,
+        proxy_port = free_port(),
+    );
+    let config = Config::from_yaml(&yaml).unwrap_or_else(|e| panic!("forward listener config should parse: {e}"));
+    let proxy = start_full_proxy(&config);
+    wait_for_tcp(proxy.addr());
+    proxy
+}
+
+/// Send `GET target` in absolute form, as an `HTTP_PROXY` client does, and
+/// return the response status and body.
+fn forward_get(proxy: &str, target: &str) -> (u16, String) {
+    let authority = target
+        .split_once("://")
+        .and_then(|(_scheme, rest)| rest.split('/').next())
+        .expect("target must be absolute-form");
+    let mut stream = TcpStream::connect(proxy).expect("connect to proxy");
+    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    write!(
+        stream,
+        "GET {target} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    let mut response = String::new();
+    drop(stream.read_to_string(&mut response));
+    let status = response
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or_else(|| panic!("malformed response: {response:?}"));
+    (status, response)
 }

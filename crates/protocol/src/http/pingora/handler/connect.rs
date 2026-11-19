@@ -58,7 +58,7 @@ use crate::{
             ERROR_TYPE_UPSTREAM_UNAVAILABLE,
         },
     },
-    tcp::proxy::connect_resolved,
+    tcp::proxy::{UPSTREAM_CONNECT_TIMEOUT, connect_resolved, find_private_addr},
 };
 
 /// Status for a filter's 2xx answer to a CONNECT.
@@ -91,7 +91,8 @@ pub(super) struct ForwardProxyRuntime {
     /// Host-to-ports destination matcher.
     matcher: SniMatcher<Vec<u16>>,
 
-    /// How long the tunnel may stay idle before closing.
+    /// How long the tunnel may stay idle before closing, and the read and
+    /// write timeout toward a forwarded request's destination.
     idle_timeout: Duration,
 
     /// Hard cap on total tunnel duration.
@@ -948,27 +949,76 @@ fn forward_destination(target: &str) -> Option<ForwardDestination> {
     })
 }
 
-/// The address the HTTP upstream resolver dials: [`dial_address`] with a
-/// host name made absolute (see [`absolute_name`]). IP literals are left as
-/// they are; they are not resolved and would not parse with a dot.
-fn resolve_address(destination: &ConnectDestination) -> String {
-    if destination.host.parse::<std::net::IpAddr>().is_ok() {
-        return dial_address(destination);
+/// Resolve a forward destination to the one address to dial, under the
+/// bounds and checks the CONNECT dialer applies.
+///
+/// The name is client-chosen, so it resolves through the bounded per-call
+/// resolver (see [`resolve_destination`]), not the shared cached one that
+/// configured endpoints use: slow DNS fails the request instead of pinning a
+/// blocking thread per name, and client names never fill the shared cache.
+/// A name with any private or reserved answer is refused unless
+/// `insecure_options.allow_private_upstreams` is set, as the CONNECT dialer
+/// refuses it. IPv4 is preferred, as for configured endpoints. `None`,
+/// after logging why, when there is nothing to dial.
+async fn checked_dial_address(
+    forward_proxy: &ForwardProxyRuntime,
+    destination: &ConnectDestination,
+) -> Option<std::net::SocketAddr> {
+    let address = dial_address(destination);
+    let addrs = resolve_destination(&address, &destination.host, destination.port).await?;
+    if !forward_proxy.allow_private_upstreams
+        && let Some(private) = find_private_addr(&addrs)
+    {
+        warn!(
+            destination = %address,
+            ip = %private,
+            "forward request destination resolves to a private/reserved address; \
+             set insecure_options.allow_private_upstreams to allow"
+        );
+        return None;
     }
-    format!("{}:{}", absolute_name(&destination.host), destination.port)
+    addrs
+        .iter()
+        .find(|addr| addr.is_ipv4())
+        .or_else(|| addrs.first())
+        .copied()
 }
 
-/// Build the upstream for a forward destination.
+/// Connection limits for a client-chosen destination.
 ///
-/// HTTPS destinations originate TLS with SNI from the destination host
-/// and verification against the system roots: no custom CA, no client
-/// certificate. The dialed authority becomes the upstream `Host`.
+/// No configuration names these upstreams, so nothing else would bound
+/// them: the connect, including the TLS handshake, gets the CONNECT dialer's
+/// limit, and each read and write gets the listener's forward-proxy idle
+/// timeout, so a destination that stops answering cannot hold the request
+/// and its connection indefinitely.
+fn forward_connection_options(idle_timeout: Duration) -> ConnectionOptions {
+    ConnectionOptions {
+        connection_timeout: Some(UPSTREAM_CONNECT_TIMEOUT),
+        total_connection_timeout: Some(UPSTREAM_CONNECT_TIMEOUT),
+        read_timeout: Some(idle_timeout),
+        write_timeout: Some(idle_timeout),
+        ..ConnectionOptions::default()
+    }
+}
+
+/// Build the upstream for a forward destination that dials `dial`.
+///
+/// `dial` is the checked address from [`checked_dial_address`]; the
+/// upstream connects to it directly, so nothing resolves the client's name
+/// again. The name stays in the `Host` header and, for HTTPS, in the SNI
+/// that the certificate is verified against. HTTPS destinations originate
+/// TLS with verification against the system roots: no custom CA, no client
+/// certificate.
 ///
 /// # Errors
 ///
 /// Returns the TLS material error when the HTTPS TLS settings cannot be
 /// built.
-fn build_destination_upstream(parsed: &ForwardDestination) -> Result<Upstream, praxis_tls::TlsError> {
+fn build_destination_upstream(
+    parsed: &ForwardDestination,
+    dial: std::net::SocketAddr,
+    idle_timeout: Duration,
+) -> Result<Upstream, praxis_tls::TlsError> {
     let tls = parsed
         .tls
         .then(|| {
@@ -979,11 +1029,10 @@ fn build_destination_upstream(parsed: &ForwardDestination) -> Result<Upstream, p
         })
         .transpose()?;
     Ok(Upstream {
-        // Absolute, so the resolver dials exactly the host the rules approved.
-        address: Arc::from(resolve_address(&parsed.destination)),
+        address: Arc::from(dial.to_string()),
         authority: Some(parsed.host_header.clone()),
         base_path: None,
-        connection: Arc::new(ConnectionOptions::default()),
+        connection: Arc::new(forward_connection_options(idle_timeout)),
         tls,
     })
 }
@@ -1090,22 +1139,43 @@ async fn gate_and_select(
         send_rejection_for(session, Rejection::status(status), ctx).await;
         return Ok(Some(true));
     }
-    if ctx.upstream.is_none() {
-        match build_destination_upstream(parsed) {
-            Ok(upstream) => ctx.upstream = Some(upstream),
-            Err(error) => {
-                warn!(
-                    destination = %dial_address(&parsed.destination),
-                    error = %error,
-                    "forward destination TLS setup failed"
-                );
-                ctx.stamp_error_type(ERROR_TYPE_INTERNAL);
-                send_rejection_for(session, Rejection::status(500), ctx).await;
-                return Ok(Some(true));
-            },
-        }
+    // A pipeline-selected upstream keeps control, and the destination is
+    // then neither resolved nor dialed.
+    if ctx.upstream.is_some() {
+        return Ok(None);
     }
-    Ok(None)
+    match select_destination_upstream(forward_proxy, parsed).await {
+        Ok(upstream) => {
+            ctx.upstream = Some(upstream);
+            ctx.upstream_is_forward_destination = true;
+            Ok(None)
+        },
+        Err((status, error_type)) => {
+            ctx.stamp_error_type(error_type);
+            send_rejection_for(session, Rejection::status(status), ctx).await;
+            Ok(Some(true))
+        },
+    }
+}
+
+/// Resolve the destination and build its upstream, or the status and error
+/// type that answer the request instead: 502 when there is nothing safe to
+/// dial, 500 when the HTTPS TLS settings cannot be built.
+async fn select_destination_upstream(
+    forward_proxy: &ForwardProxyRuntime,
+    parsed: &ForwardDestination,
+) -> Result<Upstream, (u16, &'static str)> {
+    let dial = checked_dial_address(forward_proxy, &parsed.destination)
+        .await
+        .ok_or((502, ERROR_TYPE_UPSTREAM_UNAVAILABLE))?;
+    build_destination_upstream(parsed, dial, forward_proxy.idle_timeout).map_err(|error| {
+        warn!(
+            destination = %dial_address(&parsed.destination),
+            error = %error,
+            "forward destination TLS setup failed"
+        );
+        (500, ERROR_TYPE_INTERNAL)
+    })
 }
 
 /// Rewrite an absolute-form request to origin-form for the upstream leg.
@@ -2366,13 +2436,21 @@ allow_destinations:
         assert_eq!(forwarded("http://93.184.216.34/").destination.host, "93.184.216.34");
     }
 
+    /// A dial address for upstream-building tests.
+    fn dial(address: &str) -> std::net::SocketAddr {
+        address.parse().unwrap()
+    }
+
+    /// Idle timeout for upstream-building tests.
+    const IDLE: Duration = Duration::from_secs(120);
+
     #[test]
-    fn destination_upstream_plain_http_dials_with_authority() {
+    fn destination_upstream_dials_the_checked_address_with_the_name_as_host() {
         let parsed = forwarded("http://api.example.com:8080/");
-        let upstream = build_destination_upstream(&parsed).unwrap();
-        // Dialed as an absolute name, so search domains are never appended;
-        // the Host header keeps the name the client sent.
-        assert_eq!(&*upstream.address, "api.example.com.:8080");
+        let upstream = build_destination_upstream(&parsed, dial("93.184.216.34:8080"), IDLE).unwrap();
+        // The checked address is dialed as is, so nothing resolves the
+        // client's name again; the Host header keeps the name it sent.
+        assert_eq!(&*upstream.address, "93.184.216.34:8080");
         assert!(upstream.tls.is_none(), "plain http must not originate TLS");
         assert_eq!(
             upstream
@@ -2385,12 +2463,60 @@ allow_destinations:
     }
 
     #[test]
-    fn destination_upstream_https_originate_tls_with_sni() {
+    fn destination_upstream_https_verifies_the_name_while_dialing_the_address() {
         let parsed = forwarded("https://api.example.com/");
-        let upstream = build_destination_upstream(&parsed).unwrap();
-        assert_eq!(&*upstream.address, "api.example.com.:443");
+        let upstream = build_destination_upstream(&parsed, dial("[2001:db8::1]:443"), IDLE).unwrap();
+        assert_eq!(&*upstream.address, "[2001:db8::1]:443");
         let tls = upstream.tls.as_ref().unwrap();
-        assert_eq!(tls.sni(), Some("api.example.com"), "SNI is never fully qualified");
+        assert_eq!(
+            tls.sni(),
+            Some("api.example.com"),
+            "SNI is the name, never fully qualified"
+        );
+    }
+
+    #[test]
+    fn destination_upstream_bounds_connect_reads_and_writes() {
+        let parsed = forwarded("http://api.example.com/");
+        let upstream =
+            build_destination_upstream(&parsed, dial("93.184.216.34:80"), Duration::from_millis(1500)).unwrap();
+        let options = &upstream.connection;
+        assert_eq!(options.connection_timeout, Some(UPSTREAM_CONNECT_TIMEOUT));
+        assert_eq!(options.total_connection_timeout, Some(UPSTREAM_CONNECT_TIMEOUT));
+        assert_eq!(options.read_timeout, Some(Duration::from_millis(1500)));
+        assert_eq!(options.write_timeout, Some(Duration::from_millis(1500)));
+    }
+
+    #[tokio::test]
+    async fn names_resolve_through_the_per_call_resolver_and_private_answers_are_refused() {
+        let destination = forwarded("http://localhost:8080/").destination;
+        let config: ForwardProxyConfig = serde_yaml::from_str("enabled: true\n").unwrap();
+        let allowing = ForwardProxyRuntime::try_from_config(&config, true).unwrap();
+        let addr = checked_dial_address(&allowing, &destination)
+            .await
+            .expect("localhost must resolve");
+        assert!(addr.ip().is_loopback() && addr.port() == 8080, "{addr}");
+        assert!(
+            checked_dial_address(&runtime("enabled: true\n"), &destination)
+                .await
+                .is_none(),
+            "a name answering with a private address is refused without allow_private_upstreams"
+        );
+    }
+
+    #[tokio::test]
+    async fn ip_literal_destinations_are_dialed_as_given() {
+        let config: ForwardProxyConfig = serde_yaml::from_str("enabled: true\n").unwrap();
+        let allowing = ForwardProxyRuntime::try_from_config(&config, true).unwrap();
+        for (target, expected) in [
+            ("http://10.0.0.1:8080/", "10.0.0.1:8080"),
+            ("http://[::1]:8080/", "[::1]:8080"),
+        ] {
+            let addr = checked_dial_address(&allowing, &forwarded(target).destination)
+                .await
+                .unwrap();
+            assert_eq!(addr.to_string(), expected, "{target}");
+        }
     }
 
     #[test]
@@ -2419,13 +2545,5 @@ allow_destinations:
         // An IPv4-mapped spelling is not canonical, so it is refused at parse
         // and never reaches the dial.
         assert!(forward_destination("https://[::ffff:10.0.0.1]/").is_none());
-    }
-
-    #[test]
-    fn destination_upstream_dials_ip_literals_as_given() {
-        let upstream = build_destination_upstream(&forwarded("http://10.0.0.1:8080/")).unwrap();
-        assert_eq!(&*upstream.address, "10.0.0.1:8080");
-        let upstream = build_destination_upstream(&forwarded("http://[::1]:8080/")).unwrap();
-        assert_eq!(&*upstream.address, "[::1]:8080");
     }
 }

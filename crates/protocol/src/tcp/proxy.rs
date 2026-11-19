@@ -57,7 +57,10 @@ const PEEK_INITIAL: usize = 1_024; // 1 KiB
 const PEEK_MAX: usize = 16_384; // 16 KiB
 
 /// Timeout for upstream TCP connect (including DNS resolution).
-const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+///
+/// The HTTP forward proxy dials client-chosen destinations under the same
+/// limit.
+pub(crate) const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Timeout for SNI peek phase.
 ///
@@ -1160,7 +1163,7 @@ async fn check_and_connect(upstream_addr: &str, addrs: &[SocketAddr], allow_priv
 /// `64:ff9b::a00:1` are both identified as private.
 ///
 /// [`is_private_upstream_ip`]: praxis_core::connectivity::is_private_upstream_ip
-fn find_private_addr(addrs: &[SocketAddr]) -> Option<std::net::IpAddr> {
+pub(crate) fn find_private_addr(addrs: &[SocketAddr]) -> Option<std::net::IpAddr> {
     addrs.iter().map(SocketAddr::ip).find(is_private_upstream_ip)
 }
 
