@@ -30,6 +30,11 @@ ignore = [
     # engines pull it in through cel and regorus. Remove after those upstream
     # dependencies migrate off chrono-tz.
     "RUSTSEC-2026-0555",
+    # 2026-11-19: Policy's limitador and regorus pull in heapless 0.7.17 via
+    # postcard. RustSec rates the IndexMap insertion bug as very unlikely to
+    # be reachable in practice. Remove when Policy drops heapless < 0.9.4.
+    # https://github.com/praxis-proxy/policy/issues/353
+    "RUSTSEC-2026-0582",
 ]
 
 [licenses]
