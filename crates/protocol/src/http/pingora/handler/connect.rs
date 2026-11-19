@@ -301,8 +301,12 @@ pub(super) async fn handle(
         .await
 }
 
-/// Record the request facts later phases (logging, metrics) need.
+/// Record the request facts the filters and later phases (logging, metrics)
+/// need.
 fn prepare_context(pipeline: &FilterPipeline, session: &Session, ctx: &mut PingoraRequestCtx) {
+    // The tunnel dials its own destination, never the cluster a route
+    // selects for the CONNECT; a catch-all route matches it too.
+    ctx.extensions.insert(praxis_filter::ClusterNotContacted);
     ctx.client_http_version = Some(session.req_header().version);
     ctx.client_addr = session
         .client_addr()

@@ -255,9 +255,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   without a port is answered with 400, and a 2xx answer to a CONNECT, from
   a request filter or made so by a response filter, with 502, since a 2xx
   would claim a tunnel that was never opened. HTTP/2 CONNECT is answered
-  with 501. Tunneled payloads are opaque to body-inspecting filters.
+  with 501. Tunneled payloads are opaque to body-inspecting filters. On a
+  listener that also reverse-proxies, a CONNECT that matches a route
+  leaves that cluster's `circuit_breaker` alone: it neither takes the
+  half-open probe nor counts as a success or failure.
   Example configs: `security/forward-proxy.yaml` (destination allowlist)
   and `security/forward-proxy-ip-acl.yaml` (client ACL).
+- `praxis_filter::ClusterNotContacted`, a request extension an HTTP
+  adapter publishes for a request that will not reach the cluster a
+  router selects for it, such as a forward-proxy CONNECT;
+  `circuit_breaker` takes no token for such a request.
 - `praxis_protocol::http::load_http_handler_with_options` and
   `HttpHandlerOptions`, for library callers that load HTTP listeners
   themselves and need settings from outside the listener, such as
