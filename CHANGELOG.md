@@ -77,6 +77,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `context_headers` or request conditions keep the previous timing.
   Pipeline construction warns when an earlier filter or request conditions
   move admission out of the head.
+- Routes with `replace_inherited` are now judged by their own
+  authentication steps only, in every pipeline. Pipelines that streamed the
+  body used to also require the global credential, so such a route (or one
+  with `steps: []`) now accepts requests the global steps would have
+  rejected.
 - `grpc_status` arms gRPC error responses at the request head, so a later
   head denial such as `policy` admission reaches gRPC clients as a
   `grpc-status`. `HttpFilter::repeats_request_head` declares a head hook whose
