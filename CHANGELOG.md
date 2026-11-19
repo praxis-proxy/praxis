@@ -58,7 +58,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   does not pre-read the body, the policy admits in the request phase as
   before, so that filter still runs first (a pre-read already runs the
   policy's body hook before any request phase, so there the head is kept);
-  `HttpFilter::admits_at_request_head` declares a head hook that may reject.
+  `HttpFilter::admits_at_request_head` declares a head hook that may reject,
+  and `HttpFilter::may_end_request` (default true) whether a filter's request
+  phase can reject or answer; built-ins that only continue, such as
+  `forwarded_headers`, `credential_injection` and `headers`, declare false.
   When an entity default, group or route sets `replace_inherited`, or
   `global.defaults.http` or an `http:` route adds authentication, the policy
   never runs the global gate: the route judges the credential, the head runs

@@ -390,6 +390,35 @@ async fn the_pipeline_runs_each_stage_once_across_the_head_and_request_phases() 
     assert_eq!(plugins(&other_calls), ["pre", "who", "post"]);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn only_an_earlier_filter_that_can_end_the_request_moves_admission_out_of_the_head() {
+    let (_dir, path, _calls) = recorded_policy("test/head-ordering", &HOST_LIMITERS.replace("{deny}", "{}"));
+    let cases = [
+        ("forwarded_headers", "- filter: forwarded_headers\n", true),
+        (
+            "headers",
+            "- filter: headers\n  request_add:\n    - name: x-a\n      value: b\n",
+            true,
+        ),
+        (
+            "grpc_timeout",
+            "- filter: grpc_timeout\n  max_timeout_ms: 1000\n",
+            false,
+        ),
+        (
+            "router",
+            "- filter: router\n  routes:\n    - path_prefix: /\n      cluster: backend\n",
+            false,
+        ),
+    ];
+    for (case, earlier, head) in cases {
+        let yaml = format!("{earlier}- filter: policy\n  config_path: {path}\n");
+        let mut entries: Vec<FilterEntry> = serde_yaml::from_str(&yaml).unwrap();
+        let pipeline = FilterPipeline::build(&mut entries, &FilterRegistry::with_builtins()).unwrap();
+        assert_eq!(pipeline.has_request_head_phase(), head, "{case}");
+    }
+}
+
 #[test]
 fn only_dropped_or_head_only_steps_keep_the_global_resolver_from_the_head() {
     for (case, yaml, blocker) in additive_layouts().into_iter().chain(blocking_layouts()) {

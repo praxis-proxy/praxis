@@ -164,6 +164,10 @@ impl HttpFilter for RequestIdFilter {
         "request_id"
     }
 
+    fn may_end_request(&self) -> bool {
+        false
+    }
+
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         let client_id = inbound_header_value(ctx, &self.header_name);
 

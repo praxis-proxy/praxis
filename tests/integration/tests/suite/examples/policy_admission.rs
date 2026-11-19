@@ -178,6 +178,28 @@ fn an_earlier_grpc_status_shapes_a_head_denial() {
 }
 
 #[test]
+fn an_earlier_grpc_timeout_still_answers_a_malformed_deadline() {
+    let backend = start_header_echo_backend();
+    let grpc_timeout = "      - filter: grpc_timeout\n        max_timeout_ms: 1000\n\n";
+    let proxy = start_proxy(&without_classifier(&load_example_yaml(
+        free_port(),
+        backend.port(),
+        Some(grpc_timeout),
+    )));
+    let raw = http_send(
+        proxy.addr(),
+        "POST /pkg.Svc/Call HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/grpc\r\ngrpc-timeout: \
+         soon\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+    )
+    .to_ascii_lowercase();
+    assert_eq!(parse_status(&raw), 200, "{raw}");
+    assert!(
+        raw.contains("grpc-status: 13"),
+        "grpc_timeout answers INTERNAL before policy asks for a credential: {raw}"
+    );
+}
+
+#[test]
 fn a_route_that_replaces_global_authentication_judges_its_own_credential() {
     let backend = start_header_echo_backend();
     let dir = tempfile::TempDir::new().unwrap();

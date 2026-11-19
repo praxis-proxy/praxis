@@ -97,9 +97,10 @@ both during a later `stream_buffer` pre-read and the request phase.
 A filter whose head hook may reject the request, as an admission check does,
 declares `admits_at_request_head`. In a pipeline without a `stream_buffer`
 pre-read, the pipeline skips that hook when an earlier top-level filter, or a
-filter in one of its branches, can end the request in its request phase (a
-security filter, or one that answers like `static_response` or `redirect`),
-and the filter admits in `on_request` instead, so the earlier filter still
+filter in one of its branches, can end the request in its request phase (one
+that answers like `static_response` or `redirect`, or any filter that does not
+declare `may_end_request` false, as `forwarded_headers` and `headers` do), and
+the filter admits in `on_request` instead, so the earlier filter still
 runs first. A pre-read runs body hooks before any request phase, so there the
 head hook is kept. A filter with request `conditions` always admits in
 `on_request`, where its conditions see the headers that head filters publish.

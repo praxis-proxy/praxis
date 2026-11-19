@@ -685,6 +685,10 @@ impl HttpFilter for CloudEventsFilter {
         "cloud_events"
     }
 
+    fn may_end_request(&self) -> bool {
+        false
+    }
+
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         if self.on != CloudEventsPhase::Request {
             return Ok(FilterAction::Continue);

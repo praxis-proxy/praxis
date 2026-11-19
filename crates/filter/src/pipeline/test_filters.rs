@@ -40,6 +40,15 @@ pub(in crate::pipeline) fn noop_filter(name: &'static str) -> PipelineFilter {
     })
 }
 
+/// A filter named `name` whose request phase can end the request.
+pub(in crate::pipeline) fn ending_filter(name: &'static str) -> PipelineFilter {
+    capability_filter(CapabilityFilter {
+        name,
+        ends_request: true,
+        ..CapabilityFilter::default()
+    })
+}
+
 /// A filter named `name` that runs in the request-head phase.
 pub(in crate::pipeline) fn head_filter(name: &'static str) -> PipelineFilter {
     capability_filter(CapabilityFilter {
@@ -201,6 +210,7 @@ struct CapabilityFilter {
     produces_terminal_response: bool,
     runs_request_head: bool,
     admits_at_request_head: bool,
+    ends_request: bool,
 }
 
 #[async_trait]
@@ -259,6 +269,10 @@ impl HttpFilter for CapabilityFilter {
 
     fn admits_at_request_head(&self) -> bool {
         self.admits_at_request_head
+    }
+
+    fn may_end_request(&self) -> bool {
+        self.ends_request
     }
 
     #[cfg(feature = "upstream-binding")]

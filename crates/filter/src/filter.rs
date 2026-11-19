@@ -157,6 +157,21 @@ pub trait HttpFilter: Send + Sync {
         false
     }
 
+    /// Whether [`on_request`] can end the request, by rejecting it or answering
+    /// it, so an admitting head hook of a later filter must wait for it (see
+    /// [`admits_at_request_head`]).
+    ///
+    /// Defaults to `true`, so a filter that says nothing keeps its precedence.
+    /// A filter whose request phase only continues overrides this; an error
+    /// under `failure_mode: closed` and a rejection from a body hook don't
+    /// count.
+    ///
+    /// [`on_request`]: HttpFilter::on_request
+    /// [`admits_at_request_head`]: HttpFilter::admits_at_request_head
+    fn may_end_request(&self) -> bool {
+        true
+    }
+
     /// Whether [`on_request`] repeats everything the request-head hook does,
     /// so the filter still works where no head phase runs, such as an
     /// `iterative_request_router` step. The head hook then only does the same

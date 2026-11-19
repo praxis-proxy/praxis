@@ -1257,12 +1257,14 @@ mod tests {
 
     #[test]
     fn an_admitting_head_filter_is_left_out_behind_a_filter_that_can_end_the_request() {
-        use crate::pipeline::test_filters::{admitting_head_filter, head_filter, noop_filter};
+        use crate::pipeline::test_filters::{admitting_head_filter, ending_filter, head_filter, noop_filter};
 
-        let mut ip_acl = noop_filter("ip_acl");
-        ip_acl.is_security = true;
         let indices = request_head_filter_indices(
-            &[ip_acl, admitting_head_filter("policy"), head_filter("classifier")],
+            &[
+                ending_filter("ip_acl"),
+                admitting_head_filter("policy"),
+                head_filter("classifier"),
+            ],
             false,
         );
         assert_eq!(
@@ -1279,6 +1281,15 @@ mod tests {
 
         let indices = request_head_filter_indices(&[head_filter("classifier"), admitting_head_filter("policy")], false);
         assert_eq!(indices, vec![0, 1], "a fact-publishing filter ends nothing");
+
+        let mut forwarded_headers = noop_filter("forwarded_headers");
+        forwarded_headers.is_security = true;
+        let indices = request_head_filter_indices(&[forwarded_headers, admitting_head_filter("policy")], false);
+        assert_eq!(
+            indices,
+            vec![1],
+            "a security filter whose request phase only continues ends nothing"
+        );
 
         let mut gated = noop_filter("gate");
         gated.branches.push(crate::pipeline::branch::ResolvedBranch {

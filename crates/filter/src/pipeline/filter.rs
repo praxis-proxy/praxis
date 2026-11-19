@@ -87,13 +87,14 @@ pub(super) const ANSWERING_FILTERS: &[&str] = &["iterative_request_router", "red
 
 impl PipelineFilter {
     /// Whether this filter can end a request in its request phase, before a
-    /// later filter runs: it answers requests, declares terminal responses, is
-    /// a security filter that may reject, or a filter in one of its branches
-    /// can.
+    /// later filter runs: it declares it [may end the request], answers
+    /// requests, declares terminal responses, or a filter in one of its
+    /// branches can.
+    ///
+    /// [may end the request]: crate::HttpFilter::may_end_request
     pub(crate) fn can_end_request(&self) -> bool {
-        self.is_security
+        matches!(&self.filter, AnyFilter::Http(filter) if filter.may_end_request() || filter.produces_terminal_response())
             || ANSWERING_FILTERS.contains(&self.filter.name())
-            || matches!(&self.filter, AnyFilter::Http(filter) if filter.produces_terminal_response())
             || self
                 .branches
                 .iter()

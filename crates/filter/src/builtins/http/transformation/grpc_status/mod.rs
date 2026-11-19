@@ -165,6 +165,10 @@ impl HttpFilter for GrpcStatusFilter {
         "grpc_status"
     }
 
+    fn may_end_request(&self) -> bool {
+        false
+    }
+
     // Arming at the head shapes rejections from head filters too, such as
     // `policy` admission; `on_request` arms again where no head phase runs.
     fn runs_request_head(&self) -> bool {
