@@ -19,6 +19,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Core policy-enforcement guide with PPE use cases, integration conditions,
+  and links from onboarding, architecture, and security documentation.
+- Expose compact JSON sizing and capped serialization utilities in
+  `praxis_filter::json_size` for built-in and external filters.
 - Experimental `bandwidth` server support paces HTTP request and response
   bodies on Pingora and Hyper, and both TCP payload directions, including
   local responses and the prefix inspected for SNI routing.
@@ -98,6 +102,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Return gRPC `DEADLINE_EXCEEDED` when Pingora's rounded upstream timeout fires just before the call's exact deadline, while preserving earlier transport timeouts.
 - Check every logical subrequest output against its size limit before pacing,
   including output following empty emissions or consuming callbacks.
 

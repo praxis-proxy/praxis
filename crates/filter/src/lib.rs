@@ -63,6 +63,7 @@ mod filter;
 mod filtered_subrequest;
 mod grpc_response;
 pub mod json_ops;
+pub mod json_size;
 pub(crate) mod load_balancing;
 mod metadata;
 mod metrics;
