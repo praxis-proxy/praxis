@@ -63,6 +63,7 @@ mod credential_store_parity;
 mod csrf;
 mod downstream_keepalive;
 mod downstream_read_timeout;
+mod drain_handoff;
 mod error_response;
 mod examples;
 mod failure_mode;
@@ -88,7 +89,11 @@ mod path_rewrite;
 mod payload_processing;
 mod payload_transport;
 mod per_listener_pipeline;
+#[cfg(any(feature = "pingora", feature = "hyper"))]
+mod pingora_response_trailers;
 mod pipelines_admin;
+#[cfg(feature = "policy-builtins")]
+mod policy_boundary;
 mod process_logging;
 mod prometheus_metrics;
 mod rate_limit;

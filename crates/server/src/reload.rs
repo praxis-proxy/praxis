@@ -28,6 +28,7 @@ use crate::{
         log_config_change_audit, log_restart_required_changes, warn_insecure_option_escalations,
         warn_stateful_filter_reset,
     },
+    server::HealthTaskLifecycle,
     startup_checks::{
         warn_insecure_key_permissions, warn_insecure_log_file_permissions, warn_insecure_sink_file_permissions,
     },
@@ -66,6 +67,7 @@ pub(crate) fn reload_pipelines(
     listener_meta: &praxis_protocol::http::health::ListenerMetaStore,
     cluster_meta: &praxis_protocol::http::health::ClusterMetaStore,
     health_shutdown: &Arc<Mutex<CancellationToken>>,
+    health_lifecycle: Option<&HealthTaskLifecycle>,
     kv_stores: &praxis_core::kv::KvStoreRegistry,
     session_stores: &Arc<praxis_filter::SessionStoreRegistry>,
     slow_start_registry: &Arc<praxis_filter::SlowStartRegistry>,
@@ -102,20 +104,18 @@ pub(crate) fn reload_pipelines(
         .max_response_bytes
         .unwrap_or(usize::MAX)
         .min(new_config.body_limits.max_buffer_bytes.get());
-    let updated_client = praxis_core::subrequest::SubRequestClient::with_max_response_bytes(
-        subrequest_client.connector().clone(),
-        new_ceiling,
-    );
+    let updated_client = subrequest_client.with_response_ceiling(new_ceiling);
 
     // Hold the generation across the last fallible step. Publishing it inside
     // pipeline construction would retire live tables when a later step fails.
     let slow_start_generation = slow_start_registry.enter_generation();
+    let candidate_session_stores = Arc::new(session_stores.candidate());
     let new_pipelines = match resolve_pipelines_with_composition(
         new_config,
         registry,
         &health_registry,
         kv_stores,
-        session_stores,
+        &candidate_session_stores,
         slow_start_registry,
         &updated_client,
         composition,
@@ -159,6 +159,20 @@ pub(crate) fn reload_pipelines(
         return Err(error.into());
     }
 
+    // Removed listeners keep serving through their old bound pipelines. Their
+    // stores must remain discoverable for a later reintroduction, even though
+    // the configured candidate has no filter for them in this generation.
+    for name in live.listener_names() {
+        if new_pipelines.get(name).is_none()
+            && let Some(old) = live.get(name)
+        {
+            let old_pipeline = old.load();
+            if let Some(stores) = old_pipeline.session_stores() {
+                candidate_session_stores.retain_used_from(stores);
+            }
+        }
+    }
+    session_stores.publish(&candidate_session_stores);
     slow_start_generation.commit();
 
     // Copy known-down endpoint state into the new registry BEFORE the
@@ -181,9 +195,7 @@ pub(crate) fn reload_pipelines(
         swapped.push(name);
     }
 
-    listener_meta.store(Arc::new(praxis_protocol::http::health::listener_meta_from_config(
-        new_config,
-    )));
+    listener_meta.store(Arc::new(merged_listener_meta(new_config, live, listener_meta)));
     cluster_meta.store(Arc::new(praxis_protocol::http::health::cluster_meta_from_config(
         new_config,
     )));
@@ -193,12 +205,44 @@ pub(crate) fn reload_pipelines(
         new_config,
         &health_registry,
         health_shutdown,
+        health_lifecycle,
         subrequest_client.upstream_ca(),
     );
 
     info!(swapped = ?swapped, skipped = ?skipped, "config reload complete");
 
     Ok(())
+}
+
+/// Keep bound transport metadata for live slots across a filter-only reload.
+///
+/// A removed HTTP listener remains bound with its old pipeline. A changed
+/// address or TLS block also cannot rebind a live slot, while its new chains
+/// are applied above. Newly configured, unbound listeners remain in the
+/// configured metadata map but cannot appear in `/api/pipelines` without a
+/// live slot.
+fn merged_listener_meta(
+    config: &Config,
+    live: &ListenerPipelines,
+    store: &praxis_protocol::http::health::ListenerMetaStore,
+) -> std::collections::HashMap<String, praxis_protocol::http::health::ListenerMeta> {
+    let previous = store.load();
+    let mut next = praxis_protocol::http::health::listener_meta_from_config(config);
+    for name in live.listener_names() {
+        let Some(bound) = previous.get(name) else {
+            continue;
+        };
+        if let Some(applied) = next.get_mut(name) {
+            applied.address.clone_from(&bound.address);
+            applied.protocol = bound.protocol;
+            applied.tls = bound.tls;
+        } else {
+            let mut retained = bound.clone();
+            retained.configured_in_current_generation = false;
+            next.insert(name.to_owned(), retained);
+        }
+    }
+    next
 }
 
 /// Refuse a config that changes the protocol of a listener whose handler
@@ -452,11 +496,16 @@ fn health_checked_cluster_names(config: &Config) -> Vec<&str> {
 /// Cancel old health check tasks and spawn new ones from the
 /// updated config.
 #[expect(clippy::expect_used, reason = "poisoned mutex is unrecoverable")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "health generation replacement needs current and root owners"
+)]
 fn respawn_health_checks(
     old_config: &Config,
     config: &Config,
     health_registry: &HealthRegistry,
     health_shutdown: &Arc<Mutex<CancellationToken>>,
+    health_lifecycle: Option<&HealthTaskLifecycle>,
     upstream_ca: Option<Arc<praxis_tls::CachedCaCerts>>,
 ) {
     // One critical section swaps in the fresh token and hands back both
@@ -466,7 +515,7 @@ fn respawn_health_checks(
     let (old_token, new_token) = {
         let mut guard = health_shutdown.lock().expect("health shutdown lock poisoned");
         let old = guard.clone();
-        *guard = CancellationToken::new();
+        *guard = health_lifecycle.map_or_else(CancellationToken::new, HealthTaskLifecycle::new_token);
         (old, guard.clone())
     };
     old_token.cancel();
@@ -492,7 +541,10 @@ fn respawn_health_checks(
         .collect();
     let registry = Arc::clone(health_registry);
 
-    spawn_health_check_thread(clusters, registry, new_token, upstream_ca);
+    let handle = spawn_health_check_thread(clusters, registry, new_token, upstream_ca);
+    if let Some(owner) = health_lifecycle {
+        owner.track(handle);
+    }
 }
 
 /// Spawn the reloaded health-check probes on a dedicated thread + runtime.
@@ -506,8 +558,12 @@ fn spawn_health_check_thread(
     registry: HealthRegistry,
     new_token: CancellationToken,
     upstream_ca: Option<Arc<praxis_tls::CachedCaCerts>>,
-) {
+) -> std::thread::JoinHandle<()> {
+    #[cfg(test)]
+    let observation = crate::server::background_observation::capture();
     std::thread::spawn(move || {
+        #[cfg(test)]
+        let _observation = crate::server::background_observation::start("health check runtime", observation);
         let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
             Ok(rt) => rt,
             Err(err) => {
@@ -524,7 +580,7 @@ fn spawn_health_check_thread(
             );
             new_token.cancelled().await;
         });
-    });
+    })
 }
 
 // -----------------------------------------------------------------------------
@@ -543,12 +599,13 @@ fn spawn_health_check_thread(
 )]
 mod tests {
     use std::{
-        collections::HashMap,
+        collections::{BTreeMap, HashMap},
         sync::atomic::{AtomicUsize, Ordering},
     };
 
     use praxis_core::config::{InsecureOptions, SkipPipelineChecks};
     use praxis_filter::{CircuitBreakerFilter, FilterFactory, PipelineExtension, RequestExtensions};
+    use tracing_subscriber::layer::SubscriberExt as _;
 
     use super::*;
     use crate::composition::ServerComposition;
@@ -598,6 +655,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
             &empty_kv_stores(),
             &empty_session_stores(),
             &empty_slow_start_registry(),
@@ -655,6 +713,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
             &empty_kv_stores(),
             &empty_session_stores(),
             &empty_slow_start_registry(),
@@ -680,13 +739,104 @@ filter_chains:
         );
         assert_eq!(
             loaded.get("web").unwrap().address,
-            "127.0.0.1:9090",
-            "meta should reflect reloaded listener address"
+            "127.0.0.1:8080",
+            "meta should retain the bound listener address"
         );
         assert_eq!(
             loaded.get("web").unwrap().chain_names,
             ["main"],
             "meta should preserve chain names after reload"
+        );
+    }
+
+    #[test]
+    fn reload_preserves_upstream_ca_and_updates_ceiling() {
+        praxis_tls::provider::install();
+        let mut startup = valid_config();
+        startup.runtime.upstream_ca_file = Some(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../tests/integration/fixtures/fips/ca-cert.pem"
+            )
+            .to_owned(),
+        );
+        let client = crate::pipelines::build_subrequest_client(&startup).expect("test CA must load");
+        let startup_ca = client.upstream_ca().expect("startup client has global CA");
+        let (live, old_config, registry, shutdown, meta, cluster_meta) = setup_live_pipelines_from(startup);
+        let mut next = old_config.clone();
+        next.body_limits.max_response_bytes = Some(8192);
+
+        reload_pipelines(
+            &next,
+            &old_config,
+            &registry,
+            &live,
+            &meta,
+            &cluster_meta,
+            &shutdown,
+            None,
+            &empty_kv_stores(),
+            &empty_session_stores(),
+            &empty_slow_start_registry(),
+            &client,
+            None,
+            &PipelineComposition::default(),
+        )
+        .expect("limit-only reload must succeed");
+        let applied = live.get("web").unwrap().load_full();
+        let applied_client = applied.subrequest_client().expect("reloaded pipeline has client");
+        assert_eq!(applied_client.max_response_bytes(), 8192, "new ceiling is applied");
+        assert!(
+            Arc::ptr_eq(&applied_client.upstream_ca().unwrap(), &startup_ca),
+            "global CA must retain its startup identity"
+        );
+        assert_ne!(client.max_response_bytes(), 8192, "original client must stay unchanged");
+
+        let mut changed_path = next.clone();
+        changed_path.runtime.upstream_ca_file = Some("/nonexistent/replacement-ca.pem".to_owned());
+        changed_path.body_limits.max_response_bytes = Some(4096);
+        let warnings = capture_warnings(|| log_restart_required_changes(&next, &changed_path));
+        assert_warning(
+            &warnings,
+            "startup-only runtime setting changed; requires restart",
+            &[("field", "runtime.upstream_ca_file")],
+        );
+        reload_pipelines(
+            &changed_path,
+            &next,
+            &registry,
+            &live,
+            &meta,
+            &cluster_meta,
+            &shutdown,
+            None,
+            &empty_kv_stores(),
+            &empty_session_stores(),
+            &empty_slow_start_registry(),
+            &client,
+            None,
+            &PipelineComposition::default(),
+        )
+        .expect("changed CA path remains startup-only");
+        let second_applied = live.get("web").unwrap().load_full();
+        let second_applied_client = second_applied
+            .subrequest_client()
+            .expect("reloaded pipeline has client");
+        assert_eq!(
+            second_applied_client.max_response_bytes(),
+            4096,
+            "later ceiling is applied"
+        );
+        assert!(
+            Arc::ptr_eq(&second_applied_client.upstream_ca().unwrap(), &startup_ca),
+            "new CA path must not hot-load or replace startup trust"
+        );
+        assert!(
+            empty_subrequest_client()
+                .with_response_ceiling(4096)
+                .upstream_ca()
+                .is_none(),
+            "no global CA keeps the default trust behavior"
         );
     }
 
@@ -710,6 +860,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
             &empty_kv_stores(),
             &empty_session_stores(),
             &empty_slow_start_registry(),
@@ -759,6 +910,7 @@ filter_chains:
                 &meta,
                 &cluster_meta,
                 &shutdown,
+                None,
                 &empty_kv_stores(),
                 &empty_session_stores(),
                 &empty_slow_start_registry(),
@@ -789,6 +941,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
             &empty_kv_stores(),
             &empty_session_stores(),
             &empty_slow_start_registry(),
@@ -829,6 +982,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
         );
 
         assert!(result.is_err(), "grouped TCP listeners must keep identical chains");
@@ -859,6 +1013,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
         );
 
         assert!(
@@ -876,6 +1031,7 @@ filter_chains:
     fn tcp_listener_removal_rejects_reload() {
         let (live, old_config, registry, shutdown, meta, cluster_meta) =
             setup_live_pipelines_from(tcp_group_config("tcp_lb", "tcp_lb", "db_pool", false));
+        let original_meta = meta.load_full();
 
         let new_config = tcp_web_config();
         let result = reload_tcp(
@@ -886,11 +1042,16 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
         );
 
         assert!(
             result.is_err(),
             "removing a bound TCP listener cannot be applied without a restart"
+        );
+        assert!(
+            Arc::ptr_eq(&meta.load_full(), &original_meta),
+            "rejected TCP removal must preserve live listener metadata"
         );
     }
 
@@ -909,6 +1070,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
         );
 
         assert!(result.is_ok(), "consistent chain edits must reload: {result:?}");
@@ -933,6 +1095,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
         );
 
         assert!(
@@ -959,6 +1122,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
         )
         .expect_err("allow_private_upstreams is captured by forward_proxy listeners at startup");
         assert!(err.to_string().contains("allow_private_upstreams"), "{err}");
@@ -981,6 +1145,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
         );
         assert!(result.is_ok(), "{result:?}");
     }
@@ -1000,6 +1165,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
         );
         assert!(result.is_ok(), "{result:?}");
     }
@@ -1024,6 +1190,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
         );
 
         let err = result.expect_err("the CONNECT runtime is captured at startup");
@@ -1059,6 +1226,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
         );
 
         assert!(result.is_err(), "the destination matcher is built at startup");
@@ -1078,6 +1246,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
         );
 
         assert!(result.is_err(), "the CONNECT gate is set when the handler is bound");
@@ -1111,6 +1280,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
         );
 
         assert!(
@@ -1148,6 +1318,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
         )
         .expect("removing a listener without forward_proxy is accepted");
 
@@ -1160,6 +1331,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
         );
 
         assert!(
@@ -1184,6 +1356,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
         );
 
         assert!(result.is_ok(), "an unchanged block must not block reloads: {result:?}");
@@ -1224,6 +1397,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
             &empty_kv_stores(),
             &empty_session_stores(),
             &empty_slow_start_registry(),
@@ -1233,8 +1407,10 @@ filter_chains:
         )
         .expect("removing a listener from the config is accepted");
         assert!(
-            meta.load().get("web").is_none(),
-            "the removed listener has no metadata entry to compare against"
+            meta.load()
+                .get("web")
+                .is_some_and(|entry| !entry.configured_in_current_generation),
+            "the removed listener remains bound with retained metadata"
         );
 
         let readded_as_tcp = tcp_web_config();
@@ -1246,6 +1422,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
             &empty_kv_stores(),
             &empty_session_stores(),
             &empty_slow_start_registry(),
@@ -1332,6 +1509,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
             &empty_kv_stores(),
             &empty_session_stores(),
             &empty_slow_start_registry(),
@@ -1413,6 +1591,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
             &empty_kv_stores(),
             &empty_session_stores(),
             &empty_slow_start_registry(),
@@ -1516,7 +1695,7 @@ filter_chains:
             .expect("register observing_callout");
 
         let session_stores = empty_session_stores();
-        let expected_session_ptr = Arc::as_ptr(&session_stores).addr();
+        let publication_session_ptr = Arc::as_ptr(&session_stores).addr();
         let kv_stores = empty_kv_stores();
         let health_registry: HealthRegistry = Arc::new(HashMap::new());
 
@@ -1553,6 +1732,17 @@ filter_chains:
         )
         .unwrap();
 
+        let expected_session_ptr = live
+            .get("web")
+            .unwrap()
+            .load()
+            .session_stores()
+            .map(|stores| Arc::as_ptr(stores).addr())
+            .unwrap();
+        assert_ne!(
+            expected_session_ptr, publication_session_ptr,
+            "listener must own an isolated store registry"
+        );
         let after_build = injections.lock().unwrap().clone();
         let build_count = after_build.len();
         assert!(
@@ -1604,6 +1794,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
             &kv_stores,
             &session_stores,
             &empty_slow_start_registry(),
@@ -1618,6 +1809,17 @@ filter_chains:
         assert_eq!(pinned_old.buffer_cap(), 4096, "in-flight requests keep their old cap");
         assert_eq!(pinned_old.subrequest_client().unwrap().max_response_bytes(), 4096);
         assert_eq!(live.get("web").unwrap().load().buffer_cap(), 67_108_865);
+        let published_session_ptr = live
+            .get("web")
+            .unwrap()
+            .load()
+            .session_stores()
+            .map(|stores| Arc::as_ptr(stores).addr());
+        assert_ne!(
+            published_session_ptr,
+            Some(expected_session_ptr),
+            "candidate generation has distinct registry ownership"
+        );
 
         let after_reload = injections.lock().unwrap().clone();
         assert!(
@@ -1626,7 +1828,7 @@ filter_chains:
         );
         assert!(
             after_reload[build_count..].iter().any(|(kv, session, cap, client)| *kv
-                && *session == Some(expected_session_ptr)
+                && *session == published_session_ptr
                 && *cap == 67_108_865
                 && *client == Some(67_108_865)),
             "reload must re-inject KV and session stores into the rebuilt bound outbound pipeline"
@@ -1660,6 +1862,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
             &empty_kv_stores(),
             &empty_session_stores(),
             &empty_slow_start_registry(),
@@ -1671,6 +1874,274 @@ filter_chains:
 
         let current_ptr = Arc::as_ptr(&live.get("web").unwrap().load());
         assert_eq!(old_ptr, current_ptr, "pipeline should be untouched after failure");
+    }
+
+    #[test]
+    fn failed_reload_does_not_publish_sticky_candidate() {
+        let (live, old_config, registry, shutdown, meta, cluster_meta) = setup_live_pipelines();
+        let old_ptr = Arc::as_ptr(&live.get("web").unwrap().load());
+        let stores = empty_session_stores();
+        let new_config = Config::from_yaml(
+            r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: sticky_sessions
+        clusters:
+          - name: backend
+            type: header
+            header_name: X-Session-Id
+            ttl_secs: 3600
+            max_entries: 1000
+            storage: local
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints: ["127.0.0.1:9"]
+insecure_options:
+  allow_private_endpoints: true
+"#,
+        )
+        .unwrap();
+        let (_factory, failing) = ServerComposition::standard()
+            .add_pipeline_validator(|_ctx| Err(crate::composition::CompositionError::new("late validator failure")))
+            .into_parts();
+
+        let result = reload_pipelines(
+            &new_config,
+            &old_config,
+            &registry,
+            &live,
+            &meta,
+            &cluster_meta,
+            &shutdown,
+            None,
+            &empty_kv_stores(),
+            &stores,
+            &empty_slow_start_registry(),
+            &empty_subrequest_client(),
+            None,
+            &failing,
+        );
+        assert!(result.is_err(), "the late validator must reject the candidate");
+        assert!(stores.is_empty(), "a failed build cannot publish a new sticky store");
+        assert_eq!(
+            Arc::as_ptr(&live.get("web").unwrap().load()),
+            old_ptr,
+            "live pipeline remains unchanged"
+        );
+
+        reload_pipelines(
+            &new_config,
+            &old_config,
+            &registry,
+            &live,
+            &meta,
+            &cluster_meta,
+            &shutdown,
+            None,
+            &empty_kv_stores(),
+            &stores,
+            &empty_slow_start_registry(),
+            &empty_subrequest_client(),
+            None,
+            &PipelineComposition::default(),
+        )
+        .unwrap();
+        assert!(
+            !stores.is_empty(),
+            "successful publication must carry the candidate store"
+        );
+        assert_ne!(
+            Arc::as_ptr(&live.get("web").unwrap().load()),
+            old_ptr,
+            "successful reload swaps pipeline"
+        );
+    }
+
+    #[tokio::test]
+    async fn removed_listener_retains_only_its_bound_stores_across_reloads() {
+        let mut previous = sticky_listener_config(true, 100);
+        let mut registry = FilterRegistry::with_builtins();
+        registry
+            .register(
+                "observe_sticky_binding",
+                FilterFactory::Http(Arc::new(|_| Ok(Box::new(ObserveStickyBinding)))),
+            )
+            .unwrap();
+        let stores = empty_session_stores();
+        let client = empty_subrequest_client();
+        let kv = empty_kv_stores();
+        let slow = empty_slow_start_registry();
+        let live = resolve_pipelines(&previous, &registry, &Arc::new(HashMap::new()), &kv, &stores, &client).unwrap();
+        let shutdown = Arc::new(Mutex::new(CancellationToken::new()));
+        let meta = praxis_protocol::http::health::new_listener_meta_store(
+            praxis_protocol::http::health::listener_meta_from_config(&previous),
+        );
+        let cluster_meta = praxis_protocol::http::health::new_cluster_meta_store(
+            praxis_protocol::http::health::cluster_meta_from_config(&previous),
+        );
+        let initial = live.get("retained").unwrap().load_full();
+        let retained_registry = Arc::clone(initial.session_stores().unwrap());
+        assert_eq!(
+            retained_registry.len(),
+            1,
+            "startup listener must not own its sibling's stores"
+        );
+        assert_eq!(stores.len(), 2, "publication owns both configured listeners");
+        assert!(
+            exercise_sticky_binding(&initial, true).await.is_none(),
+            "first request is unbound"
+        );
+        assert_eq!(
+            exercise_sticky_binding(&initial, false).await.as_deref(),
+            Some("127.0.0.1:9"),
+            "the initial response must establish a binding before reload"
+        );
+        drop(initial);
+        for ttl in 101..105 {
+            let retiring = Arc::downgrade(live.get("changing").unwrap().load().session_stores().unwrap());
+            let next = sticky_listener_config(false, ttl);
+            reload_pipelines(
+                &next,
+                &previous,
+                &registry,
+                &live,
+                &meta,
+                &cluster_meta,
+                &shutdown,
+                None,
+                &kv,
+                &stores,
+                &slow,
+                &client,
+                None,
+                &PipelineComposition::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                stores.len(),
+                2,
+                "only removed A and current B stores may remain published"
+            );
+            assert_eq!(
+                retained_registry.len(),
+                1,
+                "retained A must not acquire any B generation"
+            );
+            assert!(
+                retiring.upgrade().is_none(),
+                "no retained listener may own B's retired registry"
+            );
+            let retained = live.get("retained").unwrap().load_full();
+            assert!(Arc::ptr_eq(retained.session_stores().unwrap(), &retained_registry));
+            assert_eq!(
+                exercise_sticky_binding(&retained, false).await.as_deref(),
+                Some("127.0.0.1:9"),
+                "removed listener must keep its original session binding while it serves"
+            );
+            previous = next;
+        }
+        let restored = sticky_listener_config(true, 104);
+        reload_pipelines(
+            &restored,
+            &previous,
+            &registry,
+            &live,
+            &meta,
+            &cluster_meta,
+            &shutdown,
+            None,
+            &kv,
+            &stores,
+            &slow,
+            &client,
+            None,
+            &PipelineComposition::default(),
+        )
+        .unwrap();
+        let current = live.get("retained").unwrap().load_full();
+        assert!(
+            !Arc::ptr_eq(current.session_stores().unwrap(), &retained_registry),
+            "reintroduction must construct a new listener pipeline registry"
+        );
+        assert_eq!(
+            exercise_sticky_binding(&current, false).await.as_deref(),
+            Some("127.0.0.1:9"),
+            "reintroduced listener must reuse the actual old store binding"
+        );
+        assert_eq!(stores.len(), 2);
+    }
+
+    /// Build distinct sticky configurations for a retained listener and its changing sibling.
+    fn sticky_listener_config(include_retained: bool, ttl: u64) -> Config {
+        let retained = if include_retained {
+            "  - name: retained\n    address: '127.0.0.1:8081'\n    filter_chains: [retained]\n"
+        } else {
+            ""
+        };
+        let chains: String = [("retained", 3600), ("changing", ttl)].into_iter().map(|(name, lifetime)| format!(
+            "  - name: {name}\n    filters:\n      - filter: router\n        routes:\n          - path_prefix: /\n            cluster: {name}\n      - filter: sticky_sessions\n        clusters:\n          - name: {name}\n            type: header\n            header_name: X-Session-Id\n            ttl_secs: {lifetime}\n            max_entries: 100\n            storage: local\n      - filter: observe_sticky_binding\n      - filter: load_balancer\n        clusters:\n          - name: {name}\n            endpoints: ['127.0.0.1:9']\n")).collect();
+        Config::from_yaml(&format!("listeners:\n{retained}  - name: changing\n    address: '127.0.0.1:8082'\n    filter_chains: [changing]\nfilter_chains:\n{chains}insecure_options:\n  allow_private_endpoints: true\n")).unwrap()
+    }
+
+    /// Sticky lookup result captured before the load balancer consumes the pin.
+    struct ObservedStickyBinding(Option<Arc<str>>);
+
+    /// Observe the real sticky decision without changing upstream selection.
+    struct ObserveStickyBinding;
+
+    #[async_trait::async_trait]
+    impl praxis_filter::HttpFilter for ObserveStickyBinding {
+        fn name(&self) -> &'static str {
+            "observe_sticky_binding"
+        }
+
+        async fn on_request(
+            &self,
+            ctx: &mut praxis_filter::HttpFilterContext<'_>,
+        ) -> Result<praxis_filter::FilterAction, praxis_filter::FilterError> {
+            ctx.extensions
+                .insert(ObservedStickyBinding(ctx.pinned_endpoint_address.clone()));
+            Ok(praxis_filter::FilterAction::Continue)
+        }
+    }
+
+    /// Exercise real request/response filter ownership without a network adapter.
+    async fn exercise_sticky_binding(pipeline: &praxis_filter::FilterPipeline, bind: bool) -> Option<Arc<str>> {
+        let request = praxis_filter::Request {
+            method: "GET".parse().unwrap(),
+            uri: "/".parse().unwrap(),
+            headers: [("x-session-id".parse().unwrap(), "retained-key".parse().unwrap())]
+                .into_iter()
+                .collect(),
+        };
+        let mut adapter = praxis_protocol::http::pingora::context::PingoraRequestCtx::default();
+        let mut ctx = adapter.build_filter_context(pipeline, &request, None);
+        assert!(matches!(
+            pipeline.execute_http_request(&mut ctx).await.unwrap(),
+            praxis_filter::FilterAction::Continue
+        ));
+        let pinned = ctx.extensions.get::<ObservedStickyBinding>().unwrap().0.clone();
+        if bind {
+            let endpoint = Arc::clone(&ctx.upstream.as_ref().unwrap().address);
+            ctx.upstream_reached = true;
+            ctx.extensions
+                .insert(praxis_filter::UpstreamForwardedEndpoint(endpoint));
+            assert!(matches!(
+                pipeline.execute_http_response(&mut ctx).await.unwrap(),
+                praxis_filter::FilterAction::Continue
+            ));
+        }
+        pinned
     }
 
     #[cfg(any(feature = "policy-builtins", feature = "policy-crypto-default"))]
@@ -1709,6 +2180,7 @@ filter_chains:
                 &meta,
                 &cluster_meta,
                 &shutdown,
+                None,
                 &empty_kv_stores(),
                 &empty_session_stores(),
                 &empty_slow_start_registry(),
@@ -1751,6 +2223,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
             &empty_kv_stores(),
             &empty_session_stores(),
             &empty_slow_start_registry(),
@@ -1780,6 +2253,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
             &empty_kv_stores(),
             &empty_session_stores(),
             &empty_slow_start_registry(),
@@ -1824,6 +2298,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
             &empty_kv_stores(),
             &empty_session_stores(),
             &empty_slow_start_registry(),
@@ -1867,6 +2342,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
             &empty_kv_stores(),
             &empty_session_stores(),
             &empty_slow_start_registry(),
@@ -1902,7 +2378,8 @@ filter_chains:
         )
         .unwrap();
 
-        log_restart_required_changes(&old, &new);
+        let warnings = capture_warnings(|| log_restart_required_changes(&old, &new));
+        assert_warning(&warnings, "listener added in config", &[("listener", "api")]);
     }
 
     #[test]
@@ -1926,7 +2403,8 @@ filter_chains:
         .unwrap();
         let new = valid_config();
 
-        log_restart_required_changes(&old, &new);
+        let warnings = capture_warnings(|| log_restart_required_changes(&old, &new));
+        assert_warning(&warnings, "listener removed in config", &[("listener", "api")]);
     }
 
     #[test]
@@ -1947,39 +2425,44 @@ filter_chains:
         )
         .unwrap();
 
-        log_restart_required_changes(&old, &new);
+        let warnings = capture_warnings(|| log_restart_required_changes(&old, &new));
+        assert_warning(
+            &warnings,
+            "listener address changed",
+            &[
+                ("listener", "web"),
+                ("old_address", "127.0.0.1:8080"),
+                ("new_address", "127.0.0.1:9999"),
+            ],
+        );
     }
 
     #[test]
     fn tls_toggle_detected() {
         let old = valid_config();
-        let new = Config::from_yaml(
-            r#"
-listeners:
-  - name: web
-    address: "127.0.0.1:8080"
-    filter_chains: [main]
-    tls:
-      certificates:
-        - cert_path: "/tmp/cert.pem"
-          key_path: "/tmp/key.pem"
-filter_chains:
-  - name: main
-    filters:
-      - filter: static_response
-        status: 200
-"#,
-        )
-        .unwrap();
+        let new = config_with_tls_toggle();
 
-        log_restart_required_changes(&old, &new);
+        let warnings = capture_warnings(|| log_restart_required_changes(&old, &new));
+        assert_warning(&warnings, "TLS enabled; requires restart", &[("listener", "web")]);
+    }
+
+    #[test]
+    fn tls_disable_detected() {
+        let plain = valid_config();
+        let tls = config_with_tls_toggle();
+        let warnings = capture_warnings(|| log_restart_required_changes(&tls, &plain));
+        assert_warning(&warnings, "TLS disabled; requires restart", &[("listener", "web")]);
     }
 
     #[test]
     fn no_restart_required_no_warnings() {
         let old = valid_config();
         let new = valid_config();
-        log_restart_required_changes(&old, &new);
+        let warnings = capture_warnings(|| log_restart_required_changes(&old, &new));
+        assert!(
+            warnings.is_empty(),
+            "identical configs need no restart warning: {warnings:?}"
+        );
     }
 
     #[test]
@@ -2097,7 +2580,10 @@ filter_chains:
         )
         .unwrap();
 
-        detect_compression_additions(&old, &new);
+        let warnings = capture_warnings(|| log_restart_required_changes(&old, &new));
+        assert_warning(&warnings, "compression added; requires restart", &[("listener", "web")]);
+        let direct = capture_warnings(|| detect_compression_additions(&old, &new));
+        assert_warning(&direct, "compression added; requires restart", &[("listener", "web")]);
     }
 
     #[test]
@@ -2116,7 +2602,16 @@ filter_chains:
         )
         .unwrap();
 
-        detect_compression_additions(&config, &config);
+        let warnings = capture_warnings(|| log_restart_required_changes(&config, &config));
+        assert!(
+            warnings.is_empty(),
+            "already registered compression needs no restart warning: {warnings:?}"
+        );
+        let direct = capture_warnings(|| detect_compression_additions(&config, &config));
+        assert!(
+            direct.is_empty(),
+            "direct compression detector must also stay silent: {direct:?}"
+        );
     }
 
     #[test]
@@ -2461,6 +2956,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
             &empty_kv_stores(),
             &empty_session_stores(),
             &empty_slow_start_registry(),
@@ -2517,6 +3013,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
             &empty_kv_stores(),
             &empty_session_stores(),
             &empty_slow_start_registry(),
@@ -2536,6 +3033,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
             &empty_kv_stores(),
             &empty_session_stores(),
             &empty_slow_start_registry(),
@@ -2589,6 +3087,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
             &empty_kv_stores(),
             &empty_session_stores(),
             &empty_slow_start_registry(),
@@ -2670,6 +3169,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
             &empty_kv_stores(),
             &empty_session_stores(),
             &empty_slow_start_registry(),
@@ -2703,6 +3203,7 @@ filter_chains:
             &meta,
             &cluster_meta,
             &shutdown,
+            None,
             &empty_kv_stores(),
             &empty_session_stores(),
             &empty_slow_start_registry(),
@@ -2731,6 +3232,84 @@ filter_chains:
     // -----------------------------------------------------------------------------
     // Test Utilities
     // -----------------------------------------------------------------------------
+
+    /// Captured warning and its structured tracing fields.
+    #[derive(Clone, Debug)]
+    struct WarningEvent {
+        /// Field values rendered by the tracing visitor.
+        fields: BTreeMap<String, String>,
+    }
+
+    /// Layer that records warning events for one synchronous detector call.
+    struct WarningCapture(Arc<Mutex<Vec<WarningEvent>>>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for WarningCapture {
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: tracing_subscriber::layer::Context<'_, S>) {
+            if *event.metadata().level() != tracing::Level::WARN {
+                return;
+            }
+            let mut visitor = WarningFieldVisitor(BTreeMap::new());
+            event.record(&mut visitor);
+            self.0.lock().unwrap().push(WarningEvent { fields: visitor.0 });
+        }
+    }
+
+    /// Visitor that keeps warning messages and named fields.
+    struct WarningFieldVisitor(BTreeMap<String, String>);
+
+    impl tracing::field::Visit for WarningFieldVisitor {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0.insert(field.name().to_owned(), format!("{value:?}"));
+        }
+    }
+
+    /// Capture warnings emitted in the calling thread.
+    fn capture_warnings(run: impl FnOnce()) -> Vec<WarningEvent> {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(WarningCapture(Arc::clone(&events)));
+        tracing::subscriber::with_default(subscriber, run);
+        let guard = events.lock().unwrap();
+        guard.clone()
+    }
+
+    /// Assert that one event carries a message and all named field values.
+    fn assert_warning(warnings: &[WarningEvent], message: &str, fields: &[(&str, &str)]) {
+        let found = warnings.iter().any(|warning| {
+            warning
+                .fields
+                .get("message")
+                .is_some_and(|value| value.contains(message))
+                && fields
+                    .iter()
+                    .all(|(name, expected)| warning.fields.get(*name).is_some_and(|value| value.contains(expected)))
+        });
+        assert!(
+            found,
+            "expected warning {message:?} with {fields:?}; observed {warnings:?}"
+        );
+    }
+
+    /// TLS-enabled variant of the minimal reload config.
+    fn config_with_tls_toggle() -> Config {
+        Config::from_yaml(
+            r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+    tls:
+      certificates:
+        - cert_path: "/tmp/cert.pem"
+          key_path: "/tmp/key.pem"
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#,
+        )
+        .unwrap()
+    }
 
     /// A policy-filter config whose policy document is `policy_path`.
     #[cfg(any(feature = "policy-builtins", feature = "policy-crypto-default"))]
@@ -2897,6 +3476,7 @@ filter_chains:
         meta: &praxis_protocol::http::health::ListenerMetaStore,
         cluster_meta: &praxis_protocol::http::health::ClusterMetaStore,
         shutdown: &Arc<Mutex<CancellationToken>>,
+        health_lifecycle: Option<&HealthTaskLifecycle>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         reload_pipelines(
             new_config,
@@ -2906,6 +3486,7 @@ filter_chains:
             meta,
             cluster_meta,
             shutdown,
+            health_lifecycle,
             &empty_kv_stores(),
             &empty_session_stores(),
             &empty_slow_start_registry(),

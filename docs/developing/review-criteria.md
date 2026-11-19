@@ -246,7 +246,7 @@ invariants are easy to break from a distance.
 
 ## 11. Test Depth Beyond Coverage
 
-The 96% line-coverage floor proves execution, not
+The 97% line-coverage floor proves execution, not
 correctness. Review what the suite would *fail to notice*.
 
 - Mutation results (`make mutants`): surviving mutants are
@@ -304,7 +304,7 @@ documentation into misinformation.
   enforcing source (`Makefile`, CI workflows, config
   defaults). Example of the failure mode: `AGENTS.md`
   advertised a 95% coverage floor while the `Makefile`
-  enforced 96%.
+  enforced 97%.
 - Cross-check boundary claims: the "Pingora handles /
   Praxis handles" split, filter reference docs
   (`docs/filters/reference.md`) vs `from_config`

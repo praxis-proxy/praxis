@@ -36,6 +36,7 @@ pub(super) fn apply_request_header_mutations(headers: &mut HeaderMap, ctx: &Http
     for (name, value) in &ctx.request_headers_to_set {
         headers.insert(name.clone(), value.clone());
     }
+    apply_ordered_request_header_mutations(headers, &ctx.request_header_mutations);
     for (name, value) in &ctx.extra_request_headers {
         if let (Ok(header_name), Ok(header_value)) = (
             http::header::HeaderName::from_bytes(name.as_bytes()),
@@ -44,6 +45,25 @@ pub(super) fn apply_request_header_mutations(headers: &mut HeaderMap, ctx: &Http
             headers.insert(header_name, header_value);
         } else {
             tracing::warn!(header = %name, "dropping invalid extra header on sub-request");
+        }
+    }
+}
+
+/// Replay the headers filter's ordered mutations without folding fields.
+fn apply_ordered_request_header_mutations(headers: &mut HeaderMap, mutations: &[crate::TrustedHeaderMutation]) {
+    for mutation in mutations {
+        match mutation {
+            crate::TrustedHeaderMutation::Remove(name) => {
+                headers.remove(name);
+            },
+            crate::TrustedHeaderMutation::Set(name, value) => {
+                headers.insert(name.clone(), value.clone());
+            },
+            crate::TrustedHeaderMutation::Add(name, value) => {
+                if let Ok(value) = http::HeaderValue::from_str(value) {
+                    headers.append(name.clone(), value);
+                }
+            },
         }
     }
 }
@@ -154,6 +174,7 @@ pub(super) fn fold_pending_into(headers: &mut HeaderMap, ctx: &mut HttpFilterCon
     ctx.extra_request_headers.clear();
     ctx.request_headers_to_remove.clear();
     ctx.request_headers_to_set.clear();
+    ctx.request_header_mutations.clear();
     ctx.pre_read_mutations.clear();
 }
 

@@ -12,7 +12,7 @@ Security filters protect against threats, enforce access control, and validate r
 
 ## Key Filters
 
-**Guardrails**: Inspects request and response bodies for forbidden content patterns. Supports regex matching, size limits, and conditional execution (e.g., per-model gating).
+**Guardrails**: Inspects request headers and bodies for forbidden content patterns. Supports regex matching, size limits, and conditional execution (e.g., per-model gating).
 
 **CORS**: Handles cross-origin resource sharing with configurable origins, methods, headers, and credentials.
 

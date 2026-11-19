@@ -284,8 +284,14 @@ async fn the_original_query_reaches_a_later_cmf_hook() {
     body_ctx.current_filter_id = Some(0);
     body_ctx.extensions = std::mem::take(&mut ctx.extensions);
     body_ctx.filter_state = std::mem::take(&mut ctx.filter_state);
-    body_ctx.set_metadata("mcp.method", "tools/call");
-    body_ctx.set_metadata("mcp.name", "echo");
+    body_ctx
+        .filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    body_ctx
+        .filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
     let body = Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#);
     let action = filter
         .on_request_body(&mut body_ctx, &mut Some(body), true)

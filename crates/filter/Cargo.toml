@@ -154,6 +154,7 @@ url = { workspace = true, optional = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]
+dhat = { workspace = true }
 # The policy tests mint HS256 JWTs through the system OpenSSL rather than
 # jsonwebtoken, whose crypto backend would unify into Policy's own copy.
 openssl = { workspace = true }
@@ -162,7 +163,7 @@ openssl = { workspace = true }
 jsonwebtoken = { workspace = true }
 # The filter's own tests dial real sockets through the sub-request client, so
 # they need a backend even though the library does not.
-praxis-core = { workspace = true, features = ["pingora"] }
+praxis-core = { workspace = true, features = ["pingora", "test-support"] }
 opentelemetry_sdk = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 proptest = { workspace = true }

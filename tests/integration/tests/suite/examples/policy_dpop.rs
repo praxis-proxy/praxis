@@ -88,8 +88,12 @@ impl HttpFilter for ToolTagger {
     }
 
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        ctx.set_metadata("mcp.method", "tools/call");
-        ctx.set_metadata("mcp.name", "echo");
+        ctx.filter_metadata
+            .insert("mcp.method", "tools/call")
+            .expect("entry must fit in the filter's metadata");
+        ctx.filter_metadata
+            .insert("mcp.name", "echo")
+            .expect("entry must fit in the filter's metadata");
         Ok(FilterAction::Continue)
     }
 }

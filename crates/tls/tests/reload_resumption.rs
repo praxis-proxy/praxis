@@ -13,9 +13,16 @@
     reason = "integration tests"
 )]
 
-use std::{io::Read as _, sync::Arc};
+use std::{
+    io::Read as _,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
-use praxis_tls::{CaConfig, ClientCertMode, ListenerTls, setup};
+use praxis_tls::{
+    CaConfig, ClientCertMode, ListenerTls, setup,
+    watcher::{CertWatcher, ClientVerifierReload},
+};
 use rcgen::{CertificateParams, Issuer, KeyPair};
 use rustls::{
     CertificateError, ClientConfig, ClientConnection, HandshakeKind, RootCertStore, ServerConnection,
@@ -35,7 +42,7 @@ struct ClientIdentity {
 /// Server, client identities, and a CRL revoking just the first client.
 struct Fixture {
     /// Keeps the listener's PEM files alive.
-    _dir: tempfile::TempDir,
+    dir: tempfile::TempDir,
     /// Reloadable listener with an initially empty CRL.
     tls: ListenerTls,
     /// Trust anchor used by clients to authenticate the unchanged server.
@@ -83,7 +90,7 @@ impl Fixture {
             crl_paths: vec![crl_path.to_str().expect("CRL path").to_owned()],
         });
         Self {
-            _dir: dir,
+            dir,
             tls,
             root: ca.der().clone(),
             revoked: identity(&issuer, 1),
@@ -121,6 +128,69 @@ impl Fixture {
     fn revoke(&self) {
         let path = self.tls.client_ca.as_ref().expect("CA").crl_paths.first().expect("CRL");
         std::fs::write(path, &self.revoked_crl).expect("revoked CRL");
+    }
+
+    /// Put verifier inputs in watched directories apart from the server key.
+    fn separate_verifier_dirs(&mut self) {
+        let ca = self.tls.client_ca.as_mut().expect("client CA");
+        let ca_dir = self.dir.path().join("ca-only");
+        let crl_dir = self.dir.path().join("crl-only");
+        std::fs::create_dir(&ca_dir).expect("CA directory");
+        std::fs::create_dir(&crl_dir).expect("CRL directory");
+        let next_ca = ca_dir.join("ca.pem");
+        let next_crl = crl_dir.join("ca.crl");
+        std::fs::copy(&ca.ca_path, &next_ca).expect("copy CA");
+        std::fs::copy(ca.crl_paths.first().expect("CRL path"), &next_crl).expect("copy CRL");
+        next_ca.to_str().expect("CA path").clone_into(&mut ca.ca_path);
+        ca.crl_paths = vec![next_crl.to_str().expect("CRL path").to_owned()];
+    }
+}
+
+/// Own a watcher thread so every assertion path shuts it down and joins it.
+struct WatcherGuard {
+    /// Sender that requests watcher shutdown.
+    shutdown: tokio::sync::watch::Sender<bool>,
+    /// Background watcher thread.
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl WatcherGuard {
+    /// Start the real filesystem watcher for a reloadable listener.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "synchronous test waits for a separate watcher thread"
+    )]
+    fn new(server: &setup::ReloadableServerConfig, tls: &ListenerTls) -> Self {
+        let ca = tls.client_ca.as_ref().expect("client CA");
+        let reload = ClientVerifierReload {
+            ca_path: ca.ca_path.clone(),
+            crl_paths: ca.crl_paths.clone(),
+            mode: tls.client_cert_mode,
+            trusted_spiffe_ids: tls.trusted_spiffe_ids.clone(),
+            swap_handle: Arc::clone(server.verifier_handle.as_ref().expect("verifier handle")),
+        };
+        let (shutdown, receiver) = tokio::sync::watch::channel(false);
+        let thread = CertWatcher::spawn(
+            Arc::clone(&server.cert_handle),
+            tls.certificates.first().expect("server certificate").clone(),
+            Some(reload),
+            receiver,
+            server.startup_hashes.clone(),
+        );
+        std::thread::sleep(Duration::from_millis(150));
+        Self {
+            shutdown,
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for WatcherGuard {
+    fn drop(&mut self) {
+        let _sent = self.shutdown.send(true);
+        if let Some(thread) = self.thread.take() {
+            thread.join().expect("watcher thread must exit cleanly");
+        }
     }
 }
 
@@ -266,6 +336,63 @@ fn crl_race(version: &'static SupportedProtocolVersion, mode: ClientCertMode) {
 }
 
 #[test]
+#[expect(clippy::disallowed_methods, reason = "the test waits through real polling intervals")]
+fn polling_reloads_the_listener_verifier_without_notifications() {
+    let fixture = Fixture::new(ClientCertMode::Require);
+    let server = setup::build_reloadable_server_config(&fixture.tls, false).expect("server");
+    let ca = fixture.tls.client_ca.clone().expect("client CA");
+    let verifier = server.verifier_handle.clone().expect("verifier");
+    let pair = fixture.tls.certificates.first().cloned().expect("certificate pair");
+    let reload = ClientVerifierReload {
+        ca_path: ca.ca_path,
+        crl_paths: ca.crl_paths,
+        mode: fixture.tls.client_cert_mode,
+        trusted_spiffe_ids: fixture.tls.trusted_spiffe_ids.clone(),
+        swap_handle: verifier,
+    };
+    let (stop, shutdown) = tokio::sync::watch::channel(false);
+    let watcher = CertWatcher::spawn_polling(
+        Arc::clone(&server.cert_handle),
+        pair,
+        Some(reload),
+        shutdown,
+        server.startup_hashes.clone(),
+    );
+
+    let client = fixture.client(&TLS13, Some(&fixture.revoked));
+    fixture.revoke();
+
+    let deadline = Instant::now()
+        .checked_add(Duration::from_secs(40))
+        .expect("deadline fits the clock");
+    let mut rejected = false;
+    let mut last = "no handshake completed".to_owned();
+    while Instant::now() < deadline {
+        match handshake(&server.config, &client, None) {
+            Err(rustls::Error::InvalidCertificate(CertificateError::Revoked)) => {
+                rejected = true;
+                break;
+            },
+            Ok(kind) => last = format!("accepted: {kind:?}"),
+            Err(error) => last = format!("error: {error}"),
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let anonymous = fixture.client(&TLS13, None);
+    let anonymous_result = handshake(&server.config, &anonymous, None);
+    stop.send(true).expect("stop the watcher");
+    drop(watcher.join());
+    assert!(
+        rejected,
+        "polling must install the repaired CRL on the listener verifier; last: {last}"
+    );
+    assert!(
+        anonymous_result.is_err(),
+        "Require mode must reject an anonymous client after the watcher swap"
+    );
+}
+
+#[test]
 fn tls12_finished_after_crl_reload_cannot_seed_resumption() {
     crl_race(&TLS12, ClientCertMode::Require);
 }
@@ -369,5 +496,95 @@ fn optional_client_auth_still_accepts_anonymous_clients_after_reload() {
             HandshakeKind::Full,
             "the connection must perform full authentication"
         );
+    }
+}
+
+#[test]
+fn watcher_rotates_ca_and_crl_for_fresh_handshakes() {
+    for rotate_ca in [true, false] {
+        let mut fixture = Fixture::new(ClientCertMode::Require);
+        fixture.separate_verifier_dirs();
+        if rotate_ca {
+            fixture.tls.client_ca.as_mut().expect("client CA").crl_paths.clear();
+        }
+        let replacement = Fixture::new(ClientCertMode::Require);
+        let server = setup::build_reloadable_server_config(&fixture.tls, true).expect("reloadable server");
+        let _watcher = WatcherGuard::new(&server, &fixture.tls);
+        let old_client = fixture.client(&TLS13, Some(&fixture.revoked));
+        handshake(&server.config, &old_client, None).expect("old client initially trusted");
+        let replacement_client = fixture.client(&TLS13, Some(&replacement.trusted));
+        assert!(
+            matches!(
+                handshake(&server.config, &replacement_client, None),
+                Err(rustls::Error::InvalidCertificate(_))
+            ),
+            "replacement CA identity must initially be untrusted"
+        );
+
+        let ca = fixture.tls.client_ca.as_ref().expect("client CA");
+        let changed_path = if rotate_ca {
+            &ca.ca_path
+        } else {
+            ca.crl_paths.first().expect("CRL path")
+        };
+        let before_cert = server.cert_handle.load_full();
+        let verifier_handle = server.verifier_handle.as_ref().expect("verifier handle");
+        let before_verifier = verifier_handle.load_full();
+        std::fs::write(changed_path, b"invalid verifier material").expect("corrupt verifier file");
+        wait_for_condition(
+            || !Arc::ptr_eq(&before_cert, &server.cert_handle.load_full()),
+            "watcher must begin processing the first corrupt verifier-file event",
+        );
+        let first_cert = server.cert_handle.load_full();
+        std::fs::write(changed_path, b"invalid verifier material").expect("rewrite corrupt verifier file");
+        wait_for_condition(
+            || !Arc::ptr_eq(&first_cert, &server.cert_handle.load_full()),
+            "watcher must publish a second certificate after the first verifier attempt completes",
+        );
+        assert!(
+            Arc::ptr_eq(&before_verifier, &verifier_handle.load_full()),
+            "failed verifier reload must retain the same verifier"
+        );
+        handshake(&server.config, &old_client, None).expect("invalid reload must keep old verifier");
+        assert!(
+            matches!(
+                handshake(&server.config, &replacement_client, None),
+                Err(rustls::Error::InvalidCertificate(_))
+            ),
+            "invalid reload must not trust the independent replacement identity"
+        );
+
+        if rotate_ca {
+            let replacement_ca = &replacement.tls.client_ca.as_ref().expect("replacement CA").ca_path;
+            std::fs::copy(replacement_ca, changed_path).expect("replace CA from distinct watched directory");
+        } else {
+            fixture.revoke();
+        }
+        wait_for_condition(
+            || {
+                matches!(
+                    handshake(&server.config, &old_client, None),
+                    Err(rustls::Error::InvalidCertificate(_))
+                )
+            },
+            "fresh handshakes must reject the old identity after a CA or CRL file event",
+        );
+        let trusted = if rotate_ca {
+            &replacement.trusted
+        } else {
+            &fixture.trusted
+        };
+        let trusted_client = fixture.client(&TLS13, Some(trusted));
+        handshake(&server.config, &trusted_client, None).expect("trusted identity must still connect");
+    }
+}
+
+/// Poll a watcher-visible condition with a finite deadline.
+#[expect(clippy::disallowed_methods, reason = "bounded polling in a synchronous watcher test")]
+fn wait_for_condition(mut condition: impl FnMut() -> bool, message: &str) {
+    let started = Instant::now();
+    while !condition() {
+        assert!(started.elapsed() < Duration::from_secs(5), "{message}");
+        std::thread::sleep(Duration::from_millis(50));
     }
 }

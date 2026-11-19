@@ -25,6 +25,7 @@ use praxis_core::{
     ProxyError,
     backend::Runtime,
     config::{Config, ProtocolKind},
+    server::ServerRuntime as _,
 };
 
 #[cfg(feature = "pingora")]
@@ -89,16 +90,23 @@ impl Protocol for PingoraHttp {
             return Ok(Vec::new());
         }
 
-        let mut cert_watcher_shutdowns = Vec::new();
+        let mut cert_watcher_shutdowns = crate::cert_watcher_shutdowns::RegistrationWatchers::default();
+        let lifecycle = server.lifecycle();
         for listener in &http_listeners {
             let pipeline = pipelines.get(&listener.name).map(Arc::clone).ok_or_else(|| {
                 ProxyError::Config(format!("no pipeline for listener '{name}'", name = listener.name))
             })?;
 
-            handler::load_http_handler(server.server_mut(), listener, pipeline, &mut cert_watcher_shutdowns)?;
+            handler::load_http_handler_with_lifecycle(
+                server.server_mut(),
+                listener,
+                pipeline,
+                cert_watcher_shutdowns.senders_mut(),
+                lifecycle.clone(),
+            )?;
         }
 
-        Ok(cert_watcher_shutdowns)
+        Ok(cert_watcher_shutdowns.finish())
     }
 }
 
@@ -140,6 +148,7 @@ mod tests {
             listeners,
             metrics: MetricsConfig::default(),
             runtime: RuntimeConfig::default(),
+            shutdown_drain_delay_secs: 0,
             shutdown_timeout_secs: 30,
             telemetry: TelemetryConfig::default(),
         }

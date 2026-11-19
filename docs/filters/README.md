@@ -57,7 +57,9 @@ influence downstream processing:
   upstream request.
 - `ctx.request_headers_to_remove`: remove headers from the
   upstream request.
-- `ctx.filter_metadata`: write durable per-request metadata.
+- `ctx.filter_metadata`: write durable per-request metadata
+  (`FilterMetadata`: keys up to 64 bytes, values up to 256
+  bytes, at most 128 entries).
 - `ctx.filter_results`: write key-value results for
   [branch chain](branch-chains.md) evaluation. Results
   are keyed by the filter's TYPE name (the return value
@@ -383,7 +385,7 @@ pub struct HttpFilterContext<'a> {
     pub downstream_tls: bool,
     pub extensions: RequestExtensions,
     pub extra_request_headers: Vec<(Cow<'static, str>, String)>,
-    pub filter_metadata: HashMap<String, String>,
+    pub filter_metadata: FilterMetadata,
     pub filter_results: HashMap<&'static str, FilterResultSet>,
     pub filter_state: HashMap<usize, Box<dyn Any + Send + Sync>>,
     pub health_registry: Option<&'a HealthRegistry>,
@@ -561,7 +563,7 @@ rejected.
 | ------------------- | ----------------------------------------------- |
 | `grpc`              | Request is (`true`) or is not (`false`) gRPC    |
 | `path`              | URI exactly equals value                        |
-| `path_prefix`       | URI starts with value                           |
+| `path_prefix`       | URI path matches at a segment boundary         |
 | `methods`           | Method in list                                  |
 | `headers`           | All listed headers match                        |
 | `headers_present`   | All listed headers are present, any value       |
@@ -574,13 +576,20 @@ so it works without the `grpc_detection` filter and does not depend on
 filter ordering. `application/grpc-web` is a distinct protocol and does
 not match.
 
+For `path_prefix`, `/api` matches `/api` and `/api/v1`, but not
+`/apikeys`. One trailing slash on a configured prefix is ignored, so
+`/api/` is equivalent to `/api`.
+
 ```yaml
 # Rate limit only gRPC calls.
 - filter: rate_limit
   conditions:
     - when:
         grpc: true
-  requests_per_second: 100
+  mode: global
+  scope: local
+  rate: 100
+  burst: 200
 ```
 
 ```yaml

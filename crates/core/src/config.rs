@@ -38,13 +38,13 @@ pub mod runtime;
 mod telemetry;
 mod validate;
 
-pub use admin::AdminConfig;
+pub use admin::{AdminConfig, ReadinessMode};
 pub use body_limits::{
     ABSOLUTE_MAX_BODY_BYTES, BodyLimitsConfig, BufferLimit, DEFAULT_MAX_BODY_BYTES, DEFAULT_MAX_BUFFER_BYTES,
     MAX_BUFFER_BYTES,
 };
 pub use bootstrap::{ConfigFile, DEFAULT_CONFIG, load_config};
-pub use branch_chain::{BranchChainConfig, BranchCondition, ResultMatch};
+pub use branch_chain::{BranchChainConfig, BranchCondition, MAX_RESULT_KEY_LEN, ResultMatch};
 pub use chain_ref::ChainRef;
 pub use cluster::{
     AuthoritySource, BackoffConfig, BudgetPercent, Cluster, ClusterHttpOptions, ConsistentHashOpts,
@@ -139,7 +139,12 @@ pub struct Config {
     #[serde(default)]
     pub runtime: RuntimeConfig,
 
-    /// Upper bound on the duration of a graceful shutdown.
+    /// Delay after shutdown begins before graceful connection shutdown; it
+    /// counts against `shutdown_timeout_secs`.
+    #[serde(default)]
+    pub shutdown_drain_delay_secs: u64,
+
+    /// Total budget for a graceful shutdown, including the drain delay.
     #[serde(default = "default_shutdown_timeout_secs")]
     pub shutdown_timeout_secs: u64,
 
@@ -343,6 +348,10 @@ mod tests {
     #[test]
     fn default_shutdown_timeout_is_30() {
         let config = Config::from_yaml(VALID_YAML).unwrap();
+        assert_eq!(
+            config.shutdown_drain_delay_secs, 0,
+            "drain delay should default to zero"
+        );
         assert_eq!(
             config.shutdown_timeout_secs, 30,
             "default shutdown timeout should be 30s"
@@ -730,6 +739,7 @@ listeners:
   - name: web
     address: "127.0.0.1:8080"
     filter_chains: [main]
+shutdown_drain_delay_secs: 2
 filter_chains:
   - name: main
     filters:
@@ -765,6 +775,10 @@ filter_chains:
         assert_eq!(
             roundtripped.shutdown_timeout_secs, original.shutdown_timeout_secs,
             "shutdown_timeout_secs should survive roundtrip"
+        );
+        assert_eq!(
+            roundtripped.shutdown_drain_delay_secs, original.shutdown_drain_delay_secs,
+            "shutdown_drain_delay_secs should survive roundtrip"
         );
     }
 

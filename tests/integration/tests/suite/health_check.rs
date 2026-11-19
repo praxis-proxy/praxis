@@ -19,7 +19,11 @@ use std::{
 
 use praxis_core::config::Config;
 #[cfg(feature = "pingora")]
-use praxis_core::health::{EndpointHealth, HealthRegistry};
+use praxis_core::{
+    config::ReadinessMode,
+    health::{EndpointHealth, HealthRegistry},
+    server::{LifecycleHandle, LifecyclePhase},
+};
 #[cfg(feature = "pingora")]
 use praxis_test_utils::ensure_crypto_provider;
 use praxis_test_utils::{
@@ -463,11 +467,14 @@ filter_chains:
     health_map.insert(Arc::from("backend"), Arc::new(entry));
     let health_registry: HealthRegistry = Arc::new(health_map);
 
-    praxis_protocol::http::pingora::health::add_health_endpoint_to_pingora_server(
+    praxis_protocol::http::pingora::health::add_health_endpoint_to_pingora_server_with_policy(
         &mut server,
         &format!("127.0.0.1:{admin_port}"),
         Some(health_registry),
         true,
+        None,
+        ReadinessMode::Upstreams,
+        None,
     );
 
     std::thread::spawn(move || {
@@ -480,6 +487,69 @@ filter_chains:
     assert_eq!(status, 503, "/ready should return 503 when all endpoints unhealthy");
     assert!(body.contains("degraded"), "status should be degraded: {body}");
     assert!(body.contains(r#""healthy":0"#), "should report 0 healthy: {body}");
+}
+
+/// `/ready` maps each lifecycle phase while the listener keeps accepting.
+#[cfg(feature = "pingora")]
+#[test]
+fn ready_endpoint_reports_lifecycle_phases() {
+    let admin_port = free_port();
+    let proxy_port = free_port();
+
+    let yaml = format!(
+        r#"
+listeners:
+  - name: default
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains: [main]
+admin:
+  metrics_address: "127.0.0.1:{admin_port}"
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#
+    );
+
+    let config = Config::from_yaml(&yaml).unwrap();
+    let mut server = praxis_core::server::build_http_server(config.shutdown_timeout_secs, &Default::default());
+    let lifecycle = LifecycleHandle::new();
+    praxis_protocol::http::pingora::health::add_health_endpoint_to_pingora_server_with_policy(
+        &mut server,
+        &format!("127.0.0.1:{admin_port}"),
+        None,
+        false,
+        None,
+        ReadinessMode::Serving,
+        Some(lifecycle.clone()),
+    );
+
+    std::thread::spawn(move || {
+        server.run_forever();
+    });
+
+    wait_for_http(&format!("127.0.0.1:{admin_port}"));
+
+    let initializing = http_get(&format!("127.0.0.1:{admin_port}"), "/ready", None);
+    assert_eq!(initializing.0, 503, "an initializing server must not report ready");
+    assert_eq!(initializing.1, r#"{"status":"initializing"}"#);
+
+    lifecycle.mark_serving().unwrap();
+    let serving = http_get(&format!("127.0.0.1:{admin_port}"), "/ready", None);
+    assert_eq!(serving.0, 200, "a serving server must report ready");
+    assert_eq!(serving.1, r#"{"status":"ok"}"#);
+
+    assert!(lifecycle.begin_drain(), "serving must drain");
+    let draining = http_get(&format!("127.0.0.1:{admin_port}"), "/ready", None);
+    assert_eq!(draining.0, 503, "a draining server must not report ready");
+    assert_eq!(draining.1, r#"{"status":"draining"}"#);
+
+    lifecycle.mark_stopped();
+    let stopped = http_get(&format!("127.0.0.1:{admin_port}"), "/ready", None);
+    assert_eq!(stopped.0, 503, "a stopped server must not report ready");
+    assert_eq!(stopped.1, r#"{"status":"stopped"}"#);
+    assert_eq!(lifecycle.phase(), LifecyclePhase::Stopped);
 }
 
 #[test]

@@ -229,6 +229,14 @@ async fn read_body<R: AdminRequest>(req: &mut R) -> Result<String, Response<Vec<
     let buf = match req.read_body(MAX_BODY_BYTES).await {
         Ok(buf) => buf,
         Err(BodyReadError::TooLarge) => return Err(payload_too_large()),
+        Err(BodyReadError::TimedOut) => {
+            tracing::warn!("log level admin request body timed out");
+            let mut response = json_response(408, br#"{"error":"request body timed out"}"#);
+            response
+                .headers_mut()
+                .insert(http::header::CONNECTION, http::HeaderValue::from_static("close"));
+            return Err(response);
+        },
         Err(BodyReadError::Io(error)) => {
             tracing::warn!(%error, "log level admin request body read failed");
             return Err(internal_error());

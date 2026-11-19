@@ -23,7 +23,7 @@ use std::{collections::HashMap, hint::black_box};
 use common::{bench_runtime, make_ctx, make_request};
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use praxis_core::config::{BranchChainConfig, BranchCondition, ChainRef, InsecureOptions, ResultMatch};
-use praxis_filter::{FilterEntry, FilterPipeline, FilterRegistry, FilterResultSet, Request};
+use praxis_filter::{FilterEntry, FilterPipeline, FilterRegistry, FilterResultSet, Request, TrustedHeaderMutation};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -82,7 +82,9 @@ fn bench_pipeline_with_branches(c: &mut Criterion) {
 
     for &(label, branch_count) in &[("1", 1), ("3", 3), ("5", 5)] {
         let pipeline = build_pipeline_with_branches(branch_count);
-        assert_branch_ran(&rt, &pipeline, &make_request("/api/data"), "X-Branch");
+        let branch_names: Vec<_> = (0..branch_count).map(|index| format!("branch_{index}")).collect();
+        let expected: Vec<_> = branch_names.iter().map(String::as_str).collect();
+        assert_branch_values(&rt, &pipeline, &make_request("/api/data"), "X-Branch", &expected);
         group.bench_with_input(BenchmarkId::from_parameter(label), &pipeline, |b, pipeline| {
             b.to_async(&rt).iter_batched(
                 || make_request("/api/data"),
@@ -104,15 +106,13 @@ fn bench_branch_condition_matching(c: &mut Criterion) {
     let mut group = c.benchmark_group("branch_chains/condition_matching");
     let pipeline = build_pipeline_with_conditional_branches();
 
-    for (label, content_type) in [
-        ("match_first", Some("application/grpc")),
-        ("match_last", Some("application/grpc+json")),
-        ("no_match", None),
+    for (label, content_type, expected) in [
+        ("match_first", Some("application/grpc"), &["branch_0"][..]),
+        ("match_last", Some("application/grpc+json"), &["branch_2"][..]),
+        ("no_match", None, &[][..]),
     ] {
         let request = grpc_request(content_type);
-        if content_type.is_some() {
-            assert_branch_ran(&rt, &pipeline, &request, "X-Kind");
-        }
+        assert_branch_values(&rt, &pipeline, &request, "X-Kind", expected);
         group.bench_function(label, |b| {
             let pipeline = &pipeline;
             b.to_async(&rt).iter_batched(
@@ -235,16 +235,30 @@ fn grpc_request(content_type: Option<&str>) -> Request {
     request
 }
 
-/// Run `request` once and panic unless a branch added `header`, so a
-/// broken config cannot silently time the branch-free path.
-fn assert_branch_ran(rt: &tokio::runtime::Runtime, pipeline: &FilterPipeline, request: &Request, header: &str) {
+/// Run `request` once and check which branches added `header`, so a
+/// broken config cannot silently time the wrong branch path.
+fn assert_branch_values(
+    rt: &tokio::runtime::Runtime,
+    pipeline: &FilterPipeline,
+    request: &Request,
+    header: &str,
+    expected: &[&str],
+) {
     let mut ctx = make_ctx(request);
     let _action = rt.block_on(pipeline.execute_http_request(&mut ctx)).unwrap();
+    let name = header.parse().unwrap();
+    let actual = ctx
+        .request_header_mutations
+        .iter()
+        .filter(|mutation| mutation.matches_header(&name))
+        .map(|mutation| match mutation {
+            TrustedHeaderMutation::Add(_, value) => Some(value.as_str()),
+            TrustedHeaderMutation::Remove(_) | TrustedHeaderMutation::Set(..) => None,
+        });
     assert!(
-        ctx.extra_request_headers
-            .iter()
-            .any(|(name, _)| name.eq_ignore_ascii_case(header)),
-        "a branch should have added {header}"
+        actual.eq(expected.iter().copied().map(Some)),
+        "expected {header} additions {expected:?}, got {:?}",
+        ctx.request_header_mutations
     );
 }
 
