@@ -1609,7 +1609,7 @@ mod tests {
     )]
     async fn final_header_cleanup_waits_for_the_retry_decision() {
         let pipeline = admission_cleanup_pipeline();
-        let mut ctx = body_filtered_attempt(&pipeline).await;
+        let mut ctx = Box::pin(body_filtered_attempt(&pipeline)).await;
         let lease = Arc::clone(ctx.cluster_admission.as_ref().unwrap());
         let mut retryable = pingora_http::ResponseHeader::build(503, None).unwrap();
         let error = super::super::super::response_filter::execute(&pipeline, &mut retryable, &mut ctx)
@@ -1645,7 +1645,7 @@ mod tests {
     #[tokio::test]
     async fn fallback_cleanup_during_retry_backoff_keeps_another_requests_endpoint() {
         let pipeline = admission_cleanup_pipeline();
-        let mut abandoned = body_filtered_attempt(&pipeline).await;
+        let mut abandoned = Box::pin(body_filtered_attempt(&pipeline)).await;
         let lease = Arc::clone(abandoned.cluster_admission.as_ref().unwrap());
         assert!(super::super::super::retry_util::response_status_retry(
             &mut abandoned,
