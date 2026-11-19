@@ -66,8 +66,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   When an entity default, group or route sets `replace_inherited`, or
   `global.defaults.http` or an `http:` route adds authentication, the policy
   never runs the global gate: the route judges the credential, the head runs
-  the limiter only, the body is buffered (up to `max_buffer_bytes`) until the
-  route decides, and a startup warning names the section. Policies with
+  the limiter only, the body is buffered until the route decides, and a
+  startup warning names the section. The buffer holds at least
+  `max_buffer_bytes`, more if another filter asks for more, within the
+  global `body_limits.max_buffer_bytes`; a larger body now gets 413, where a
+  `read_only` policy used to stream it. Policies with
   `context_headers` or request conditions keep the previous timing.
   Pipeline construction warns when an earlier filter or request conditions
   move admission out of the head.

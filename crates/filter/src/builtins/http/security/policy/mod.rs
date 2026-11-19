@@ -223,8 +223,10 @@
 //! `global.defaults.http` or an `http:` route adds steps only the head would
 //! run, the policy never runs the global gate: the head runs the pre-identity
 //! limiter only, identity waits for the route, the request body is buffered
-//! (up to `max_buffer_bytes`) until the route decides, and a startup warning
-//! names the section. A policy with `context_headers` keeps today's timing:
+//! until the route decides, and a startup warning names the section. The
+//! buffer holds at least `max_buffer_bytes`, more if another filter asks for
+//! more, within the global `body_limits.max_buffer_bytes`; a larger body gets
+//! 413, where a `read_only` policy used to stream it. A policy with `context_headers` keeps today's timing:
 //! those values can come from filters that run after the head.
 //!
 //! The head judges the request as the client sent it plus the trusted header
