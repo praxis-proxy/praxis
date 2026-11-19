@@ -257,6 +257,28 @@ fn head_hook_rejection_refuses_the_connect() {
 }
 
 #[test]
+fn body_hook_rejection_refuses_the_connect_before_dialing() {
+    // A CONNECT has no body, so its body filters get just the end of it, as
+    // a bodyless request's do. A filter that decides there (an entity-aware
+    // policy authorizes at that call) must decide before the dial.
+    let (destination, port) = praxis_test_utils::bind_unique_port();
+    let proxy = start_allowlist_example_with_registry(
+        port,
+        "      - filter: test_hook\n",
+        &registry_with("test_hook", || Box::new(RejectingHook::Body)),
+    );
+
+    let tunnel = connect_tunnel(proxy.addr(), &format!("localhost:{port}"));
+    assert_eq!(tunnel.status, 418, "the body hook's refusal answers the CONNECT");
+    // A dial would have connected before the refusal was written.
+    destination.set_nonblocking(true).unwrap();
+    assert!(
+        matches!(destination.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+        "the refused CONNECT must not dial its destination"
+    );
+}
+
+#[test]
 fn response_hook_rejection_refuses_the_tunnel() {
     let destination = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = destination.local_addr().unwrap().port();
@@ -415,6 +437,9 @@ enum RejectingHook {
     /// Reject in the request-head phase.
     Head,
 
+    /// Reject at the end of the request body.
+    Body,
+
     /// Reject the tunnel's response.
     Response,
 }
@@ -429,6 +454,13 @@ impl HttpFilter for RejectingHook {
         matches!(self, Self::Head)
     }
 
+    fn request_body_access(&self) -> praxis_filter::BodyAccess {
+        match self {
+            Self::Body => praxis_filter::BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Required),
+            Self::Head | Self::Response => praxis_filter::BodyAccess::None,
+        }
+    }
+
     async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         Ok(FilterAction::Continue)
     }
@@ -437,9 +469,22 @@ impl HttpFilter for RejectingHook {
         Ok(FilterAction::Reject(Rejection::status(418)))
     }
 
+    async fn on_request_body(
+        &self,
+        _ctx: &mut HttpFilterContext<'_>,
+        _body: &mut Option<bytes::Bytes>,
+        end_of_stream: bool,
+    ) -> Result<FilterAction, FilterError> {
+        Ok(if end_of_stream {
+            FilterAction::Reject(Rejection::status(418))
+        } else {
+            FilterAction::Continue
+        })
+    }
+
     async fn on_response(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         Ok(match self {
-            Self::Head => FilterAction::Continue,
+            Self::Head | Self::Body => FilterAction::Continue,
             Self::Response => FilterAction::Reject(Rejection::status(418)),
         })
     }

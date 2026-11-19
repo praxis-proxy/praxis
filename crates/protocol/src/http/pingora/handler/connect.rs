@@ -6,9 +6,10 @@
 //! A listener with `forward_proxy.enabled: true` routes `CONNECT
 //! host:port` requests here instead of the reverse-proxy request path.
 //! The filter pipeline runs first (so `ip_acl`, `policy`, and conditions
-//! apply to the tunnel request), then the destination rules and the
-//! private-IP guard decide the dial, and the tunnel relays raw bytes with
-//! idle and duration limits.
+//! apply to the tunnel request), its body filters getting the end of the
+//! CONNECT's empty body as on any bodyless request; then the destination
+//! rules and the private-IP guard decide the dial, and the tunnel relays raw
+//! bytes, which no body filter sees, with idle and duration limits.
 //!
 //! Non-CONNECT requests keep using the reverse-proxy pipeline.
 
@@ -29,10 +30,13 @@ use tunnel::{TunnelStats, pump};
 use super::{
     body_util::BodyFilterOutput,
     inbound_admission::admit_inbound_session,
+    request_body_filter::run_request_body,
     request_filter::{
-        pipeline::run_pipeline,
+        header_mutations::apply_pre_read_mutations_to_request,
+        pipeline::{PipelineResult, run_pipeline},
         request_head,
         request_utils::{create_request_span, snapshot_for_early_exit},
+        stream_buffer::{PreReadPass, PreReadStop},
         terminal_responses::{run_streaming_terminal_response, run_terminal_response},
     },
     response_filter::run_response_filters,
@@ -350,10 +354,10 @@ async fn serve_connect(
     // The head phase runs first, as on every other request: a head hook may
     // refuse the CONNECT, and what it publishes (head_classifier's class,
     // trusted header sets) must reach the request pipeline.
-    if request_head::prepare(pipeline, session, &mut request, ctx).await {
+    if prepare_request(pipeline, session, &mut request, ctx).await {
         return Ok(true);
     }
-    let outcome = run_pipeline(pipeline, request, ctx).await;
+    let outcome = Box::pin(run_request_filters(pipeline, request, ctx)).await;
     if let Some(status) = outcome.as_ref().ok().and_then(|result| success_answer(&result.action)) {
         refuse_filter_success(session, ctx, status).await;
         return Ok(true);
@@ -378,6 +382,95 @@ async fn serve_connect(
         },
     }
     Ok(true)
+}
+
+/// Run the phases that precede the request filters, as on any request: the
+/// request-head phase, then the pre-read of the CONNECT's empty body when
+/// the pipeline buffers request bodies (see [`pre_read_empty_body`]).
+///
+/// Returns `true` when the CONNECT has been answered.
+async fn prepare_request(
+    pipeline: &FilterPipeline,
+    session: &mut Session,
+    request: &mut Request,
+    ctx: &mut PingoraRequestCtx,
+) -> bool {
+    if request_head::prepare(pipeline, session, request, ctx).await {
+        return true;
+    }
+    let Err(rejection) = Box::pin(pre_read_empty_body(pipeline, request, ctx)).await else {
+        return false;
+    };
+    ctx.request_snapshot = Some(request.clone());
+    if is_success(rejection.status) {
+        refuse_filter_success(session, ctx, rejection.status).await;
+    } else {
+        send_rejection_for(session, rejection, ctx).await;
+    }
+    true
+}
+
+/// Pre-read the CONNECT's empty request body when the pipeline buffers
+/// request bodies.
+///
+/// The reverse path pre-reads a `StreamBuffer` body before the request
+/// filters, so they run with the body filters' verdict and promotions. A
+/// CONNECT has no body (RFC 9110 Section 9.3.6), so the pass ends at once;
+/// nothing is read from the session, where the bytes after the CONNECT head
+/// belong to the tunnel. Header mutations the body filters emit reach the
+/// request the filters see.
+async fn pre_read_empty_body(
+    pipeline: &FilterPipeline,
+    request: &mut Request,
+    ctx: &mut PingoraRequestCtx,
+) -> Result<(), Rejection> {
+    let Some(mut pass) = PreReadPass::new(pipeline) else {
+        return Ok(());
+    };
+    match Box::pin(pass.feed(pipeline, ctx, request, None)).await {
+        Ok(_ended) => {},
+        Err(PreReadStop::Rejected(rejection)) => {
+            ctx.stamp_error_type(ERROR_TYPE_FILTER_REJECT);
+            return Err(rejection);
+        },
+        Err(PreReadStop::Filter(error)) => {
+            tracing::error!(error = %error, "CONNECT body filter error during pre-read");
+            ctx.stamp_error_type(ERROR_TYPE_INTERNAL);
+            return Err(Rejection::status(500));
+        },
+    }
+    let pre_read = pass.finish(pipeline, ctx);
+    apply_pre_read_mutations_to_request(request, &pre_read.mutations);
+    ctx.pre_read_mutations = pre_read.mutations;
+    Ok(())
+}
+
+/// Run the request filters, then, when they approve, give the body filters
+/// the end of the CONNECT's empty body before anything is dialed.
+///
+/// On the reverse path a bodyless request's body filters run once, at end
+/// of stream, after the request filters, and a filter may decide there: an
+/// entity-aware `policy` authorizes at that call. A CONNECT gets the same
+/// call, which drains the pre-read instead when one ran. Tunnel bytes are
+/// not the request body and never reach the body filters. A refusal from
+/// the body filters becomes the outcome, answered like the request filters'.
+async fn run_request_filters(
+    pipeline: &FilterPipeline,
+    request: Request,
+    ctx: &mut PingoraRequestCtx,
+) -> Result<PipelineResult, praxis_filter::FilterError> {
+    let mut outcome = run_pipeline(pipeline, request, ctx).await;
+    if let Ok(result) = &mut outcome
+        && matches!(
+            result.action,
+            FilterAction::Continue | FilterAction::Release | FilterAction::BodyDone
+        )
+        && let Err(halt) = Box::pin(run_request_body(pipeline, &mut None, true, ctx)).await
+    {
+        tracing::debug!(reason = %halt.reason, "CONNECT request body filters refused the tunnel");
+        result.action = FilterAction::Reject(halt.rejection.unwrap_or_else(|| Rejection::status(500)));
+    }
+    outcome
 }
 
 /// The status of a filter's 2xx answer to the CONNECT, if it gave one.
@@ -1289,6 +1382,156 @@ allow_destinations:
         assert_eq!(ctx.upstream_response_status, Some(200));
     }
 
+    // -------------------------------------------------------------------------
+    // Request Body Phase
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn body_filter_refusal_answers_before_the_destination_gate() {
+        // The destination rules would answer this CONNECT with 403.
+        for buffered in [false, true] {
+            let pipeline = body_hook_pipeline(buffered, BodyAnswer::Refuse(418));
+            let response = Box::pin(handle_raw(&pipeline, DENIED_CONNECT)).await;
+            assert_eq!(status_of(&response), 418, "buffered {buffered}: {response}");
+        }
+    }
+
+    #[tokio::test]
+    async fn body_filter_error_answers_500() {
+        for buffered in [false, true] {
+            let pipeline = body_hook_pipeline(buffered, BodyAnswer::Fail);
+            let response = Box::pin(handle_raw(&pipeline, DENIED_CONNECT)).await;
+            assert_eq!(status_of(&response), 500, "buffered {buffered}: {response}");
+        }
+    }
+
+    #[tokio::test]
+    async fn body_filter_success_answer_is_refused() {
+        // A 2xx would claim a tunnel no one opened.
+        for buffered in [false, true] {
+            let pipeline = body_hook_pipeline(buffered, BodyAnswer::Refuse(200));
+            let response = Box::pin(handle_raw(&pipeline, DENIED_CONNECT)).await;
+            assert_eq!(
+                status_of(&response),
+                CONNECT_SUCCESS_REFUSED,
+                "buffered {buffered}: {response}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn body_filters_see_the_end_of_the_empty_body_once_before_the_tunnel_opens() {
+        // As for a bodyless request on the reverse path: a buffering pipeline
+        // pre-reads the body before the request filters run, a streaming one
+        // ends it after them.
+        for (buffered, first_hook) in [(false, "request"), (true, "body")] {
+            let pipeline = body_hook_pipeline(buffered, BodyAnswer::Admit);
+            let (response, ctx) = Box::pin(connect_to_loopback(&pipeline)).await;
+            assert_eq!(status_of(&response), 200, "buffered {buffered}: {response}");
+            assert_eq!(
+                ctx.filter_metadata.get(BODY_ENDS),
+                Some("1"),
+                "buffered {buffered}: one end-of-stream call"
+            );
+            assert_eq!(
+                ctx.filter_metadata.get(FIRST_HOOK),
+                Some(first_hook),
+                "buffered {buffered}: hook order"
+            );
+        }
+    }
+
+    /// A one-filter pipeline whose [`BodyHook`] answers `answer`.
+    fn body_hook_pipeline(buffered: bool, answer: BodyAnswer) -> FilterPipeline {
+        test_pipeline(move || Box::new(BodyHook { buffered, answer }))
+    }
+
+    /// Metadata key counting a [`BodyHook`]'s end-of-stream calls.
+    const BODY_ENDS: &str = "test.body_ends";
+
+    /// Metadata key naming the [`BodyHook`] hook that ran first.
+    const FIRST_HOOK: &str = "test.first_hook";
+
+    /// A test filter that decides at the end of the request body.
+    struct BodyHook {
+        /// Whether the filter buffers the body (`StreamBuffer`) rather than
+        /// streaming it.
+        buffered: bool,
+
+        /// The filter's answer at the end of the body.
+        answer: BodyAnswer,
+    }
+
+    /// A [`BodyHook`]'s answer at the end of the request body.
+    #[derive(Clone, Copy)]
+    enum BodyAnswer {
+        /// Let the request continue.
+        Admit,
+
+        /// Refuse the request with this status.
+        Refuse(u16),
+
+        /// Fail with the default (closed) failure mode.
+        Fail,
+    }
+
+    #[async_trait::async_trait]
+    impl praxis_filter::HttpFilter for BodyHook {
+        fn name(&self) -> &'static str {
+            "test_hook"
+        }
+
+        fn request_body_access(&self) -> praxis_filter::BodyAccess {
+            praxis_filter::BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Required)
+        }
+
+        fn request_body_mode(&self) -> praxis_filter::BodyMode {
+            if self.buffered {
+                praxis_filter::BodyMode::StreamBuffer { max_bytes: None }
+            } else {
+                praxis_filter::BodyMode::Stream
+            }
+        }
+
+        async fn on_request(
+            &self,
+            ctx: &mut praxis_filter::HttpFilterContext<'_>,
+        ) -> Result<FilterAction, praxis_filter::FilterError> {
+            if ctx.filter_metadata.get(FIRST_HOOK).is_none() {
+                ctx.filter_metadata.insert(FIRST_HOOK, "request").unwrap();
+            }
+            Ok(FilterAction::Continue)
+        }
+
+        async fn on_request_body(
+            &self,
+            ctx: &mut praxis_filter::HttpFilterContext<'_>,
+            body: &mut Option<bytes::Bytes>,
+            end_of_stream: bool,
+        ) -> Result<FilterAction, praxis_filter::FilterError> {
+            assert!(end_of_stream, "a CONNECT's body filters see only the end of its body");
+            assert!(
+                body.as_ref().is_none_or(bytes::Bytes::is_empty),
+                "a CONNECT has no body"
+            );
+            if ctx.filter_metadata.get(FIRST_HOOK).is_none() {
+                ctx.filter_metadata.insert(FIRST_HOOK, "body").unwrap();
+            }
+            let ends: u32 = ctx
+                .filter_metadata
+                .get(BODY_ENDS)
+                .map_or(0, |ends| ends.parse().unwrap());
+            ctx.filter_metadata
+                .insert(BODY_ENDS, ends.saturating_add(1).to_string())
+                .unwrap();
+            match self.answer {
+                BodyAnswer::Admit => Ok(FilterAction::Continue),
+                BodyAnswer::Refuse(status) => Ok(FilterAction::Reject(Rejection::status(status))),
+                BodyAnswer::Fail => Err("body hook failed".into()),
+            }
+        }
+    }
+
     /// A request context whose CONNECT tunnel has just been established.
     async fn established_tunnel(pipeline: &FilterPipeline) -> PingoraRequestCtx {
         let mut ctx = PingoraRequestCtx {
@@ -1400,7 +1643,7 @@ allow_destinations:
     }
 
     /// A one-filter pipeline running the test filter `make` builds.
-    fn test_pipeline(make: fn() -> Box<dyn praxis_filter::HttpFilter>) -> FilterPipeline {
+    fn test_pipeline(make: impl Fn() -> Box<dyn praxis_filter::HttpFilter> + Send + Sync + 'static) -> FilterPipeline {
         let mut registry = praxis_filter::FilterRegistry::with_builtins();
         registry
             .register(

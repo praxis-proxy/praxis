@@ -226,7 +226,8 @@ production` at startup. Do not run an experimental build in production.
   every destination through the allowlist; the filters and the private-IP
   guard still apply, and validation then requires an `ip_acl` or `policy`
   filter. Default builds reject the key. Tunneled payloads are opaque to
-  body-inspecting filters.
+  body-inspecting filters, which see only the end of the CONNECT's own,
+  empty body.
 - **`bound-upstream-request-body`**: the once-per-request bound-upstream
   request-body hook (`bound_upstream_request_body_access` and
   `on_bound_upstream_request_body` on `HttpFilter`). It runs right after the

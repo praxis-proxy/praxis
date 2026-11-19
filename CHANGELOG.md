@@ -234,7 +234,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   requests pass the same inbound admission as other requests (reserved
   `x-praxis-*` headers are refused with 400), run the request-head and
   request filter phases (`head_classifier`, `ip_acl`, `policy`,
-  conditions), then the destination rules and the private-IP guard decide
+  conditions), give the body filters the end of the CONNECT's empty body
+  as on any bodyless request (an entity-aware `policy` authorizes there),
+  then the destination rules and the private-IP guard decide
   the dial. The response filters then run on the tunnel's 200 before it is
   sent: a rejection, a closed-failure filter error, or a non-2xx status
   answers the CONNECT instead, and their header edits reach the 200. A
