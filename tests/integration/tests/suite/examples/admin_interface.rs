@@ -3,7 +3,10 @@
 
 //! Integration tests for the admin-interface example configuration.
 
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
 use praxis_test_utils::{free_port, http_get, start_backend, start_full_proxy, wait_for_tcp};
 
@@ -85,8 +88,7 @@ fn admin_interface_serves_health_and_metrics() {
         assert_eq!(status, 404, "health/metrics listener must not expose {path}: {body}");
     }
 
-    let (metrics_status, metrics_body) = http_get(&metrics_addr, "/metrics", None);
-    assert_eq!(metrics_status, 200, "/metrics should return 200");
+    let metrics_body = wait_for_completed_request_metrics(&metrics_addr);
     assert!(
         metrics_body.contains("praxis_http_requests_total"),
         "/metrics should contain praxis_http_requests_total: {metrics_body}"
@@ -143,4 +145,27 @@ fn admin_interface_serves_health_and_metrics() {
         metrics_body.contains("stream=\"headers\""),
         "/metrics should contain headers stream label: {metrics_body}"
     );
+}
+
+/// Wait for completion metrics: receiving the body can precede the logging hook.
+fn wait_for_completed_request_metrics(metrics_addr: &str) -> String {
+    let required = [
+        "praxis_http_requests_total{",
+        "praxis_http_request_duration_seconds_count{",
+        "praxis_http_request_body_bytes_count{",
+        "praxis_http_response_body_bytes_count{",
+    ];
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let (status, body) = http_get(metrics_addr, "/metrics", None);
+        assert_eq!(status, 200, "/metrics should return 200: {body}");
+        if required.iter().all(|metric| body.contains(metric)) {
+            return body;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "/metrics did not expose completed request metrics before the deadline: {body}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
