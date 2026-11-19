@@ -35,20 +35,20 @@ repository = "https://github.com/praxis-proxy/praxis"
 readme = "README.md"
 
 [workspace.dependencies]
-arc-swap = "1.9.3"
+arc-swap = "1.9.5"
 async-trait = "0.1.92"
 base64 = "0.23.1"
-bytes = "1.12.1"
+bytes = "1.12.2"
 cargo_metadata = "0.23.1"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
-clap = { version = "4.6.7", features = ["derive"] }
+clap = { version = "4.6.8", features = ["derive"] }
 criterion = { version = "0.8.2", features = ["async_tokio"] }
 dhat = "0.3.3"
 governor = "0.10.4"
 dashmap = "6.2.1"
 futures = "0.3.34"
 # Same backend pingora already builds (zlib-ng), so xtask adds no crate to the lockfile.
-flate2 = { version = "1.1.10", default-features = false, features = ["zlib-ng"] }
+flate2 = { version = "1.1.11", default-features = false, features = ["zlib-ng"] }
 h2 = "0.4.20"
 http = "1.5.0"
 # The hyper network backend (the `hyper` feature of praxis-proxy-core and
@@ -57,12 +57,12 @@ http = "1.5.0"
 http-body-util = "0.1.5"
 hyper = { version = "1.12.0", default-features = false }
 hyper-util = { version = "0.1.21", default-features = false }
-loom = "0.7.2"
+loom = "0.7.3"
 metrics = "0.24.6"
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
-nix = { version = "0.31.3", default-features = false, features = ["process", "resource", "signal", "user"] }
-notify = "8.2.0"
-object = { version = "0.40.0", default-features = false, features = ["read_core", "elf", "std"] }
+nix = { version = "0.31.4", default-features = false, features = ["process", "resource", "signal", "user"] }
+notify = "8.2.2"
+object = { version = "0.41.0", default-features = false, features = ["read_core", "elf", "std"] }
 opentelemetry = { version = "0.33.1", default-features = false, features = ["trace"] }
 opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["trace", "rt-tokio"] }
 opentelemetry-otlp = { version = "0.33.1", default-features = false, features = ["grpc-tonic", "http-proto", "reqwest-client", "tls-provider-agnostic", "tls-roots", "trace"] }
@@ -72,7 +72,7 @@ pingora-core = { version = "0.11.4", package = "quixotic-plecostomus-core", feat
 pingora-http = { version = "0.11.4", package = "quixotic-plecostomus-http" }
 pingora-proxy = { version = "0.11.4", package = "quixotic-plecostomus-proxy", features = ["rustls"] }
 percent-encoding = "2.3.2"
-rand = "0.10.3"
+rand = "0.10.4"
 plotters = { version = "0.3.7", default-features = false, features = ["svg_backend", "line_series"] }
 ppe = { version = "0.6.0", package = "praxis-policy", default-features = false }
 parking_lot = "0.12.5"
@@ -114,14 +114,14 @@ praxis-proxy-benchmarks = "0.2.2"
 jsonwebtoken = { version = "11.1.0", default-features = false }
 # System OpenSSL bindings, the same crate the rustls provider below uses; never
 # with the `vendored` feature, the platform library is the validated module.
-openssl = "0.10.81"
+openssl = "0.10.82"
 secrecy = { version = "0.10.3", features = ["serde"] }
 serde = { version = "1.0.229", features = ["derive", "rc"] }
-smallvec = "1.16.3"
+smallvec = "1.16.6"
 serde_json = "1.0.154"
 subtle = "2.6.1"
 rcgen = "0.14.10"
-regex = "1.13.1"
+regex = "1.13.2"
 # No built-in provider: praxis-proxy-tls installs the OpenSSL-backed one
 # below at startup (see crates/tls/src/provider.rs). Leaving rustls' defaults
 # on would silently link aws-lc-rs into every build, and
@@ -140,7 +140,7 @@ x509-parser = { version = "0.18.1", default-features = false }
 spiffe = { version = "0.19.0", default-features = false }
 # NOTE: serde_yaml is deprecated; using yaml_serde (yaml.org maintained fork) as drop-in.
 serde_yaml = { package = "yaml_serde", version = "0.10.7" }
-syn = { version = "3.0.9", features = ["full", "extra-traits", "visit"] }
+syn = { version = "3.0.10", features = ["full", "extra-traits", "visit"] }
 syslog = "7.0.0"
 tempfile = "3.27.0"
 # The hyper backend's TLS acceptor and connector, and the test suites' TLS
@@ -152,8 +152,8 @@ tokio-rustls = { version = "0.26.6", default-features = false, features = ["logg
 tokio-tungstenite = "0.30.0"
 thiserror = "2.0.21"
 tikv-jemallocator = "0.7.0"
-tonic = "0.14.6"
-tonic-prost = "0.14.6"
+tonic = "0.14.9"
+tonic-prost = "0.14.9"
 # Pingora 0.11 creates zero-capacity BufStreams, which Tokio 1.54 rejects.
 # Keep the 1.53 patch line until Pingora supports the new constructor contract.
 # https://github.com/tokio-rs/tokio/pull/8494
@@ -166,7 +166,7 @@ tracing-opentelemetry = "0.34.0"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json", "registry"] }
 unicase = "2.10.0"
 url = "2.5.8"
-zeroize = "1.9.1"
+zeroize = "1.9.2"
 
 [profile.release]
 codegen-units = 1

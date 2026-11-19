@@ -36,6 +36,9 @@ const H2_FRAME_TYPE_SETTINGS: u8 = 0x04;
 /// Minimum H2 frame header size (9 bytes).
 const H2_FRAME_HEADER_LEN: usize = 9;
 
+/// Maximum frame payload before either endpoint has changed the default.
+const H2_INITIAL_MAX_FRAME: usize = 16_384; // 16 KiB
+
 /// How long a healthy HTTP/2 probe waits for the server to close after GOAWAY.
 ///
 /// Long enough for a same-datacenter peer to drain and FIN (so our close is
@@ -327,11 +330,58 @@ async fn h2_read_settings(stream: &mut TcpStream, addr: &str) -> bool {
         return false;
     }
 
-    if !is_settings_frame(&header) {
-        trace!(addr, "h2 health check did not receive SETTINGS frame");
+    let Some(length) = initial_settings_length(&header) else {
+        trace!(addr, "h2 health check received invalid initial SETTINGS header");
+        return false;
+    };
+
+    let mut payload = vec![0_u8; length];
+    if let Err(error) = stream.read_exact(&mut payload).await {
+        trace!(addr, %error, "h2 health check received incomplete SETTINGS payload");
         return false;
     }
-    true
+
+    settings_values_valid(&payload)
+}
+
+/// Validate a server's initial non-ACK SETTINGS header per RFC 9113 §6.5.
+fn initial_settings_length(header: &[u8; H2_FRAME_HEADER_LEN]) -> Option<usize> {
+    let [
+        length_hi,
+        length_mid,
+        length_lo,
+        _,
+        flags,
+        stream_hi,
+        stream_mid,
+        stream_lo,
+        stream_end,
+    ] = *header;
+    let stream_id = u32::from_be_bytes([stream_hi & 0x7F, stream_mid, stream_lo, stream_end]);
+    let length = (usize::from(length_hi) << 16) | (usize::from(length_mid) << 8) | usize::from(length_lo);
+    (is_settings_frame(header)
+        && flags & 0x01 == 0
+        && stream_id == 0
+        && length <= H2_INITIAL_MAX_FRAME
+        && length.is_multiple_of(6))
+    .then_some(length)
+}
+
+/// Validate the constrained server setting values while accepting extensions.
+fn settings_values_valid(payload: &[u8]) -> bool {
+    payload.chunks_exact(6).all(|setting| {
+        let [id_hi, id_lo, value_a, value_b, value_c, value_d] = setting else {
+            return false;
+        };
+        let id = u16::from_be_bytes([*id_hi, *id_lo]);
+        let value = u32::from_be_bytes([*value_a, *value_b, *value_c, *value_d]);
+        match id {
+            2 => value == 0,
+            4 => value <= 2_147_483_647,
+            5 => (16_384..=16_777_215).contains(&value),
+            _ => true,
+        }
+    })
 }
 
 /// Send SETTINGS ACK and GOAWAY, then drain remaining data.
@@ -562,6 +612,67 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(clippy::too_many_lines, reason = "table covers initial SETTINGS frame variants")]
+    async fn initial_settings_exchange_validation() {
+        let empty = settings_frame(&[], 0, [0, 0, 0, 0]);
+        let mut truncated = settings_frame(&[0, 5, 0, 0, 0x40, 0], 0, [0; 4]);
+        truncated.truncate(12);
+        let cases = [
+            ("empty", empty.clone(), true),
+            ("unknown flags", settings_frame(&[], 0x80, [0, 0, 0, 0]), true),
+            ("reserved stream bit", settings_frame(&[], 0, [0x80, 0, 0, 0]), true),
+            (
+                "extension setting",
+                settings_frame(&[0xFF, 0xFF, 0, 0, 0, 1], 0, [0; 4]),
+                true,
+            ),
+            (
+                "server disables push",
+                settings_frame(&[0, 2, 0, 0, 0, 0], 0, [0; 4]),
+                true,
+            ),
+            (
+                "server enables push",
+                settings_frame(&[0, 2, 0, 0, 0, 1], 0, [0; 4]),
+                false,
+            ),
+            (
+                "maximum initial window",
+                settings_frame(&[0, 4, 0x7F, 0xFF, 0xFF, 0xFF], 0, [0; 4]),
+                true,
+            ),
+            (
+                "oversize initial window",
+                settings_frame(&[0, 4, 0x80, 0, 0, 0], 0, [0; 4]),
+                false,
+            ),
+            (
+                "minimum frame setting",
+                settings_frame(&[0, 5, 0, 0, 0x40, 0], 0, [0; 4]),
+                true,
+            ),
+            (
+                "undersize frame setting",
+                settings_frame(&[0, 5, 0, 0, 0, 1], 0, [0; 4]),
+                false,
+            ),
+            ("initial ACK", settings_frame(&[], 1, [0; 4]), false),
+            ("nonzero stream", settings_frame(&[], 0, [0, 0, 0, 1]), false),
+            ("incomplete setting", settings_frame(&[0], 0, [0; 4]), false),
+            ("truncated payload", truncated, false),
+            ("oversize payload", vec![0, 0x40, 2, 4, 0, 0, 0, 0, 0], false),
+        ];
+        for (name, frame, expected) in cases {
+            let actual = probe_settings_response(&frame).await;
+            assert_eq!(actual, expected, "RFC 9113 initial SETTINGS: {name}");
+        }
+        assert!(
+            !probe_stalled_settings_payload().await,
+            "incomplete live payload must time out"
+        );
+    }
+
+    #[tokio::test]
     async fn h2_probe_succeeds_with_settings_response() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap().to_string();
@@ -716,5 +827,51 @@ mod tests {
         let result = probe.await.unwrap();
         assert!(!result, "an empty response must fail the probe");
         drop(socket);
+    }
+
+    // -------------------------------------------------------------------------
+    // Test Utilities
+    // -------------------------------------------------------------------------
+
+    /// Frame an initial SETTINGS response with a chosen payload and flags.
+    fn settings_frame(payload: &[u8], flags: u8, stream: [u8; 4]) -> Vec<u8> {
+        let length = u32::try_from(payload.len()).unwrap().to_be_bytes();
+        let mut frame = vec![length[1], length[2], length[3], 4, flags];
+        frame.extend_from_slice(&stream);
+        frame.extend_from_slice(payload);
+        frame
+    }
+
+    /// Probe one peer that sends a response in split network writes.
+    async fn probe_settings_response(frame: &[u8]) -> bool {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let probe = tokio::spawn(async move { h2_probe(&addr, Duration::from_millis(300)).await });
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut preface = [0_u8; 33];
+        socket.read_exact(&mut preface).await.unwrap();
+        for chunk in frame.chunks(4) {
+            if socket.write_all(chunk).await.is_err() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        drop(socket);
+        probe.await.unwrap()
+    }
+
+    /// Keep a truncated SETTINGS payload open until the probe timeout.
+    async fn probe_stalled_settings_payload() -> bool {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let probe = tokio::spawn(async move { h2_probe(&addr, Duration::from_millis(80)).await });
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut preface = [0_u8; 33];
+        socket.read_exact(&mut preface).await.unwrap();
+        let frame = settings_frame(&[0, 5, 0, 0, 0x40, 0], 0, [0; 4]);
+        socket.write_all(&frame[..12]).await.unwrap();
+        let result = probe.await.unwrap();
+        drop(socket);
+        result
     }
 }

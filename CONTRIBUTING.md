@@ -4,7 +4,7 @@ Thank you for your interest in contributing! Start by
 reading the [development conventions]. Submissions that
 do not follow the conventions will be rejected.
 
-[development conventions]: docs/conventions.md
+[development conventions]: docs/developing/conventions.md
 
 ## Getting Help
 
@@ -25,11 +25,12 @@ points you to a better channel:
 1. Fork the repository and clone your fork
 2. Install pre-commit hooks: `make setup-hooks`
 3. Build and test: `make build && make test`
-4. Run every gate locally before pushing: `make all`
+4. Run the relevant checks in the [getting started guide]
+   before pushing. `make all` runs the workspace build.
 
-Requirements are listed in [docs/development.md].
+Requirements are listed in the [getting started guide].
 
-[docs/development.md]: docs/development.md
+[getting started guide]: docs/developing/getting-started.md
 
 ## Picking Up an Issue
 
@@ -64,7 +65,7 @@ CI enforces reviewability on every PR:
 
 See the [PR conventions] section for details and override labels.
 
-[PR conventions]: docs/conventions.md#pull-request-conventions
+[PR conventions]: docs/developing/conventions.md#pull-request-conventions
 
 ## Pull Request Review
 

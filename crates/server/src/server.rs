@@ -15,7 +15,7 @@ use std::{
     path::PathBuf,
     pin::Pin,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use praxis_core::{
@@ -24,6 +24,7 @@ use praxis_core::{
     config::{Config, ConfigFile, LogOutput, ProtocolKind, RuntimeConfig},
     health::{HealthRegistry, build_health_registry},
     logging::LogLevelState,
+    server::ShutdownFuture,
     subrequest::SubRequestClient,
 };
 use praxis_filter::FilterRegistry;
@@ -63,6 +64,9 @@ const CIRCUIT_EVICTION_INTERVAL: Duration = Duration::from_secs(300); // 5 min
 
 /// How long a healthy breaker must sit idle before eviction.
 const CIRCUIT_IDLE_THRESHOLD: Duration = Duration::from_secs(600); // 10 min
+
+/// Maximum total wait for server-owned background threads during cleanup.
+const BACKGROUND_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 // -----------------------------------------------------------------------------
 // Crypto Provider
@@ -309,10 +313,24 @@ pub fn try_run_server_with_composition(
     config_file: Option<ConfigFile>,
     log_level: Option<Arc<LogLevelState>>,
 ) -> Result<(), StartupError> {
+    try_run_server_with_composition_and_shutdown(config, composition, config_file, log_level, None)
+}
+
+/// Run one server invocation with an optional caller-controlled shutdown.
+#[expect(clippy::too_many_lines, reason = "startup registration and lifecycle orchestration")]
+#[expect(clippy::allow_attributes, reason = "lint is platform/config-dependent")]
+#[allow(clippy::needless_pass_by_value, reason = "server owns config")]
+fn try_run_server_with_composition_and_shutdown(
+    config: Config,
+    composition: ServerComposition,
+    config_file: Option<ConfigFile>,
+    log_level: Option<Arc<LogLevelState>>,
+    shutdown: Option<ShutdownFuture>,
+) -> Result<(), StartupError> {
     run_startup_checks(&config)?;
 
     #[cfg(feature = "admin-api")]
-    let stats_started_at = std::time::Instant::now();
+    let stats_started_at = Instant::now();
 
     // Install before startup instrumentation emits metrics. `/api/stats` reads
     // this recorder even when only the admin API listener is configured.
@@ -326,11 +344,17 @@ pub fn try_run_server_with_composition(
         .then(praxis_protocol::backend::admin::install_prometheus_admin_recorder);
 
     let health_registry = build_health_registry(&config.clusters);
-    let (state, registry) = build_server_state(&config, composition, &health_registry, log_level)?;
+    let (mut state, registry) = build_server_state(&config, composition, &health_registry, log_level)?;
+    let tasks = state
+        .tasks
+        .take()
+        .ok_or_else(|| std::io::Error::other("server task owner missing"))?;
+    #[cfg(feature = "config-reload")]
+    let mut tasks = tasks;
 
     info!(backend = praxis_core::backend::NAME, "initializing server");
     let mut server = Runtime::from_config(&config);
-    let _cert_shutdowns = register_protocols(&mut server, &config, &state.pipelines)?;
+    let cert_shutdowns = register_protocols(&mut server, &config, &state.pipelines)?;
     #[cfg(feature = "admin-api")]
     register_admin_endpoints(
         &mut server,
@@ -342,15 +366,22 @@ pub fn try_run_server_with_composition(
     );
 
     #[cfg(feature = "config-reload")]
-    let _watcher = spawn_watcher(config_file, config, registry, state);
+    {
+        tasks.watcher = spawn_watcher(config_file, config, registry, state);
+    }
     // Without the config-reload feature there is no file watcher; consume the
     // now-unused startup values so the server still runs, just without reload.
     #[cfg(not(feature = "config-reload"))]
     drop((config_file, config, registry, state));
 
     info!("starting server");
-    server.run_until_shutdown();
+    match shutdown {
+        Some(signal) => server.run_with_shutdown(signal),
+        None => server.run_until_shutdown(),
+    }
     info!("server stopped");
+    cert_shutdowns.shutdown();
+    drop(tasks);
     // Request handling has stopped; give direct access-log sinks a brief,
     // bounded window to flush records still queued for their writer threads
     // before the process exits.
@@ -459,6 +490,118 @@ fn exit_with(outcome: Result<(), StartupError>) -> ! {
 // Server State
 // -----------------------------------------------------------------------------
 
+/// Owns every health-check thread, including generations started by reload.
+pub(crate) struct HealthTaskLifecycle {
+    /// Cancels both current and future child generations on server return.
+    root: CancellationToken,
+    /// Handles retained until a bounded cleanup or reaped after reload.
+    handles: Mutex<Vec<std::thread::JoinHandle<()>>>,
+}
+
+impl HealthTaskLifecycle {
+    /// Create the parent cancellation scope for health generations.
+    fn new() -> Self {
+        Self {
+            root: CancellationToken::new(),
+            handles: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Create a health generation that inherits server shutdown.
+    pub(crate) fn new_token(&self) -> CancellationToken {
+        self.root.child_token()
+    }
+
+    /// Retain a health thread and reap completed earlier generations.
+    pub(crate) fn track(&self, handle: std::thread::JoinHandle<()>) {
+        let finished = {
+            let mut handles = self.handles.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if self.root.is_cancelled() {
+                drop(handles);
+                let deadline = Instant::now()
+                    .checked_add(BACKGROUND_DRAIN_TIMEOUT)
+                    .unwrap_or_else(Instant::now);
+                join_background_thread(handle, deadline, "health check runtime after shutdown");
+                return;
+            }
+            let (finished, mut running): (Vec<_>, Vec<_>) = std::mem::take(&mut *handles)
+                .into_iter()
+                .partition(std::thread::JoinHandle::is_finished);
+            running.push(handle);
+            *handles = running;
+            finished
+        };
+        for old in finished {
+            if old.join().is_err() {
+                warn!(
+                    runtime = "health check runtime",
+                    "background runtime panicked after reload"
+                );
+            }
+        }
+    }
+
+    /// Cancel every health generation and drain its recorded threads.
+    fn stop_until(&self, deadline: Instant) {
+        self.root.cancel();
+        let handles = {
+            let mut guard = self.handles.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::mem::take(&mut *guard)
+        };
+        for handle in handles {
+            join_background_thread(handle, deadline, "health check runtime");
+        }
+    }
+}
+
+/// Cancels and joins work that belongs to one returning server invocation.
+struct ServerBackgroundTasks {
+    /// All startup and reloaded health threads.
+    health: Arc<HealthTaskLifecycle>,
+    /// Periodic samplers and circuit eviction runtime.
+    housekeeping: Option<(CancellationToken, std::thread::JoinHandle<()>)>,
+    /// Configuration watcher runtime, started after protocol registration.
+    watcher: Option<(CancellationToken, std::thread::JoinHandle<()>)>,
+}
+
+impl Drop for ServerBackgroundTasks {
+    fn drop(&mut self) {
+        let deadline = Instant::now()
+            .checked_add(BACKGROUND_DRAIN_TIMEOUT)
+            .unwrap_or_else(Instant::now);
+        if let Some((shutdown, handle)) = self.watcher.take() {
+            shutdown.cancel();
+            join_background_thread(handle, deadline, "config watcher");
+        }
+        if let Some((shutdown, handle)) = self.housekeeping.take() {
+            shutdown.cancel();
+            join_background_thread(handle, deadline, "housekeeping runtime");
+        }
+        self.health.stop_until(deadline);
+    }
+}
+
+/// Join an already-stopped background thread without exceeding the deadline.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "synchronous Drop polls thread completion within one deadline"
+)]
+fn join_background_thread(handle: std::thread::JoinHandle<()>, deadline: Instant, name: &'static str) {
+    while !handle.is_finished() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10).min(deadline.saturating_duration_since(Instant::now())));
+    }
+    if handle.is_finished() {
+        if handle.join().is_err() {
+            warn!(runtime = name, "background runtime panicked during shutdown");
+        }
+    } else {
+        warn!(
+            runtime = name,
+            "background runtime did not stop within cleanup deadline"
+        );
+    }
+}
+
 /// State built during server initialization and shared with the file watcher for hot reload.
 ///
 /// This struct holds everything the hot-reload watcher needs to rebuild pipelines and swap them
@@ -493,6 +636,12 @@ struct ServerState {
 
     /// Health check cancellation token.
     health_shutdown: Arc<Mutex<CancellationToken>>,
+
+    /// Root cancellation and handles for all health generations.
+    health_lifecycle: Arc<HealthTaskLifecycle>,
+
+    /// Startup task owner, moved out before the backend runtime runs.
+    tasks: Option<ServerBackgroundTasks>,
 
     /// Runtime log-level overlay state for admin API and reload.
     log_level: Option<Arc<LogLevelState>>,
@@ -560,14 +709,21 @@ fn build_server_state(
         praxis_protocol::http::health::cluster_meta_from_config(config),
     );
 
-    let health_shutdown = Arc::new(Mutex::new(CancellationToken::new()));
-    spawn_health_check_tasks(
+    let health_lifecycle = Arc::new(HealthTaskLifecycle::new());
+    let health_shutdown = Arc::new(Mutex::new(health_lifecycle.new_token()));
+    if let Some(handle) = spawn_health_check_tasks(
         config,
         Arc::clone(health_registry),
         &health_shutdown,
         subrequest_client.upstream_ca(),
-    );
-    spawn_housekeeping_tasks(&config.runtime, &subrequest_client, praxis_core::fd::usage().is_some());
+    ) {
+        health_lifecycle.track(handle);
+    }
+    let tasks = ServerBackgroundTasks {
+        health: Arc::clone(&health_lifecycle),
+        housekeeping: spawn_housekeeping_tasks(&config.runtime, &subrequest_client, praxis_core::fd::usage().is_some()),
+        watcher: None,
+    };
 
     let state = ServerState {
         pipelines: Arc::new(pipelines),
@@ -578,6 +734,8 @@ fn build_server_state(
         slow_start_registry,
         subrequest_client,
         health_shutdown,
+        health_lifecycle,
+        tasks: Some(tasks),
         log_level,
         pipeline_composition,
     };
@@ -589,6 +747,35 @@ fn build_server_state(
 // Protocol Registration
 // -----------------------------------------------------------------------------
 
+/// Stops certificate watchers if a later protocol registration fails.
+#[derive(Default)]
+struct RegistrationWatcherRollback {
+    /// Watchers started by successfully registered protocols.
+    senders: Vec<tokio::sync::watch::Sender<bool>>,
+    /// Disarmed only after every protocol registered successfully.
+    committed: bool,
+}
+
+impl RegistrationWatcherRollback {
+    /// Transfer successful registrations to the server lifetime owner.
+    fn finish(mut self) -> CertWatcherShutdowns {
+        self.committed = true;
+        CertWatcherShutdowns::new(std::mem::take(&mut self.senders))
+    }
+}
+
+impl Drop for RegistrationWatcherRollback {
+    fn drop(&mut self) {
+        if !self.committed {
+            for sender in &self.senders {
+                if sender.send(true).is_err() {
+                    debug!("certificate watcher already stopped during registration rollback");
+                }
+            }
+        }
+    }
+}
+
 /// Register HTTP and TCP protocol handlers with the backend runtime.
 ///
 /// Only registers the protocols actually used by the config (skips HTTP registration if no
@@ -599,15 +786,45 @@ fn register_protocols(
     config: &Config,
     pipelines: &ListenerPipelines,
 ) -> Result<CertWatcherShutdowns, praxis_core::errors::ProxyError> {
-    let mut all_shutdowns = Vec::new();
+    register_protocols_with(
+        server,
+        config,
+        pipelines,
+        |runtime, config, pipelines| Box::new(Http).register(runtime, config, pipelines),
+        |runtime, config, pipelines| Box::new(Tcp).register(runtime, config, pipelines),
+    )
+}
+
+/// Register both protocols while retaining the first protocol's watcher
+/// senders if the second registration fails.
+fn register_protocols_with<FHttp, FTcp>(
+    server: &mut Runtime,
+    config: &Config,
+    pipelines: &ListenerPipelines,
+    register_http: FHttp,
+    register_tcp: FTcp,
+) -> Result<CertWatcherShutdowns, praxis_core::errors::ProxyError>
+where
+    FHttp: FnOnce(
+        &mut Runtime,
+        &Config,
+        &ListenerPipelines,
+    ) -> Result<Vec<tokio::sync::watch::Sender<bool>>, praxis_core::errors::ProxyError>,
+    FTcp: FnOnce(
+        &mut Runtime,
+        &Config,
+        &ListenerPipelines,
+    ) -> Result<Vec<tokio::sync::watch::Sender<bool>>, praxis_core::errors::ProxyError>,
+{
+    let mut rollback = RegistrationWatcherRollback::default();
 
     if config
         .listeners
         .iter()
         .any(|listener| listener.protocol == ProtocolKind::Http)
     {
-        let shutdowns = Box::new(Http).register(server, config, pipelines)?;
-        all_shutdowns.extend(shutdowns);
+        let shutdowns = register_http(server, config, pipelines)?;
+        rollback.senders.extend(shutdowns);
     }
 
     if config
@@ -615,11 +832,11 @@ fn register_protocols(
         .iter()
         .any(|listener| listener.protocol == ProtocolKind::Tcp)
     {
-        let shutdowns = Box::new(Tcp).register(server, config, pipelines)?;
-        all_shutdowns.extend(shutdowns);
+        let shutdowns = register_tcp(server, config, pipelines)?;
+        rollback.senders.extend(shutdowns);
     }
 
-    Ok(CertWatcherShutdowns::new(all_shutdowns))
+    Ok(rollback.finish())
 }
 
 /// Spawn the config file watcher for hot reload if a config path is available.
@@ -635,8 +852,11 @@ fn spawn_watcher(
     config: Config,
     registry: FilterRegistry,
     state: ServerState,
-) -> Option<std::thread::JoinHandle<()>> {
-    watcher_params(config_file, config, registry, state).map(crate::watcher::spawn_config_watcher)
+) -> Option<(CancellationToken, std::thread::JoinHandle<()>)> {
+    watcher_params(config_file, config, registry, state).map(|params| {
+        let shutdown = params.shutdown.clone();
+        (shutdown, crate::watcher::spawn_config_watcher(params))
+    })
 }
 
 /// Assemble the watcher's parameters, or `None` when there is no config file to watch.
@@ -669,6 +889,7 @@ fn watcher_params(
     Some(crate::watcher::WatcherParams {
         config_path: path,
         health_shutdown: state.health_shutdown,
+        health_lifecycle: Some(state.health_lifecycle),
         initial_content_hash,
         initial_config: config,
         kv_stores: state.kv_stores,
@@ -703,7 +924,7 @@ fn register_admin_endpoints(
     health_registry: HealthRegistry,
     state: &ServerState,
     prometheus_recorder: Option<praxis_protocol::backend::admin::PrometheusAdminRecorder>,
-    stats_started_at: std::time::Instant,
+    stats_started_at: Instant,
 ) {
     use praxis_protocol::backend::admin;
 
@@ -774,7 +995,7 @@ fn init_runtime_limits(runtime: &RuntimeConfig) {
 // Background Tasks
 // -----------------------------------------------------------------------------
 
-/// A periodic loop that runs for the life of the process.
+/// A periodic loop that runs until its server invocation stops.
 type HousekeepingLoop = Pin<Box<dyn Future<Output = ()> + Send>>;
 
 /// Spawn `fut` on a dedicated thread running its own current-thread
@@ -784,11 +1005,15 @@ type HousekeepingLoop = Pin<Box<dyn Future<Output = ()> + Send>>;
 /// reactor is registered on the calling thread and a bare
 /// `tokio::spawn` would panic; the health checks and the housekeeping
 /// loops get their own thread and runtime instead.
-fn spawn_on_dedicated_runtime<F>(runtime_name: &'static str, fut: F)
+fn spawn_on_dedicated_runtime<F>(runtime_name: &'static str, fut: F) -> std::thread::JoinHandle<()>
 where
     F: Future<Output = ()> + Send + 'static,
 {
+    #[cfg(test)]
+    let observation = background_observation::capture();
     std::thread::spawn(move || {
+        #[cfg(test)]
+        let _observation = background_observation::start(runtime_name, observation);
         let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
             Ok(rt) => rt,
             Err(err) => {
@@ -797,19 +1022,83 @@ where
             },
         };
         rt.block_on(fut);
-    });
+    })
+}
+
+/// Per-invocation observations inherited by actual background threads in tests.
+#[cfg(test)]
+pub(crate) mod background_observation {
+    use std::{cell::RefCell, sync::mpsc::Sender};
+
+    /// Actual background-thread entry and completion, after its runtime drops.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(crate) enum Event {
+        /// The named background thread started executing.
+        Started(&'static str),
+        /// The named thread's runtime and tasks have been dropped.
+        Stopped(&'static str),
+    }
+
+    thread_local! {
+        /// Invocation-scoped observer, explicitly inherited across thread spawns.
+        static CURRENT: RefCell<Option<Sender<Event>>> = const { RefCell::new(None) };
+    }
+
+    /// Restore the previous invocation observer when its scope ends.
+    pub(crate) struct Scope(Option<Sender<Event>>);
+
+    impl Drop for Scope {
+        fn drop(&mut self) {
+            CURRENT.with(|current| *current.borrow_mut() = self.0.take());
+        }
+    }
+
+    /// Scope observations to this invocation and its spawned descendants.
+    pub(crate) fn scope(observer: Option<Sender<Event>>) -> Scope {
+        Scope(CURRENT.with(|current| current.replace(observer)))
+    }
+
+    /// Capture the caller's invocation observer before crossing a thread boundary.
+    pub(crate) fn capture() -> Option<Sender<Event>> {
+        CURRENT.with(|current| current.borrow().clone())
+    }
+
+    /// Report actual completion and restore the thread's previous observer.
+    pub(crate) struct Observation {
+        /// Runtime name used to match starts with completions.
+        name: &'static str,
+        /// Invocation receiving this thread's observations.
+        observer: Option<Sender<Event>>,
+        /// Keeps the observer installed for descendant health generations.
+        _scope: Scope,
+    }
+
+    impl Drop for Observation {
+        fn drop(&mut self) {
+            if let Some(observer) = &self.observer {
+                _ = observer.send(Event::Stopped(self.name));
+            }
+        }
+    }
+
+    /// Observe a real thread before creating its runtime, so completion follows teardown.
+    pub(crate) fn start(name: &'static str, observer: Option<Sender<Event>>) -> Observation {
+        let scoped = scope(observer.clone());
+        if let Some(sender) = &observer {
+            _ = sender.send(Event::Started(name));
+        }
+        Observation {
+            name,
+            observer,
+            _scope: scoped,
+        }
+    }
 }
 
 /// Spawn background health check tasks on a dedicated tokio runtime.
 ///
-/// The spawned thread listens for `ctrl_c` and cancels the
-/// [`CancellationToken`] so that every health check loop exits
-/// cleanly via `shutdown.cancelled()` before the thread returns.
-///
-/// The backend runtime installs its own signal handlers and may
-/// terminate the process before this thread receives `ctrl_c`. This is
-/// acceptable: the OS reaps the thread on process exit, so the graceful
-/// shutdown path here is best-effort.
+/// The owner cancels the token on return and joins the thread within its
+/// cleanup deadline. Reload replaces the token for each health generation.
 ///
 /// [`CancellationToken`]: tokio_util::sync::CancellationToken
 #[expect(clippy::expect_used, reason = "fatal")]
@@ -818,9 +1107,9 @@ fn spawn_health_check_tasks(
     registry: HealthRegistry,
     health_shutdown: &Arc<Mutex<CancellationToken>>,
     upstream_ca: Option<Arc<praxis_tls::CachedCaCerts>>,
-) {
+) -> Option<std::thread::JoinHandle<()>> {
     if registry.is_empty() {
-        return;
+        return None;
     }
 
     let shutdown = health_shutdown.lock().expect("health shutdown lock").clone();
@@ -833,7 +1122,7 @@ fn spawn_health_check_tasks(
         .cloned()
         .collect();
 
-    spawn_on_dedicated_runtime("health check runtime", async move {
+    Some(spawn_on_dedicated_runtime("health check runtime", async move {
         praxis_protocol::http::health::runner::spawn_health_checks_with_ca(
             &clusters,
             &registry,
@@ -841,26 +1130,33 @@ fn spawn_health_check_tasks(
             upstream_ca.as_deref(),
         );
         shutdown.cancelled().await;
-    });
+    }))
 }
 
 /// Run the periodic loops `runtime` asks for on one shared dedicated runtime.
 ///
 /// Descriptor tracking, memory limits, and the sub-request circuit breaker
-/// are startup-only, so their loops run for the life of the process and share
-/// one thread; nothing is spawned when none of them is active.
-fn spawn_housekeeping_tasks(runtime: &RuntimeConfig, client: &SubRequestClient, track_fds: bool) {
+/// are startup-only, so their loops share one owned runtime until shutdown.
+/// Nothing is spawned when none of them is active.
+fn spawn_housekeeping_tasks(
+    runtime: &RuntimeConfig,
+    client: &SubRequestClient,
+    track_fds: bool,
+) -> Option<(CancellationToken, std::thread::JoinHandle<()>)> {
     let loops = housekeeping_loops(runtime, client, track_fds);
     if loops.is_empty() {
-        return;
+        return None;
     }
 
-    spawn_on_dedicated_runtime("housekeeping runtime", async move {
+    let shutdown = CancellationToken::new();
+    let token = shutdown.clone();
+    let handle = spawn_on_dedicated_runtime("housekeeping runtime", async move {
         for task in loops {
             tokio::spawn(task);
         }
-        std::future::pending::<()>().await;
+        token.cancelled().await;
     });
+    Some((shutdown, handle))
 }
 
 /// The periodic loops `runtime` asks for: the descriptor sampler when
@@ -1209,6 +1505,51 @@ mod tests {
     }
 
     #[test]
+    fn http_then_tcp_registration_failure_stops_cert_watchers() {
+        let mut config = minimal_config("static_response");
+        let mut tcp = config.listeners.first().expect("HTTP listener").clone();
+        tcp.name = "tcp".to_owned();
+        tcp.protocol = ProtocolKind::Tcp;
+        config.listeners.push(tcp);
+        let pipelines = ListenerPipelines::new(std::collections::HashMap::new());
+        let mut runtime = Runtime::from_config(&config);
+        let (failed_sender, failed_receiver) = tokio::sync::watch::channel(false);
+
+        let result = register_protocols_with(
+            &mut runtime,
+            &config,
+            &pipelines,
+            move |_, _, _| Ok(vec![failed_sender]),
+            |_, _, _| {
+                Err(praxis_core::errors::ProxyError::Config(
+                    "TCP registration failed".to_owned(),
+                ))
+            },
+        );
+        assert!(result.is_err(), "the TCP registration error must propagate");
+        assert!(
+            *failed_receiver.borrow(),
+            "HTTP watcher must receive shutdown when later TCP registration fails"
+        );
+
+        let (success_sender, success_receiver) = tokio::sync::watch::channel(false);
+        let shutdowns = register_protocols_with(
+            &mut runtime,
+            &config,
+            &pipelines,
+            move |_, _, _| Ok(vec![success_sender]),
+            |_, _, _| Ok(Vec::new()),
+        )
+        .expect("both protocol registrations should succeed");
+        assert!(
+            !*success_receiver.borrow(),
+            "success transfers the live watcher unchanged"
+        );
+        shutdowns.shutdown();
+        assert!(*success_receiver.borrow(), "returning-server cleanup stops the watcher");
+    }
+
+    #[test]
     fn try_run_server_returns_startup_error_instead_of_exiting() {
         let config = Config::from_yaml(&format!(
             "{}insecure_options:\n  allow_root: true\n",
@@ -1315,11 +1656,12 @@ mod tests {
     #[test]
     fn dedicated_runtime_runs_the_future() {
         let (tx, rx) = std::sync::mpsc::channel::<u8>();
-        spawn_on_dedicated_runtime("test runtime", async move {
+        let handle = spawn_on_dedicated_runtime("test runtime", async move {
             tx.send(7).expect("send completion marker");
         });
         let received = rx.recv_timeout(Duration::from_secs(5));
         assert_eq!(received.ok(), Some(7), "the future must run on the dedicated runtime");
+        handle.join().expect("test runtime must exit");
     }
 
     #[test]
@@ -1338,7 +1680,8 @@ filter_chains:
         let config = Config::from_yaml(yaml).expect("test config should parse");
         let registry: HealthRegistry = Arc::new(std::collections::HashMap::new());
         let health_shutdown = Arc::new(Mutex::new(CancellationToken::new()));
-        spawn_health_check_tasks(&config, registry, &health_shutdown, None);
+        let handle = spawn_health_check_tasks(&config, registry, &health_shutdown, None);
+        assert!(handle.is_none(), "empty health registry must not spawn a thread");
     }
 
     #[test]
@@ -1378,8 +1721,10 @@ filter_chains:
         let registry = build_health_registry(&config.clusters);
         assert!(!registry.is_empty(), "health-checked clusters must register");
         let health_shutdown = Arc::new(Mutex::new(CancellationToken::new()));
-        spawn_health_check_tasks(&config, registry, &health_shutdown, None);
+        let handle = spawn_health_check_tasks(&config, registry, &health_shutdown, None)
+            .expect("health-checked cluster must spawn a runtime");
         health_shutdown.lock().expect("health shutdown lock").cancel();
+        handle.join().expect("health runtime must exit on cancellation");
     }
 
     #[test]
@@ -1418,8 +1763,171 @@ filter_chains:
     #[test]
     fn housekeeping_tasks_spawn_without_panicking() {
         let client = SubRequestClient::new(crate::test_support::connector(1));
-        spawn_housekeeping_tasks(&RuntimeConfig::default(), &client, false);
-        spawn_housekeeping_tasks(&fully_limited_runtime(), &client, true);
+        assert!(
+            spawn_housekeeping_tasks(&RuntimeConfig::default(), &client, false).is_none(),
+            "default runtime needs no housekeeping thread"
+        );
+        let (shutdown, handle) = spawn_housekeeping_tasks(&fully_limited_runtime(), &client, true)
+            .expect("limited runtime needs housekeeping");
+        shutdown.cancel();
+        handle.join().expect("housekeeping runtime must exit on cancellation");
+    }
+
+    #[test]
+    fn server_shutdown_stops_owned_tasks() {
+        let health = Arc::new(HealthTaskLifecycle::new());
+        let late_generation = Arc::clone(&health);
+        let (exited_tx, exited_rx) = std::sync::mpsc::channel::<&'static str>();
+        let health_token = health.new_token();
+        let health_exit = exited_tx.clone();
+        health.track(spawn_on_dedicated_runtime("test health", async move {
+            health_token.cancelled().await;
+            health_exit.send("health").expect("health completion marker");
+        }));
+        let watcher_token = CancellationToken::new();
+        let watcher_wait = watcher_token.clone();
+        let watcher_exit = exited_tx.clone();
+        let watcher = spawn_on_dedicated_runtime("test watcher", async move {
+            watcher_wait.cancelled().await;
+            watcher_exit.send("watcher").expect("watcher completion marker");
+        });
+        let housekeeping_token = CancellationToken::new();
+        let housekeeping_wait = housekeeping_token.clone();
+        let housekeeping = spawn_on_dedicated_runtime("test housekeeping", async move {
+            housekeeping_wait.cancelled().await;
+            exited_tx.send("housekeeping").expect("housekeeping completion marker");
+        });
+        drop(ServerBackgroundTasks {
+            health,
+            housekeeping: Some((housekeeping_token, housekeeping)),
+            watcher: Some((watcher_token, watcher)),
+        });
+
+        let exited: std::collections::HashSet<_> = std::iter::repeat_with(|| {
+            exited_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("owned runtime must exit")
+        })
+        .take(3)
+        .collect();
+        assert_eq!(
+            exited,
+            std::collections::HashSet::from(["health", "housekeeping", "watcher"])
+        );
+        assert!(
+            late_generation.new_token().is_cancelled(),
+            "health generations created after cleanup inherit cancellation"
+        );
+        let (late_exit, late_done) = std::sync::mpsc::channel();
+        let late_token = late_generation.new_token();
+        late_generation.track(spawn_on_dedicated_runtime("late health", async move {
+            late_token.cancelled().await;
+            late_exit.send(()).expect("late health completion marker");
+        }));
+        late_done
+            .recv_timeout(Duration::from_secs(1))
+            .expect("late health runtime must exit after inherited cancellation");
+        drop(ServerBackgroundTasks {
+            health: Arc::new(HealthTaskLifecycle::new()),
+            housekeeping: None,
+            watcher: None,
+        });
+    }
+
+    #[test]
+    fn server_registration_failure_stops_owned_tasks() {
+        praxis_tls::provider::install();
+        let (observer, events) = std::sync::mpsc::channel();
+        let _scope = background_observation::scope(Some(observer));
+        let config = Config::from_yaml(
+            r#"
+insecure_options:
+  allow_root: true
+  allow_private_endpoints: true
+  allow_private_health_checks: true
+listeners:
+  - name: web
+    address: 127.0.0.1:0
+    filter_chains: [main]
+    tls:
+      certificates:
+        - cert_path: /nonexistent/startup-cert.pem
+          key_path: /nonexistent/startup-key.pem
+clusters:
+  - name: checked
+    endpoints: ["127.0.0.1:1"]
+    health_check:
+      type: tcp
+      interval_ms: 60000
+filter_chains:
+  - name: main
+    filters: [{ filter: static_response, status: 200 }]
+runtime:
+  overload_gauges: true
+"#,
+        )
+        .expect("startup config parses");
+        let result =
+            try_run_server_with_composition_and_shutdown(config, ServerComposition::standard(), None, None, None);
+        let error = result.expect_err("invalid TLS certificate must fail registration");
+        assert!(
+            error.to_string().contains("TLS"),
+            "registration must reach TLS setup: {error}"
+        );
+        assert_background_tasks_stopped(&events.try_iter().collect::<Vec<_>>(), 1, 0);
+    }
+
+    #[cfg(feature = "config-reload")]
+    #[test]
+    fn sequential_server_runs_release_owned_tasks() {
+        praxis_tls::provider::install();
+        let dir = tempfile::tempdir().expect("config directory");
+        let path = dir.path().join("praxis.yaml");
+        for _ in 0..2 {
+            let socket = std::net::TcpListener::bind("127.0.0.1:0").expect("ephemeral listener");
+            let port = socket.local_addr().expect("bound address").port();
+            drop(socket);
+            let yaml = lifecycle_config(port, 200);
+            std::fs::write(&path, &yaml).expect("write config");
+            let file = ConfigFile::read(&path).expect("read config");
+            let config = Config::from_config_file(&file).expect("parse config");
+            let (observer, events) = std::sync::mpsc::channel();
+            let (completed, completion) = std::sync::mpsc::channel();
+            let shutdown = CancellationToken::new();
+            let _shutdown_on_failure = shutdown.clone().drop_guard();
+            let signal = shutdown.clone();
+            let server = std::thread::spawn(move || {
+                let _scope = background_observation::scope(Some(observer));
+                let result = try_run_server_with_composition_and_shutdown(
+                    config,
+                    ServerComposition::standard(),
+                    Some(file),
+                    None,
+                    Some(Box::pin(async move { signal.cancelled().await })),
+                );
+                completed
+                    .send(result.map_err(|error| error.to_string()))
+                    .expect("server completion");
+            });
+            let mut observed = Vec::new();
+            await_background_event(&events, &mut observed, |events| {
+                started_count(events, "health check runtime") == 1
+                    && started_count(events, "housekeeping runtime") == 1
+                    && started_count(events, "config watcher") == 1
+            });
+            std::fs::write(&path, lifecycle_config(port, 201)).expect("write reload");
+            await_background_event(&events, &mut observed, |events| {
+                started_count(events, "health check runtime") == 2
+            });
+            shutdown.cancel();
+            completion
+                .recv_timeout(Duration::from_secs(10))
+                .expect("server must return within its cleanup bounds")
+                .expect("controlled server run must return successfully");
+            server.join().expect("server invocation must exit");
+            observed.extend(events.try_iter());
+            assert_background_tasks_stopped(&observed, 2, 1);
+        }
     }
 
     #[cfg(feature = "config-reload")]
@@ -1493,6 +2001,86 @@ filter_chains:
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
+
+    /// Number of actual thread starts for this invocation and runtime kind.
+    fn started_count(events: &[background_observation::Event], name: &'static str) -> usize {
+        events
+            .iter()
+            .filter(|event| **event == background_observation::Event::Started(name))
+            .count()
+    }
+
+    /// Require every expected real task to have completed before the invocation returns.
+    fn assert_background_tasks_stopped(events: &[background_observation::Event], health: usize, watcher: usize) {
+        for (name, expected) in [
+            ("health check runtime", health),
+            ("housekeeping runtime", 1),
+            ("config watcher", watcher),
+        ] {
+            let stopped = events
+                .iter()
+                .filter(|event| **event == background_observation::Event::Stopped(name))
+                .count();
+            assert_eq!(started_count(events, name), expected, "actual task starts: {events:?}");
+            assert_eq!(
+                stopped, expected,
+                "all {name} tasks must finish before return: {events:?}"
+            );
+        }
+    }
+
+    /// Wait for an observed lifecycle transition with one bounded deadline.
+    #[cfg(feature = "config-reload")]
+    fn await_background_event(
+        receiver: &std::sync::mpsc::Receiver<background_observation::Event>,
+        events: &mut Vec<background_observation::Event>,
+        reached: impl Fn(&[background_observation::Event]) -> bool,
+    ) {
+        let deadline = Instant::now()
+            .checked_add(Duration::from_secs(10))
+            .expect("test deadline");
+        while !reached(events) {
+            match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(event) => events.push(event),
+                Err(error) => {
+                    assert!(
+                        reached(events),
+                        "background transition missing: {error}; observed {events:?}"
+                    );
+                    return;
+                },
+            }
+        }
+    }
+
+    /// Configure real health, housekeeping and watcher work without global resource limits.
+    #[cfg(feature = "config-reload")]
+    fn lifecycle_config(port: u16, status: u16) -> String {
+        format!(
+            r#"
+insecure_options:
+  allow_root: true
+  allow_private_endpoints: true
+  allow_private_health_checks: true
+runtime:
+  threads: 1
+  overload_gauges: true
+listeners:
+  - name: web
+    address: 127.0.0.1:{port}
+    filter_chains: [main]
+clusters:
+  - name: checked
+    endpoints: ["127.0.0.1:1"]
+    health_check:
+      type: tcp
+      interval_ms: 60000
+filter_chains:
+  - name: main
+    filters: [{{ filter: static_response, status: {status} }}]
+"#
+        )
+    }
 
     /// Layer counting the events it sees.
     struct CountLayer(Arc<std::sync::atomic::AtomicUsize>);

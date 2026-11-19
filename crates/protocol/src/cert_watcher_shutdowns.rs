@@ -20,12 +20,74 @@ use tokio::sync::watch;
 /// [`CertWatcher`]: praxis_tls::watcher::CertWatcher
 pub struct CertWatcherShutdowns {
     /// Shutdown senders kept alive for the server lifetime.
-    _senders: Vec<watch::Sender<bool>>,
+    senders: Vec<watch::Sender<bool>>,
 }
 
 impl CertWatcherShutdowns {
     /// Wrap collected shutdown senders.
     pub fn new(senders: Vec<watch::Sender<bool>>) -> Self {
-        Self { _senders: senders }
+        Self { senders }
+    }
+
+    /// Explicitly stop every certificate watcher after the server returns.
+    pub fn shutdown(self) {
+        for sender in &self.senders {
+            _ = sender.send(true);
+        }
+    }
+}
+
+/// Roll back watchers started during a fallible registration.
+#[cfg(any(feature = "pingora", feature = "hyper"))]
+#[derive(Default)]
+pub(crate) struct RegistrationWatchers {
+    /// Watchers started by the current registration.
+    senders: Vec<watch::Sender<bool>>,
+}
+
+#[cfg(any(feature = "pingora", feature = "hyper"))]
+impl RegistrationWatchers {
+    /// Borrow the collection used by existing listener registration helpers.
+    pub(crate) fn senders_mut(&mut self) -> &mut Vec<watch::Sender<bool>> {
+        &mut self.senders
+    }
+
+    /// Transfer the handles after registration succeeds.
+    pub(crate) fn finish(mut self) -> Vec<watch::Sender<bool>> {
+        std::mem::take(&mut self.senders)
+    }
+}
+
+#[cfg(any(feature = "pingora", feature = "hyper"))]
+impl Drop for RegistrationWatchers {
+    fn drop(&mut self) {
+        for sender in &self.senders {
+            _ = sender.send(true);
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_shutdown_signals_every_watcher() {
+        let (first, first_rx) = watch::channel(false);
+        let (second, second_rx) = watch::channel(false);
+        CertWatcherShutdowns::new(vec![first, second]).shutdown();
+        assert!(*first_rx.borrow(), "first watcher must stop");
+        assert!(*second_rx.borrow(), "second watcher must stop");
+    }
+
+    #[test]
+    fn ordinary_drop_preserves_watcher_value() {
+        let (sender, receiver) = watch::channel(false);
+        drop(CertWatcherShutdowns::new(vec![sender]));
+        assert!(!*receiver.borrow(), "ordinary drop must not signal shutdown");
     }
 }

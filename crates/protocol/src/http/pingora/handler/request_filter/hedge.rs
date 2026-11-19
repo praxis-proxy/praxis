@@ -152,9 +152,7 @@ pub(super) async fn dispatch(
         end_lease(ctx);
         return Err(upstream_failure(miss));
     }
-    if let HedgeDelivery::Ready { address, .. } = &delivery {
-        note_winner(ctx, address);
-    }
+    note_delivery_winner(ctx, &delivery);
     end_lease(ctx);
     let terminal = terminal_for(session, pipeline, delivery);
     Box::pin(super::terminal_responses::run_terminal_response(
@@ -215,7 +213,11 @@ fn is_grpc(session: &Session) -> bool {
 
 /// An event stream has to stay on the streaming path.
 fn is_event_stream(session: &Session) -> bool {
-    contains_header_ascii(session, http::header::ACCEPT, b"text/event-stream")
+    contains_header_ascii(
+        &session.req_header().headers,
+        http::header::ACCEPT,
+        b"text/event-stream",
+    )
 }
 
 /// `header`'s value starts with `prefix`, ignoring ASCII case.
@@ -229,8 +231,8 @@ fn has_header_prefix(session: &Session, header: http::HeaderName, prefix: &[u8])
 }
 
 /// `header`'s value contains `needle`, ignoring ASCII case.
-fn contains_header_ascii(session: &Session, header: http::HeaderName, needle: &[u8]) -> bool {
-    session.req_header().headers.get(header).is_some_and(|value| {
+fn contains_header_ascii(headers: &HeaderMap, header: http::HeaderName, needle: &[u8]) -> bool {
+    headers.get_all(header).iter().any(|value| {
         value
             .as_bytes()
             .windows(needle.len())
@@ -739,9 +741,18 @@ fn prefix_base_path(uri: http::Uri, base: &str) -> Result<http::Uri> {
 // Response
 // -----------------------------------------------------------------------------
 
+/// Record only a ready hedge winner as a forwarded endpoint.
+fn note_delivery_winner<T>(ctx: &mut PingoraRequestCtx, delivery: &HedgeDelivery<T>) {
+    if let HedgeDelivery::Ready { address, .. } = delivery {
+        note_winner(ctx, address);
+    }
+}
+
 /// Point passive health at the endpoint that won.
 fn note_winner(ctx: &mut PingoraRequestCtx, address: &Arc<str>) {
     ctx.upstream_contacted = true;
+    ctx.extensions
+        .insert(praxis_filter::UpstreamForwardedEndpoint(Arc::clone(address)));
     ctx.selected_endpoint_index = Some(endpoint_index(ctx, address.as_ref()));
     if let Some(reselector) = &ctx.endpoint_reselector {
         ctx.upstream = Some(reselector.build_upstream(Arc::clone(address)));
@@ -865,6 +876,75 @@ fn client_status(status: Option<u16>) -> u16 {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, reason = "tests")]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accept_sse_in_later_field_stays_streaming() {
+        for values in [
+            vec!["text/event-stream", "application/json"],
+            vec!["application/json", "text/event-stream"],
+            vec!["application/json, text/event-stream"],
+            vec!["application/json", "TEXT/EVENT-STREAM"],
+        ] {
+            let mut headers = HeaderMap::new();
+            for value in values {
+                headers.append(http::header::ACCEPT, value.parse().unwrap());
+            }
+            assert!(
+                contains_header_ascii(&headers, http::header::ACCEPT, b"text/event-stream"),
+                "every Accept field must participate in the SSE gate"
+            );
+        }
+        let mut headers = HeaderMap::new();
+        headers.append(http::header::ACCEPT, "application/json".parse().unwrap());
+        headers.append(http::header::ACCEPT, "text/plain".parse().unwrap());
+        assert!(!contains_header_ascii(
+            &headers,
+            http::header::ACCEPT,
+            b"text/event-stream"
+        ));
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "compare authentic winner and failed race affinity evidence"
+    )]
+    fn successful_hedge_marks_only_winning_endpoint_for_stickiness() {
+        let mut ctx = PingoraRequestCtx::default();
+        let winner: Arc<str> = Arc::from("10.0.0.2:80");
+        note_delivery_winner(
+            &mut ctx,
+            &HedgeDelivery::Ready {
+                address: Arc::clone(&winner),
+                response: (),
+            },
+        );
+        assert_eq!(
+            ctx.extensions
+                .get::<praxis_filter::UpstreamForwardedEndpoint>()
+                .map(|marker| &marker.0),
+            Some(&winner),
+            "a real hedge winner must be eligible for header affinity"
+        );
+        drop(ctx);
+
+        let mut failed = PingoraRequestCtx::default();
+        note_delivery_winner(
+            &mut failed,
+            &HedgeDelivery::<()>::Failed {
+                status: Some(502),
+                response: None,
+            },
+        );
+        assert!(
+            failed
+                .extensions
+                .get::<praxis_filter::UpstreamForwardedEndpoint>()
+                .is_none(),
+            "a failed race cannot establish a header binding"
+        );
+        drop(failed);
+    }
 
     #[test]
     fn preparation_rejection_reaches_the_final_error_handler() {

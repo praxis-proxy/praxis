@@ -199,8 +199,11 @@ pub(in crate::http) async fn prepare_attempt(ctx: &mut PingoraRequestCtx) -> Res
     // it stood then, and would otherwise outlast it.
     if let Some(deadline) = ctx.extensions.get::<praxis_core::grpc::GrpcDeadline>().copied()
         && let Some(upstream) = ctx.upstream_for_retry.as_mut()
+        && let Some(remaining) = deadline.remaining()
     {
-        apply_grpc_deadline(deadline, upstream);
+        apply_grpc_deadline(remaining, upstream);
+        #[cfg(feature = "pingora")]
+        ctx.extensions.insert(GrpcDeadlineAttemptBudget(remaining));
     }
 
     let upstream = ctx.upstream_for_retry.as_ref().ok_or_else(|| {
@@ -242,16 +245,18 @@ fn reselected_endpoint_index(health: Option<&praxis_core::health::ClusterHealthS
 /// `upstream_peer` runs once per attempt against the same absolute
 /// instant, each retry gets a smaller budget rather than restarting the
 /// client's clock.
-fn apply_grpc_deadline(deadline: praxis_core::grpc::GrpcDeadline, upstream: &mut Upstream) {
-    let Some(remaining) = deadline.remaining() else {
-        return;
-    };
+fn apply_grpc_deadline(remaining: std::time::Duration, upstream: &mut Upstream) {
     let opts = Arc::make_mut(&mut upstream.connection);
     opts.connection_timeout = Some(shorter(opts.connection_timeout, remaining));
     opts.total_connection_timeout = Some(shorter(opts.total_connection_timeout, remaining));
     opts.read_timeout = Some(shorter(opts.read_timeout, remaining));
     opts.write_timeout = Some(shorter(opts.write_timeout, remaining));
 }
+
+/// The absolute deadline's remaining budget when this attempt selected its
+/// upstream. A phase timeout equal to this budget was capped by gRPC.
+#[cfg(feature = "pingora")]
+pub(in crate::http) struct GrpcDeadlineAttemptBudget(pub(in crate::http) std::time::Duration);
 
 /// The shorter of a configured timeout and the remaining deadline.
 fn shorter(configured: Option<std::time::Duration>, remaining: std::time::Duration) -> std::time::Duration {
@@ -329,7 +334,8 @@ pub(super) async fn build_peer(upstream: &Upstream, allow_private: bool) -> ping
     peer_utils::apply_connection_options(&mut peer, &upstream.connection);
 
     if let Some(tls) = &upstream.tls {
-        peer_utils::apply_cached_tls(&mut peer, tls, &upstream.address);
+        peer_utils::apply_cached_tls(&mut peer, tls, &upstream.address)
+            .map_err(|error| pingora_core::Error::explain(pingora_core::ErrorType::ConnectError, error))?;
     }
 
     Ok(Box::new(peer))
@@ -395,6 +401,23 @@ mod tests {
     use praxis_tls::{CachedClusterTls, ClusterTls};
 
     use super::*;
+
+    #[test]
+    fn grpc_deadline_caps_each_phase_and_preserves_shorter_limits() {
+        let mut upstream = make_upstream("127.0.0.1:9090");
+        let opts = Arc::make_mut(&mut upstream.connection);
+        opts.connection_timeout = Some(std::time::Duration::from_millis(10));
+        opts.total_connection_timeout = Some(std::time::Duration::from_secs(1));
+        opts.read_timeout = Some(std::time::Duration::from_millis(10));
+        let budget = std::time::Duration::from_millis(100);
+        apply_grpc_deadline(budget, &mut upstream);
+        let opts = &upstream.connection;
+
+        assert_eq!(opts.connection_timeout, Some(std::time::Duration::from_millis(10)));
+        assert_eq!(opts.total_connection_timeout, Some(budget));
+        assert_eq!(opts.read_timeout, Some(std::time::Duration::from_millis(10)));
+        assert_eq!(opts.write_timeout, Some(budget));
+    }
 
     /// The downstream `Host` every load-balanced test request carries.
     const CLIENT_HOST: &str = "client.example.com";
@@ -912,13 +935,42 @@ mod tests {
         assert!(peer.options.ca.is_some(), "peer should have custom CA set from cache");
     }
 
+    #[tokio::test]
+    async fn build_peer_rejects_failed_client_identity_conversion() {
+        praxis_tls::provider::install();
+        let files = gen_cert_key_files();
+        let tls = ClusterTls {
+            client_cert: Some(praxis_tls::CertKeyPair {
+                cert_path: files.cert_path.to_str().unwrap().to_owned(),
+                default: false,
+                key_path: files.key_path.to_str().unwrap().to_owned(),
+                server_names: Vec::new(),
+            }),
+            sni: Some("api.example.com".to_owned()),
+            ..ClusterTls::default()
+        };
+        let cached = CachedClusterTls::try_from_config(&tls).unwrap();
+        assert_eq!(cached.client_cert().unwrap().converted_or_init(|| 1_u64), Some(&1_u64));
+        let upstream = Upstream {
+            address: Arc::from("127.0.0.1:8443"),
+            authority: None,
+            base_path: None,
+            connection: Arc::new(ConnectionOptions::default()),
+            tls: Some(cached),
+        };
+        assert!(
+            build_peer(&upstream, false).await.is_err(),
+            "peer construction must return an error when mTLS identity conversion fails"
+        );
+    }
+
     #[test]
     fn ca_from_cached_produces_wrapped_x509() {
         let ca = gen_ca_file();
         let ca_path = ca.ca_path.to_str().expect("ca path should be valid UTF-8");
 
         let cached = praxis_tls::CachedCaCerts::from_pem_file(ca_path).expect("valid CA should parse");
-        let wrapped = peer_utils::ca_from_cached(&cached);
+        let wrapped = peer_utils::ca_from_cached(&cached).expect("valid CA should convert");
         assert_eq!(wrapped.len(), 1, "should produce one WrappedX509");
     }
 
@@ -933,7 +985,7 @@ mod tests {
 
         let cached =
             praxis_tls::CachedClientCert::from_pem_files(cert_path, key_path).expect("valid cert+key should parse");
-        let _cert_key = peer_utils::client_cert_from_cached(&cached);
+        let _cert_key = peer_utils::client_cert_from_cached(&cached).expect("valid identity should convert");
     }
 
     // -------------------------------------------------------------------------

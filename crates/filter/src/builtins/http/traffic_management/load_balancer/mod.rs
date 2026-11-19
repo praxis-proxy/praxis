@@ -38,7 +38,7 @@ pub use self::reselector::EndpointReselector;
 #[cfg(feature = "upstream-binding")]
 use crate::pipeline::catalog::{ClusterApplicationMetadata, ClusterMetadataDeclaration};
 use crate::{
-    FilterError,
+    FilterError, FilterMetadata,
     actions::FilterAction,
     filter::{HttpFilter, HttpFilterContext},
 };
@@ -323,6 +323,10 @@ impl HttpFilter for LoadBalancerFilter {
         "load_balancer"
     }
 
+    fn selects_upstream_endpoint(&self) -> bool {
+        true
+    }
+
     #[cfg(feature = "slow-start")]
     fn bind_slow_start(&self, registry: &Arc<crate::SlowStartRegistry>) {
         for binding in &self.ramps {
@@ -448,7 +452,9 @@ impl HttpFilter for LoadBalancerFilter {
         debug!(cluster = %cluster_name, upstream = %addr, "upstream selected");
 
         ctx.selected_endpoint_index = health.and_then(|h| h.endpoint_index(&addr)).or(Some(usize::MAX));
-        ctx.set_metadata("lb.selected", "true");
+        ctx.filter_metadata
+            .insert("lb.selected", "true")
+            .unwrap_or_else(FilterMetadata::log_loss);
 
         // Track active request for retry budget.
         entry.retry_state.enter();
@@ -483,7 +489,7 @@ impl HttpFilter for LoadBalancerFilter {
     }
 
     async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        if ctx.get_metadata("lb.selected").is_none() {
+        if ctx.filter_metadata.get("lb.selected").is_none() {
             return Ok(FilterAction::Continue);
         }
 

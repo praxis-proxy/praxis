@@ -46,6 +46,7 @@ docs/**/
 !docs/filters/tcp/
 !docs/filters/tcp/*/
 !docs/operating/
+!docs/security/
 
 # A local praxis config at the repo root
 /praxis.yaml

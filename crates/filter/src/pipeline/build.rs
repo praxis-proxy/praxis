@@ -139,6 +139,7 @@ impl FilterPipeline {
             enable_upstream_binding(&mut filters, &catalog);
         }
         let body_capabilities = compute_body_capabilities(&filters);
+        let has_request_completion_observer = super::pipeline_has_request_completion_observer(&filters);
         let compression = extract_compression_config(&filters);
         let may_select_streaming_subrequest_response = filters_may_select_streaming_subrequest_response(&filters);
         let trace_context_filter_indices = filters
@@ -156,6 +157,7 @@ impl FilterPipeline {
         let time_source: Arc<dyn praxis_core::time::TimeSource> = Arc::new(SystemTimeSource);
         let mut pipeline = Self {
             body_capabilities,
+            has_request_completion_observer,
             compression,
             filters,
             request_head_filter_indices,

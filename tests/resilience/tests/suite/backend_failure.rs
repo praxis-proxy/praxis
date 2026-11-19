@@ -6,10 +6,11 @@
 
 use std::{
     io::{ErrorKind, Read as _, Write as _},
-    net::{Shutdown, TcpStream},
+    net::{Shutdown, TcpListener, TcpStream},
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
+        mpsc,
     },
     time::{Duration, Instant},
 };
@@ -258,28 +259,114 @@ insecure_options:
 
 #[test]
 fn client_disconnect_during_slow_response_does_not_crash_proxy() {
-    let slow_port = start_slow_backend("slow-body", Duration::from_secs(3));
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind delayed backend");
+    let slow_port = listener.local_addr().expect("delayed backend address").port();
+    listener.set_nonblocking(true).expect("bound delayed backend accept");
+    let (received_tx, received_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let (completed_tx, completed_rx) = mpsc::channel();
+    let delayed_backend = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut upstream = loop {
+            match listener.accept() {
+                Ok((upstream, _)) => break upstream,
+                Err(error) if error.kind() == ErrorKind::WouldBlock && Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(5));
+                },
+                Err(error) => panic!("accept delayed request within deadline: {error}"),
+            }
+        };
+        upstream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("bound delayed request read");
+        upstream
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .expect("bound delayed response write");
+        let mut request = Vec::new();
+        while !request.ends_with(b"\r\n\r\n") {
+            let mut chunk = [0_u8; 1024];
+            let received = upstream.read(&mut chunk).expect("read delayed request");
+            assert!(received > 0, "delayed request must contain complete headers");
+            request.extend_from_slice(&chunk[..received]);
+            assert!(request.len() <= 16_384, "delayed request headers must be bounded");
+        }
+        assert!(
+            request.starts_with(b"GET /slow HTTP/1.1"),
+            "delayed backend must receive the intended request"
+        );
+        received_tx.send(()).expect("signal delayed request receipt");
+        release_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("release delayed response within deadline");
+        let attempt = upstream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\nConnection: close\r\n\r\nslow-body");
+        completed_tx.send(attempt).expect("signal delayed response attempt");
+    });
+    let delayed_backend = DelayedBackendGuard {
+        release: release_tx,
+        worker: Some(delayed_backend),
+    };
+    let live_port = start_backend("still-alive");
     let proxy_port = free_port();
-    let yaml = simple_proxy_yaml(proxy_port, slow_port);
+    let yaml = format!(
+        r#"
+listeners:
+  - name: default
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/slow"
+            cluster: delayed
+          - path_prefix: "/"
+            cluster: healthy
+      - filter: load_balancer
+        clusters:
+          - name: delayed
+            endpoints:
+              - "127.0.0.1:{slow_port}"
+          - name: healthy
+            endpoints:
+              - "127.0.0.1:{live_port}"
+insecure_options:
+  allow_private_endpoints: true
+"#
+    );
     let config = Config::from_yaml(&yaml).unwrap();
     let proxy = start_proxy(&config);
+    let proxy_addr = proxy.addr().to_owned();
 
-    let mut stream = TcpStream::connect(proxy.addr()).expect("TCP connect");
-    drop(stream.set_read_timeout(Some(Duration::from_millis(200))));
-    let request = "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    let mut stream = TcpStream::connect(proxy_addr.as_str()).expect("connect original proxy");
+    let request = "GET /slow HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
     stream.write_all(request.as_bytes()).expect("write request");
+    received_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("delayed backend must receive request before disconnect");
+
+    let (pending_status, pending_body) = http_get(&proxy_addr, "/healthy", None);
+    assert_eq!(
+        pending_status, 200,
+        "original proxy must serve while delayed exchange is pending"
+    );
+    assert_eq!(pending_body, "still-alive");
+
     drop(stream);
+    delayed_backend
+        .release
+        .send(())
+        .expect("release delayed backend after disconnect");
+    let _response_attempt = completed_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("delayed backend must attempt its response within deadline");
+    drop(delayed_backend);
 
-    std::thread::sleep(Duration::from_millis(200));
-
-    let live_port = start_backend("still-alive");
-    let proxy_port2 = free_port();
-    let yaml2 = simple_proxy_yaml(proxy_port2, live_port);
-    let config2 = Config::from_yaml(&yaml2).unwrap();
-    let proxy2 = start_proxy(&config2);
-
-    let (status, body) = http_get(proxy2.addr(), "/", None);
-    assert_eq!(status, 200, "proxy should remain functional after client disconnect");
+    let (status, body) = http_get(&proxy_addr, "/healthy", None);
+    assert_eq!(
+        status, 200,
+        "original proxy must serve after disconnected response attempt"
+    );
     assert_eq!(body, "still-alive", "proxy should serve new requests normally");
 }
 
@@ -660,6 +747,26 @@ fn start_partial_response_backend() -> u16 {
         }
     });
     port
+}
+
+/// Releases and joins the delayed backend even when a test assertion fails.
+struct DelayedBackendGuard {
+    /// Gate allowing the backend to attempt its response.
+    release: mpsc::Sender<()>,
+    /// Owned backend worker, joined exactly once.
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for DelayedBackendGuard {
+    fn drop(&mut self) {
+        let _release_result = self.release.send(());
+        if let Some(worker) = self.worker.take() {
+            let result = worker.join();
+            if !std::thread::panicking() {
+                result.expect("delayed backend worker completion");
+            }
+        }
+    }
 }
 
 /// Build a YAML config with a cluster-level read timeout.

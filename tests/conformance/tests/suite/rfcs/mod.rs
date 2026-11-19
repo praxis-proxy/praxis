@@ -21,6 +21,7 @@
 //! [RFC 9112]: https://datatracker.ietf.org/doc/html/rfc9112
 //! [RFC 9113]: https://datatracker.ietf.org/doc/html/rfc9113
 
+mod expect_continue;
 mod rfc6265;
 mod rfc6455;
 mod rfc7239;
