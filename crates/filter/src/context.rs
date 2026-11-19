@@ -596,8 +596,8 @@ impl HttpFilterContext<'_> {
         // which owes back both an endpoint counter and a cluster slot.
         // `lb.admitted` marks one it only admitted — a preset upstream —
         // which owes back the cluster slot alone.
-        let selected = self.get_metadata("lb.selected").is_some();
-        if !selected && self.get_metadata("lb.admitted").is_none() {
+        let selected = self.filter_metadata.contains_key("lb.selected");
+        if !selected && !self.filter_metadata.contains_key("lb.admitted") {
             return;
         }
         // The response phase runs once per response head the upstream sends,

@@ -40,7 +40,7 @@ pub use self::reselector::EndpointReselector;
 use crate::pipeline::catalog::{ClusterApplicationMetadata, ClusterMetadataDeclaration};
 use crate::{
     FilterError,
-    actions::{FilterAction, Rejection},
+    actions::FilterAction,
     filter::{HttpFilter, HttpFilterContext},
 };
 
@@ -343,8 +343,8 @@ impl LoadBalancerFilter {
 ///
 /// Mirrors the listener-level connection cap: `503` with `Retry-After: 1`,
 /// so a client backs off the same way whichever ceiling shed it.
-fn cluster_overloaded() -> Rejection {
-    Rejection::status(503)
+fn cluster_overloaded() -> crate::Rejection {
+    crate::Rejection::status(503)
         .with_header("Retry-After", "1")
         .with_body("cluster at max_connections")
 }
@@ -358,10 +358,10 @@ fn cluster_overloaded() -> Rejection {
 /// releases an endpoint counter, and a preset upstream never went through
 /// `strategy.select`, so it holds no such counter to release.
 ///
-/// A request already holding a lease — a sub-request, or a second load
-/// balancer in the chain — keeps the one it has, since the ceiling counts
+/// A request already holding a lease, a sub-request, or a second load
+/// balancer in the chain, keeps the one it has, since the ceiling counts
 /// requests to the cluster rather than the filters that handled them.
-fn admit_preset(cluster: &Arc<str>, entry: &ClusterEntry, ctx: &mut HttpFilterContext<'_>) -> Option<Rejection> {
+fn admit_preset(cluster: &Arc<str>, entry: &ClusterEntry, ctx: &mut HttpFilterContext<'_>) -> Option<crate::Rejection> {
     if ctx.cluster_admission.is_some() {
         return None;
     }

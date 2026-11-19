@@ -532,18 +532,18 @@ mod tests {
     use std::{collections::VecDeque, net::IpAddr, sync::atomic::Ordering as AtomicOrdering, time::Duration};
 
     use http::{HeaderMap, Method, Uri};
+    use praxis_core::config::FailureMode;
     #[cfg(not(feature = "pingora"))]
     use praxis_core::connectivity::normalize_mapped_ipv4;
-    use praxis_core::{
-        config::FailureMode,
-        retry::{AdmissionLease, ClusterRetryState},
-    };
+    use praxis_filter::FilterRegistry;
     #[cfg(not(feature = "pingora"))]
     use praxis_filter::{BodyMode, Rejection};
-    use praxis_filter::{FilterRegistry, TrustedHeaderMutation};
 
     use super::*;
     use crate::http::pingora::handler::{response_filter::run_response_filters, retry_util::release_retry_state};
+
+    /// Header mutation queued by the pre-read test.
+    type TrustedHeaderMutation = praxis_filter::TrustedHeaderMutation;
 
     #[tokio::test]
     async fn empty_pipeline_continues() {
@@ -1664,7 +1664,7 @@ mod tests {
 
     /// A context as the response phase finds it: request answered by the
     /// upstream the load balancer picked, holding `lease`.
-    fn answered_ctx(lease: Arc<AdmissionLease>) -> PingoraRequestCtx {
+    fn answered_ctx(lease: Arc<praxis_core::retry::AdmissionLease>) -> PingoraRequestCtx {
         let mut ctx = ctx_for_web();
         ctx.request_snapshot = Some(make_request());
         ctx.upstream = Some(make_test_upstream());
@@ -1708,6 +1708,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_cancelled_response_phase_keeps_another_requests_slot() {
+        use praxis_core::retry::{AdmissionLease, ClusterRetryState};
+
         let pipeline = capped_lb_with_stall("stalling_response", || Box::new(StallingResponseFilter), true);
         let state = Arc::new(ClusterRetryState::new(None).with_max_concurrent(Some(2)));
         let lease = AdmissionLease::claim(&state).expect("the first request is admitted");
