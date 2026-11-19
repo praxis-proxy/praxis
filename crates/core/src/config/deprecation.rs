@@ -64,6 +64,15 @@ struct DeprecationRule {
     message: &'static str,
 }
 
+/// The rule and listener a recorded occurrence belongs to.
+#[derive(Clone, Copy)]
+struct OccurrenceContext<'listener> {
+    /// Rule that matched this location.
+    rule: DeprecationRule,
+    /// Listener using this occurrence, if the chain is listener-referenced.
+    listener: Option<&'listener str>,
+}
+
 /// One location in the loaded config matching a deprecation rule.
 struct DeprecatedConfigOccurrence {
     /// Rule that matched this location.
@@ -97,43 +106,71 @@ const DEPRECATION_RULES: &[DeprecationRule] = &[
     },
 ];
 
-/// Check valid YAML for deprecated config usages and warn for each match.
+/// Bound work and output even when named chains expand exponentially.
+///
+/// Above the `100_000` filter entries the chain limits allow (`MAX_CHAINS`
+/// chains of `MAX_FILTERS_PER_CHAIN` filters), so every configuration that
+/// can build a pipeline is scanned completely.
+const MAX_SCAN_VISITS: usize = 150_000;
+/// Maximum number of individual deprecation warnings per config.
+const MAX_WARNINGS: usize = 1_000;
+/// Maximum bytes retained for warning paths and listener names.
+const MAX_WARNING_BYTES: usize = 1_048_576; // 1 MiB
+/// Bound the recursion depth of the scan, which runs before the pipeline
+/// builder applies `MAX_BRANCH_DEPTH`.
+///
+/// Headroom over that limit, not a config constraint: named chain references
+/// nest without a depth check at config-validation time, so only this bounds
+/// the native stack the recursive scan consumes.
+const MAX_SCAN_DEPTH: usize = 32;
+
+/// Check valid YAML for deprecated config usages and report truncation.
 pub(super) fn check_for_deprecated_config(yaml: &str) {
     let Ok(root) = serde_yaml::from_str::<Value>(yaml) else {
         return;
     };
-    for usage in find_usages(&root, DEPRECATION_RULES) {
+    let (usages, truncated) = find_usages(&root, DEPRECATION_RULES);
+    let reported = usages.len();
+    for usage in usages {
         warn_usage(&usage);
+    }
+    if truncated {
+        warn!(
+            item = "deprecation_scan",
+            reported, "deprecation scan truncated; some deprecated settings may not be reported"
+        );
     }
 }
 
-/// Find all deprecated usages declared in `rules`.
-fn find_usages(root: &Value, rules: &[DeprecationRule]) -> Vec<DeprecatedConfigOccurrence> {
+/// Find deprecated usages declared in `rules`, subject to scan limits.
+fn find_usages(root: &Value, rules: &[DeprecationRule]) -> (Vec<DeprecatedConfigOccurrence>, bool) {
     let mut scanner = Scanner {
         chains: named_chains(root),
         rules,
         reached_chains: HashSet::new(),
         usages: Vec::new(),
+        visits: 0,
+        depth: 0,
+        warning_bytes: 0,
+        truncated: false,
     };
-    find_config_fields(root, rules, &mut scanner.usages);
+    find_config_fields(root, &mut scanner);
     scan_listener_chains(root, &mut scanner);
     scan_unreferenced_chains(&mut scanner);
-    scanner.usages
+    (scanner.usages, scanner.truncated)
 }
 
 /// Find explicitly supplied deprecated fields in the raw config mapping.
-fn find_config_fields(root: &Value, rules: &[DeprecationRule], usages: &mut Vec<DeprecatedConfigOccurrence>) {
-    for rule in rules {
+fn find_config_fields(root: &Value, scanner: &mut Scanner<'_, '_>) {
+    for rule in scanner.rules {
         let DeprecatedConfigTarget::ConfigField(field_path) = rule.target else {
             continue;
         };
-        let mut locations = Vec::new();
-        collect_path_matches(root, field_path, "", &mut locations);
-        usages.extend(locations.into_iter().map(|location| DeprecatedConfigOccurrence {
+        let context = OccurrenceContext {
             rule: *rule,
-            path: location,
             listener: None,
-        }));
+        };
+        collect_path_matches(scanner, root, field_path, "", context);
     }
 }
 
@@ -156,11 +193,50 @@ struct Scanner<'config, 'rules> {
     reached_chains: HashSet<String>,
     /// Every matching config occurrence.
     usages: Vec<DeprecatedConfigOccurrence>,
+    /// Number of visited scanner nodes.
+    visits: usize,
+    /// Number of active recursive filter entries.
+    depth: usize,
+    /// Bytes retained in warning paths and listener names.
+    warning_bytes: usize,
+    /// Whether a limit prevented a complete scan.
+    truncated: bool,
+}
+
+impl Scanner<'_, '_> {
+    /// Reserve one visit, stopping the entire scan when the budget is exhausted.
+    fn visit(&mut self) -> bool {
+        if self.truncated || self.visits >= MAX_SCAN_VISITS {
+            self.truncated = true;
+            return false;
+        }
+        self.visits = self.visits.saturating_add(1);
+        true
+    }
+
+    /// Record one occurrence without allowing unbounded warning output.
+    fn record(&mut self, context: OccurrenceContext<'_>, path: &str) {
+        let bytes = path.len().saturating_add(context.listener.map_or(0, str::len));
+        let total = self.warning_bytes.saturating_add(bytes);
+        if self.usages.len() >= MAX_WARNINGS || total > MAX_WARNING_BYTES {
+            self.truncated = true;
+            return;
+        }
+        self.warning_bytes = total;
+        self.usages.push(DeprecatedConfigOccurrence {
+            rule: context.rule,
+            path: path.to_owned(),
+            listener: context.listener.map(str::to_owned),
+        });
+    }
 }
 
 /// Scan every chain referenced by every listener, preserving listener context.
 fn scan_listener_chains(root: &Value, scanner: &mut Scanner<'_, '_>) {
     for listener in sequence_at(root, "listeners").into_iter().flatten() {
+        if !scanner.visit() {
+            break;
+        }
         let Some(listener_name) = string_at(listener, "name") else {
             continue;
         };
@@ -169,6 +245,9 @@ fn scan_listener_chains(root: &Value, scanner: &mut Scanner<'_, '_>) {
             .flatten()
             .filter_map(Value::as_str)
         {
+            if !scanner.visit() {
+                break;
+            }
             let Some(chain) = scanner.chains.get(chain_name).copied() else {
                 continue;
             };
@@ -183,6 +262,9 @@ fn scan_unreferenced_chains(scanner: &mut Scanner<'_, '_>) {
     let mut chains: Vec<_> = scanner.chains.iter().map(|(name, chain)| (*name, *chain)).collect();
     chains.sort_unstable_by_key(|(name, _)| *name);
     for (chain_name, chain) in chains {
+        if !scanner.visit() {
+            break;
+        }
         if scanner.reached_chains.contains(chain_name) {
             continue;
         }
@@ -199,13 +281,17 @@ fn scan_named_chain(
     listener: Option<&str>,
     chain_stack: &mut HashSet<String>,
 ) {
+    if !scanner.visit() {
+        return;
+    }
     if listener.is_none() && scanner.reached_chains.contains(name) {
         return;
     }
-    scanner.reached_chains.insert(name.to_owned());
-    if !chain_stack.insert(name.to_owned()) {
+    if chain_stack.contains(name) {
         return;
     }
+    scanner.reached_chains.insert(name.to_owned());
+    chain_stack.insert(name.to_owned());
     let prefix = format!("filter_chains[{name}].filters");
     if let Some(filters) = sequence_at(chain, "filters") {
         scan_filter_entries(scanner, filters, &prefix, listener, chain_stack);
@@ -222,6 +308,9 @@ fn scan_filter_entries(
     chain_stack: &mut HashSet<String>,
 ) {
     for (index, entry) in entries.iter().enumerate() {
+        if !scanner.visit() {
+            break;
+        }
         let path = format!("{prefix}[{index}]");
         scan_filter_entry(scanner, entry, &path, listener, chain_stack);
     }
@@ -235,12 +324,18 @@ fn scan_filter_entry(
     listener: Option<&str>,
     chain_stack: &mut HashSet<String>,
 ) {
+    if scanner.depth >= MAX_SCAN_DEPTH {
+        scanner.truncated = true;
+        return;
+    }
     let Some(filter) = string_at(entry, "filter") else {
         return;
     };
+    scanner.depth = scanner.depth.saturating_add(1);
     find_filter_deprecations(scanner, entry, filter, path, listener);
     scan_branch_chains(scanner, entry, path, listener, chain_stack);
     scan_step_filters(scanner, entry, path, listener, chain_stack);
+    scanner.depth = scanner.depth.saturating_sub(1);
 }
 
 /// Match whole-filter and filter-specific-field declarations.
@@ -252,26 +347,21 @@ fn find_filter_deprecations(
     listener: Option<&str>,
 ) {
     for rule in scanner.rules {
-        let matches = match rule.target {
-            DeprecatedConfigTarget::Filter(name) => (filter == name).then_some(vec![path.to_owned()]),
+        if scanner.truncated {
+            break;
+        }
+        let context = OccurrenceContext { rule: *rule, listener };
+        match rule.target {
+            DeprecatedConfigTarget::Filter(name) if filter == name => scanner.record(context, path),
             DeprecatedConfigTarget::FilterField {
                 filter: name,
                 path: field_path,
             } if filter == name => {
-                let mut locations = Vec::new();
-                collect_path_matches(entry, field_path, path, &mut locations);
-                Some(locations)
+                collect_path_matches(scanner, entry, field_path, path, context);
             },
-            DeprecatedConfigTarget::FilterField { .. } | DeprecatedConfigTarget::ConfigField(_) => None,
-        };
-        if let Some(locations) = matches {
-            scanner
-                .usages
-                .extend(locations.into_iter().map(|location| DeprecatedConfigOccurrence {
-                    rule: *rule,
-                    path: location,
-                    listener: listener.map(str::to_owned),
-                }));
+            DeprecatedConfigTarget::Filter(_)
+            | DeprecatedConfigTarget::FilterField { .. }
+            | DeprecatedConfigTarget::ConfigField(_) => {},
         }
     }
 }
@@ -285,6 +375,9 @@ fn scan_branch_chains(
     chain_stack: &mut HashSet<String>,
 ) {
     for (branch_index, branch) in sequence_at(entry, "branch_chains").into_iter().flatten().enumerate() {
+        if !scanner.visit() {
+            break;
+        }
         let branch_path = format!("{path}.branch_chains[{branch_index}]");
         scan_branch_chain(scanner, branch, &branch_path, listener, chain_stack);
     }
@@ -299,6 +392,9 @@ fn scan_branch_chain(
     chain_stack: &mut HashSet<String>,
 ) {
     for (chain_index, nested) in sequence_at(branch, "chains").into_iter().flatten().enumerate() {
+        if !scanner.visit() {
+            break;
+        }
         if let Some(name) = nested.as_str() {
             if let Some(chain) = scanner.chains.get(name).copied() {
                 scan_named_chain(scanner, name, chain, listener, chain_stack);
@@ -319,6 +415,9 @@ fn scan_step_filters(
     chain_stack: &mut HashSet<String>,
 ) {
     for (step_index, step) in sequence_at(entry, "steps").into_iter().flatten().enumerate() {
+        if !scanner.visit() {
+            break;
+        }
         let Some(filters) = sequence_at(step, "filters") else {
             continue;
         };
@@ -333,23 +432,35 @@ fn scan_step_filters(
 }
 
 /// Expand a configured field path into concrete locations where it exists.
-fn collect_path_matches(value: &Value, path: &[ConfigPathSegment], prefix: &str, locations: &mut Vec<String>) {
+fn collect_path_matches(
+    scanner: &mut Scanner<'_, '_>,
+    value: &Value,
+    path: &[ConfigPathSegment],
+    prefix: &str,
+    context: OccurrenceContext<'_>,
+) {
+    if !scanner.visit() {
+        return;
+    }
     let Some((part, remaining)) = path.split_first() else {
-        locations.push(prefix.to_owned());
+        scanner.record(context, prefix);
         return;
     };
     match part {
         ConfigPathSegment::Key(key) => {
             if let Some(next) = mapping_at(value, key) {
                 let next_prefix = append_field(prefix, key);
-                collect_path_matches(next, remaining, &next_prefix, locations);
+                collect_path_matches(scanner, next, remaining, &next_prefix, context);
             }
         },
         ConfigPathSegment::AnySequenceItem => {
             if let Some(values) = value.as_sequence() {
                 for (index, next) in values.iter().enumerate() {
+                    if scanner.truncated {
+                        break;
+                    }
                     let next_prefix = format!("{prefix}[{index}]");
-                    collect_path_matches(next, remaining, &next_prefix, locations);
+                    collect_path_matches(scanner, next, remaining, &next_prefix, context);
                 }
             }
         },
@@ -404,10 +515,88 @@ fn append_field(prefix: &str, field: &str) -> String {
     reason = "tests"
 )]
 mod tests {
+    use std::fmt::Write as _;
+
     use super::{
         ConfigPathSegment, DEPRECATION_RULES, DeprecatedConfigOccurrence, DeprecatedConfigTarget, DeprecationRule,
-        find_usages,
+        MAX_WARNINGS, find_usages,
     };
+
+    /// Generate a compact chain graph with exponentially many pipeline occurrences.
+    fn branching_config(leaf_filter: &str) -> serde_yaml::Value {
+        let mut yaml = String::from("listeners:\n  - name: web\n    filter_chains: [chain0]\nfilter_chains:\n");
+        for index in 0_usize..29 {
+            write!(yaml,
+                "  - name: chain{index}\n    filters:\n      - filter: headers\n        branch_chains:\n          - chains: [chain{}, chain{}]\n",
+                index.saturating_add(1), index.saturating_add(1)
+            ).unwrap();
+        }
+        write!(yaml, "  - name: chain29\n    filters:\n      - filter: {leaf_filter}\n").unwrap();
+        serde_yaml::from_str(&yaml).unwrap()
+    }
+
+    #[test]
+    fn exponential_chain_expansion_is_bounded_without_deprecations() {
+        let (usages, truncated) = find_usages(&branching_config("headers"), DEPRECATION_RULES);
+        assert!(usages.is_empty(), "non-deprecated filters should not warn");
+        assert!(truncated, "exponential traversal must be truncated");
+    }
+
+    #[test]
+    fn exponential_chain_expansion_caps_warnings() {
+        let (usages, truncated) = find_usages(&branching_config("basic_auth"), DEPRECATION_RULES);
+        assert_eq!(usages.len(), MAX_WARNINGS);
+        assert!(truncated, "warning limit must truncate the scan");
+    }
+
+    #[test]
+    fn field_warnings_are_capped_only_when_an_extra_match_exists() {
+        let rules = [DeprecationRule {
+            item: "listeners.old_setting",
+            target: DeprecatedConfigTarget::ConfigField(&[
+                ConfigPathSegment::Key("listeners"),
+                ConfigPathSegment::AnySequenceItem,
+                ConfigPathSegment::Key("old_setting"),
+            ]),
+            replacement: None,
+            message: "test field",
+        }];
+        for count in [MAX_WARNINGS, MAX_WARNINGS.saturating_add(1)] {
+            let yaml = format!("listeners:\n{}", "  - old_setting: true\n".repeat(count));
+            let config = serde_yaml::from_str(&yaml).unwrap();
+            let (usages, truncated) = find_usages(&config, &rules);
+            assert_eq!(usages.len(), MAX_WARNINGS);
+            assert_eq!(truncated, count > MAX_WARNINGS);
+        }
+    }
+
+    #[test]
+    fn warning_bytes_are_bounded_for_long_listener_names() {
+        let name = "a".repeat(300_000);
+        let yaml = format!(
+            "listeners:\n  - name: {name}\n    filter_chains: [auth, auth, auth, auth]\nfilter_chains:\n  - name: auth\n    filters:\n      - filter: basic_auth\n"
+        );
+        let config = serde_yaml::from_str(&yaml).unwrap();
+        let (usages, truncated) = find_usages(&config, DEPRECATION_RULES);
+        assert_eq!(usages.len(), 3);
+        assert!(truncated, "warning byte limit must truncate the scan");
+    }
+
+    #[test]
+    fn long_named_chain_path_is_bounded() {
+        let mut yaml = String::from("listeners:\n  - name: web\n    filter_chains: [chain0]\nfilter_chains:\n");
+        for index in 0_usize..40 {
+            write!(yaml,
+                "  - name: chain{index}\n    filters:\n      - filter: headers\n        branch_chains:\n          - chains: [chain{}]\n",
+                index.saturating_add(1)
+            ).unwrap();
+        }
+        yaml.push_str("  - name: chain40\n    filters:\n      - filter: basic_auth\n");
+        let config = serde_yaml::from_str(&yaml).unwrap();
+        let (usages, truncated) = find_usages(&config, DEPRECATION_RULES);
+        assert!(usages.is_empty(), "the leaf is past the depth limit");
+        assert!(truncated, "deep traversal must be truncated");
+    }
 
     #[test]
     fn deprecated_filter_warns_once_per_listener_usage() {
@@ -425,7 +614,7 @@ filter_chains:
 "#,
         )
         .unwrap();
-        let usages = find_usages(&config, DEPRECATION_RULES);
+        let usages = find_usages(&config, DEPRECATION_RULES).0;
 
         assert_eq!(usages.len(), 2, "each affected listener should be reported");
         assert_eq!(usages[0].listener.as_deref(), Some("public"));
@@ -451,7 +640,7 @@ filter_chains:
 "#,
         )
         .unwrap();
-        let usages = find_usages(&config, DEPRECATION_RULES);
+        let usages = find_usages(&config, DEPRECATION_RULES).0;
 
         assert_eq!(usages.len(), 2, "each pipeline occurrence should be reported");
         assert!(usages.iter().all(|usage| usage.listener.as_deref() == Some("web")));
@@ -469,7 +658,7 @@ filter_chains:
 "#,
         )
         .unwrap();
-        let usages = find_usages(&config, DEPRECATION_RULES);
+        let usages = find_usages(&config, DEPRECATION_RULES).0;
 
         assert_eq!(usages.len(), 1);
         assert!(usages[0].listener.is_none());
@@ -495,7 +684,7 @@ filter_chains:
 "#,
         )
         .unwrap();
-        let usages = find_usages(&config, DEPRECATION_RULES);
+        let usages = find_usages(&config, DEPRECATION_RULES).0;
 
         assert_eq!(usages.len(), 1);
         assert_eq!(usages[0].listener.as_deref(), Some("web"));
@@ -517,11 +706,11 @@ filter_chains:
         let explicit_default: serde_yaml::Value = serde_yaml::from_str("runtime:\n  old_setting: false\n").unwrap();
 
         assert!(
-            find_usages(&omitted, &rules).is_empty(),
+            find_usages(&omitted, &rules).0.is_empty(),
             "omitted field must stay quiet"
         );
         assert_eq!(
-            find_usages(&explicit_default, &rules).len(),
+            find_usages(&explicit_default, &rules).0.len(),
             1,
             "explicit default value must still warn"
         );
@@ -549,7 +738,7 @@ listeners:
 "#,
         )
         .unwrap();
-        let usages = find_usages(&config, &rules);
+        let usages = find_usages(&config, &rules).0;
 
         assert_eq!(usages.len(), 1);
         assert_eq!(usages[0].path, "listeners[0].old_setting");
@@ -578,7 +767,7 @@ filter_chains:
 "#,
         )
         .unwrap();
-        let usages = find_usages(&config, &rules);
+        let usages = find_usages(&config, &rules).0;
 
         assert_eq!(usages.len(), 1);
         assert_eq!(usages[0].rule.item, "old_option");
@@ -608,7 +797,7 @@ filter_chains:
     #[test]
     fn credential_stripping_rule_reports_only_explicit_fields_in_its_filter() {
         let config = serde_yaml::from_str(CREDENTIAL_FIELDS_YAML).unwrap();
-        let usages = find_usages(&config, DEPRECATION_RULES);
+        let usages = find_usages(&config, DEPRECATION_RULES).0;
 
         assert_eq!(usages.len(), 2, "only explicit fields under credential_injection match");
         assert_eq!(
@@ -647,7 +836,7 @@ filter_chains:
 "#,
         )
         .unwrap();
-        let usages: Vec<DeprecatedConfigOccurrence> = find_usages(&config, DEPRECATION_RULES);
+        let usages: Vec<DeprecatedConfigOccurrence> = find_usages(&config, DEPRECATION_RULES).0;
 
         assert_eq!(usages.len(), 1);
         assert!(usages[0].path.contains("steps[0].filters[0]"));

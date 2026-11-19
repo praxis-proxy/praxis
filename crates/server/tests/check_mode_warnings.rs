@@ -15,7 +15,7 @@
     reason = "integration tests are in tests/ directory, not in src"
 )]
 
-use std::{io::Write as _, process::Command};
+use std::{fmt::Write as _, io::Write as _, process::Command};
 
 /// Minimal valid config with two insecure overrides enabled.
 const INSECURE_CONFIG: &str = r#"
@@ -118,6 +118,26 @@ fn dump_surfaces_deprecation_warning_without_mixing_stdout() {
         "warnings must not leak into YAML output: {stdout}"
     );
     serde_yaml::from_str::<serde_yaml::Value>(&stdout).expect("dump stdout should remain valid YAML");
+}
+
+#[test]
+fn validate_warns_once_when_deprecation_scan_is_truncated() {
+    let mut yaml = String::from(
+        "listeners:\n  - name: web\n    address: '127.0.0.1:8080'\n    filter_chains: [chain0]\nfilter_chains:\n",
+    );
+    for index in 0_usize..29 {
+        write!(yaml,
+            "  - name: chain{index}\n    filters:\n      - filter: request_id\n        branch_chains:\n          - name: branch{index}\n            rejoin: next\n            chains: [chain{}, chain{}]\n",
+            index.saturating_add(1), index.saturating_add(1)
+        ).expect("writing to a String cannot fail");
+    }
+    yaml.push_str("  - name: chain29\n    filters:\n      - filter: request_id\n");
+    let (_, _, stderr) = run_check_mode("--validate", &yaml, Some("json"));
+    assert_eq!(
+        stderr.matches("deprecation scan truncated").count(),
+        1,
+        "a truncated scan should emit one warning: {stderr}"
+    );
 }
 
 #[test]
