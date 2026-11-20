@@ -168,7 +168,7 @@ on that edge too. Adding a backend is described in
 | `slow-start` | off (experimental) | Per-cluster `slow_start` config. | The key is rejected unless the feature is on. With the feature on, weighted strategies apply the ramp. Hash strategies do not. |
 | `forward-proxy` | off (experimental) | The listener `forward_proxy` block and the HTTP CONNECT runtime (tunnels to allowlisted destinations). | On for an egress gateway in front of CONNECT clients (`HTTPS_PROXY`); plain `http://` requests through the proxy are not forwarded yet. The key is rejected unless the feature is on. |
 | `bound-upstream-request-body` | off (experimental) | The `HttpFilter::on_bound_upstream_request_body` hook, run once at the logical-binding barrier. | For out-of-tree filters that must inspect or rewrite the request body against the bound upstream; no in-tree filter uses it yet. Pulls in `upstream-binding`. |
-| `chain-binding` | off (experimental) | The `register_chain_binding` outbound-callout API (`ChainBindingContext::bind_chain`) and its authority-bound deferred credentials (`PendingCredentials`, `DeferredCredential`). | For out-of-tree callout filters; no in-tree consumer yet. |
+| `chain-binding` | off (experimental) | The `register_chain_binding` outbound-callout API (`ChainBindingContext::bind_chain`), its authority-bound deferred credentials (`PendingCredentials`, `DeferredCredential`), and cluster-staged callouts (`ChainBindingContext::cluster`, `StagedCluster`). | For out-of-tree callout filters; no in-tree consumer yet. |
 | `spiffe` | off (experimental) | SPIFFE X.509-SVID mTLS peer identity (the `require_named` listener mode) and the `peer_identity_trust` filter. | On for mTLS peer-identity authorization. Adds `spiffe` and `x509-parser`. |
 | `access-log-syslog` | off (experimental) | The `access_log` filter's syslog sink (RFC 3164 over a Unix socket, UDP, or TCP). | On to ship access logs to a syslog collector. Adds the optional `syslog` crate; kept out of the default and FIPS builds. |
 | `tls-health-check` | off (experimental) | TLS handshakes and HTTPS active health probes. Selects Pingora. | Enables `health_check.type: tls`; HTTP probes on TLS clusters use HTTPS. See [health checking](health-checking.md#tls-and-https-probes). |
@@ -240,9 +240,10 @@ production` at startup. Do not run an experimental build in production.
   `ChainBindingContext::bind_chain`, together with the authority-bound
   deferred-credential channel (`PendingCredentials` / `DeferredCredential`)
   that injects a secret into an outbound sub-request only when the resolved
-  destination matches the authority the credential was issued for. This is the
-  outbound-callout mechanism; it has no in-tree consumer yet and exists for
-  out-of-tree callout filters.
+  destination matches the authority the credential was issued for, and the
+  `ChainBindingContext::cluster` / `StagedCluster` pair that sends a callout to
+  a named top-level cluster. This is the outbound-callout mechanism; it has no
+  in-tree consumer yet and exists for out-of-tree callout filters.
 - **`spiffe`**: SPIFFE X.509-SVID mutual-TLS peer identity, including the
   `require_named` listener client-cert mode, plus the `peer_identity_trust`
   filter that authorizes clients by mTLS peer identity. Note that

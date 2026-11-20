@@ -145,6 +145,11 @@ pub struct FilterPipeline {
     /// Slow-start ramp state, preserved across reloads.
     slow_start_registry: Option<Arc<crate::SlowStartRegistry>>,
 
+    /// Cluster handles chain-binding filters resolved during this build,
+    /// whose slow-start ramps attach with the load balancers' own.
+    #[cfg(all(feature = "chain-binding", feature = "slow-start"))]
+    pub(crate) bound_clusters: Vec<crate::ClusterRef>,
+
     /// Shared sub-request client for iterative sub-requests.
     subrequest_client: Option<praxis_core::subrequest::SubRequestClient>,
 
@@ -779,6 +784,10 @@ impl FilterPipeline {
         self.visit_nested_pipelines(&mut |pipeline| pipeline.set_slow_start_registry(Arc::clone(&registry)));
         #[cfg(feature = "slow-start")]
         bind_pipeline_slow_start(&self.filters, &registry);
+        #[cfg(all(feature = "chain-binding", feature = "slow-start"))]
+        for cluster in &self.bound_clusters {
+            cluster.bind_slow_start(&registry);
+        }
         self.slow_start_registry = Some(registry);
     }
 

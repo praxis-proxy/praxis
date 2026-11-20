@@ -48,6 +48,8 @@ pub mod body;
 pub mod builtins;
 #[cfg(feature = "policy-engine")]
 mod client_address;
+#[cfg(feature = "chain-binding")]
+mod cluster_ref;
 mod condition;
 mod context;
 #[cfg(feature = "chain-binding")]
@@ -141,6 +143,8 @@ pub use builtins::{
 pub fn fips_crypto_blocker() -> Option<String> {
     Some("this build has no Policy crypto capability evidence for a `policy` filter".to_owned())
 }
+#[cfg(feature = "chain-binding")]
+pub use cluster_ref::ClusterRef;
 pub use condition::{should_execute, should_execute_response, should_execute_response_ref};
 pub use context::{
     HttpFilterContext, PendingHeaderResult, Request, Response, StreamTermination, StreamTerminationCause,
@@ -160,6 +164,8 @@ pub use factory::{
     tcp_builtin,
 };
 pub use filter::{Filter, FilterContext, FilterError, HttpFilter};
+#[cfg(feature = "chain-binding")]
+pub use filtered_subrequest::StagedCluster;
 pub use filtered_subrequest::{
     CalloutOutcome, CalloutResponse, CalloutResponseTooLarge, FilteredSubrequestExecutor, StagedUpstream,
     StagedUpstreamFallback, StreamBodySuppressed, SubrequestRuntime,

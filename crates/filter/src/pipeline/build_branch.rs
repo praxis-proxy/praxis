@@ -8,7 +8,7 @@
 //! [`FilterPipeline::build`](super::FilterPipeline::build) (in
 //! [`build`]) skips branch resolution;
 //! [`FilterPipeline::build_with_chains`](super::FilterPipeline::build_with_chains)
-//! delegates here via [`resolve_chain_filters`].
+//! delegates here via [`resolve_chain_filters_in`].
 //!
 //! ## Resolution flow
 //!
@@ -134,6 +134,7 @@ struct BuildContext<'a> {
 /// resolves nested branches up to [`MAX_BRANCH_DEPTH`].
 ///
 /// [`ResolvedBranch`]: super::branch::ResolvedBranch
+#[cfg(test)]
 #[expect(
     clippy::too_many_arguments,
     reason = "threads the shared build resources plus the cluster declarations the binding path needs"
@@ -146,8 +147,32 @@ pub(super) fn resolve_chain_filters(
     insecure: &InsecureOptions,
     top_level_clusters: &[Cluster],
 ) -> Result<Vec<PipelineFilter>, FilterError> {
-    let mut next_filter_id: usize = 0;
     let stack = ResolutionStack::new();
+    resolve_chain_filters_in(entries, registry, chains, depth, insecure, top_level_clusters, &stack)
+}
+
+/// Resolve filter entries with a caller-owned resolution stack, so the caller
+/// can read build-wide state (the bound cluster handles) afterwards.
+///
+/// Builds filters from entries, resolves `branch_chains` on each entry into
+/// runtime [`ResolvedBranch`] types, and recursively resolves nested branches
+/// up to [`MAX_BRANCH_DEPTH`].
+///
+/// [`ResolvedBranch`]: super::branch::ResolvedBranch
+#[expect(
+    clippy::too_many_arguments,
+    reason = "threads the shared build resources plus the caller-owned stack"
+)]
+pub(super) fn resolve_chain_filters_in(
+    entries: &mut [FilterEntry],
+    registry: &FilterRegistry,
+    chains: &HashMap<&str, &[FilterEntry]>,
+    depth: usize,
+    insecure: &InsecureOptions,
+    top_level_clusters: &[Cluster],
+    stack: &ResolutionStack,
+) -> Result<Vec<PipelineFilter>, FilterError> {
+    let mut next_filter_id: usize = 0;
     let budget = Cell::new(0);
     // Seed the shared branch budget with the configuration-wide branch count —
     // this pipeline's own entries plus every named chain — so bound outbound
@@ -168,7 +193,7 @@ pub(super) fn resolve_chain_filters(
         depth,
         &mut next_filter_id,
         insecure,
-        &stack,
+        stack,
         &budget,
         &branch_budget,
         0,

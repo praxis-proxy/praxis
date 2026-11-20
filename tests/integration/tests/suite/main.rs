@@ -112,6 +112,8 @@ mod selected_upstream_body;
 mod selected_upstream_body_subrequests;
 mod selected_upstream_preset_endpoint;
 mod sni_router;
+#[cfg(feature = "chain-binding")]
+mod staged_cluster_callout;
 mod stats_admin;
 mod stdout_sink;
 mod stream_buffer_adapter;

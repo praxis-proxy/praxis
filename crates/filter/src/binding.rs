@@ -38,10 +38,10 @@ use praxis_core::config::{
 };
 use praxis_core::config::{ClusterDeclarations, FilterEntry, InsecureOptions};
 
-#[cfg(feature = "chain-binding")]
-use crate::filter::HttpFilter;
 #[cfg(any(feature = "iterative-request-router", feature = "chain-binding"))]
 use crate::pipeline::FilterPipeline;
+#[cfg(feature = "chain-binding")]
+use crate::{ClusterRef, filter::HttpFilter};
 use crate::{FilterError, registry::FilterRegistry};
 
 /// Maximum nesting depth permitted when resolving outbound chain references.
@@ -83,6 +83,14 @@ pub type ChainBindingHttpFactory =
 pub(crate) struct ResolutionStack {
     /// Names currently being resolved, innermost last.
     active: RefCell<Vec<Box<str>>>,
+
+    /// Cluster handles resolved so far in this build, by name.
+    ///
+    /// The stack is the one value shared by every binding context of a build,
+    /// so it also carries this cache: every filter that names a cluster gets
+    /// the same [`ClusterRef`], sharing its balancer state and retry budget.
+    #[cfg(feature = "chain-binding")]
+    clusters: RefCell<HashMap<Arc<str>, ClusterRef>>,
 }
 
 impl ResolutionStack {
@@ -90,6 +98,8 @@ impl ResolutionStack {
     pub(crate) fn new() -> Self {
         Self {
             active: RefCell::new(Vec::new()),
+            #[cfg(feature = "chain-binding")]
+            clusters: RefCell::new(HashMap::new()),
         }
     }
 
@@ -105,6 +115,12 @@ impl ResolutionStack {
         }
         active.push(Box::from(name));
         Ok(ResolutionGuard { stack: self })
+    }
+
+    /// Every cluster handle resolved during the build, consuming the stack.
+    #[cfg(all(feature = "chain-binding", feature = "slow-start"))]
+    pub(crate) fn into_clusters(self) -> Vec<ClusterRef> {
+        self.clusters.into_inner().into_values().collect()
     }
 }
 
@@ -340,6 +356,34 @@ impl<'a> ChainBindingContext<'a> {
             self.top_level_clusters,
         )?;
         Ok(FilterPipeline::from_filters(filters))
+    }
+
+    /// Resolve a top-level cluster into a handle a callout can be staged at.
+    ///
+    /// The name must match a top-level `clusters:` declaration. Calling this
+    /// from a chain-binding factory makes an unknown name fail config load
+    /// (and hot reload) rather than a request. Within one pipeline build the
+    /// same name always yields the same handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilterError`] if no top-level cluster has this name, or its
+    /// TLS material or authority override cannot be prepared.
+    #[cfg(feature = "chain-binding")]
+    pub fn cluster(&self, name: &str) -> Result<ClusterRef, FilterError> {
+        if let Some(cached) = self.stack.clusters.borrow().get(name) {
+            return Ok(cached.clone());
+        }
+        let declared = self
+            .top_level_clusters
+            .get(name)
+            .ok_or_else(|| -> FilterError { format!("chain binding: unknown cluster '{name}'").into() })?;
+        let resolved = ClusterRef::resolve(declared)?;
+        self.stack
+            .clusters
+            .borrow_mut()
+            .insert(Arc::clone(&declared.name), resolved.clone());
+        Ok(resolved)
     }
 
     /// The active registry, used by the builder to instantiate filters.
@@ -1917,6 +1961,112 @@ mod tests {
             *sink.lock().expect("sink lock"),
             Some(3),
             "rebuilding after a config change must re-bind the outbound chain from the new config"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Cluster References
+    // -------------------------------------------------------------------------
+
+    // A top-level cluster declaration with one endpoint.
+    fn declared_cluster(name: &str) -> praxis_core::config::Cluster {
+        serde_yaml::from_str(&format!("name: {name}\nendpoints: [\"127.0.0.1:9\"]\n")).expect("cluster yaml")
+    }
+
+    // Run `f` with a binding context whose top-level clusters are `clusters`.
+    fn with_cluster_ctx<R>(
+        clusters: &[praxis_core::config::Cluster],
+        f: impl FnOnce(&ChainBindingContext<'_>) -> R,
+    ) -> R {
+        let registry = FilterRegistry::with_builtins();
+        let stack = ResolutionStack::new();
+        let chains: HashMap<&str, &[FilterEntry]> = HashMap::new();
+        let insecure = InsecureOptions::default();
+        let (budget, branches) = (Cell::new(0), Cell::new(0));
+        let decls = ClusterDeclarations::new(clusters);
+        let ctx = ChainBindingContext::new(&registry, &chains, &stack, 0, &insecure, &decls, &budget, &branches);
+        f(&ctx)
+    }
+
+    #[test]
+    fn cluster_resolves_a_top_level_declaration() {
+        let clusters = [declared_cluster("weather-mcp")];
+        let name = with_cluster_ctx(&clusters, |ctx| {
+            ctx.cluster("weather-mcp").expect("declared cluster").name().to_owned()
+        });
+        assert_eq!(name, "weather-mcp");
+    }
+
+    #[test]
+    fn cluster_rejects_an_unknown_name() {
+        let clusters = [declared_cluster("weather-mcp")];
+        let Err(error) = with_cluster_ctx(&clusters, |ctx| ctx.cluster("nope")) else {
+            panic!("an undeclared cluster must fail to bind");
+        };
+        assert!(
+            error.to_string().contains("unknown cluster 'nope'"),
+            "error must name the missing cluster: {error}"
+        );
+    }
+
+    #[test]
+    fn cluster_returns_the_same_handle_for_the_same_name() {
+        let clusters = [declared_cluster("weather-mcp")];
+        with_cluster_ctx(&clusters, |ctx| {
+            let first = ctx.cluster("weather-mcp").expect("first bind");
+            let second = ctx.cluster("weather-mcp").expect("second bind");
+            assert!(
+                first.ptr_eq(&second),
+                "one build must hand out one shared handle per cluster"
+            );
+        });
+    }
+
+    // A registry with a chain-binding filter that binds cluster `name` and
+    // hands the handle to the test through `held`.
+    #[cfg(feature = "slow-start")]
+    fn cluster_holder_registry(name: &'static str, held: &Arc<Mutex<Option<ClusterRef>>>) -> FilterRegistry {
+        let sink = Arc::clone(held);
+        let mut registry = FilterRegistry::with_builtins();
+        registry
+            .register_chain_binding(
+                "test_cluster_holder",
+                Arc::new(move |_config: &serde_yaml::Value, ctx: &ChainBindingContext<'_>| {
+                    *sink.lock().expect("sink lock") = Some(ctx.cluster(name)?);
+                    let filter: Box<dyn HttpFilter> = Box::new(ProbeFilter);
+                    Ok(filter)
+                }),
+            )
+            .expect("register test_cluster_holder");
+        registry
+    }
+
+    #[cfg(feature = "slow-start")]
+    #[test]
+    fn issued_cluster_refs_open_their_ramp_on_install() {
+        let held: Arc<Mutex<Option<ClusterRef>>> = Arc::new(Mutex::new(None));
+        let registry = cluster_holder_registry("ramped", &held);
+        let clusters: Vec<praxis_core::config::Cluster> = serde_yaml::from_str(
+            "- name: ramped\n  slow_start:\n    window_ms: 30000\n  endpoints: [\"127.0.0.1:9\", \"127.0.0.1:10\"]\n",
+        )
+        .expect("clusters yaml");
+        let mut top = entries("- filter: test_cluster_holder\n");
+        let mut pipeline = FilterPipeline::build_with_chains(
+            &mut top,
+            &registry,
+            &HashMap::new(),
+            &InsecureOptions::default(),
+            &clusters,
+        )
+        .expect("build pipeline");
+        let cluster = held.lock().expect("held lock").clone().expect("factory ran");
+        assert!(!cluster.ramp_attached(), "the ramp attaches only on install");
+
+        pipeline.set_slow_start_registry(Arc::new(crate::SlowStartRegistry::new()));
+
+        assert!(
+            cluster.ramp_attached(),
+            "installing the pipeline must attach the ramp of every cluster its filters bound"
         );
     }
 }

@@ -349,6 +349,24 @@ impl<'clusters> ClusterDeclarations<'clusters> {
     }
 
     /// The top-level declaration named `name`, if any.
+    ///
+    /// ```
+    /// use praxis_core::config::{Cluster, ClusterDeclarations};
+    ///
+    /// let clusters = [Cluster::with_defaults(
+    ///     "backend",
+    ///     vec!["10.0.0.1:80".into()],
+    /// )];
+    /// let declarations = ClusterDeclarations::new(&clusters);
+    /// assert!(declarations.get("backend").is_some());
+    /// assert!(declarations.get("missing").is_none());
+    /// ```
+    #[must_use]
+    pub fn get(&self, name: &str) -> Option<&'clusters Cluster> {
+        self.clusters.iter().find(|declared| declared.name.as_ref() == name)
+    }
+
+    /// The top-level declaration named `name`, if any.
     fn find(&self, name: &Arc<str>) -> Option<&Cluster> {
         self.clusters.iter().find(|declared| &declared.name == name)
     }

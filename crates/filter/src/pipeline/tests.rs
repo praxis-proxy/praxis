@@ -3598,6 +3598,8 @@ async fn skip_to_excludes_skipped_filters_from_response() {
         kv_stores: None,
         session_stores: None,
         slow_start_registry: None,
+        #[cfg(all(feature = "chain-binding", feature = "slow-start"))]
+        bound_clusters: Vec::new(),
         subrequest_client: None,
         may_select_streaming_subrequest_response: false,
         trace_context_filter_indices: Vec::new(),
@@ -3684,6 +3686,8 @@ async fn skip_to_excludes_skipped_filters_from_body_hooks() {
         kv_stores: None,
         session_stores: None,
         slow_start_registry: None,
+        #[cfg(all(feature = "chain-binding", feature = "slow-start"))]
+        bound_clusters: Vec::new(),
         may_select_streaming_subrequest_response: false,
         trace_context_filter_indices: Vec::new(),
         subrequest_client: None,
@@ -3767,6 +3771,8 @@ async fn body_hooks_run_for_every_filter_before_the_request_phase() {
         kv_stores: None,
         session_stores: None,
         slow_start_registry: None,
+        #[cfg(all(feature = "chain-binding", feature = "slow-start"))]
+        bound_clusters: Vec::new(),
         may_select_streaming_subrequest_response: false,
         trace_context_filter_indices: Vec::new(),
         subrequest_client: None,
@@ -3844,6 +3850,8 @@ async fn all_executed_filters_run_on_response() {
         kv_stores: None,
         session_stores: None,
         slow_start_registry: None,
+        #[cfg(all(feature = "chain-binding", feature = "slow-start"))]
+        bound_clusters: Vec::new(),
         subrequest_client: None,
         may_select_streaming_subrequest_response: false,
         trace_context_filter_indices: Vec::new(),
@@ -4058,6 +4066,8 @@ async fn skipped_filter_skips_its_branches() {
         kv_stores: None,
         session_stores: None,
         slow_start_registry: None,
+        #[cfg(all(feature = "chain-binding", feature = "slow-start"))]
+        bound_clusters: Vec::new(),
         subrequest_client: None,
         may_select_streaming_subrequest_response: false,
         trace_context_filter_indices: Vec::new(),
@@ -5706,6 +5716,8 @@ fn test_pipeline(body_capabilities: BodyCapabilities, filters: Vec<PipelineFilte
         kv_stores: None,
         session_stores: None,
         slow_start_registry: None,
+        #[cfg(all(feature = "chain-binding", feature = "slow-start"))]
+        bound_clusters: Vec::new(),
         subrequest_client: None,
         may_select_streaming_subrequest_response: false,
         trace_context_filter_indices: Vec::new(),
@@ -6152,6 +6164,8 @@ fn make_pipeline(filters: Vec<Box<dyn HttpFilter>>) -> FilterPipeline {
         kv_stores: None,
         session_stores: None,
         slow_start_registry: None,
+        #[cfg(all(feature = "chain-binding", feature = "slow-start"))]
+        bound_clusters: Vec::new(),
         subrequest_client: None,
         may_select_streaming_subrequest_response: false,
         trace_context_filter_indices: Vec::new(),
@@ -6196,6 +6210,8 @@ fn make_pipeline_with_conditions(
         kv_stores: None,
         session_stores: None,
         slow_start_registry: None,
+        #[cfg(all(feature = "chain-binding", feature = "slow-start"))]
+        bound_clusters: Vec::new(),
         subrequest_client: None,
         may_select_streaming_subrequest_response: false,
         trace_context_filter_indices: Vec::new(),
@@ -6240,6 +6256,8 @@ fn make_pipeline_with_response_conditions(
         kv_stores: None,
         session_stores: None,
         slow_start_registry: None,
+        #[cfg(all(feature = "chain-binding", feature = "slow-start"))]
+        bound_clusters: Vec::new(),
         subrequest_client: None,
         may_select_streaming_subrequest_response: false,
         trace_context_filter_indices: Vec::new(),
@@ -6912,6 +6930,8 @@ fn streaming_capability_detected_when_filter_declares_it() {
         kv_stores: None,
         session_stores: None,
         slow_start_registry: None,
+        #[cfg(all(feature = "chain-binding", feature = "slow-start"))]
+        bound_clusters: Vec::new(),
         pipeline_extensions: Vec::new(),
         record_filter_duration_metrics: false,
         route_templates: Arc::default(),
