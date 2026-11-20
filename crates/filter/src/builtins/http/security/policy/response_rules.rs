@@ -448,6 +448,48 @@ routes:
     }
 
     #[test]
+    fn fetch_is_unavailable_even_for_a_capable_response_plugin() -> Result<(), Box<dyn std::error::Error>> {
+        let block: Value = serde_yaml::from_str(
+            r#"
+authorization:
+  pre_invocation:
+    - "fetch(metadata)"
+"#,
+        )?;
+        let compiled = compile_policy_block_value("test", &block)?;
+        let effect = compiled.pre_invocation.first().expect("compiled fetch effect");
+        let metadata_plugins = HashSet::from(["metadata".to_owned()]);
+        assert!(matches!(effect, Effect::Fetch(_)), "the test must reach the Fetch arm");
+        assert!(
+            effect_unavailable_in_metadata_view(effect, &metadata_plugins),
+            "response capability does not make a fetch source available"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn post_invocation_fetch_is_rejected_before_effect_classification() -> Result<(), FilterError> {
+        let steps = [
+            Value::String("fetch(metadata)".to_owned()),
+            Value::String("run(metadata)".to_owned()),
+        ];
+        let metadata_plugins = HashSet::from(["metadata".to_owned()]);
+        let error = filter_post_steps(&steps, "test", &metadata_plugins).expect_err("post-invocation fetch is invalid");
+        assert!(
+            error
+                .to_string()
+                .contains("`fetch(...)` is allowed only in authorization.pre_invocation"),
+            "PPE must reject fetch before the response classifier: {error}"
+        );
+        assert_eq!(
+            filter_post_steps(steps.get(1..).expect("metadata step"), "test", &metadata_plugins)?,
+            vec![Value::String("run(metadata)".to_owned())],
+            "the separate metadata-only run step remains supported"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn drops_canonical_llm_output_rules() {
         let yaml = format!(
             r#"{PLUGINS}
