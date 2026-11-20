@@ -43,6 +43,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   rollouts, config reloads, TLS rotation, node drain, and upstream failure
   under continuous HTTP/1.1, HTTP/2, and HTTPS traffic.
 
+- Experimental `runtime.overload_actions` (requires
+  `runtime.overload_gauges` and the `overload-actions` Cargo feature)
+  requests allocator purging under memory pressure when a callback is registered,
+  disables HTTP/1
+  keep-alive above 50% pressure with recovery at 40%, and fails
+  `/ready` after sustained saturation. It now includes validated per-resource
+  bands, server-scoped transport admission, connect/header timeout scaling,
+  and idle pool aging, with
+  `praxis_overload_action` exposing the applied policy.
+  The Unix binary registers its jemalloc callback automatically; embedded hosts
+  must register an allocator callback themselves.
+  `runtime.overload_purge: false` disables explicit allocator purging while
+  retaining the other overload actions; changing it requires a restart.
+
 ### Changed
 
 - The `policy` filter admits at the request head: it runs
@@ -244,6 +258,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   and `ring_hash` instead of silently hashing by request path.
 - **Breaking:** Reject HTTP-only downstream read and keepalive timeouts on TCP
   listeners instead of silently ignoring them.
+- Config watcher shutdown releases the live overload controller even when a
+  downstream reload validator or file-permission check stalls; completed late
+  builds cannot publish.
+  Reloads now warn when changing the restart-only `runtime.overload_purge` flag.
+
 - **Breaking:** statically buffered request pipelines now reject a finite
   `body_limits.max_request_bytes` above `body_limits.max_buffer_bytes` at
   startup, config validation, and reload, naming both fields and byte values.
@@ -343,7 +362,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `forward_proxy` block, removes a listener that has one, or changes
   `insecure_options.allow_private_upstreams` while a bound listener has
   an enabled block, is rejected. The CONNECT runtime is a follow-up
- change; the block is inert until it lands.
+  change; the block is inert until it lands.
 - An experimental network backend behind the `hyper` feature, off by
   default: the proxy data path, TCP forwarder, admin surface and sub-request
   client on hyper 1.x. See `docs/architecture/hyper-backend.md`.

@@ -316,6 +316,10 @@ async fn accept_until_shutdown(
             Some(joined) = connections.join_next(), if !connections.is_empty() => log_connection_end(&joined),
             accepted = listener.accept() => match accepted {
                 Ok((stream, peer)) => {
+                    if proxy.overload.is_saturated() {
+                        crate::http::metrics::record_overload_reject("pre_tls_pressure");
+                        continue;
+                    }
                     if let Some(admission) = proxy.try_admit(&peer.to_string()) {
                         let accepted = AcceptedTcp { stream, peer, admission };
                         connections.spawn(handle_connection(Arc::clone(&proxy), accepted, tls.clone(), shutdown.clone()));

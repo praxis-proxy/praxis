@@ -136,6 +136,8 @@ impl LogLevelInner {
 
 /// Shared runtime log-level overlay state and reload handle.
 pub struct LogLevelState {
+    /// Serialize filter changes through completion of tracing's cache rebuild.
+    updates: Mutex<()>,
     /// Serializes overlay mutation, baseline refresh, and filter reload.
     inner: Mutex<LogLevelInner>,
 }
@@ -148,6 +150,7 @@ impl LogLevelState {
         reload_handle: reload::Handle<EnvFilter, tracing_subscriber::Registry>,
     ) -> Arc<Self> {
         Arc::new(Self {
+            updates: Mutex::new(()),
             inner: Mutex::new(LogLevelInner {
                 baseline_directive,
                 overlays: HashMap::new(),
@@ -181,20 +184,18 @@ impl LogLevelState {
         validate_put_request(request.module.as_deref(), &request.level, duration_secs)?;
 
         let target = overlay_target_key(request.module.as_deref());
-        let level = normalize_level(&request.level);
-        let ttl = chrono::Duration::seconds(i64::try_from(duration_secs).unwrap_or(i64::MAX));
-        let expires_at = Utc::now().checked_add_signed(ttl).unwrap_or(DateTime::<Utc>::MAX_UTC);
-
+        let _update = self.updates.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut guard = self.inner.lock().expect("log level state lock poisoned");
+        let (expires_at, deadline) = overlay_deadlines(duration_secs);
         let previous = guard.overlays.remove(&target);
 
         let generation = guard.take_generation();
-        let abort_handle = spawn_revert_task(Arc::clone(self), target.clone(), duration_secs, generation);
+        let abort_handle = spawn_revert_task(Arc::clone(self), target.clone(), deadline, generation);
 
         guard.overlays.insert(
             target.clone(),
             OverlayEntry {
-                level,
+                level: normalize_level(&request.level),
                 expires_at,
                 revert_abort: abort_handle,
                 generation,
@@ -249,6 +250,7 @@ impl LogLevelState {
             ));
         }
 
+        let _update = self.updates.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut guard = self.inner.lock().expect("log level state lock poisoned");
 
         if all {
@@ -279,17 +281,49 @@ impl LogLevelState {
     /// # Panics
     ///
     /// Panics if the internal mutex is poisoned.
+    pub fn refresh_baseline(self: &Arc<Self>, config: &Config) -> Result<(), ProxyError> {
+        self.refresh_baseline_with(config, || Ok(()))
+    }
+
+    /// Prepare a baseline, then publish it only if `publish` succeeds.
+    ///
+    /// The callback must contain only the short state commit. Tracing invokes
+    /// subscriber callbacks after it returns, outside the caller's publication
+    /// gate. A revoked commit leaves both the filter and baseline unchanged.
+    ///
+    /// # Errors
+    /// Returns a converted configuration/reload error, or the publication error.
+    ///
+    /// # Panics
+    /// Panics if the internal mutex is poisoned.
     #[expect(clippy::expect_used, reason = "poisoned mutex is unrecoverable")]
     #[expect(
         clippy::significant_drop_tightening,
-        reason = "baseline update and reload must share one lock guard"
+        reason = "guard is moved into modify and dropped before subscriber callbacks"
     )]
-    pub fn refresh_baseline(self: &Arc<Self>, config: &Config) -> Result<(), ProxyError> {
-        let baseline = build_baseline_directive(config)?;
+    pub fn refresh_baseline_with<T, E, Publish>(self: &Arc<Self>, config: &Config, publish: Publish) -> Result<T, E>
+    where
+        E: From<ProxyError>,
+        Publish: FnOnce() -> Result<T, E>,
+    {
+        let baseline = build_baseline_directive(config).map_err(E::from)?;
+        let _update = self.updates.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut guard = self.inner.lock().expect("log level state lock poisoned");
-        guard.baseline_directive = baseline;
-        reload_locked(&guard).map_err(|error| ProxyError::Config(error.to_string()))?;
-        Ok(())
+        let directive = build_effective_directive(&baseline, &guard.overlays);
+        let filter = env_filter_from_directive(&directive).map_err(E::from)?;
+        let handle = guard.reload_handle.clone();
+        let mut result = None;
+        handle
+            .modify(|active| {
+                result = Some(publish().inspect(|_published| {
+                    *active = filter;
+                    guard.baseline_directive = baseline;
+                }));
+                // Interest-cache rebuilding happens after this closure returns.
+                drop(guard);
+            })
+            .map_err(|error| E::from(ProxyError::Config(error.to_string())))?;
+        result.expect("tracing modify synchronously executes its closure")
     }
 
     /// Remove one overlay after its revert timer fires (internal).
@@ -300,6 +334,7 @@ impl LogLevelState {
     /// have lost the race against its own wakeup) becomes a no-op instead of
     /// evicting the newer overlay.
     fn revert_target(self: &Arc<Self>, target: &str, generation: u64) {
+        let _update = self.updates.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let Ok(mut guard) = self.inner.lock() else {
             return;
         };
@@ -439,10 +474,25 @@ fn remove_overlay_locked(guard: &mut LogLevelInner, target: &str) {
     }
 }
 
-/// Spawn a task that reverts one overlay after `duration_secs`.
-fn spawn_revert_task(state: Arc<LogLevelState>, target: String, duration_secs: u64, generation: u64) -> AbortHandle {
+/// Derive the advertised expiry and timer deadline when the overlay is installed.
+fn overlay_deadlines(duration_secs: u64) -> (DateTime<Utc>, tokio::time::Instant) {
+    let ttl = chrono::Duration::seconds(i64::try_from(duration_secs).unwrap_or(i64::MAX));
+    let expires_at = Utc::now().checked_add_signed(ttl).unwrap_or(DateTime::<Utc>::MAX_UTC);
+    let deadline = tokio::time::Instant::now()
+        .checked_add(Duration::from_secs(duration_secs))
+        .unwrap_or_else(tokio::time::Instant::now);
+    (expires_at, deadline)
+}
+
+/// Revert at the installation deadline, even if the task's first poll is delayed.
+fn spawn_revert_task(
+    state: Arc<LogLevelState>,
+    target: String,
+    deadline: tokio::time::Instant,
+    generation: u64,
+) -> AbortHandle {
     let handle = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(duration_secs)).await;
+        tokio::time::sleep_until(deadline).await;
         state.revert_target(&target, generation);
     });
     handle.abort_handle()
@@ -469,6 +519,169 @@ mod tests {
     use tracing_subscriber::layer::SubscriberExt as _;
 
     use super::*;
+
+    /// Small valid config whose baseline is distinguishable from the old filter.
+    fn publication_config() -> Config {
+        let mut config = Config::from_yaml("listeners:\n  - name: web\n    address: '127.0.0.1:0'\n    filter_chains: [main]\nfilter_chains:\n  - name: main\n    filters: []\n").unwrap();
+        config
+            .runtime
+            .log_overrides
+            .insert("praxis_test".to_owned(), "debug".to_owned());
+        config
+    }
+
+    #[test]
+    fn revoked_baseline_commit_keeps_filter_and_state_unchanged() {
+        let (layer, handle) = reload::Layer::new(EnvFilter::new("warn"));
+        let _subscriber = tracing_subscriber::registry().with(layer);
+        let state = LogLevelState::new("warn".to_owned(), handle.clone());
+        let result: Result<(), ProxyError> = state.refresh_baseline_with(&publication_config(), || {
+            Err(ProxyError::Config("publication revoked".to_owned()))
+        });
+        assert!(
+            matches!(&result, Err(ProxyError::Config(error)) if error == "publication revoked"),
+            "the publication callback must run and its rejection must propagate"
+        );
+        assert_eq!(state.snapshot().baseline_directive, "warn");
+        assert_eq!(handle.clone_current().unwrap().to_string(), "warn");
+    }
+
+    #[test]
+    fn missing_subscriber_does_not_publish_baseline_or_pipelines() {
+        let (layer, handle) = reload::Layer::<EnvFilter, tracing_subscriber::Registry>::new(EnvFilter::new("warn"));
+        drop(layer);
+        let state = LogLevelState::new("warn".to_owned(), handle);
+        let mut published = false;
+        let result: Result<(), ProxyError> = state.refresh_baseline_with(&publication_config(), || {
+            published = true;
+            Ok(())
+        });
+        assert!(result.is_err());
+        assert!(!published);
+        assert_eq!(state.snapshot().baseline_directive, "warn");
+    }
+
+    #[test]
+    fn subscriber_callbacks_run_after_publication_and_state_unlock() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            mpsc,
+        };
+        let (started, observed) = mpsc::channel();
+        let (release, wait) = mpsc::channel();
+        let committed = Arc::new(AtomicBool::new(false));
+        let gate = Arc::new(Mutex::new(()));
+        let (layer, handle) = reload::Layer::new(EnvFilter::new("warn"));
+        let subscriber = tracing_subscriber::registry().with(layer).with(BlockingRegistration {
+            committed: Arc::clone(&committed),
+            started,
+            wait: Mutex::new(wait),
+        });
+        let dispatch = tracing::Dispatch::new(subscriber);
+        let worker_dispatch = dispatch.clone();
+        let state = LogLevelState::new("warn".to_owned(), handle);
+        let worker_state = Arc::clone(&state);
+        let worker_gate = Arc::clone(&gate);
+        let worker = std::thread::Builder::new()
+            .name("baseline-publication".to_owned())
+            .spawn(move || {
+                tracing::dispatcher::with_default(&worker_dispatch, || {
+                    tracing::warn!("seed registration before arming publication probe");
+                    worker_state
+                        .refresh_baseline_with(&publication_config(), || {
+                            let _guard = worker_gate.lock().unwrap();
+                            committed.store(true, Ordering::Relaxed);
+                            Ok::<_, ProxyError>(())
+                        })
+                        .unwrap();
+                });
+            })
+            .unwrap();
+        observed.recv_timeout(Duration::from_secs(5)).unwrap();
+        let publication_unlocked = gate.try_lock().is_ok();
+        let (snapshot_sent, snapshot_received) = mpsc::channel();
+        let snapshot_state = Arc::clone(&state);
+        let probe = std::thread::spawn(move || {
+            let _sent = snapshot_sent.send(snapshot_state.snapshot());
+        });
+        let snapshot = snapshot_received.recv_timeout(Duration::from_secs(1));
+        let (updating, attempted) = mpsc::channel();
+        let (updated, completed) = mpsc::channel();
+        let overlay_state = Arc::clone(&state);
+        let admin = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let _started = updating.send(());
+            let result = runtime.block_on(async {
+                overlay_state.apply_put(&PutLogLevelRequest {
+                    level: "debug".to_owned(),
+                    module: Some("overlay_test".to_owned()),
+                    duration_secs: Some(300),
+                })
+            });
+            let _sent = updated.send(result);
+        });
+        attempted.recv_timeout(Duration::from_secs(5)).unwrap();
+        let early_update = completed.recv_timeout(Duration::from_millis(50));
+        let earliest_expiry = Utc::now().checked_add_signed(chrono::Duration::seconds(300)).unwrap();
+        release.send(()).unwrap();
+        worker.join().unwrap();
+        probe.join().unwrap();
+        admin.join().unwrap();
+        assert!(publication_unlocked, "a stalled subscriber must not hold publication");
+        let snapshot = snapshot.expect("snapshot must finish before the callback is released");
+        assert!(
+            snapshot.baseline_directive.contains("praxis_test=debug"),
+            "snapshot must see committed baseline"
+        );
+        assert!(
+            snapshot.overlays.is_empty(),
+            "overlay mutation must wait for the earlier cache rebuild"
+        );
+        assert!(
+            matches!(early_update, Err(mpsc::RecvTimeoutError::Timeout)),
+            "cache rebuilds must not overlap"
+        );
+        assert!(
+            completed.recv_timeout(Duration::from_secs(5)).unwrap().is_ok(),
+            "queued overlay must complete"
+        );
+        assert!(
+            state
+                .inner
+                .lock()
+                .unwrap()
+                .overlays
+                .get("overlay_test")
+                .unwrap()
+                .expires_at
+                >= earliest_expiry,
+            "queued PUT expiry must start at installation, after the cache-rebuild wait"
+        );
+    }
+    /// Stall one interest-cache callback only after the worker commits.
+    struct BlockingRegistration {
+        /// One-shot flag armed by publication.
+        committed: Arc<std::sync::atomic::AtomicBool>,
+        /// Let the test inspect locks while registration is blocked.
+        started: std::sync::mpsc::Sender<()>,
+        /// Release on an explicit signal or sender drop during unwinding.
+        wait: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for BlockingRegistration {
+        fn register_callsite(&self, _metadata: &'static tracing::Metadata<'static>) -> tracing::subscriber::Interest {
+            if std::thread::current().name() == Some("baseline-publication")
+                && self.committed.swap(false, std::sync::atomic::Ordering::Relaxed)
+            {
+                let _sent = self.started.send(());
+                let _released = self.wait.lock().unwrap().recv();
+            }
+            tracing::subscriber::Interest::always()
+        }
+    }
 
     /// Serializes overlay mutation tests that share one global [`LogLevelState`].
     #[allow(
@@ -613,48 +826,35 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "setup, timer advance, and assertions in one async test"
-    )]
     async fn overlay_auto_reverts_after_duration() {
-        let state = shared_test_state();
-        {
-            let _lock = OVERLAY_TEST_LOCK
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            reset_overlays(&state);
-
-            state
-                .apply_put(&PutLogLevelRequest {
-                    level: "trace".to_owned(),
-                    module: Some("praxis_filter".to_owned()),
-                    duration_secs: Some(10),
-                })
-                .expect("module overlay");
-            let snap = state.snapshot();
-            assert!(
-                snap.effective_directive.contains("praxis_filter=trace"),
-                "overlay should be active: {snap:?}"
-            );
-        }
-
-        // Let the revert task register its sleep before advancing fake time.
-        tokio::task::yield_now().await;
-        tokio::time::advance(Duration::from_secs(10)).await;
-        tokio::task::yield_now().await;
-
-        let _lock = OVERLAY_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let snap = state.snapshot();
+        let (layer, handle) = reload::Layer::new(EnvFilter::new("info"));
+        let _subscriber = tracing_subscriber::registry().with(layer);
+        let state = LogLevelState::new("info".to_owned(), handle);
+        state
+            .apply_put(&PutLogLevelRequest {
+                level: "trace".to_owned(),
+                module: Some("praxis_filter".to_owned()),
+                duration_secs: Some(10),
+            })
+            .expect("module overlay");
         assert!(
-            snap.overlays.is_empty(),
-            "overlay should revert after duration: {snap:?}"
+            !state.snapshot().overlays.is_empty(),
+            "the overlay must be installed before its deadline"
         );
-        assert_eq!(snap.effective_directive, "info");
+        tokio::time::advance(Duration::from_secs(10)).await;
+        for _ in 0..100 {
+            if state.snapshot().overlays.is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let snapshot = state.snapshot();
+        assert!(
+            snapshot.overlays.is_empty(),
+            "revert must run after its installation deadline, even with a delayed first poll: {snapshot:?}"
+        );
+        assert_eq!(snapshot.effective_directive, "info", "expiry must restore the baseline");
     }
-
     #[test]
     fn log_level_error_display() {
         let bad_request = LogLevelError::BadRequest("invalid input".to_owned());

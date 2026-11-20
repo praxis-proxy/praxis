@@ -294,7 +294,10 @@ fn resolve_praxis_bin_path() -> PathBuf {
     )
 }
 
-/// Target directory for fallback builds, isolated by backend and Policy profile.
+/// The target directory the fallback build uses: cargo's, with a `hyper`
+/// subdirectory when this harness tests the hyper backend, so neither
+/// backend's binary stands in for the other's. Overload-enabled subprocesses
+/// use a further isolated feature directory.
 fn build_target_dir() -> PathBuf {
     let target = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
         || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"),
@@ -307,7 +310,12 @@ fn build_target_dir() -> PathBuf {
     };
     let default_bundle =
         effective_policy_features(&selected_policy_features()) == effective_policy_features(&["policy-builtins"]);
-    if default_bundle { target } else { target.join("policy") }
+    let target = if default_bundle { target } else { target.join("policy") };
+    if cfg!(feature = "overload-actions") {
+        target.join("overload-actions")
+    } else {
+        target.join("default-actions")
+    }
 }
 
 /// Policy features this harness and its subprocess proxies must carry.
@@ -377,7 +385,7 @@ fn effective_policy_features<'name>(names: &[&'name str]) -> std::collections::B
 fn backend_build_args() -> Vec<String> {
     let policy = selected_policy_features();
     let is_default_bundle = effective_policy_features(&policy) == effective_policy_features(&["policy-builtins"]);
-    if !cfg!(feature = "hyper") && is_default_bundle {
+    if !cfg!(feature = "hyper") && is_default_bundle && !cfg!(feature = "overload-actions") {
         return Vec::new();
     }
     let backend = if cfg!(feature = "hyper") { "hyper" } else { "pingora" };
@@ -393,6 +401,7 @@ fn subprocess_features(backend: &str, policy: &[&str]) -> String {
     [backend, "config-reload", "admin-api"]
         .into_iter()
         .chain(policy.iter().copied())
+        .chain(cfg!(feature = "overload-actions").then_some("overload-actions"))
         .collect::<Vec<_>>()
         .join(",")
 }
@@ -666,7 +675,10 @@ fn capped_config(config: &Config) -> Config {
 /// Build a backend runtime with every HTTP listener's pipeline resolved from
 /// `registry`, plus the optional admin and metrics endpoints, and nothing else
 /// (no sub-request client, no health probes).
-fn build_light_runtime(config: &Config, registry: &FilterRegistry) -> (Runtime, FixtureCertWatchers) {
+fn build_light_runtime(
+    config: &Config,
+    registry: &FilterRegistry,
+) -> (Runtime, FixtureCertWatchers, Arc<praxis_core::overload::Signal>) {
     // Registering a listener builds the backend's upstream connector, which
     // constructs a rustls `ClientConfig` even for a listener that serves plain HTTP.
     crate::net::tls::ensure_crypto_provider();
@@ -683,6 +695,7 @@ fn build_light_runtime(config: &Config, registry: &FilterRegistry) -> (Runtime, 
         })
         .collect();
     let pipelines = ListenerPipelines::new(pipelines);
+    let signal = pipelines.overload();
     let mut cert_watchers = FixtureCertWatchers::default();
     let shutdowns = Box::new(Http)
         .register(&mut runtime, config, &pipelines)
@@ -697,7 +710,7 @@ fn build_light_runtime(config: &Config, registry: &FilterRegistry) -> (Runtime, 
         admin::add_health_endpoint(&mut runtime, metrics_addr, None, config.admin.verbose);
     }
 
-    (runtime, cert_watchers)
+    (runtime, cert_watchers, signal)
 }
 
 /// Build a [`ProxyGuard`] by spawning a backend runtime that
@@ -709,7 +722,7 @@ fn spawn_proxy_server(config: &Config, registry: &FilterRegistry) -> ProxyGuard 
         .expect("config must have at least one listener")
         .address
         .clone();
-    let (runtime, cert_watchers) = build_light_runtime(config, registry);
+    let (runtime, cert_watchers, _) = build_light_runtime(config, registry);
     spawn_runtime(addr, runtime, None, cert_watchers)
 }
 
@@ -730,6 +743,22 @@ pub fn start_proxy(config: &Config) -> ProxyGuard {
     start_proxy_with_registry(config, &FilterRegistry::with_builtins())
 }
 
+/// Configure a lightweight proxy's existing controller before starting it.
+///
+/// # Panics
+/// Panics when listener configuration cannot be registered or started.
+pub fn start_proxy_with_overload<Configure: FnOnce(&praxis_core::overload::Signal)>(
+    config: &Config,
+    configure: Configure,
+) -> (ProxyGuard, Arc<praxis_core::overload::Signal>) {
+    let (runtime, cert_watchers, signal) = build_light_runtime(config, &FilterRegistry::with_builtins());
+    configure(&signal);
+    let addr = config.listeners.first().expect("listener").address.clone();
+    let guard = spawn_runtime(addr, runtime, None, cert_watchers);
+    crate::net::wait::wait_for_http(&guard.addr);
+    (guard, signal)
+}
+
 /// Start the proxy with a custom filter registry.
 ///
 /// Returns a [`ProxyGuard`] that shuts down the server when
@@ -746,20 +775,24 @@ pub fn start_proxy_with_registry(config: &Config, registry: &FilterRegistry) -> 
 
 /// Build a backend [`Runtime`] with HTTP and TCP protocols
 /// and spawn background health check probes.
-fn build_full_server(config: &Config) -> (Runtime, Option<HealthRuntime>, FixtureCertWatchers) {
+fn build_full_server(config: &Config) -> FullServer {
     let registry = praxis::build_full_registry();
-    build_full_server_with_registry(config, &registry, KvStoreRegistry::new())
+    build_full_server_with_registry(config, &registry, KvStoreRegistry::new(), |_| {})
 }
 
 /// Build a backend [`Runtime`] with a caller-supplied filter
 /// registry and KV store registry, HTTP and TCP protocols, and
 /// background health probes.
 #[expect(clippy::too_many_lines, reason = "test utility wiring")]
-fn build_full_server_with_registry(
+fn build_full_server_with_registry<Configure>(
     config: &Config,
     registry: &FilterRegistry,
     kv_stores: KvStoreRegistry,
-) -> (Runtime, Option<HealthRuntime>, FixtureCertWatchers) {
+    configure: Configure,
+) -> FullServer
+where
+    Configure: FnOnce(&Arc<praxis_core::overload::Signal>),
+{
     // Every full-proxy start builds a `SubRequestConnector`, which constructs a
     // rustls `ClientConfig`. Hooking the certificate fixtures is not enough: a test
     // that starts a proxy without TLS reaches rustls with no provider installed.
@@ -792,6 +825,7 @@ fn build_full_server_with_registry(
     )
     .expect("pipeline resolution should succeed in test");
     let pipelines = Arc::new(pipelines);
+    configure(&pipelines.overload());
     let listener_meta = health::new_listener_meta_store(health::listener_meta_from_config(config));
     let cluster_meta = health::new_cluster_meta_store(health::cluster_meta_from_config(config));
 
@@ -850,7 +884,7 @@ fn build_full_server_with_registry(
     }
 
     let health = spawn_test_health_checks(config, &health_registry);
-    (runtime, health, cert_watchers)
+    (runtime, health, cert_watchers, pipelines.overload())
 }
 
 /// Spawn background health check tasks for tests.
@@ -906,6 +940,27 @@ pub fn start_full_proxy(config: &Config) -> ProxyGuard {
     start_full_proxy_runtime(config, runtime)
 }
 
+/// Start HTTP/TCP protocols with a caller-controlled overload signal, without
+/// sampling host resources, so transport admission and recovery are deterministic.
+///
+/// # Panics
+///
+/// Panics if the config has no listeners or cannot be resolved or registered.
+pub fn start_full_proxy_with_overload<Configure>(
+    config: &Config,
+    configure: Configure,
+) -> (ProxyGuard, Arc<praxis_core::overload::Signal>)
+where
+    Configure: FnOnce(&Arc<praxis_core::overload::Signal>),
+{
+    let registry = praxis::build_full_registry();
+    let server = build_full_server_with_registry(config, &registry, KvStoreRegistry::new(), configure);
+    let signal = Arc::clone(&server.3);
+    let guard = start_full_proxy_runtime(config, server);
+    crate::net::wait::wait_for_tcp(guard.addr());
+    (guard, signal)
+}
+
 /// Start a full proxy server with a caller-supplied filter registry.
 ///
 /// Unlike [`start_proxy_with_registry`], this path wires the shared
@@ -917,7 +972,7 @@ pub fn start_full_proxy(config: &Config) -> ProxyGuard {
 /// Panics if `config.listeners` is empty or pipeline resolution
 /// fails.
 pub fn start_full_proxy_with_registry(config: &Config, registry: &FilterRegistry) -> ProxyGuard {
-    let runtime = build_full_server_with_registry(config, registry, KvStoreRegistry::new());
+    let runtime = build_full_server_with_registry(config, registry, KvStoreRegistry::new(), |_| {});
     start_full_proxy_runtime(config, runtime)
 }
 
@@ -933,15 +988,12 @@ pub fn start_full_proxy_with_registry(config: &Config, registry: &FilterRegistry
 /// fails.
 pub fn start_full_proxy_with_kv_stores(config: &Config, kv_stores: &KvStoreRegistry) -> ProxyGuard {
     let registry = praxis::build_full_registry();
-    let runtime = build_full_server_with_registry(config, &registry, kv_stores.clone());
+    let runtime = build_full_server_with_registry(config, &registry, kv_stores.clone(), |_| {});
     start_full_proxy_runtime(config, runtime)
 }
 
 /// Spawn a fully configured proxy runtime in a background thread.
-fn start_full_proxy_runtime(
-    config: &Config,
-    server: (Runtime, Option<HealthRuntime>, FixtureCertWatchers),
-) -> ProxyGuard {
+fn start_full_proxy_runtime(config: &Config, server: FullServer) -> ProxyGuard {
     let addr = config
         .listeners
         .first()
@@ -950,6 +1002,14 @@ fn start_full_proxy_runtime(
         .clone();
     spawn_runtime(addr, server.0, server.1, server.2)
 }
+
+/// Runtime and all background fixture resources, plus its controlled signal.
+type FullServer = (
+    Runtime,
+    Option<HealthRuntime>,
+    FixtureCertWatchers,
+    Arc<praxis_core::overload::Signal>,
+);
 
 // -----------------------------------------------------------------------------
 // Reloadable Proxy Guard
@@ -1247,7 +1307,7 @@ pub fn registry_with(name: &str, make: fn() -> Box<dyn HttpFilter>) -> FilterReg
 mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt as _;
-    use std::{net::TcpListener, sync::mpsc::RecvTimeoutError};
+    use std::sync::mpsc::RecvTimeoutError;
 
     use super::*;
 
@@ -1593,6 +1653,23 @@ insecure_options:
         assert_eq!(std::fs::read(sentinel).expect("child completion sentinel"), b"returned");
     }
 
+    /// Stop and reap the probe endpoint on success and during assertion unwinding.
+    struct ProbeEndpoint {
+        /// Cancel its nonblocking accept loop.
+        stop: Arc<AtomicBool>,
+        /// Thread owned until the fixture drops.
+        thread: Option<JoinHandle<()>>,
+    }
+
+    impl Drop for ProbeEndpoint {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Release);
+            if let Some(thread) = self.thread.take() {
+                join_bounded(thread, "health fixture", "probe endpoint");
+            }
+        }
+    }
+
     #[test]
     #[expect(
         clippy::too_many_lines,
@@ -1600,7 +1677,7 @@ insecure_options:
     )]
     fn health_probes_stop_with_proxy_guard() {
         for _ in 0..2 {
-            let listener = TcpListener::bind("127.0.0.1:0").expect("health listener");
+            let (listener, _) = crate::net::port::bind_unique_port();
             listener.set_nonblocking(true).expect("nonblocking listener");
             let health_addr = listener.local_addr().expect("health address");
             let (sender, receiver) = mpsc::channel();
@@ -1620,6 +1697,10 @@ insecure_options:
                     }
                 }
             });
+            let _endpoint = ProbeEndpoint {
+                stop,
+                thread: Some(endpoint),
+            };
             let proxy_port = crate::net::free_port();
             let yaml = format!(
                 r#"
@@ -1653,6 +1734,22 @@ insecure_options:
 "#
             );
             let config = Config::from_yaml(&yaml).expect("health fixture config");
+            let failed = std::panic::catch_unwind(|| {
+                start_full_proxy_with_overload(&config, |_signal| panic!("configuration failure"));
+            });
+            assert_eq!(
+                failed
+                    .expect_err("configurator must panic")
+                    .downcast_ref::<&str>()
+                    .copied(),
+                Some("configuration failure"),
+                "the configurator must cause the expected panic"
+            );
+            assert_eq!(
+                receiver.recv_timeout(Duration::from_millis(350)),
+                Err(RecvTimeoutError::Timeout),
+                "failed configuration must not start health probes"
+            );
             let guard = start_full_proxy(&config);
             let finished = Arc::clone(&guard.health.as_ref().expect("health runtime").finished);
             receiver
@@ -1666,8 +1763,6 @@ insecure_options:
                 Err(RecvTimeoutError::Timeout),
                 "cancelled health runtime must stop probing"
             );
-            stop.store(true, Ordering::Release);
-            endpoint.join().expect("health endpoint");
         }
         let empty = Config::from_yaml(&simple_proxy_yaml(crate::net::free_port(), 1)).expect("plain config");
         let registry = build_health_registry(&empty.clusters);

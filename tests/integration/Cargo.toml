@@ -49,6 +49,7 @@ cloud-events-filter = ["praxis/cloud-events-filter"]
 upstream-binding = ["praxis/upstream-binding"]
 iterative-request-router = ["praxis/iterative-request-router"]
 slow-start = ["praxis/slow-start"]
+overload-actions = ["praxis/overload-actions", "praxis-test-utils/overload-actions"]
 bound-upstream-request-body = ["praxis/bound-upstream-request-body"]
 # Off by default; runs the SPIFFE mTLS e2e tests against a proxy built with it.
 spiffe = ["praxis/spiffe"]

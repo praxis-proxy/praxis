@@ -74,6 +74,8 @@ use crate::http::pingora::{context::PingoraRequestCtx, metrics};
 /// [`BodyAccess`]: praxis_filter::BodyAccess
 /// [`ArcSwap`]: arc_swap::ArcSwap
 pub struct PingoraHttpHandler {
+    /// Server-scoped overload controller.
+    pub(super) overload: Arc<praxis_core::overload::Signal>,
     /// Compression configuration snapshot for module registration.
     ///
     /// Used only by [`init_downstream_modules`] to register the
@@ -125,6 +127,7 @@ impl PingoraHttpHandler {
     ) -> Self {
         let compression = pipeline.load().compression_config().cloned();
         Self {
+            overload: Arc::default(),
             compression,
             connection_semaphore,
             downstream_keepalive_timeout_secs,
@@ -198,8 +201,22 @@ fn record_streaming_writer(pipeline: &FilterPipeline, body: Option<&Bytes>, end:
 impl ProxyHttp for PingoraHttpHandler {
     type CTX = PingoraRequestCtx;
 
+    fn on_connection_reuse(
+        &self,
+        _session: &mut Session,
+        _ctx: &mut Self::CTX,
+        previous: Box<dyn std::any::Any + Send + Sync>,
+    ) {
+        if let Ok(parsed) = previous.downcast::<crate::overload::HeaderParsed>() {
+            parsed.0.notify_one();
+        }
+    }
+
     fn new_ctx(&self) -> Self::CTX {
-        PingoraRequestCtx::default()
+        PingoraRequestCtx {
+            overload: Some(Arc::clone(&self.overload)),
+            ..PingoraRequestCtx::default()
+        }
     }
 
     /// Registers Pingora's compression module when compression is
@@ -228,6 +245,10 @@ impl ProxyHttp for PingoraHttpHandler {
         // requests today; this is belt-and-suspenders that keeps the invariant
         // true before every rejection path (the 503s below and the early exits in
         // request_filter) should context reuse ever be enabled.
+        #[cfg(feature = "test-support")]
+        if let Some(signal) = &ctx.overload {
+            ctx.extensions.insert(Arc::clone(signal));
+        }
         ctx.upstream_for_retry = None;
         ctx.upstream_contacted = false;
         // Record the client's HTTP version before the admission checks below
@@ -235,6 +256,10 @@ impl ProxyHttp for PingoraHttpHandler {
         // request_filter assigns the same value later from the same source.
         ctx.client_http_version = Some(session.req_header().version);
 
+        if self.overload.is_saturated() {
+            metrics::record_overload_reject("pressure");
+            return reject_503(session, "1", "sustained resource pressure", ctx, &self.lifecycle).await;
+        }
         if praxis_core::memory::is_exceeded() {
             metrics::record_overload_reject(metrics::OVERLOAD_REASON_MEMORY);
             return reject_503(session, "5", "memory pressure exceeded", ctx, &self.lifecycle).await;
@@ -271,6 +296,9 @@ impl ProxyHttp for PingoraHttpHandler {
 
         ctx._active_request = Some(metrics::ActiveRequestGuard::acquire(self.listener_name.clone()));
 
+        if !session.is_http2() && self.downstream_read_timeout.is_none() {
+            session.set_read_timeout(Some(Duration::from_secs(60)));
+        }
         if let Some(timeout) = self.downstream_read_timeout {
             debug!(
                 timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
@@ -281,10 +309,17 @@ impl ProxyHttp for PingoraHttpHandler {
 
         // Bound a keep-alive the client and protocol already allow, never turn one
         // on: an HTTP/1.0 client without `Connection: keep-alive` must still be closed.
-        if let Some(secs) = self.downstream_keepalive_timeout_secs
-            && session.get_keepalive().is_some()
-        {
-            session.set_keepalive(Some(secs));
+        if session.get_keepalive().is_some() {
+            if !session.is_http2() && self.overload.should_disable_keepalive() {
+                // Under pressure, close the connection after the response so
+                // descriptors are freed sooner. Only affects HTTP/1; HTTP/2
+                // multiplexes over a single connection.
+                session.set_keepalive(None);
+            } else if let Some(secs) = self.downstream_keepalive_timeout_secs {
+                session.set_keepalive(Some(
+                    self.overload.scale_timeout(Duration::from_secs(secs)).as_secs().max(1),
+                ));
+            }
         }
 
         // Pingora parses Accept-Encoding after this hook, before request_filter.
@@ -557,6 +592,7 @@ impl ProxyHttp for PingoraHttpHandler {
     where
         Self::CTX: Send + Sync,
     {
+        close_keepalive_under_overload(session, ctx.overload.as_deref());
         let pipeline = ctx.pipeline(&self.pipeline);
         let span = ctx.request_span.clone();
         let client_span = ctx.upstream_client_span.clone();
@@ -567,6 +603,7 @@ impl ProxyHttp for PingoraHttpHandler {
             .instrument(client_span)
             .instrument(span)
             .await;
+        close_keepalive_under_overload(session, ctx.overload.as_deref());
         if result.is_ok() {
             add_drain_connection_close(session, upstream_response, ctx, &self.lifecycle)?;
             // RFC 9110 §7.6.3: the response Via received-protocol is the leg this
@@ -642,6 +679,13 @@ impl ProxyHttp for PingoraHttpHandler {
         if std::mem::take(&mut ctx.rejection_cleanup_pending) {
             crate::http::pingora::rejection_cleanup::finish_rejection(session).await;
         }
+    }
+}
+
+/// Close HTTP/1 keep-alive when pressure rose after request admission.
+pub(super) fn close_keepalive_under_overload(session: &mut Session, signal: Option<&praxis_core::overload::Signal>) {
+    if !session.is_http2() && signal.is_some_and(praxis_core::overload::Signal::should_disable_keepalive) {
+        session.set_keepalive(None);
     }
 }
 

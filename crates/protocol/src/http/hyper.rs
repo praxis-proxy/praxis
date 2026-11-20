@@ -131,13 +131,14 @@ impl HyperHttp {
             let pipeline = pipelines.get(&listener.name).map(Arc::clone).ok_or_else(|| {
                 ProxyError::Config(format!("no pipeline for listener '{name}'", name = listener.name))
             })?;
-            let shared = ListenerShared::new(
+            let mut shared = ListenerShared::new(
                 listener,
                 pipeline,
                 connector.clone(),
                 runtime.trust_anchors(),
                 runtime.lifecycle(),
             );
+            shared.overload = pipelines.overload();
             listener::register(runtime, listener, shared, cert_watcher_shutdowns.senders_mut())?;
         }
 

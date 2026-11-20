@@ -77,6 +77,11 @@ const H2_MAX_CONCURRENT_STREAMS: u32 = 128; // streams
 /// How long a client may take to complete the TLS handshake, as on Pingora.
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60); // 60 s
 
+tokio::task_local! {
+    /// Carry the first-byte wait into this connection's first HTTP/1 header timer.
+    static INITIAL_HEADER_DEADLINE: std::cell::Cell<Option<tokio::time::Instant>>;
+}
+
 // -----------------------------------------------------------------------------
 // ListenerShared
 // -----------------------------------------------------------------------------
@@ -85,6 +90,8 @@ const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60); // 60 s
 pub(super) struct ListenerShared {
     /// Process lifecycle, used to stop reusing HTTP/1 connections while draining.
     pub(super) lifecycle: LifecycleHandle,
+    /// Server-scoped overload controller.
+    pub(super) overload: Arc<praxis_core::overload::Signal>,
     /// Listener name, as the active-request gauge labels it.
     pub(super) name: ::metrics::SharedString,
 
@@ -124,6 +131,7 @@ impl ListenerShared {
             .map(|millis| Duration::from_secs(millis.div_ceil(1_000)));
         Self {
             lifecycle,
+            overload: Arc::default(),
             name: ::metrics::SharedString::from_shared(Arc::from(listener.name.as_str())),
             connection_limit: listener
                 .max_connections
@@ -229,7 +237,7 @@ fn connection_builder(shared: &ListenerShared) -> auto::Builder<TokioExecutor> {
         .half_close(true)
         .max_headers(H1_MAX_HEADERS)
         .header_read_timeout(shared.header_timeout)
-        .timer(TokioTimer::new());
+        .timer(HeaderTimer(Arc::clone(&shared.overload)));
     builder
         .http2()
         .max_header_list_size(H2_MAX_HEADER_LIST_SIZE)
@@ -247,7 +255,7 @@ struct AcceptLoop {
     /// TLS acceptor for a TLS listener.
     acceptor: Option<TlsAcceptor>,
 
-    /// The connection builder every connection of the listener uses.
+    /// Immutable listener settings; `HeaderTimer` reads the shared signal live.
     builder: Arc<auto::Builder<TokioExecutor>>,
 
     /// How long connections may take to finish once shutdown starts: less
@@ -269,6 +277,10 @@ impl AcceptLoop {
     ) {
         match accepted {
             Ok((stream, peer)) => {
+                if self.shared.overload.is_saturated() {
+                    crate::http::metrics::record_overload_reject("pre_tls_pressure");
+                    return;
+                }
                 if let Err(err) = stream.set_nodelay(true) {
                     debug!(%peer, error = %err, "could not set TCP_NODELAY on the client socket");
                 }
@@ -279,7 +291,7 @@ impl AcceptLoop {
                     shared: Arc::clone(&self.shared),
                     shutdown: shutdown.clone(),
                 };
-                connections.spawn(connection.serve(stream));
+                connections.spawn(INITIAL_HEADER_DEADLINE.scope(std::cell::Cell::new(None), connection.serve(stream)));
             },
             Err(err) => {
                 warn!(name = %self.shared.name, error = %err, "failed to accept an HTTP connection");
@@ -371,8 +383,12 @@ impl Connection {
     /// keep-alive handling applies.
     async fn first_bytes(&mut self, socket: &TcpStream) -> bool {
         let mut probe = [0_u8; 1];
+        let deadline = tokio::time::Instant::now() + self.shared.overload.scale_timeout(self.shared.header_timeout);
+        if self.shared.overload.is_enabled() {
+            let _stored = INITIAL_HEADER_DEADLINE.try_with(|initial| initial.set(Some(deadline)));
+        }
         let peeked = tokio::select! {
-            peeked = tokio::time::timeout(self.shared.header_timeout, socket.peek(&mut probe)) => peeked,
+            peeked = tokio::time::timeout_at(deadline, socket.peek(&mut probe)) => peeked,
             _stopping = self.shutdown.wait_for(|stopping| *stopping) => return false,
         };
         match peeked {
@@ -569,6 +585,36 @@ fn tls_holds_data(tls: &mut TlsStream<TcpStream>) -> bool {
 // Tests
 // -----------------------------------------------------------------------------
 
+/// Resample overload whenever Hyper starts a new header wait, including reuse.
+/// This timer is installed only on HTTP/1's header parser, never body I/O.
+#[derive(Clone, Debug)]
+struct HeaderTimer(Arc<praxis_core::overload::Signal>);
+
+impl hyper::rt::Timer for HeaderTimer {
+    fn sleep(&self, duration: Duration) -> Pin<Box<dyn hyper::rt::Sleep>> {
+        let scaled = self.0.scale_timeout(duration);
+        let initial = INITIAL_HEADER_DEADLINE.try_with(std::cell::Cell::take).ok().flatten();
+        let remaining = initial.map_or(scaled, |deadline| {
+            scaled.min(deadline.saturating_duration_since(tokio::time::Instant::now()))
+        });
+        hyper::rt::Timer::sleep(&TokioTimer::new(), remaining)
+    }
+
+    fn sleep_until(&self, deadline: std::time::Instant) -> Pin<Box<dyn hyper::rt::Sleep>> {
+        self.sleep(deadline.saturating_duration_since(self.now()))
+    }
+
+    fn reset(&self, sleep: &mut Pin<Box<dyn hyper::rt::Sleep>>, new_deadline: std::time::Instant) {
+        let now = self.now();
+        let scaled = now + self.0.scale_timeout(new_deadline.saturating_duration_since(now));
+        hyper::rt::Timer::reset(&TokioTimer::new(), sleep, scaled);
+    }
+
+    fn now(&self) -> std::time::Instant {
+        hyper::rt::Timer::now(&TokioTimer::new())
+    }
+}
+
 #[cfg(test)]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
@@ -689,6 +735,37 @@ mod tests {
         assert!(
             closed.is_ok_and(|response| !response.starts_with(b"HTTP/1.1 200")),
             "a client that never finishes its request head is disconnected"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn initial_header_deadline_includes_probe_and_continuous_drips() {
+        let mut shared = shared("");
+        shared.header_timeout = Duration::from_secs(4);
+        shared
+            .overload
+            .update(praxis_core::overload::EngagedActions::default(), 1.0);
+        let initial = tokio::time::Instant::now() + Duration::from_millis(400);
+        tokio::time::advance(Duration::from_millis(250)).await;
+        let mut client = serve_with_initial_deadline(&shared, Some(initial));
+        client
+            .write_all(b"GET / HTTP/1.1\r\nHost: x\r\nX-Drip: ")
+            .await
+            .unwrap();
+        tokio::task::yield_now().await;
+        for step in 0..4 {
+            tokio::time::advance(Duration::from_millis(50)).await;
+            let sent = client.write_all(b"x").await;
+            assert!(
+                step >= 2 || sent.is_ok(),
+                "the header must stay open before its deadline"
+            );
+            tokio::task::yield_now().await;
+        }
+        let closed = tokio::time::timeout(Duration::ZERO, read_to_close(&mut client)).await;
+        assert!(
+            closed.is_ok_and(|response| !response.starts_with(b"HTTP/1.1 200")),
+            "the probe starts one 400ms budget; controlled 50ms drips cannot renew it"
         );
     }
 
@@ -984,18 +1061,26 @@ mod tests {
     /// builder and a service answering every request with `200 ok`; the
     /// client's end.
     fn serve(shared: &ListenerShared) -> DuplexStream {
+        serve_with_initial_deadline(shared, None)
+    }
+
+    /// Simulate a completed protocol probe without relying on client scheduling.
+    fn serve_with_initial_deadline(shared: &ListenerShared, initial: Option<tokio::time::Instant>) -> DuplexStream {
         let (client, server) = tokio::io::duplex(1_048_576); // 1 MiB
         let service = service_fn(|_request: Request<Incoming>| async {
             Ok::<_, Infallible>(Response::new(ProxyBody::full(Bytes::from_static(b"ok"))))
         });
         let builder = connection_builder(shared);
-        drop(tokio::spawn(async move {
-            drop(
-                builder
-                    .serve_connection_with_upgrades(TokioIo::new(server), service)
-                    .await,
-            );
-        }));
+        drop(tokio::spawn(INITIAL_HEADER_DEADLINE.scope(
+            std::cell::Cell::new(initial),
+            async move {
+                drop(
+                    builder
+                        .serve_connection_with_upgrades(TokioIo::new(server), service)
+                        .await,
+                );
+            },
+        )));
         client
     }
 

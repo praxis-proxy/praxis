@@ -159,6 +159,9 @@ fn build_health_params(
 
 /// Main loop for a single cluster's health check task.
 async fn run_health_check_loop(params: &HealthCheckParams, shutdown: CancellationToken) {
+    if shutdown.is_cancelled() {
+        return;
+    }
     debug!(cluster = %params.cluster_name, "health check loop started");
 
     probe_all_endpoints(params, &shutdown).await;
@@ -316,6 +319,32 @@ mod tests {
     use tokio::net::TcpListener;
 
     use super::*;
+
+    #[tokio::test]
+    async fn cancelled_before_start_never_probes() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let state = Arc::new(ClusterHealthEntry::new(
+            vec![EndpointHealth::new()],
+            vec![Arc::from(address.as_str())],
+            None,
+            None,
+        ));
+        let params = test_params(vec![address], Arc::clone(&state), (1, 1));
+        let shutdown = CancellationToken::new();
+        shutdown.cancel();
+        run_health_check_loop(&params, shutdown).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), listener.accept())
+                .await
+                .is_err(),
+            "pre-cancelled health tasks must not initiate network probes"
+        );
+        assert!(
+            state.endpoints()[0].is_healthy(),
+            "pre-cancelled tasks must leave health state unchanged"
+        );
+    }
 
     #[tokio::test]
     async fn probe_all_marks_unreachable_unhealthy() {
