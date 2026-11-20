@@ -126,7 +126,9 @@ pub(crate) struct PolicyFilterConfig {
     /// its absence means either (a) the protocol classifier filter is missing from
     /// the chain, or (b) it is ordered AFTER `policy` instead of
     /// before. Either is a misconfiguration that would silently
-    /// bypass CMF policy.
+    /// bypass CMF policy. The classifier must publish the metadata
+    /// from its body hook: a buffering policy can judge the body
+    /// before any filter's `on_request` runs.
     ///
     /// Set to `false` only when intentionally fronting non-classified
     /// traffic through the `policy` filter for identity-only

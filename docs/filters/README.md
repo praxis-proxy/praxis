@@ -104,8 +104,9 @@ the filter admits in `on_request` instead, so the earlier filter still
 runs first. A `stream_buffer` pre-read runs body hooks before any request
 phase, so there the pipeline holds that filter's body-phase rejection until
 the request phase reaches it, and runs no later body hook. A filter with
-request `conditions` always admits in `on_request`, where its conditions see
-the headers that head filters publish. The `policy` filter uses the head
+request `conditions` skips its head hook and admits in `on_request`, where its
+conditions see the headers that head filters publish; a pre-read still runs
+its body hook first when those conditions already match. The `policy` filter uses the head
 phase this way: where it can, it rate-limits and authenticates before any
 filter reads the body. When a route replaces or extends authentication in a
 way the head can't match, the head only rate-limits and identity waits for

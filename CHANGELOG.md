@@ -77,8 +77,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   request because the policy's body hook was skipped (a request condition
   that changes after the body is read, or `failure_mode: open`), the request
   phase rejects it with 500 instead of forwarding it. Policies with
-  `context_headers` or request conditions keep the previous timing, but
-  their replacing routes also judge identity alone.
+  `context_headers` or request conditions keep the previous timing, but in
+  the cases above the route still judges identity alone.
   Pipeline construction warns when an earlier filter or request conditions
   move admission out of the head.
 - Routes with `replace_inherited` are now judged by their own
