@@ -11,11 +11,15 @@
 //!
 //! Every read and write is its own `select!` arm, so a peer that stops
 //! reading stalls only the direction toward it: the other direction keeps
-//! moving and the deadlines keep firing. Client writes go through the
-//! session's cancel-safe task writer, which keeps a partial write's
-//! progress when the loop polls another arm. Each direction holds at most
-//! one chunk: the next read toward a peer waits until that peer accepts
-//! the last one, which passes its backpressure on to the sender.
+//! moving and the deadlines keep firing. A half-close passed on to a peer
+//! is one more write toward it, polled like the others: on a TLS listener
+//! the client's is a `close_notify`, which a client that is not reading
+//! does not accept, and its upload keeps flowing meanwhile. No arm's handler
+//! awaits, so the loop is always back polling every arm. Client writes go
+//! through the session's cancel-safe task writer, which keeps a partial
+//! write's progress when the loop polls another arm. Each direction holds
+//! at most one chunk: the next read toward a peer waits until that peer
+//! accepts the last one, which passes its backpressure on to the sender.
 
 use std::{io, pin::pin, task::Poll, time::Duration};
 
@@ -24,7 +28,7 @@ use pingora_core::protocols::http::HttpTask;
 use pingora_proxy::Session;
 use tokio::{
     io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _},
-    time::{Instant, sleep_until, timeout_at},
+    time::{Instant, sleep_until},
 };
 use tracing::warn;
 
@@ -76,30 +80,35 @@ pub(super) enum DownstreamEvent {
 
     /// The queued write toward the client finished.
     Written(io::Result<()>),
+
+    /// The half-close toward the client finished.
+    Closed,
 }
 
 /// The downstream (client) side of a tunnel.
 ///
 /// Factored out of the Pingora session so the pump loop can be tested
-/// against an in-memory duplex pair. Reads and writes share one session,
-/// so a single [`next_event`](Self::next_event) waits on both.
+/// against an in-memory duplex pair. Reads, writes, and the half-close
+/// share one session, so a single [`next_event`](Self::next_event) waits
+/// on all of them.
 #[async_trait::async_trait]
 pub(super) trait TunnelDownstream: Send {
     /// Queue one chunk for the client. The pump queues the next write only
     /// after [`DownstreamEvent::Written`] reports this one.
     fn queue_chunk(&mut self, chunk: Bytes);
 
-    /// Half-close toward the client after the destination's: no more
-    /// destination bytes follow, but the client may keep sending. Called
-    /// only with no chunk queued.
-    async fn close_write(&mut self);
-
-    /// Wait for the queued write to finish or, when `read` is set, for the
-    /// next client read, whichever comes first.
+    /// Wait for the queued write to finish, for the half-close toward the
+    /// client to finish when `close` is set, or, when `read` is set, for
+    /// the next client read, whichever comes first.
     ///
-    /// Cancel-safe: a write cancelled mid-chunk resumes where it stopped,
-    /// and a cancelled read has consumed no bytes.
-    async fn next_event(&mut self, read: bool) -> DownstreamEvent;
+    /// The half-close follows the destination's: no more destination bytes
+    /// follow, but the client may keep sending. The pump asks for it only
+    /// with no chunk queued, on every call until [`DownstreamEvent::Closed`]
+    /// reports it.
+    ///
+    /// Cancel-safe: a write or half-close cancelled midway resumes where it
+    /// stopped, and a cancelled read has consumed no bytes.
+    async fn next_event(&mut self, read: bool, close: bool) -> DownstreamEvent;
 }
 
 #[async_trait::async_trait]
@@ -109,19 +118,14 @@ impl TunnelDownstream for Session {
             .send_downstream_proxy_task(HttpTask::UpgradedBody(Some(chunk), false));
     }
 
-    async fn close_write(&mut self) {
-        // A write-side shutdown of the client socket (a FIN after any
-        // buffered bytes), not the end of the response body: ending the
-        // body would also stop the session reading the client's upload.
-        self.as_downstream_mut().shutdown().await;
-    }
-
-    async fn next_event(&mut self, read: bool) -> DownstreamEvent {
+    async fn next_event(&mut self, read: bool, close: bool) -> DownstreamEvent {
         let session = self.as_downstream_mut();
-        // The read and the write both borrow the session, so each poll
-        // builds both futures afresh and drops whichever is pending. Neither
+        // The write, the half-close, and the read all borrow the session, so
+        // each poll builds them afresh and drops whichever is pending. None
         // loses progress: the task writer keeps a partial write in the
-        // session, and a pending body read has consumed nothing.
+        // session, a shutdown polled again resumes where it stopped (TLS
+        // queues its close_notify once, then flushes it), and a pending body
+        // read has consumed nothing.
         std::future::poll_fn(|cx| {
             if session.has_pending_downstream_proxy_tasks()
                 && let Poll::Ready(written) = pin!(session.write_downstream_proxy_tasks()).poll(cx)
@@ -129,6 +133,12 @@ impl TunnelDownstream for Session {
                 return Poll::Ready(DownstreamEvent::Written(
                     written.map(|_end| ()).map_err(io::Error::other),
                 ));
+            }
+            // A write-side shutdown of the client socket (a FIN after any
+            // buffered bytes), not the end of the response body: ending the
+            // body would also stop the session reading the client's upload.
+            if close && pin!(session.shutdown()).poll(cx).is_ready() {
+                return Poll::Ready(DownstreamEvent::Closed);
             }
             if read && let Poll::Ready(chunk) = pin!(session.read_request_body()).poll(cx) {
                 return Poll::Ready(DownstreamEvent::Read(chunk.map_err(io::Error::other)));
@@ -139,6 +149,20 @@ impl TunnelDownstream for Session {
     }
 }
 
+/// How far one peer's half-close has been passed on to the other peer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HalfClose {
+    /// The peer is still sending.
+    Open,
+
+    /// The peer has finished sending, and the shutdown toward the other
+    /// peer is under way; the other direction keeps moving meanwhile.
+    Passing,
+
+    /// The other peer has been shut down too.
+    Passed,
+}
+
 /// Mutable pump state.
 struct TunnelState {
     /// Bytes relayed client to destination.
@@ -147,12 +171,13 @@ struct TunnelState {
     /// Bytes relayed destination to client.
     bytes_out: u64,
 
-    /// Whether the client half-closed.
-    downstream_done: bool,
+    /// The client's half-close, passed on to the destination once the
+    /// client bytes before it have drained.
+    downstream_close: HalfClose,
 
-    /// Whether the destination half-closed, once its last bytes reached
-    /// the client.
-    upstream_done: bool,
+    /// The destination's half-close, passed on to the client once its last
+    /// bytes have reached the client.
+    upstream_close: HalfClose,
 
     /// Size of the chunk toward the client the session has not finished
     /// writing, if any.
@@ -163,6 +188,23 @@ struct TunnelState {
 
     /// Hard close deadline, when `max_duration` is configured.
     hard_deadline: Option<Instant>,
+}
+
+impl TunnelState {
+    /// When the deadline arm wakes: the earlier of the idle and hard
+    /// deadlines, so a short `max_duration` is not masked by a longer idle
+    /// timeout.
+    fn wake(&self) -> Instant {
+        self.hard_deadline
+            .map_or(self.idle_deadline, |hard| self.idle_deadline.min(hard))
+    }
+
+    /// [`TunnelCloseReason::Completed`] once both half-closes have been
+    /// passed on.
+    fn completed(&self) -> Option<TunnelCloseReason> {
+        (self.downstream_close == HalfClose::Passed && self.upstream_close == HalfClose::Passed)
+            .then_some(TunnelCloseReason::Completed)
+    }
 }
 
 /// Relay bytes between `downstream` and `upstream` until the tunnel closes.
@@ -179,35 +221,24 @@ where
     let mut state = TunnelState {
         bytes_in: 0,
         bytes_out: 0,
-        downstream_done: false,
-        upstream_done: false,
+        downstream_close: HalfClose::Open,
+        upstream_close: HalfClose::Open,
         client_write: None,
         idle_deadline: Instant::now() + idle_timeout,
         hard_deadline: max_duration.map(|duration| Instant::now() + duration),
     };
-    let hard_deadline = state.hard_deadline;
-    let relay = relay_loop(downstream, upstream, &mut state, idle_timeout);
-    // The loop's deadline arm cannot fire while an arm's handler awaits (a
-    // half-close passed on to either peer). Each such await carries the
-    // idle deadline itself; bounding the whole loop keeps the hard deadline
-    // there too.
-    let reason = match hard_deadline {
-        Some(deadline) => timeout_at(deadline, relay)
-            .await
-            .unwrap_or(TunnelCloseReason::MaxDuration),
-        None => relay.await,
-    };
-    let TunnelState {
-        bytes_in, bytes_out, ..
-    } = state;
+    let reason = relay_loop(downstream, upstream, &mut state, idle_timeout).await;
     TunnelStats {
-        bytes_in,
-        bytes_out,
+        bytes_in: state.bytes_in,
+        bytes_out: state.bytes_out,
         reason,
     }
 }
 
 /// The relay loop: one `select!` over both directions and the deadlines.
+///
+/// No handler awaits, so the loop is back in `select!` after every event,
+/// polling both directions and the deadlines.
 async fn relay_loop<D, U>(
     downstream: &mut D,
     upstream: &mut U,
@@ -226,30 +257,26 @@ where
     // destination read waits the same way on `state.client_write`.
     let mut pending = Bytes::new();
     loop {
-        // Wake at the earlier of the idle and hard deadlines so a short
-        // max_duration is not masked by a longer idle timeout.
-        let wake = state
-            .hard_deadline
-            .map_or(state.idle_deadline, |hard| state.idle_deadline.min(hard));
-        let read_client = pending.is_empty() && !state.downstream_done;
+        let wake = state.wake();
+        let read_client = pending.is_empty() && state.downstream_close == HalfClose::Open;
+        let close_client = state.upstream_close == HalfClose::Passing;
         let closed = tokio::select! {
-            event = downstream.next_event(read_client), if read_client || state.client_write.is_some() => {
-                take_downstream_event(&mut upstream_writer, &mut pending, state, idle_timeout, event).await
+            event = downstream.next_event(read_client, close_client),
+                if read_client || close_client || state.client_write.is_some() => {
+                take_downstream_event(&mut pending, state, idle_timeout, event)
             },
-            written = upstream_writer.write(&pending), if !pending.is_empty() => {
-                record_destination_write(state, idle_timeout, written, &mut pending)
+            written = write_destination(&mut upstream_writer, &pending),
+                if !pending.is_empty() || state.downstream_close == HalfClose::Passing => {
+                take_destination_write(state, idle_timeout, written, &mut pending)
             },
             read = upstream_reader.read_buf(&mut upstream_buffer),
-                if state.client_write.is_none() && !state.upstream_done => {
-                relay_upstream_chunk(downstream, state, idle_timeout, read, &mut upstream_buffer).await
+                if state.client_write.is_none() && state.upstream_close == HalfClose::Open => {
+                relay_upstream_chunk(downstream, state, idle_timeout, read, &mut upstream_buffer)
             },
             () = sleep_until(wake) => Some(deadline_reason(state)),
         };
-        if let Some(reason) = closed {
+        if let Some(reason) = closed.or_else(|| state.completed()) {
             return reason;
-        }
-        if state.downstream_done && state.upstream_done {
-            return TunnelCloseReason::Completed;
         }
     }
 }
@@ -264,58 +291,48 @@ fn deadline_reason(state: &TunnelState) -> TunnelCloseReason {
     }
 }
 
-/// Take one client-side event: a client read, or a finished client write.
+/// Take one client-side event: a client read, a finished client write, or
+/// the finished half-close toward the client.
 ///
 /// Returns `Some(reason)` when the tunnel should close.
-async fn take_downstream_event<W>(
-    upstream: &mut W,
+fn take_downstream_event(
     pending: &mut Bytes,
     state: &mut TunnelState,
     idle_timeout: Duration,
     event: DownstreamEvent,
-) -> Option<TunnelCloseReason>
-where
-    W: AsyncWrite + Unpin,
-{
+) -> Option<TunnelCloseReason> {
     match event {
-        DownstreamEvent::Read(chunk) => take_downstream_chunk(upstream, pending, state, idle_timeout, chunk).await,
+        DownstreamEvent::Read(chunk) => take_downstream_chunk(pending, state, idle_timeout, chunk),
         DownstreamEvent::Written(written) => record_client_write(state, idle_timeout, written),
+        DownstreamEvent::Closed => {
+            state.upstream_close = HalfClose::Passed;
+            state.idle_deadline = Instant::now() + idle_timeout;
+            None
+        },
     }
 }
 
-/// Take one downstream read: queue its bytes for the destination, or pass
-/// on the client's half-close.
+/// Take one downstream read: queue its bytes for the destination, or start
+/// passing the client's half-close on to it.
 ///
 /// Returns `Some(reason)` when the tunnel should close.
-async fn take_downstream_chunk<W>(
-    upstream: &mut W,
+fn take_downstream_chunk(
     pending: &mut Bytes,
     state: &mut TunnelState,
     idle_timeout: Duration,
     chunk: io::Result<Option<Bytes>>,
-) -> Option<TunnelCloseReason>
-where
-    W: AsyncWrite + Unpin,
-{
+) -> Option<TunnelCloseReason> {
     match chunk {
         Ok(Some(bytes)) => {
             state.idle_deadline = Instant::now() + idle_timeout;
             *pending = bytes;
         },
         Ok(None) => {
-            // Client half-close: propagate it so the destination can finish.
-            // Bounded like every other write: a shutdown that must flush
-            // into a peer that stopped reading makes no progress.
-            state.downstream_done = true;
+            // Client half-close: the destination write arm passes it on, so
+            // the destination can finish. The client read waits on every
+            // chunk before it, so no client bytes are pending.
+            state.downstream_close = HalfClose::Passing;
             state.idle_deadline = Instant::now() + idle_timeout;
-            match timeout_at(state.idle_deadline, upstream.shutdown()).await {
-                Ok(Ok(())) => {},
-                Ok(Err(error)) => {
-                    warn!(error = %error, phase = "destination_shutdown", "tunnel_error");
-                    return Some(TunnelCloseReason::Error);
-                },
-                Err(_elapsed) => return Some(TunnelCloseReason::IdleTimeout),
-            }
         },
         Err(error) => {
             warn!(error = %error, phase = "downstream_read", "tunnel_error");
@@ -323,6 +340,55 @@ where
         },
     }
     None
+}
+
+/// One finished write toward the destination.
+enum DestinationWrite {
+    /// A write of pending client bytes: how many the destination accepted.
+    Written(io::Result<usize>),
+
+    /// The client's half-close, passed on.
+    Closed(io::Result<()>),
+}
+
+/// Write the pending client bytes to the destination or, once the client
+/// has half-closed and they have drained, pass the half-close on.
+///
+/// Cancel-safe: a cancelled write has written nothing, and a cancelled
+/// shutdown resumes where it stopped.
+async fn write_destination<W>(upstream: &mut W, pending: &[u8]) -> DestinationWrite
+where
+    W: AsyncWrite + Unpin,
+{
+    if pending.is_empty() {
+        DestinationWrite::Closed(upstream.shutdown().await)
+    } else {
+        DestinationWrite::Written(upstream.write(pending).await)
+    }
+}
+
+/// Take one finished destination write: client bytes it accepted, or the
+/// client's half-close passed on.
+///
+/// Returns `Some(reason)` when the tunnel should close.
+fn take_destination_write(
+    state: &mut TunnelState,
+    idle_timeout: Duration,
+    written: DestinationWrite,
+    pending: &mut Bytes,
+) -> Option<TunnelCloseReason> {
+    match written {
+        DestinationWrite::Written(written) => record_destination_write(state, idle_timeout, written, pending),
+        DestinationWrite::Closed(Ok(())) => {
+            state.downstream_close = HalfClose::Passed;
+            state.idle_deadline = Instant::now() + idle_timeout;
+            None
+        },
+        DestinationWrite::Closed(Err(error)) => {
+            warn!(error = %error, phase = "destination_shutdown", "tunnel_error");
+            Some(TunnelCloseReason::Error)
+        },
+    }
 }
 
 /// Count one destination write and drop the bytes it accepted.
@@ -359,11 +425,12 @@ fn record_destination_write(
 
 /// Queue one upstream read for the client.
 ///
-/// A destination EOF is passed on as a half-close: the client sees the end
-/// of the destination's bytes but may keep sending, since the destination
-/// may still be reading (a request finished only after its response, say).
-/// Returns `Some(reason)` when the tunnel should close.
-async fn relay_upstream_chunk<D>(
+/// A destination EOF starts passing a half-close on to the client: the
+/// client sees the end of the destination's bytes but may keep sending,
+/// since the destination may still be reading (a request finished only
+/// after its response, say). Returns `Some(reason)` when the tunnel should
+/// close.
+fn relay_upstream_chunk<D>(
     downstream: &mut D,
     state: &mut TunnelState,
     idle_timeout: Duration,
@@ -376,16 +443,13 @@ where
     match read {
         Ok(0) => {
             // The destination read waits on every chunk before it, so none
-            // is queued and the client has received all it was sent. On a
-            // TLS listener the half-close writes a close_notify, which a
-            // client that stopped reading never accepts, so it is bounded
-            // like any other write toward the client.
-            state.upstream_done = true;
+            // is queued and the client has received all it was sent. The
+            // client event arm passes the half-close on: on a TLS listener a
+            // close_notify, which a client that is not reading takes only
+            // later, while its upload keeps flowing.
+            state.upstream_close = HalfClose::Passing;
             state.idle_deadline = Instant::now() + idle_timeout;
-            timeout_at(state.idle_deadline, downstream.close_write())
-                .await
-                .err()
-                .map(|_elapsed| TunnelCloseReason::IdleTimeout)
+            None
         },
         Ok(_) => {
             state.idle_deadline = Instant::now() + idle_timeout;
@@ -466,9 +530,9 @@ mod tests {
         /// Whether a chunk is queued.
         writing: bool,
 
-        /// Whether [`close_write`](TunnelDownstream::close_write) never
-        /// finishes, as a TLS `close_notify` written to a client that
-        /// stopped reading never does.
+        /// Whether the half-close toward the client never finishes, as a
+        /// TLS `close_notify` written to a client that stopped reading
+        /// never does.
         close_blocks: bool,
     }
 
@@ -504,6 +568,15 @@ mod tests {
             let filled = buffer.filled();
             Poll::Ready(Ok((!filled.is_empty()).then(|| Bytes::copy_from_slice(filled))))
         }
+
+        /// Poll the half-close toward the client.
+        fn poll_close(&mut self, cx: &mut std::task::Context<'_>) -> Poll<()> {
+            if self.close_blocks {
+                return Poll::Pending;
+            }
+            // A duplex shutdown ends only this end's writes; it keeps reading.
+            Pin::new(&mut self.stream).poll_shutdown(cx).map(|_closed| ())
+        }
     }
 
     #[async_trait::async_trait]
@@ -513,20 +586,15 @@ mod tests {
             self.writing = true;
         }
 
-        async fn close_write(&mut self) {
-            if self.close_blocks {
-                std::future::pending::<()>().await;
-            }
-            // A duplex shutdown ends only this end's writes; it keeps reading.
-            let _closed = self.stream.shutdown().await;
-        }
-
-        async fn next_event(&mut self, read: bool) -> DownstreamEvent {
+        async fn next_event(&mut self, read: bool, close: bool) -> DownstreamEvent {
             std::future::poll_fn(|cx| {
                 if self.writing
                     && let Poll::Ready(written) = self.poll_queued(cx)
                 {
                     return Poll::Ready(DownstreamEvent::Written(written));
+                }
+                if close && self.poll_close(cx).is_ready() {
+                    return Poll::Ready(DownstreamEvent::Closed);
                 }
                 if read && let Poll::Ready(chunk) = self.poll_read_chunk(cx) {
                     return Poll::Ready(DownstreamEvent::Read(chunk));
@@ -835,6 +903,85 @@ mod tests {
         fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut std::task::Context<'_>) -> Poll<io::Result<()>> {
             Poll::Pending
         }
+    }
+
+    #[tokio::test]
+    async fn pending_half_close_toward_the_client_keeps_relaying_the_upload() {
+        // The destination finishes at once, but the client takes no
+        // half-close (on TLS, a close_notify to a client that is not
+        // reading). Its upload must still reach the destination in full, and
+        // the tunnel cannot complete while the half-close is pending.
+        let (mut client, pump_side) = tokio::io::duplex(64);
+        let (upstream_side, server) = tokio::io::duplex(64);
+        let mut downstream = DuplexDownstream::new(pump_side);
+        downstream.close_blocks = true;
+        let mut upstream = upstream_side;
+        let (mut server_reader, mut server_writer) = tokio::io::split(server);
+        server_writer.shutdown().await.unwrap();
+        let pump_task =
+            tokio::spawn(async move { pump(&mut downstream, &mut upstream, Duration::from_millis(500), None).await });
+
+        let upload = vec![b'u'; 8192];
+        let send = async {
+            client
+                .write_all(&upload)
+                .await
+                .expect("the tunnel must keep reading the upload");
+            client.shutdown().await.unwrap();
+        };
+        let mut received = Vec::new();
+        let receive = server_reader.read_to_end(&mut received);
+        let ((), read) = timeout(Duration::from_secs(2), async { tokio::join!(send, receive) })
+            .await
+            .expect("the upload must flow while the half-close toward the client is pending");
+        read.unwrap();
+        assert_eq!(received.len(), upload.len(), "no client byte is dropped");
+        let stats = pump_task.await.unwrap();
+        assert_eq!(
+            stats.reason,
+            TunnelCloseReason::IdleTimeout,
+            "the tunnel waits on its half-close toward the client"
+        );
+        assert_eq!(stats.bytes_in, 8192, "client-to-destination bytes counted");
+        drop((client, server_reader, server_writer));
+    }
+
+    #[tokio::test]
+    async fn pending_half_close_toward_the_destination_keeps_relaying_the_answer() {
+        // The client finishes at once, but the destination's shutdown never
+        // does. Its answer must still reach the client in full meanwhile.
+        let (client, pump_side) = tokio::io::duplex(64);
+        let (upstream_side, mut server) = tokio::io::duplex(64);
+        let mut downstream = DuplexDownstream::new(pump_side);
+        let mut upstream = ShutdownBlocks(upstream_side);
+        let (mut client_reader, mut client_writer) = tokio::io::split(client);
+        client_writer.shutdown().await.unwrap();
+        let pump_task =
+            tokio::spawn(async move { pump(&mut downstream, &mut upstream, Duration::from_millis(500), None).await });
+
+        let answer = vec![b'a'; 8192];
+        let send = async {
+            server
+                .write_all(&answer)
+                .await
+                .expect("the tunnel must keep reading the answer");
+            server.shutdown().await.unwrap();
+        };
+        let mut received = Vec::new();
+        let receive = client_reader.read_to_end(&mut received);
+        let ((), read) = timeout(Duration::from_secs(2), async { tokio::join!(send, receive) })
+            .await
+            .expect("the answer must flow while the half-close toward the destination is pending");
+        read.unwrap();
+        assert_eq!(received.len(), answer.len(), "no destination byte is dropped");
+        let stats = pump_task.await.unwrap();
+        assert_eq!(
+            stats.reason,
+            TunnelCloseReason::IdleTimeout,
+            "the tunnel waits on its half-close toward the destination"
+        );
+        assert_eq!(stats.bytes_out, 8192, "destination-to-client bytes counted");
+        drop((client_reader, client_writer, server));
     }
 
     #[tokio::test]
