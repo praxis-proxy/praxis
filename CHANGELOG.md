@@ -302,9 +302,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   such as `[blocked.example]:443`, is answered with 400. Destination names
   resolve under the bounded per-call DNS limits, so slow DNS fails a
   CONNECT with 502 instead of pinning a thread per request. A target
-  without a port is answered with 400, and a 2xx answer to a CONNECT, from
-  a request filter or made so by a response filter, with 502, since a 2xx
-  would claim a tunnel that was never opened. HTTP/2 CONNECT is answered
+  without a port is answered with 400. A CONNECT the proxy refuses itself
+  is answered in plain HTTP, never in `grpc_status`'s 200-based gRPC
+  shape, and a 2xx refusal from any filter phase is sent as 502, since a
+  2xx would claim a tunnel that was never opened. HTTP/2 CONNECT is answered
   with 501. Tunneled payloads are opaque to body-inspecting filters. On a
   listener that also reverse-proxies, a CONNECT that matches a route
   leaves that cluster's `circuit_breaker` alone: it neither takes the

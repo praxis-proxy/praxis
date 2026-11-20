@@ -402,11 +402,7 @@ async fn prepare_request(
         return false;
     };
     ctx.request_snapshot = Some(request.clone());
-    if is_success(rejection.status) {
-        refuse_filter_success(session, ctx, rejection.status).await;
-    } else {
-        send_rejection_for(session, rejection, ctx).await;
-    }
+    send_rejection_for(session, rejection, ctx).await;
     true
 }
 
@@ -533,6 +529,25 @@ pub(in crate::http) fn refuse_unopened_tunnel(
     );
     ctx.stamp_error_type(ERROR_TYPE_INTERNAL);
     Err(Rejection::status(CONNECT_SUCCESS_REFUSED))
+}
+
+/// The refusal a CONNECT is sent in place of `rejection`.
+///
+/// Every local refusal of a CONNECT passes through here as it is sent, in
+/// plain HTTP (`send_rejection_for` calls it), whichever phase refused: the
+/// head and body phases included, which no earlier check sees. A 2xx would
+/// claim the tunnel being refused (see [`CONNECT_SUCCESS_REFUSED`]), so it
+/// is replaced, without its body; any other status passes through.
+pub(in crate::http) fn connect_refusal(ctx: &mut PingoraRequestCtx, rejection: Rejection) -> Rejection {
+    if !is_success(rejection.status) {
+        return rejection;
+    }
+    warn!(
+        status = rejection.status,
+        "CONNECT refused with a 2xx, which would claim an unopened tunnel"
+    );
+    ctx.stamp_error_type(ERROR_TYPE_INTERNAL);
+    Rejection::status(CONNECT_SUCCESS_REFUSED)
 }
 
 /// Answer the CONNECT with a filter's rejection.
@@ -1070,6 +1085,40 @@ allow_destinations:
     }
 
     #[tokio::test]
+    async fn refusals_are_never_sent_in_grpc_shape() {
+        // gRPC's error shape is an HTTP 200, which to CONNECT says the tunnel
+        // is open; and a CONNECT is never a gRPC call.
+        let always = "- filter: grpc_status\n  detect: always\n";
+        let grpc_typed = "CONNECT other.invalid:443 HTTP/1.1\r\nHost: other.invalid:443\r\ncontent-type: \
+                          application/grpc\r\n\r\n";
+        for (filters, raw, status) in [
+            // The destination gate's refusal.
+            (always.to_owned(), DENIED_CONNECT, 403),
+            // A request filter's refusal.
+            (
+                format!("{always}- filter: static_response\n  status: 407\n"),
+                DENIED_CONNECT,
+                407,
+            ),
+            // The refusal standing in for a filter's 2xx.
+            (
+                format!("{always}- filter: static_response\n  status: 200\n"),
+                DENIED_CONNECT,
+                CONNECT_SUCCESS_REFUSED,
+            ),
+            // The default detection, armed by the client's own content-type.
+            ("- filter: grpc_status\n".to_owned(), grpc_typed, 403),
+        ] {
+            let response = Box::pin(handle_raw(&pipeline(&filters), raw)).await;
+            assert_eq!(status_of(&response), status, "{filters}: {response}");
+            assert!(
+                !response.to_ascii_lowercase().contains("grpc-status"),
+                "{filters}: the refusal must be plain HTTP: {response}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn tunnel_response_runs_the_response_filters_before_pumping() {
         // The logging hook must not run them again after the tunnel.
         let pipeline = pipeline("- filter: access_log\n");
@@ -1243,6 +1292,18 @@ allow_destinations:
     }
 
     #[tokio::test]
+    async fn head_success_rejection_is_answered_with_502() {
+        // The head phase sends its own refusals; a 2xx from it would claim a
+        // tunnel no one opened all the same.
+        let response = Box::pin(handle_raw(
+            &test_pipeline(|| Box::new(HeadHook::Reject(204))),
+            DENIED_CONNECT,
+        ))
+        .await;
+        assert_eq!(status_of(&response), CONNECT_SUCCESS_REFUSED, "{response}");
+    }
+
+    #[tokio::test]
     async fn head_classifier_class_reaches_the_request_pipeline() {
         // The class is published only in the head phase; a request filter
         // gated on it must see it on a CONNECT.
@@ -1323,6 +1384,21 @@ allow_destinations:
     async fn terminal_answer_rejected_with_a_success_by_a_response_filter_is_refused() {
         let response = Box::pin(handle_raw(
             &test_pipeline(|| Box::new(ResponseHook::AnswerThenReject(200))),
+            "CONNECT allowed.invalid:443 HTTP/1.1\r\nHost: allowed.invalid:443\r\n\r\n",
+        ))
+        .await;
+        assert_eq!(
+            status_of(&response),
+            CONNECT_SUCCESS_REFUSED,
+            "a 2xx rejection here would claim a tunnel no one opened: {response}"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_answer_rejected_with_a_success_by_a_body_filter_is_refused() {
+        // The response body phase runs after the header phase's check.
+        let response = Box::pin(handle_raw(
+            &test_pipeline(|| Box::new(ResponseHook::AnswerThenRejectBody(200))),
             "CONNECT allowed.invalid:443 HTTP/1.1\r\nHost: allowed.invalid:443\r\n\r\n",
         ))
         .await;
@@ -1603,6 +1679,10 @@ allow_destinations:
         /// Answer the CONNECT with a 403 terminal response, then reject it
         /// with this status in the response phase.
         AnswerThenReject(u16),
+
+        /// Answer the CONNECT with a 403 terminal response, then reject it
+        /// with this status in the response body phase.
+        AnswerThenRejectBody(u16),
     }
 
     #[async_trait::async_trait]
@@ -1611,16 +1691,37 @@ allow_destinations:
             "test_hook"
         }
 
+        fn response_body_access(&self) -> praxis_filter::BodyAccess {
+            if matches!(self, Self::AnswerThenRejectBody(_)) {
+                praxis_filter::BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Required)
+            } else {
+                praxis_filter::BodyAccess::None
+            }
+        }
+
         async fn on_request(
             &self,
             _ctx: &mut praxis_filter::HttpFilterContext<'_>,
         ) -> Result<FilterAction, praxis_filter::FilterError> {
             match self {
-                Self::AnswerThenRewrite(_) | Self::AnswerThenReject(_) => Ok(FilterAction::TerminalResponse(Box::new(
-                    praxis_filter::TerminalResponse::new(403),
-                ))),
+                Self::AnswerThenRewrite(_) | Self::AnswerThenReject(_) | Self::AnswerThenRejectBody(_) => Ok(
+                    FilterAction::TerminalResponse(Box::new(praxis_filter::TerminalResponse::new(403))),
+                ),
                 Self::Reject(_) | Self::Fail | Self::Rewrite(_) => Ok(FilterAction::Continue),
             }
+        }
+
+        fn on_response_body(
+            &self,
+            _ctx: &mut praxis_filter::HttpFilterContext<'_>,
+            _body: &mut Option<bytes::Bytes>,
+            _end_of_stream: bool,
+        ) -> Result<FilterAction, praxis_filter::FilterError> {
+            Ok(if let Self::AnswerThenRejectBody(status) = self {
+                FilterAction::Reject(Rejection::status(*status))
+            } else {
+                FilterAction::Continue
+            })
         }
 
         async fn on_response(
@@ -1638,6 +1739,7 @@ allow_destinations:
                     }
                     Ok(FilterAction::Continue)
                 },
+                Self::AnswerThenRejectBody(_) => Ok(FilterAction::Continue),
             }
         }
     }

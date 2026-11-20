@@ -99,6 +99,10 @@ impl Default for GrpcStatusConfig {
 /// are left as real HTTP responses: only error statuses become gRPC
 /// statuses.
 ///
+/// A forward-proxy `CONNECT` is always refused in plain HTTP: it is never
+/// a gRPC call, and gRPC's HTTP `200` would tell the client its tunnel is
+/// open.
+///
 /// Non-gRPC requests are untouched, so a listener can carry mixed
 /// traffic.
 ///

@@ -38,7 +38,7 @@ use super::metrics;
 mod compression;
 /// Forward-proxy (CONNECT) request handling.
 #[cfg(feature = "forward-proxy")]
-mod connect;
+pub(in crate::http) mod connect;
 /// Upstream connection established hook.
 pub(in crate::http) mod connected_to_upstream;
 /// Structured error responses for fatal proxy errors.
