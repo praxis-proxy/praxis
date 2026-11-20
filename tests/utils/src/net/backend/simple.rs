@@ -469,6 +469,7 @@ fn build_config(address: &str, clusters: Vec<Cluster>, filters: Vec<FilterEntry>
             downstream_read_timeout_ms: None,
             filter_chains: vec!["backend".to_owned()],
             forward_proxy: None,
+            job_queue: None,
             max_connections: None,
             name: "backend".to_owned(),
             protocol: ProtocolKind::default(),
