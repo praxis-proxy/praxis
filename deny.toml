@@ -30,19 +30,6 @@ ignore = [
     # engines pull it in through cel and regorus. Remove after those upstream
     # dependencies migrate off chrono-tz.
     "RUSTSEC-2026-0555",
-    # heapless 0.7.17: unsound, pulled in only because limitador 0.14.0 keeps
-    # postcard's default `heapless-cas` feature; nothing uses heapless types.
-    # limitador main disables it. Remove after limitador 0.15 is published and
-    # a praxis-policy release picks it up.
-    "RUSTSEC-2026-0574",
-    "RUSTSEC-2026-0575",
-    "RUSTSEC-2026-0576",
-    "RUSTSEC-2026-0577",
-    "RUSTSEC-2026-0578",
-    "RUSTSEC-2026-0579",
-    "RUSTSEC-2026-0580",
-    "RUSTSEC-2026-0581",
-    "RUSTSEC-2026-0582",
 ]
 
 [licenses]
