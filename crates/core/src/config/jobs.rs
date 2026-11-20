@@ -225,6 +225,23 @@ impl TryFrom<u64> for JobQueuedBytes {
 /// is valid and yields the defaults below. Use `jobs: {}` to select all
 /// defaults; a bare `jobs:` parses as null and is treated as absent.
 ///
+/// The bounds are instance-wide: one queue, one worker pool, one shared byte
+/// budget, regardless of how many listeners a deployment serves. Job
+/// submission is planned to be opt-in per listener through a `job_queue`
+/// field naming the queue that listener may submit to, so listeners sharing
+/// a chain can differ in whether they can enqueue; that field lands with the
+/// runtime that reads it.
+///
+/// What each bound counts:
+///
+/// - `queue_size` counts jobs *waiting* in the queue. A job being executed by a worker no longer occupies a slot.
+/// - `workers` bounds *concurrent executions*. It does not limit how many jobs may be waiting; `queue_size` does that.
+/// - `timeout_secs` starts when *execution begins*, not when the job is submitted. A job may wait in the queue
+///   arbitrarily long without consuming any of its timeout.
+/// - `max_queued_bytes` is the shared ceiling on the payloads of *waiting* jobs; running jobs hold no budget. With the
+///   100-slot default, payloads above roughly 41 KiB on average exhaust the 4 `MiB` budget before the slot count: the
+///   byte limit, not the slot count, is the binding constraint for large payloads.
+///
 /// ```
 /// use praxis_core::config::JobsConfig;
 ///
@@ -245,16 +262,19 @@ impl TryFrom<u64> for JobQueuedBytes {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct JobsConfig {
-    /// How many jobs may wait in the queue. Defaults to 100.
+    /// How many jobs may wait in the queue; a job being executed no longer
+    /// occupies a slot. Defaults to 100.
     pub queue_size: JobQueueSize,
 
-    /// How many workers drain the queue. Defaults to 10.
+    /// How many jobs may execute concurrently. Defaults to 10.
     pub workers: JobWorkers,
 
-    /// Per-job execution timeout. Defaults to 300 seconds.
+    /// Per-job execution timeout, measured from the moment execution begins
+    /// rather than from submission. Defaults to 300 seconds.
     pub timeout_secs: JobTimeoutSecs,
 
-    /// Ceiling on bytes held by queued payloads. Defaults to 4 `MiB`.
+    /// Shared ceiling on the bytes held by waiting job payloads; running jobs
+    /// hold no budget. Defaults to 4 `MiB`.
     pub max_queued_bytes: JobQueuedBytes,
 }
 
