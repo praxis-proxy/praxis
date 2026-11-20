@@ -69,7 +69,8 @@ pub(crate) struct PolicyFilterConfig {
     /// bodies to at least this size, unless it has inference routes, which
     /// keep the `llm.max_request_bytes` buffer. The pipeline buffers to the
     /// largest size any filter asks for, within the global
-    /// `body_limits.max_buffer_bytes`, and answers a larger body with 413.
+    /// `body_limits.max_buffer_bytes` and `body_limits.max_request_bytes`,
+    /// and answers a larger body with 413.
     #[serde(default = "default_max_buffer_bytes")]
     pub max_buffer_bytes: usize,
 

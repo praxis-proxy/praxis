@@ -492,7 +492,8 @@ impl HeadAdmission {
         let buffering = if cfg.body_access == BodyAccessMode::ReadOnly && !llm_routes {
             format!(
                 "; request bodies are buffered, up to max_buffer_bytes ({}) or more if another \
-                 filter asks for more, within body_limits.max_buffer_bytes, and a larger body gets 413",
+                 filter asks for more, within body_limits.max_buffer_bytes and max_request_bytes, \
+                 and a larger body gets 413",
                 cfg.max_buffer_bytes
             )
         } else {
