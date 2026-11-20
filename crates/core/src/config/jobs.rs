@@ -227,7 +227,7 @@ impl TryFrom<u64> for JobQueuedBytes {
 ///
 /// The bounds are instance-wide: one queue, one worker pool, one shared byte
 /// budget, regardless of how many listeners a deployment serves. Job
-/// submission is opt-in per listener through [`Listener::job_queue`], which
+/// submission is opt-in per listener through [`Listener::job_queue`](crate::config::Listener::job_queue), which
 /// names the queue that listener may submit to, so listeners sharing a chain
 /// can differ in whether they can enqueue. The field is parsed and validated
 /// here; the runtime that reads it is still pending.
