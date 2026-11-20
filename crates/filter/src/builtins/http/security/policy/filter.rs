@@ -428,10 +428,9 @@ pub struct PolicyFilter {
     limit_pre: bool,
     /// Whether a limiter runs at `ratelimit.post_identity`.
     limit_post: bool,
-    /// What this policy does in the request-head phase.
+    /// Request-head admission mode.
     head: HeadAdmission,
-    /// Whether only the route judges identity, because a section can drop
-    /// or add global steps the request-head coordinates would not match.
+    /// Whether identity resolution requires the matched route.
     route_judges_identity: bool,
     /// Whether `http.request` has work: a handler or request assertions.
     /// Without entity routes, the filter is a pure L7 policy authorized at
@@ -461,21 +460,19 @@ pub struct PolicyFilter {
     transport: Arc<PolicyHttpTransport>,
 }
 
-/// What a policy does in the request-head phase, fixed by its document.
+/// Request-head admission supported by the policy configuration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum HeadAdmission {
-    /// No head phase: `context_headers` may read values set after it.
+    /// No head admission when `context_headers` require later header values.
     Off,
-    /// `ratelimit.pre_identity` only: a section replaces the global resolvers,
-    /// or adds steps only the head would run, so identity waits for the route.
+    /// Pre-identity rate limiting with identity resolution deferred to the route.
     Defer,
     /// The pre-identity limiter and the identity gate.
     Gate,
 }
 
 impl HeadAdmission {
-    /// The head work for a filter config, given what stops the global
-    /// resolvers from judging at the head, if anything.
+    /// Select head admission for `cfg` and an optional identity-resolution blocker.
     fn for_policy(cfg: &PolicyFilterConfig, blocker: Option<&str>) -> Self {
         if !cfg.context_headers.is_empty() {
             Self::Off
@@ -486,8 +483,7 @@ impl HeadAdmission {
         }
     }
 
-    /// Warn that a deferring policy no longer rejects unauthenticated requests
-    /// before their body is read, and why.
+    /// Warn when route-specific authentication prevents early identity rejection.
     fn warn_on_defer(cfg: &PolicyFilterConfig, blocker: &str, llm_routes: bool) {
         let buffering = if cfg.body_access == BodyAccessMode::ReadOnly && !llm_routes {
             format!(
@@ -1689,10 +1685,7 @@ impl PolicyFilter {
         Ok(FilterAction::BodyDone)
     }
 
-    /// Early identity gate: resolve the baseline identity before the body
-    /// buffer cost is paid, so unauthenticated traffic is rejected first.
-    /// Entity-aware and `http.request` policies authorize later and hold the
-    /// identity for that; identity-only policies finish here.
+    /// Enforce baseline identity unless admission already ran or requires a route.
     #[expect(
         clippy::large_stack_frames,
         reason = "PPE identity resolution carries large async payloads"
@@ -1736,14 +1729,12 @@ impl PolicyFilter {
         Ok(FilterAction::Continue)
     }
 
-    /// Whether a later authorization consumes the gate identity, rather than
-    /// the gate admitting on it.
+    /// Whether the gate identity requires later authorization.
     fn holds_gate_identity(&self) -> bool {
         self.entity_routes || self.http_request_policy
     }
 
-    /// The request as head hooks see it: the earlier head filters' mutations
-    /// applied, nothing captured for later phases.
+    /// Request view including trusted header mutations from earlier head filters.
     fn head_view(&self, ctx: &HttpFilterContext<'_>) -> RequestView {
         let facts = RequestFacts::capture_head(ctx, &self.trusted_proxies);
         let headers = facts.headers();
@@ -3428,9 +3419,7 @@ pub(super) fn fit_to_original_length(new_bytes: Bytes, original_len: usize, meth
     }
 }
 
-/// Rejection for a deferred identity that the route never judged, because the
-/// policy's body hook was skipped by a request condition or failed open. HTTP
-/// 500 because the cause is configuration, not the client.
+/// HTTP 500 rejection when deferred identity resolution never completed.
 fn undecided_identity_rejection() -> Rejection {
     Rejection::status(500)
         .with_header("Content-Type", "text/plain")

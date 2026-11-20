@@ -92,9 +92,8 @@ impl Default for GrpcStatusConfig {
 /// failure with no usable status. This filter marks the request so
 /// those errors are emitted as Trailers-Only responses instead: a
 /// single header block, no body, with `grpc-status` mapped from the
-/// HTTP status Praxis chose. It marks the request at the request head, so a
-/// rejection from a later head filter, such as `policy` admission, is shaped
-/// too.
+/// HTTP status Praxis chose. Applies to rejections from later request-head
+/// filters too, including `policy` admission.
 ///
 /// Successful short-circuits (a CORS preflight, a `static_response`)
 /// are left as real HTTP responses: only error statuses become gRPC
@@ -137,7 +136,7 @@ impl GrpcStatusFilter {
         }))
     }
 
-    /// Install the error mapping when the request is gRPC, or always.
+    /// Enable gRPC error mapping for requests matching the configured detection mode.
     fn arm(&self, ctx: &mut HttpFilterContext<'_>) {
         let kind = GrpcKind::from_headers(&ctx.request.headers);
         if self.detect == DetectMode::ContentType && !kind.is_grpc() {

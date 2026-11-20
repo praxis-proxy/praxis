@@ -10529,12 +10529,16 @@ impl HttpFilter for AdmittingBodyRejectFilter {
 }
 
 /// `earlier` followed by an [`AdmittingBodyRejectFilter`] at index 1.
+///
+/// [`AdmittingBodyRejectFilter`]: AdmittingBodyRejectFilter
 fn held_pipeline(earlier: PipelineFilter) -> FilterPipeline {
     let admitter = PipelineFilter::new(1, AnyFilter::Http(Box::new(AdmittingBodyRejectFilter)), vec![], vec![]);
     test_pipeline(BodyCapabilities::default(), vec![earlier, admitter])
 }
 
 /// A [`NamedNoopFilter`] entry named `name` with the given `filter_id`.
+///
+/// [`NamedNoopFilter`]: NamedNoopFilter
 fn named_noop_pf(filter_id: usize, name: &'static str) -> PipelineFilter {
     PipelineFilter::new(
         filter_id,

@@ -207,44 +207,31 @@
 //!
 //! # Admission at the request head
 //!
-//! The filter runs in the request-head phase, before any filter reads the
-//! body, even one listed before it, so an over-limit or
-//! unauthenticated request is rejected before a classifier parses or buffers
-//! its body. There it runs `ratelimit.pre_identity`, then resolves the
-//! baseline identity on the `http` coordinates. A policy without entity routes
-//! finishes admission there, or, with `http.request` rules, authorizes in the
-//! request phase on that identity. A policy with entity routes holds it and
-//! authorizes once the request is classified, resolving the route's identity
-//! then; each limiter charges a request once.
+//! Request-head admission rejects over-limit or unauthenticated requests before
+//! body buffering, declared-body-size checks and inference body validation.
+//! It uses the client's headers plus trusted mutations from earlier head filters.
+//! Entity authorization follows classification; `http.request` authorization runs
+//! in the request phase. Each rate limiter charges a request at most once.
 //!
-//! Sections append their `authentication:` steps to the global ones, so a
-//! global step that denies at the head denies on every route that keeps it.
-//! When an entity default, group or route sets `replace_inherited`, or
-//! `global.defaults.http` or an `http:` route adds steps only the head would
-//! run, the policy never runs the global gate: the head runs the pre-identity
-//! limiter only, identity waits for the route, the request body is buffered
-//! until the route decides, and a startup warning names the section. The
-//! buffer holds at least `max_buffer_bytes` (inference policies keep
-//! `llm.max_request_bytes`), more if another filter asks for more, within the
-//! global `body_limits.max_buffer_bytes` and `body_limits.max_request_bytes`;
-//! a larger body gets 413, where a `read_only` policy used to stream it. A
-//! request the route never judged, because the body hook was skipped, is
-//! rejected with 500. A policy with `context_headers` has no head phase, since
-//! those values can come from filters that run after the head; in these cases
-//! its route still judges identity alone.
+//! For entity policies, identity resolution waits for the route when an entity
+//! default, group or route sets `authentication.replace_inherited`, or when
+//! `global.defaults.http`, an `http:` route or its groups add authentication.
+//! A startup warning identifies the blocking section. Head admission then
+//! enforces only `ratelimit.pre_identity`.
 //!
-//! The head judges the request as the client sent it plus the trusted header
-//! mutations of earlier head filters, and it precedes the declared-body-size
-//! 413 and inference body denials. Behind an earlier filter that can answer or
-//! reject the request, such as `cors`, `ip_acl`, `router` or
-//! `static_response`, the policy admits in the request phase instead, so that
-//! filter still runs first; pipeline construction warns when it does. When the
-//! body is pre-read, a denial from the policy's body hook waits until the
-//! request phase reaches the policy, and no later body hook sees the body. A
-//! policy with request
-//! conditions admits in the request phase too, where they see the headers head
-//! filters publish. In a branch chain the filter has no head phase and admits
-//! in the request phase.
+//! Policies with deferred identity buffer request bodies. In `body_access: read_only`
+//! mode, the limit is `max_buffer_bytes`, or `llm.max_request_bytes` for inference
+//! policies. Other filters can raise it
+//! within `body_limits.max_buffer_bytes` and `body_limits.max_request_bytes`;
+//! larger bodies receive HTTP 413. Requests left unauthenticated by a skipped
+//! body hook receive HTTP 500.
+//!
+//! Head admission is disabled when an earlier filter can answer or reject the
+//! request, or when policy has request conditions; pipeline construction warns in
+//! either case. Earlier filters retain precedence over policy body denials,
+//! and later body hooks do not run after a denial. Request conditions see headers
+//! published by head filters. Branch-chain policies and policies using
+//! `context_headers` also have no head phase.
 //!
 //! # Request and response phases
 //!

@@ -145,6 +145,22 @@ impl TrustedHeaderMutation {
 
     /// Apply this mutation to `headers`. An add whose value is not a valid
     /// header value is skipped with a warning.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use http::{HeaderMap, HeaderValue, header::HeaderName};
+    /// use praxis_filter::TrustedHeaderMutation;
+    ///
+    /// let name = HeaderName::from_static("x-user");
+    /// let mut headers = HeaderMap::new();
+    /// TrustedHeaderMutation::Set(name.clone(), HeaderValue::from_static("alice"))
+    ///     .apply_to(&mut headers);
+    /// TrustedHeaderMutation::Add(name.clone(), "carol".to_owned()).apply_to(&mut headers);
+    /// assert_eq!(headers.get_all(&name).iter().count(), 2);
+    /// TrustedHeaderMutation::Remove(name.clone()).apply_to(&mut headers);
+    /// assert!(!headers.contains_key(&name));
+    /// ```
     pub fn apply_to(&self, headers: &mut HeaderMap) {
         match self {
             Self::Remove(name) => {
@@ -1185,9 +1201,10 @@ impl HttpFilterContext<'_> {
         }
     }
 
-    /// This pass's trusted header mutations in application order: the ordered
-    /// [`pre_read_mutations`] log, or, when the pass wrote none, the grouped
-    /// queues. A pass uses one mechanism, so the two never mix.
+    /// This pass's trusted header mutations in application order.
+    ///
+    /// Uses [`pre_read_mutations`] when nonempty, otherwise the grouped queues.
+    /// A pass must use only one of these mutation mechanisms.
     ///
     /// [`pre_read_mutations`]: Self::pre_read_mutations
     pub fn pass_header_mutations(&self) -> Vec<TrustedHeaderMutation> {
@@ -1210,7 +1227,7 @@ impl HttpFilterContext<'_> {
         }
     }
 
-    /// The grouped header queues as ordered trusted mutations: removes, then
+    /// The grouped header queues in application order: removes, then
     /// sets, then adds. A promoted header with an invalid name or value is
     /// skipped with a warning.
     pub fn grouped_queue_mutations(&self) -> Vec<TrustedHeaderMutation> {

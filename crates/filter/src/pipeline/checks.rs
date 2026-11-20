@@ -973,17 +973,7 @@ pub(super) fn check_selected_upstream_condition_pre_read(
 // Warning Checks
 // -----------------------------------------------------------------------------
 
-/// A filter that admits at the request head, such as `policy`, runs before any
-/// earlier filter's request phase.
-///
-/// Behind an earlier filter that can end the request (an answering filter, or
-/// one that declares it [may end the request]), or with request conditions (only
-/// reachable on the `conditional_security` opt-out), the head hook is skipped
-/// and the filter admits in the request phase instead, so it rejects nothing
-/// before the body is read; this warns so the lost early rejection is visible.
-/// Branch filters never run at the head and are not checked.
-///
-/// [may end the request]: crate::HttpFilter::may_end_request
+/// Warn when filter ordering or request conditions prevent head admission.
 pub(super) fn check_head_admission_ordering(filters: &[PipelineFilter], warnings: &mut Vec<String>) {
     for (position, pf) in filters.iter().enumerate() {
         if !admits_at_request_head(pf) {

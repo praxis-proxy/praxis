@@ -1047,18 +1047,21 @@ pub fn start_reloadable_proxy(yaml: &str) -> ReloadableProxyGuard {
     start_reloadable(yaml, None)
 }
 
-/// Start a reloadable proxy like [`start_reloadable_proxy`], building every
-/// pipeline, the reloaded ones included, from `registry`.
+/// Start a reloadable proxy using `registry` for initial and reloaded pipelines.
+///
+/// See [`start_reloadable_proxy`] for reload usage.
 ///
 /// # Panics
 ///
 /// Panics if the config cannot be parsed or the server fails
 /// to start.
+///
+/// [`start_reloadable_proxy`]: start_reloadable_proxy
 pub fn start_reloadable_proxy_with_registry(yaml: &str, registry: FilterRegistry) -> ReloadableProxyGuard {
     start_reloadable(yaml, Some(registry))
 }
 
-/// Start a reloadable proxy over `registry`, or the standard composition.
+/// Start a reloadable proxy with an optional custom filter registry.
 fn start_reloadable(yaml: &str, registry: Option<FilterRegistry>) -> ReloadableProxyGuard {
     let mut config = Config::from_yaml(yaml).expect("test config should parse");
     // Cap worker threads for the reloadable path: run_server builds the

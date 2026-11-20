@@ -4,10 +4,7 @@
 //! Functional integration test for the policy head-admission example
 //! (`examples/configs/security/policy-admission.yaml`).
 //!
-//! The example lists a body-buffering `json_body_field` before `policy`. Each
-//! denial below is sent with a declared body that never arrives: the proxy can
-//! only answer if policy decided at the request head, before the classifier
-//! started reading.
+//! Covers admission before body buffering, filter precedence and reload behavior.
 
 use std::{
     collections::HashMap,
@@ -399,8 +396,7 @@ fn load_example(proxy_port: u16, backend_port: u16, prefix: Option<&str>) -> Con
     Config::from_yaml(&yaml).unwrap_or_else(|e| panic!("parse security/policy-admission.yaml: {e}"))
 }
 
-/// The example without its body-buffering classifier, so nothing pre-reads the
-/// body and the chain's request phase runs in order before any body hook.
+/// The example configuration without its body-buffering classifier.
 fn without_classifier(yaml: &str) -> Config {
     let classifier = "      - filter: json_body_field\n        field: model\n        header: X-Model\n        \
                       max_body_bytes: 65536 # 64 KiB\n";
@@ -451,6 +447,8 @@ fn route_replacing_config(dir: &tempfile::TempDir, proxy_port: u16, backend_port
 }
 
 /// The YAML behind [`route_replacing_config`].
+///
+/// [`route_replacing_config`]: route_replacing_config
 fn route_replacing_yaml(dir: &tempfile::TempDir, proxy_port: u16, backend_port: u16, prefix: &str) -> String {
     let keys = format!("{}/fixtures/api-keys.yaml", env!("CARGO_MANIFEST_DIR"));
     let admission = format!("{}/fixtures/admission-policy.yaml", env!("CARGO_MANIFEST_DIR"));
@@ -536,8 +534,7 @@ fn post_json(addr: &str, token: Option<&str>) -> u16 {
     ))
 }
 
-/// The status of a POST that declares `content_length` body bytes and sends
-/// none. Only a decision made before the body is read can answer it.
+/// The status of a POST that declares `content_length` body bytes and sends none.
 fn status_without_body(addr: &str, token: Option<&str>, content_length: u64) -> u16 {
     parse_status(&head_without_body(addr, token, "application/json", content_length))
 }
@@ -571,10 +568,9 @@ fn head_without_body(addr: &str, token: Option<&str>, content_type: &str, conten
     String::from_utf8_lossy(&head).into_owned()
 }
 
-/// Signals once per request body chunk it sees. It follows `policy`, so its
-/// pre-read body hook runs only after policy admitted the request.
+/// Test filter that signals each request body chunk received after policy admission.
 struct AdmissionProbe {
-    /// Where each signal goes.
+    /// Destination for body-chunk signals.
     admitted: std::sync::mpsc::Sender<()>,
 }
 

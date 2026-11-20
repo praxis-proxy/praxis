@@ -118,16 +118,10 @@ pub(super) fn require_dpop_external_base_url(policy: &PolicyConfig) -> Result<()
     Ok(())
 }
 
-/// What stops the global resolvers from judging an entity route's credential at
-/// the request head, naming the section, if anything does.
+/// Return a section-specific reason to defer identity resolution to the route.
 ///
-/// A section's `authentication:` steps are appended to the ones it inherits,
-/// so a global step that denies at the head denies on every route that keeps
-/// it. Only a section that sets `replace_inherited` drops them. The head
-/// resolves on the `http` coordinates, so `global.defaults.http`, `http:`
-/// routes and the groups they join add steps there that entity routes never
-/// run. This assumes a global step decides the same on the `http` coordinates
-/// as inside a route's chain.
+/// Assumes inherited authentication steps decide consistently across HTTP and
+/// entity routes.
 pub(super) fn head_identity_blocker(policy: &PolicyConfig) -> Option<String> {
     let global = &policy.global;
     let sections = sorted(&global.defaults, "global.defaults")
@@ -153,8 +147,7 @@ pub(super) fn head_identity_blocker(policy: &PolicyConfig) -> Option<String> {
         .or_else(|| http_route_group_blocker(policy))
 }
 
-/// An `http:` route that joins a group with `authentication:`, whose steps PPE
-/// folds into that route's chain on the `http` coordinates.
+/// Return a reason to defer identity when an HTTP route's group adds authentication.
 fn http_route_group_blocker(policy: &PolicyConfig) -> Option<String> {
     let authenticates = |name: &str| {
         policy

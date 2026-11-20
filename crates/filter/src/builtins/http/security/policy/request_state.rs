@@ -67,8 +67,7 @@ pub(super) enum MetadataResponseDispatch {
     Complete,
 }
 
-/// How far one instance's admission has progressed. It only moves forward:
-/// an admitted request never returns to a held identity.
+/// Admission status of one policy filter instance.
 #[derive(Default)]
 enum Admission {
     /// No baseline identity is held and the request is not admitted.
@@ -138,8 +137,7 @@ impl RequestState {
         matches!(self.admission, Admission::Admitted)
     }
 
-    /// Whether the early identity gate has run or was deliberately deferred to
-    /// the route, so a later phase must not run it again.
+    /// Whether the identity gate has completed or been deferred to the route.
     pub(super) fn gate_done(&self) -> bool {
         !matches!(self.admission, Admission::Pending)
     }

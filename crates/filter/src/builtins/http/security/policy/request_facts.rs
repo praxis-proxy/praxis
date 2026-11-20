@@ -48,10 +48,7 @@ impl RequestFacts {
         Self::of(ctx, ctx.request, trusted_proxies)
     }
 
-    /// Capture the request as the earlier head filters left it.
-    ///
-    /// Their header mutations are applied only after the whole head phase, so
-    /// `ctx.request` still holds the client's values while head filters run.
+    /// Capture request facts including trusted mutations from earlier head filters.
     pub(super) fn capture_head(ctx: &HttpFilterContext<'_>, trusted_proxies: &[CidrRange]) -> Self {
         let request = Request {
             method: ctx.request.method.clone(),
@@ -157,8 +154,7 @@ impl RequestView {
 // Helpers
 // -----------------------------------------------------------------------------
 
-/// The request headers with this pass's queued trusted mutations applied, as
-/// the head phase applies them once it ends.
+/// Request headers including this pass's queued trusted mutations.
 fn head_headers(ctx: &HttpFilterContext<'_>) -> HeaderMap {
     let mut headers = ctx.request.headers.clone();
     for mutation in ctx.pass_header_mutations() {

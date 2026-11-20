@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-//! Head-phase admission: which policies admit before the body is read, what
-//! the head judges the request by, and how later phases reuse its work.
+//! Tests for request-head admission, trusted headers and admission state.
 
 use bytes::Bytes;
 use http::{HeaderName, HeaderValue};
@@ -501,8 +500,7 @@ fn additive_layouts() -> [(&'static str, String, Option<&'static str>); 5] {
     ]
 }
 
-/// Layouts that keep the global resolver from judging at the head, and the
-/// section the reason names.
+/// Policies requiring route-specific identity resolution and their blocking sections.
 fn blocking_layouts() -> [(&'static str, String, Option<&'static str>); 4] {
     let global = "global:\n  authentication: [who]\n";
     let replacing = "authentication:\n      replace_inherited: true\n      steps: [key]\n";
@@ -533,8 +531,7 @@ fn blocking_layouts() -> [(&'static str, String, Option<&'static str>); 4] {
     ]
 }
 
-/// An `http:` route joining a group whose steps the head would run, alongside
-/// an entity route that doesn't join it.
+/// Policies with group authentication exclusive to an HTTP route.
 fn http_group_layouts() -> [(&'static str, String, Option<&'static str>); 1] {
     [(
         "an http route joining an additive group",

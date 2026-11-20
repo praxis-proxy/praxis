@@ -173,9 +173,7 @@ pub struct FilterPipeline {
     /// [`execute_http_request_head`]: FilterPipeline::execute_http_request_head
     request_head_filter_indices: Vec<usize>,
 
-    /// Indices into `filters` of top-level admitting filters behind an earlier
-    /// filter that can end the request, whose pre-read rejections wait for the
-    /// request phase.
+    /// Filter indices whose body denials must preserve earlier request filters' precedence.
     shielded_admitter_indices: Vec<usize>,
 
     /// Indices into `filters` of filters declaring request-body access.
@@ -436,10 +434,7 @@ impl FilterPipeline {
         !self.request_head_filter_indices.is_empty()
     }
 
-    /// Whether a head filter depends on the request-head phase, rather than
-    /// only [repeating its work in the request phase].
-    ///
-    /// [repeating its work in the request phase]: crate::HttpFilter::repeats_request_head
+    /// Whether any filter requires a request-head phase to function correctly.
     #[must_use]
     pub fn requires_request_head_phase(&self) -> bool {
         self.request_head_filter_indices.iter().any(|&idx| {

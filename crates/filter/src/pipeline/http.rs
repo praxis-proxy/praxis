@@ -50,9 +50,7 @@ use crate::{actions::BoundUpstreamBodyOutcome, condition::SelectedUpstream, exte
 // FilterPipeline HTTP
 // -----------------------------------------------------------------------------
 
-/// A pre-read rejection from an admitting filter behind an earlier filter that
-/// can end the request. The request phase returns it on reaching that filter,
-/// so the earlier filter still answers or rejects first.
+/// A body denial deferred to preserve earlier request filters' precedence.
 struct HeldRejection {
     /// Pipeline index of the rejecting filter.
     index: usize,
@@ -203,12 +201,14 @@ impl FilterPipeline {
     /// response fails closed with a 500 rather than forwarding
     /// upstream.
     ///
-    /// A rejection held from the pre-read is returned when the walk reaches or
-    /// skips past its filter, before any later filter runs, or at the end.
+    /// Earlier request filters retain precedence over deferred body denials.
+    /// Skipping a rejecting filter does not bypass its denial.
     ///
     /// # Errors
     ///
     /// Returns [`FilterError`] if any filter fails.
+    ///
+    /// [`FilterError`]: crate::FilterError
     pub async fn execute_http_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         let mut held = ctx.extensions.remove::<HeldRejection>();
         let action = self.run_request_filters(ctx, &mut held).await?;
@@ -224,8 +224,7 @@ impl FilterPipeline {
         })
     }
 
-    /// Run the request filters in order, returning `held` once the walk
-    /// reaches or passes the filter that rejected during the pre-read.
+    /// Run request filters in order, enforcing any deferred body denial.
     #[expect(clippy::indexing_slicing, reason = "while loop bounds idx")]
     #[expect(clippy::too_many_lines, reason = "filter identity tracking adds lines per branch")]
     async fn run_request_filters(
@@ -507,16 +506,15 @@ impl FilterPipeline {
 
     /// Run all HTTP request body filters in order.
     ///
-    /// Filters that previously returned [`BodyDone`] are skipped. During a
-    /// `StreamBuffer` pre-read, a rejection from an admitting filter behind an
-    /// earlier filter that can end the request is held for the request phase,
-    /// and no later body hook runs.
+    /// Skips filters that previously returned [`BodyDone`]. Body denials preserve
+    /// earlier request filters' precedence and prevent later body hooks from running.
     ///
     /// # Errors
     ///
     /// Returns [`FilterError`] if any body filter fails.
     ///
     /// [`BodyDone`]: FilterAction::BodyDone
+    /// [`FilterError`]: crate::FilterError
     #[expect(clippy::too_many_lines, reason = "body hook loop with metrics dispatch")]
     pub async fn execute_http_request_body(
         &self,

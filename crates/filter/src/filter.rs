@@ -142,30 +142,24 @@ pub trait HttpFilter: Send + Sync {
         false
     }
 
-    /// Whether this filter's request-head hook may reject the request, as an
-    /// admission check does.
+    /// Whether this filter's request-head hook may reject the request.
     ///
-    /// Such a hook must not run ahead of an earlier filter that can end the
-    /// request in its request phase, by answering or rejecting it, nor judge
-    /// request conditions before head filters publish their headers: pipeline
-    /// construction skips the hook in either case, and the filter admits in
-    /// [`on_request`] as it would without a head phase. A filter that only
-    /// publishes facts from the head leaves the default.
+    /// If `true`, [`on_request`] must also enforce admission: the head hook is
+    /// skipped when this filter has request conditions or an earlier filter can
+    /// end the request. Filters that only publish head metadata leave this `false`.
     ///
     /// [`on_request`]: HttpFilter::on_request
     fn admits_at_request_head(&self) -> bool {
         false
     }
 
-    /// Whether [`on_request`] can end the request, by rejecting it or answering
-    /// it, so an admitting head hook of a later filter must wait for it (see
-    /// [`admits_at_request_head`]).
+    /// Whether [`on_request`] can answer or reject the request, requiring later
+    /// filters to defer head admission (see [`admits_at_request_head`]).
     ///
-    /// Defaults to `true`, so a filter that says nothing keeps its precedence.
-    /// A filter whose request phase only continues overrides this; an error
-    /// under `failure_mode: closed` and a rejection from a body hook don't
-    /// count. A filter whose `on_request` has an effect a later rejection must
-    /// not skip, such as publishing an event, keeps `true`.
+    /// Return `false` when the request hook only continues. Body-hook rejections
+    /// and errors handled by `failure_mode: closed` do not count. Keep `true` if
+    /// the request hook has effects a later rejection must preserve, such as
+    /// publishing an event.
     ///
     /// [`on_request`]: HttpFilter::on_request
     /// [`admits_at_request_head`]: HttpFilter::admits_at_request_head
@@ -173,10 +167,10 @@ pub trait HttpFilter: Send + Sync {
         true
     }
 
-    /// Whether [`on_request`] repeats everything the request-head hook does,
-    /// so the filter still works where no head phase runs, such as an
-    /// `iterative_request_router` step. The head hook then only does the same
-    /// work earlier.
+    /// Whether [`on_request`] provides all request-head behavior too.
+    ///
+    /// Return `true` if the filter supports pipelines without a head phase,
+    /// such as an `iterative_request_router` step.
     ///
     /// [`on_request`]: HttpFilter::on_request
     fn repeats_request_head(&self) -> bool {

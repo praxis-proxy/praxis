@@ -113,8 +113,7 @@ impl FilterPipeline {
 // Walkers
 // -----------------------------------------------------------------------------
 
-/// Snapshot an ordered filter list; `head_indices` is set for the top level,
-/// naming the filters whose request-head hook the pipeline runs.
+/// Snapshot an ordered filter list with eligible top-level head hooks.
 fn snapshot_filters(filters: &[PipelineFilter], head_indices: Option<&[usize]>) -> Vec<FilterIntrospection> {
     filters
         .iter()
@@ -177,8 +176,7 @@ fn phase_and_body_info(
     }
 }
 
-/// Potential HTTP hooks for this filter's position and resolved body phase;
-/// `head` says whether the pipeline runs its request-head hook.
+/// Potential HTTP hooks for this filter's position and resolved body phase.
 fn potential_http_phases(
     pf: &PipelineFilter,
     filter: &dyn HttpFilter,
