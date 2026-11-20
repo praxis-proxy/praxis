@@ -624,6 +624,7 @@ filter_chains:
                 downstream_read_timeout_ms: None,
                 filter_chains: vec![],
                 forward_proxy: None,
+                job_queue: None,
                 max_connections: None,
                 name: format!("l{i}"),
                 protocol: Default::default(),

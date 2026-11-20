@@ -416,6 +416,7 @@ const EXPERIMENTAL_FEATURES: &[(&str, bool)] = &[
     ("hedged-requests", cfg!(feature = "hedged-requests")),
     ("hyper", cfg!(feature = "hyper")),
     ("iterative-request-router", cfg!(feature = "iterative-request-router")),
+    ("jobs-config", cfg!(feature = "jobs-config")),
     (
         "policy-experimental-ratelimit",
         cfg!(feature = "policy-experimental-ratelimit"),
@@ -457,6 +458,25 @@ pub(crate) fn warn_admin_configured_without_feature(config: &Config) {
         tracing::warn!(
             "admin.address or admin.metrics_address is set but this build lacks the `admin-api` feature; \
             the admin API (/api/*) and health/metrics endpoints (/healthy, /ready, /metrics) are disabled"
+        );
+    }
+}
+
+/// Warn when the `jobs` section is configured but no job runtime exists yet.
+///
+/// The `jobs` bounds land before the queue that reads them, so an operator
+/// who configures the section now would otherwise get no behaviour and no
+/// explanation. Remove this once the job runtime consumes the section.
+///
+/// Compiled with the `jobs-config` feature: without it the section is an
+/// unknown key the config loader already rejects, so there is nothing to
+/// warn about.
+#[cfg(feature = "jobs-config")]
+pub(crate) fn warn_jobs_configured_without_runtime(config: &Config) {
+    if config.jobs.is_some() {
+        tracing::warn!(
+            "jobs is set but this version has no background job runtime yet; \
+            the queue settings have no effect"
         );
     }
 }
@@ -1263,6 +1283,31 @@ filter_chains:
 "#,
         )
         .expect("minimal config should parse")
+    }
+
+    #[test]
+    #[cfg(feature = "jobs-config")]
+    fn warn_jobs_configured_without_runtime_emits_warning() {
+        let mut config = minimal_config();
+        config.jobs = Some(praxis_core::config::JobsConfig::default());
+        let warnings = capture_warnings(|| super::warn_jobs_configured_without_runtime(&config));
+        assert_eq!(warnings.len(), 1, "a jobs section should produce one warning");
+        assert!(
+            warnings[0].contains("jobs"),
+            "warning should name the section: got {:?}",
+            warnings[0]
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "jobs-config")]
+    fn warn_jobs_configured_without_runtime_absent_section_emits_nothing() {
+        let config = minimal_config();
+        let warnings = capture_warnings(|| super::warn_jobs_configured_without_runtime(&config));
+        assert!(
+            warnings.is_empty(),
+            "no jobs section should produce no warnings, got: {warnings:?}"
+        );
     }
 
     #[cfg(unix)]

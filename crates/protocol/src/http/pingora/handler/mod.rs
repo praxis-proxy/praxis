@@ -128,6 +128,7 @@ pub use with_body::PingoraHttpHandler;
 ///     downstream_read_timeout_ms: None,
 ///     filter_chains: vec![],
 ///     forward_proxy: None,
+///     job_queue: None,
 ///     max_connections: None,
 ///     protocol: Default::default(),
 ///     tcp_session_timeout_ms: None,

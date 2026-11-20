@@ -452,6 +452,7 @@ insecure_options:
             clusters: vec![],
             filter_chains: vec![],
             insecure_options: InsecureOptions::default(),
+            jobs: None,
             listeners: vec![Listener {
                 name: "orphan".to_owned(),
                 address: "0.0.0.0:9999".to_owned(),
@@ -460,6 +461,7 @@ insecure_options:
                 downstream_read_timeout_ms: None,
                 filter_chains: vec![],
                 forward_proxy: None,
+                job_queue: None,
                 max_connections: None,
                 protocol: ProtocolKind::Tcp,
                 tcp_session_timeout_ms: None,
@@ -508,6 +510,7 @@ insecure_options:
             downstream_read_timeout_ms: None,
             filter_chains: vec![],
             forward_proxy: None,
+            job_queue: None,
             max_connections: None,
             protocol: ProtocolKind::Tcp,
             tcp_session_timeout_ms: None,

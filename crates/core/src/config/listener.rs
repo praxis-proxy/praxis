@@ -122,6 +122,40 @@ pub struct Listener {
     #[serde(default)]
     pub forward_proxy: Option<ForwardProxyConfig>,
 
+    /// Name of the background job queue this listener may submit to.
+    ///
+    /// Job submission is opt-in per listener: two listeners sharing one
+    /// filter chain can differ in whether they may enqueue work, and a
+    /// listener without this field cannot submit jobs at all. The name
+    /// leaves room to isolate listeners onto separate queues later without
+    /// changing existing configs; the built-in queue is `default`.
+    ///
+    /// Requires the `jobs-config` Cargo feature, which is off by default:
+    /// without it the key is unknown. Nothing reads the field yet — the
+    /// job runtime that consumes it is still pending, so a configured
+    /// `job_queue` has no effect today.
+    ///
+    /// ```
+    /// use praxis_core::config::Listener;
+    ///
+    /// let parsed = serde_yaml::from_str::<Listener>(
+    ///     r#"
+    /// name: internal
+    /// address: "127.0.0.1:8081"
+    /// filter_chains: [main]
+    /// job_queue: default
+    /// "#,
+    /// );
+    /// if cfg!(feature = "jobs-config") {
+    ///     assert_eq!(parsed.unwrap().job_queue.as_deref(), Some("default"));
+    /// } else {
+    ///     assert!(parsed.is_err(), "the key is unknown without the feature");
+    /// }
+    /// ```
+    #[cfg_attr(not(feature = "jobs-config"), serde(skip))]
+    #[serde(default)]
+    pub job_queue: Option<String>,
+
     /// Maximum concurrent connections for this listener.
     ///
     /// When set, new connections beyond this limit are

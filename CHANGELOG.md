@@ -19,6 +19,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Add the `jobs:` config section behind the off-by-default `jobs-config`
+  feature: bounded queue capacity, worker count, per-job timeout, and a
+  queued-payload byte ceiling for the coming background job runtime, each
+  validated at config load with a message naming the field and its accepted
+  range. The settings are not read yet; a build with the feature enabled
+  warns at startup when the section is configured, and without the feature
+  the section is an unknown key. Listeners gain an optional `job_queue`
+  naming the queue they may submit to, so listeners sharing a filter chain
+  opt into job submission independently; it is likewise parsed only.
 - Core policy-enforcement guide with PPE use cases, integration conditions,
   and links from onboarding, architecture, and security documentation.
 - Expose compact JSON sizing and capped serialization utilities in

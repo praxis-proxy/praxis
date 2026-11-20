@@ -54,6 +54,11 @@ slow-start = []
 # crate's `forward-proxy` turns it on. Without this feature the block is an
 # unknown key; `ForwardProxyConfig` itself is always compiled.
 forward-proxy = []
+# The `jobs:` config section. Off by default; experimental. The server crate's
+# `jobs-config` turns it on. Without this feature the section is an unknown
+# key. The bounds land before the background job runtime that reads them, so
+# an end-to-end review precedes promotion out of experimental.
+jobs-config = []
 spiffe = ["praxis-tls/spiffe"]
 test-support = []
 otel = [

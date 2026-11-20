@@ -42,6 +42,8 @@ use crate::startup_checks::insecure_warn;
 use crate::startup_checks::warn_admin_configured_without_feature;
 #[cfg(feature = "experimental")]
 use crate::startup_checks::warn_experimental_features;
+#[cfg(feature = "jobs-config")]
+use crate::startup_checks::warn_jobs_configured_without_runtime;
 #[cfg(not(feature = "policy-engine"))]
 use crate::startup_checks::warn_policy_filter_without_feature;
 use crate::{
@@ -165,6 +167,8 @@ fn run_startup_security_checks(config: &Config) -> Result<(), StartupError> {
     warn_experimental_features();
     #[cfg(not(feature = "admin-api"))]
     warn_admin_configured_without_feature(config);
+    #[cfg(feature = "jobs-config")]
+    warn_jobs_configured_without_runtime(config);
     enforce_root_check(config)?;
     warn_insecure_options(config);
     init_runtime_limits(&config.runtime);
