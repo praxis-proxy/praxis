@@ -11,6 +11,10 @@
 //! either buffered or streaming mode, and captures a
 //! [`FilteredSubrequestContinuation`] the caller drives to completion.
 //!
+//! With the `bandwidth` feature, `bandwidth_limit` only reserves bytes and this
+//! executor waits for those reservations before it sends a request body or
+//! releases response bytes. A reservation it does not release is refunded.
+//!
 //! The executor owns three transient extension mechanisms end-to-end
 //! ([`RetainedFilterResults`], [`PendingStreamChunks`], and
 //! [`StreamTermination`]) and recognizes two framework-defined caller-staged
@@ -37,6 +41,8 @@
 
 mod context;
 mod continuation;
+#[cfg(feature = "bandwidth")]
+mod pace;
 mod sanitize;
 mod streaming;
 #[cfg(test)]
@@ -86,7 +92,9 @@ pub(crate) use self::{
     },
 };
 #[cfg(feature = "iterative-request-router")]
-pub(crate) use self::{continuation::SubrequestCompletion, sanitize::normalize_response_status};
+pub(crate) use self::{
+    continuation::SubrequestCompletion, sanitize::normalize_response_status, streaming::CompletionOutput,
+};
 pub use self::{
     streaming::{CalloutResponseTooLarge, StreamBodySuppressed},
     types::{CalloutOutcome, CalloutResponse, StagedUpstream, StagedUpstreamFallback, SubrequestRuntime},
@@ -101,6 +109,7 @@ use crate::{
     FilterAction, FilterError, FilterPipeline, StreamTermination, StreamTerminationCause, SubRequest,
     SubRequestResponseMode, SubResponse,
     actions::Rejection,
+    cancel_bandwidth,
     context::PendingStreamChunks,
     extensions::{RequestExtensions, SelectedClusterApplication},
     results::RetainedFilterResults,
@@ -239,6 +248,8 @@ struct ParentTransportOutcomes(Vec<(Option<NestedTransportOutcome>, Option<crate
 
 /// Keep child cancellation from changing its parent's circuit outcome.
 fn enter_nested_transport_scope(extensions: &mut RequestExtensions) {
+    #[cfg(feature = "bandwidth")]
+    crate::BandwidthLimitFilter::enter_body_scope(extensions);
     let parent = extensions.remove::<NestedTransportOutcome>();
     let mut stack = extensions.remove::<ParentTransportOutcomes>().unwrap_or_default();
     let forwarded = extensions.remove::<crate::UpstreamForwardedEndpoint>();
@@ -248,6 +259,8 @@ fn enter_nested_transport_scope(extensions: &mut RequestExtensions) {
 
 /// Restore the signal owned by the containing sub-request.
 fn restore_parent_transport_scope(extensions: &mut RequestExtensions) {
+    #[cfg(feature = "bandwidth")]
+    crate::BandwidthLimitFilter::leave_body_scope(extensions);
     extensions.remove::<NestedTransportOutcome>();
     extensions.remove::<crate::UpstreamForwardedEndpoint>();
     let Some(mut stack) = extensions.remove::<ParentTransportOutcomes>() else {
@@ -332,6 +345,9 @@ impl FilteredSubrequestError {
         ctx.extensions.remove::<PendingStreamChunks>();
         ctx.extensions.remove::<RetainedFilterResults>();
         ctx.extensions.remove::<StreamTermination>();
+        // A failed step did not release its body. Dropping the grants here
+        // returns the unsent bytes to the shared schedule immediately.
+        cancel_bandwidth(&mut ctx.extensions);
         Self::new(error, std::mem::take(&mut ctx.extensions))
     }
 
@@ -1101,6 +1117,16 @@ impl FilteredSubrequestExecutor {
             if transport_budget.is_zero() {
                 return Ok(RawResponse::Rejected(Rejection::status(504)));
             }
+            // The transport admits prefixes only after it has a connection.
+            // DNS elapsed time is already part of each absolute release time.
+            in_transport_inner.store(false, Ordering::Release);
+            #[cfg(feature = "bandwidth")]
+            let upload = pace::Upload::from_extensions(&mut filter_ctx.extensions, step_deadline, &in_transport_inner);
+            #[cfg(feature = "bandwidth")]
+            let request_client = upload.as_ref().map_or_else(|| self.client.clone(), |upload| upload.client(&self.client));
+            #[cfg(not(feature = "bandwidth"))]
+            let request_client = &self.client;
+            in_transport_inner.store(true, Ordering::Release);
 
             match filter_ctx.subrequest_response_mode {
                 SubRequestResponseMode::Streaming => {
@@ -1142,8 +1168,7 @@ impl FilteredSubrequestExecutor {
                             selected.address = Arc::clone(address);
                         }
                         response = match peer {
-                            Ok(peer) => self
-                                .client
+                            Ok(peer) => request_client
                                 .send_streaming_with_progress(peer, &request, attempt_budget, limits.clone(), Some(&framework_headers), Some(&progress))
                                 .await,
                             Err(error) => Err(SubRequestError::Connect(error.to_string())),
@@ -1156,6 +1181,8 @@ impl FilteredSubrequestExecutor {
                         }
                         break;
                     }
+                    #[cfg(feature = "bandwidth")]
+                    if upload.as_ref().and_then(|upload| upload.take_error()).is_some() { return Ok(RawResponse::Rejected(Rejection::status(504))); }
                     in_transport_inner.store(false, Ordering::Release);
                     transport::publish_forwarding(&mut filter_ctx, forwarding.as_ref());
                     match response {
@@ -1248,13 +1275,14 @@ impl FilteredSubrequestExecutor {
                             selected.address = Arc::clone(address);
                         }
                         let outcome = match peer {
-                            Ok(peer) => match self
-                                .client
+                            Ok(peer) => match request_client
                                 .execute_with_progress(peer, &request, self.max_response_bytes.min(pipeline.response_buffer_limit()), attempt_budget, Some(&framework_headers), &progress)
                                 .await
                             {
                                 Ok(response) => (response, ResponseOrigin::Upstream, None),
                                 Err(error) => {
+                                    #[cfg(feature = "bandwidth")]
+                                    if upload.as_ref().and_then(|upload| upload.take_error()).is_some() { return Ok(RawResponse::Rejected(Rejection::status(504))); }
                                     let (status, kind) = classify_transport_failure(&error);
                                     warn!(step = label, %error, status, "filtered sub-request buffered transport failure");
                                     let response =
@@ -1336,6 +1364,8 @@ impl FilteredSubrequestExecutor {
                             message: "filtered_subrequest: transformed step response exceeds configured body limit",
                         });
                     }
+                    #[cfg(feature = "bandwidth")]
+                    pace::pace_download(&mut filter_ctx.extensions, step_deadline).await?;
                     response.body = body.unwrap_or_default();
                     if let Some(metadata) = filter_ctx.response_header.as_deref() {
                         response.status = metadata.status.as_u16();
@@ -1433,6 +1463,10 @@ impl FilteredSubrequestExecutor {
                 });
                 return Err(error);
             }
+            #[cfg(feature = "bandwidth")]
+            pace::pace_download(&mut filter_ctx.extensions, step_deadline)
+                .await
+                .map_err(|error| FilteredSubrequestError::capture(error, &mut filter_ctx))?;
             outcome.response.body = completion_body.unwrap_or_default();
         }
         if outer_deadline {
@@ -1466,6 +1500,17 @@ impl FilteredSubrequestExecutor {
                         actual: Some(response.body.len()),
                         limit,
                     }));
+                }
+                #[cfg(feature = "bandwidth")]
+                {
+                    cancel_bandwidth(&mut filter_ctx.extensions);
+                    crate::reserve_generated_download(
+                        &mut filter_ctx.extensions,
+                        u64::try_from(response.body.len()).unwrap_or(u64::MAX),
+                    );
+                    pace::pace_download(&mut filter_ctx.extensions, step_deadline)
+                        .await
+                        .map_err(|error| FilteredSubrequestError::capture(error, &mut filter_ctx))?;
                 }
                 let snapshot = crate::Response {
                     status: http::StatusCode::from_u16(response.status).unwrap_or(http::StatusCode::BAD_GATEWAY),
@@ -1506,6 +1551,10 @@ impl FilteredSubrequestExecutor {
             uri: filter_ctx.request.uri.clone(),
             headers: filter_ctx.request.headers.clone(),
         };
+        // Commit already removed reservations whose bytes were released.
+        // Anything still stored was not sent; return it to the schedule
+        // before the continuation keeps the extensions alive.
+        cancel_bandwidth(&mut filter_ctx.extensions);
         let continuation = FilteredSubrequestContinuation::capture(
             Arc::clone(pipeline),
             request_snapshot,
@@ -1517,3 +1566,6 @@ impl FilteredSubrequestExecutor {
         Ok(OpenedSubrequest { continuation, kind })
     }
 }
+
+#[cfg(all(test, feature = "bandwidth", feature = "iterative-request-router"))]
+pub(crate) use streaming::tests::paced_output as paced_test_output;

@@ -157,6 +157,27 @@ pub trait Session: Send + 'static {
         end_of_stream: bool,
     ) -> impl Future<Output = Result<(), EgressError>> + Send;
 
+    /// Send a controlled prefix, acknowledging ownership at the body writer.
+    fn send_request_body_controlled(
+        &mut self,
+        chunk: Bytes,
+        end_of_stream: bool,
+    ) -> impl Future<Output = Result<(), EgressError>> + Send {
+        self.send_request_body(chunk, end_of_stream)
+    }
+
+    /// Prevent an unaccepted controlled prefix from being forwarded after cancellation.
+    fn cancel_pending_request_body(&mut self) {}
+
+    /// Body bytes accepted by the writer, excluding headers and framing.
+    ///
+    /// The optional counter lets controlled uploads settle partial progress when
+    /// a write is cancelled. Backends without a counter still report complete
+    /// successful prefixes through `send_request_body`.
+    fn request_body_bytes_sent(&self) -> Option<u64> {
+        None
+    }
+
     /// Mark the request complete when no body chunk carried `end_of_stream`.
     fn finish_request(&mut self) -> impl Future<Output = Result<(), EgressError>> + Send;
 

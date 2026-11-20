@@ -283,6 +283,8 @@ pub(super) struct CircuitGuard<'reg> {
     token: Option<CircuitToken>,
     /// Drop releases the slot instead of recording a failure.
     neutral_on_drop: bool,
+    /// Admission waits are client policy, not upstream circuit failures.
+    upload_control: Option<Arc<dyn super::UploadControl>>,
 }
 
 impl<'reg> CircuitGuard<'reg> {
@@ -293,7 +295,20 @@ impl<'reg> CircuitGuard<'reg> {
             peer,
             token: Some(token),
             neutral_on_drop: false,
+            upload_control: None,
         }
+    }
+
+    /// Observe the exchange's phase without holding a lock while it waits.
+    pub(super) fn observe_upload(&mut self, control: Option<Arc<dyn super::UploadControl>>) {
+        self.upload_control = control;
+    }
+
+    /// Whether the current interruption is caused by policy admission.
+    fn in_admission(&self) -> bool {
+        self.upload_control
+            .as_ref()
+            .is_some_and(|control| control.in_admission())
     }
 
     /// A later drop releases the slot without a success or a failure.
@@ -309,7 +324,9 @@ impl<'reg> CircuitGuard<'reg> {
         let Some(token) = self.token.take() else {
             return;
         };
-        if matches!(
+        if self.in_admission() {
+            self.registry.release(&self.peer, token);
+        } else if matches!(
             err,
             SubRequestError::Connect(_) | SubRequestError::Io(_) | SubRequestError::DeadlineExceeded
         ) {
@@ -345,7 +362,7 @@ impl<'reg> CircuitGuard<'reg> {
 impl Drop for CircuitGuard<'_> {
     fn drop(&mut self) {
         if let Some(token) = self.token.take() {
-            if self.neutral_on_drop {
+            if self.neutral_on_drop || self.in_admission() {
                 self.registry.release(&self.peer, token);
             } else {
                 self.registry.record_failure(&self.peer, token);
