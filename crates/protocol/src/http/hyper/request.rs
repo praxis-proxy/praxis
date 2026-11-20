@@ -105,8 +105,8 @@ fn capture_client(flight: &mut Flight, connection: &ConnectionFacts, parts: Part
     flight.ctx.downstream_tls = connection.tls;
     flight.ctx.peer_identity.clone_from(&connection.peer_identity);
     flight.ctx.request_is_idempotent = matches!(
-        parts.method,
-        ref method if crate::http::permits_automatic_replay(method)
+        &parts.method,
+        method if crate::http::permits_automatic_replay(method)
     );
     flight.ctx.request_span =
         create_request_span_for(parts.method.as_str(), parts.uri.path(), &parts.headers, &flight.ctx);
