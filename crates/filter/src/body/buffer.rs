@@ -28,6 +28,9 @@ pub struct BodyBuffer {
     /// Accumulated body bytes.
     bytes: Vec<u8>,
 
+    /// Recorder handle retained across buffer ownership transfers.
+    accounting: metrics::Gauge,
+
     /// Maximum allowed bytes.
     max_bytes: usize,
 }
@@ -39,6 +42,7 @@ impl BodyBuffer {
     pub fn new(max_bytes: usize) -> Self {
         Self {
             bytes: Vec::new(),
+            accounting: metrics::gauge!("praxis_body_buffer_bytes"),
             max_bytes: max_bytes.min(MAX_BUFFER_BYTES),
         }
     }
@@ -69,6 +73,7 @@ impl BodyBuffer {
                 .min(self.max_bytes);
             self.bytes.reserve_exact(capacity.saturating_sub(self.bytes.len()));
         }
+        self.accounting.increment(metric_bytes(chunk.len()));
         self.bytes.extend_from_slice(&chunk);
         drop(chunk);
 
@@ -81,8 +86,47 @@ impl BodyBuffer {
     }
 
     /// Consume the buffer and return the complete body.
-    pub fn freeze(self) -> Bytes {
-        Bytes::from(self.bytes.into_boxed_slice())
+    pub fn freeze(mut self) -> Bytes {
+        if self.bytes.is_empty() {
+            return Bytes::new();
+        }
+        Bytes::from_owner(BufferedBody {
+            bytes: std::mem::take(&mut self.bytes).into_boxed_slice(),
+            accounting: self.accounting.clone(),
+        })
+    }
+}
+
+/// Memory sizes in a proxy process remain far below f64's exact integer range.
+#[expect(clippy::cast_precision_loss, reason = "in-memory byte counts are far below 2^53")]
+fn metric_bytes(bytes: usize) -> f64 {
+    bytes as f64
+}
+
+impl Drop for BodyBuffer {
+    fn drop(&mut self) {
+        self.accounting.decrement(metric_bytes(self.bytes.len()));
+    }
+}
+
+/// Frozen body owner; the gauge remains live until the final Bytes clone drops.
+struct BufferedBody {
+    /// Payload storage retained by the zero-copy Bytes owner.
+    bytes: Box<[u8]>,
+
+    /// The same recorder handle used while accumulating the payload.
+    accounting: metrics::Gauge,
+}
+
+impl AsRef<[u8]> for BufferedBody {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+impl Drop for BufferedBody {
+    fn drop(&mut self) {
+        self.accounting.decrement(metric_bytes(self.bytes.len()));
     }
 }
 
@@ -153,14 +197,44 @@ mod tests {
     }
 
     #[test]
+    fn buffer_accounting_survives_freeze_and_clones_and_releases_on_drop() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            let mut buffer = BodyBuffer::new(16);
+            buffer.push(Bytes::from_static(b"hello")).unwrap();
+            assert_eq!(body_bytes(&handle), 5, "push must account for five bytes");
+            let frozen = buffer.freeze();
+            assert_eq!(body_bytes(&handle), 5, "freeze must retain five bytes");
+            let clone = frozen.clone();
+            assert_eq!(body_bytes(&handle), 5, "cloning must not double-count shared bytes");
+            drop(frozen);
+            assert_eq!(body_bytes(&handle), 5, "the clone must retain five bytes");
+            drop(clone);
+            assert_eq!(body_bytes(&handle), 0, "the final drop must release the bytes");
+            let mut aborted = BodyBuffer::new(16);
+            aborted.push(Bytes::from_static(b"discard")).unwrap();
+            assert_eq!(
+                body_bytes(&handle),
+                7,
+                "the unfinished buffer must account for its bytes"
+            );
+            drop(aborted);
+            assert_eq!(body_bytes(&handle), 0, "the aborted buffer must release the bytes");
+        });
+    }
+
+    #[test]
     fn buffer_empty_freeze_returns_empty_bytes() {
-        let buf = BodyBuffer::new(1024);
-
-        assert_eq!(buf.total_bytes(), 0, "empty buffer should have zero bytes");
-
-        let frozen = buf.freeze();
-
-        assert!(frozen.is_empty(), "freezing empty buffer should yield empty Bytes");
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            let buf = BodyBuffer::new(1024);
+            assert_eq!(buf.total_bytes(), 0, "empty buffer should have zero bytes");
+            let frozen = buf.freeze();
+            assert!(frozen.is_empty(), "freezing empty buffer should yield empty Bytes");
+            assert_eq!(body_bytes(&handle), 0, "empty freeze must retain no bytes");
+        });
     }
 
     #[test]
@@ -331,5 +405,20 @@ mod tests {
             "body exceeds maximum size: 150 bytes attempted, 100 byte limit",
             "overflow Display should include limit and attempted size"
         );
+    }
+
+    // -----------------------------------------------------------------------------
+    // Test Utilities
+    // -----------------------------------------------------------------------------
+
+    /// Parse the complete retained-body gauge sample as an integer byte count.
+    fn body_bytes(handle: &metrics_exporter_prometheus::PrometheusHandle) -> u64 {
+        handle
+            .render()
+            .lines()
+            .find_map(|line| line.strip_prefix("praxis_body_buffer_bytes "))
+            .expect("body buffering must register its retained-byte gauge")
+            .parse()
+            .expect("these byte-count samples must be complete nonnegative integers")
     }
 }

@@ -3,6 +3,8 @@
 
 //! Tests for pipeline construction, body capabilities, execution, and ordering warnings.
 
+mod activity_metrics;
+
 use std::{
     collections::HashMap,
     sync::{
@@ -7221,7 +7223,10 @@ mod filter_duration_metrics_tests {
 
         let metrics = crate::test_utils::render_metrics();
         assert!(
-            !metrics.contains("filter=\"disabled_only\""),
+            !metrics
+                .lines()
+                .any(|line| line.starts_with("praxis_filter_duration_seconds")
+                    && line.contains("filter=\"disabled_only\"")),
             "disabled filter metrics should not record this filter: {metrics}"
         );
     }
