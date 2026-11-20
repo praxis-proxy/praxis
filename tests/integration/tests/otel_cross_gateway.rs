@@ -129,11 +129,17 @@ fn exported_parentage_links_edge_provider_and_backend() {
 
     let backend = start_header_echo_backend();
     let subrequest_backend = start_header_echo_backend();
+    // Keep this port bound without listening so another test process cannot
+    // turn the intended connect refusal into a successful backend response.
+    let retry_dead_socket = tokio::net::TcpSocket::new_v4().expect("create refused retry endpoint");
+    retry_dead_socket
+        .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+        .expect("reserve refused retry endpoint");
+    let retry_dead_port = retry_dead_socket.local_addr().expect("refused endpoint address").port();
     let provider_port = free_port();
     let edge_port = free_port();
     let routing_edge_port = free_port();
     let retry_edge_port = free_port();
-    let retry_dead_port = free_port();
     let mid_proxy_failure_port = start_slow_backend("late response", Duration::from_millis(500));
     let mid_proxy_edge_port = free_port();
     let not_found_backend = Backend::status(404, "not found").start_with_shutdown();
@@ -260,6 +266,7 @@ fn exported_parentage_links_edge_provider_and_backend() {
     drop(mid_proxy_edge);
     drop(not_found_edge);
     drop(internal_error_edge);
+    drop(retry_dead_socket);
     drop(not_found_backend);
     drop(internal_error_backend);
     drop(tracing_guard);
@@ -315,6 +322,8 @@ fn exported_parentage_links_edge_provider_and_backend() {
         .find(|span| span.span_id != failed_client.span_id)
         .expect("retry must create a fresh successful CLIENT span");
     assert_ne!(failed_client.span_id, successful_client.span_id);
+    assert_eq!(u16_attribute(failed_client, "server.port"), Some(retry_dead_port));
+    assert_eq!(u16_attribute(successful_client, "server.port"), Some(backend.port()));
     assert_eq!(
         string_attribute(failed_client, "error.type"),
         Some("connect_refused"),
@@ -366,6 +375,10 @@ fn exported_parentage_links_edge_provider_and_backend() {
         Some(mid_proxy_failure_port),
         "the failed CLIENT span names the connected but unresponsive endpoint; attrs={:?}",
         failed_mid_proxy_client.attributes
+    );
+    assert_eq!(
+        u16_attribute(successful_mid_proxy_client, "server.port"),
+        Some(backend.port())
     );
     assert_backend_parent(
         &mid_proxy_backend_headers,
@@ -1560,7 +1573,7 @@ filter_chains:
       - filter: trace_context
       - filter: router
         routes:
-          - path_prefix: "/"
+          - path_prefix: "/retry"
             cluster: backend
       - filter: load_balancer
         clusters:

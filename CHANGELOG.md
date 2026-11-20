@@ -19,6 +19,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Core policy-enforcement guide with PPE use cases, integration conditions,
+  and links from onboarding, architecture, and security documentation.
+- Expose compact JSON sizing and capped serialization utilities in
+  `praxis_filter::json_size` for built-in and external filters.
+
 - Add `shutdown_drain_delay_secs` for readiness-first SIGTERM handoff. The
   process becomes unready, waits for the configured delay, then begins
   graceful connection shutdown; HTTP/1 responses during the drain advertise
@@ -40,6 +45,54 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- The `policy` filter admits at the request head: it runs
+  `ratelimit.pre_identity` and the baseline identity check before any filter
+  reads the body, even one listed before it, so over-limit and
+  unauthenticated requests are rejected without a body read. Entity routes
+  still authorize once the request is classified; `http.request` rules still
+  run in the request phase, on the head identity. Head denials now come
+  before the declared-body-size 413 and inference model and body denials,
+  and inference and pre-read MCP requests resolve the global identity once
+  more. Behind an earlier filter that can answer or reject the request
+  (`cors`, `ip_acl`, `static_response`, `redirect`, ...), the policy admits
+  in the request phase as before, so that filter still runs first. With a
+  pre-read, the pipeline holds the policy's body-phase denial until the
+  request phase reaches it, so the earlier filter answers or rejects first
+  here too, where it used to lose to the policy.
+  `HttpFilter::admits_at_request_head` declares a head hook that may reject,
+  and `HttpFilter::may_end_request` (default true) whether a filter's request
+  phase can reject or answer; built-ins that only continue, such as
+  `forwarded_headers`, `credential_injection` and `headers`, declare false;
+  `cloud_events` with `on: request` keeps true, so its event is still
+  published when the policy would deny the request.
+  When an entity default, group or route sets `replace_inherited`, or
+  `global.defaults.http`, an `http:` route or a group one joins adds
+  authentication, the policy
+  never runs the global gate: the route judges the credential, the head runs
+  the limiter only, the body is buffered until the route decides, and a
+  startup warning names the section. The buffer holds at least
+  `max_buffer_bytes` (inference policies keep `llm.max_request_bytes`),
+  more if another filter asks for more, within the global
+  `body_limits.max_buffer_bytes` and `body_limits.max_request_bytes`; a
+  larger body now gets 413, where a
+  `read_only` policy used to stream it. If the route never judges such a
+  request because the policy's body hook was skipped (a request condition
+  that changes after the body is read, or `failure_mode: open`), the request
+  phase rejects it with 500 instead of forwarding it. Policies with
+  `context_headers` or request conditions keep the previous timing, but in
+  the cases above the route still judges identity alone.
+  Pipeline construction warns when an earlier filter or request conditions
+  move admission out of the head.
+- Routes with `replace_inherited` are now judged by their own
+  authentication steps only, in every pipeline. Pipelines that streamed the
+  body used to also require the global credential, so such a route (or one
+  with `steps: []`) now accepts requests the global steps would have
+  rejected.
+- `grpc_status` arms gRPC error responses at the request head, so a later
+  head denial such as `policy` admission reaches gRPC clients as a
+  `grpc-status`. `HttpFilter::repeats_request_head` declares a head hook whose
+  work `on_request` repeats; such a filter may sit in an
+  `iterative_request_router` step.
 - Temporarily disable KIND rollout acceptance in CI and local commands
   because the cluster exhausts the shared inotify instance budget, pending
   migration to [gateway-controller](https://github.com/praxis-proxy/gateway-controller).
@@ -90,6 +143,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Return gRPC `DEADLINE_EXCEEDED` when Pingora's rounded upstream timeout fires just before the call's exact deadline, while preserving earlier transport timeouts.
 - Strip reserved and hop-by-hop headers from preformatted gRPC rejections while retaining safe gRPC fields, and frame empty HTTP/1 responses with one correct zero length even when filters supply stale or conflicting lengths.
 - Preserve final body-filter bytes with forwarded trailers on Hyper; abort Pingora delivery when both outputs cannot be represented or EOF filtering fails, while retaining ordinary trailers and deliberate conversion.
 - Keep requests streaming when any repeated Accept field contains text/event-stream.

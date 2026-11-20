@@ -89,9 +89,29 @@ via `runs_request_head`. It only runs for **top-level** filters: a filter
 nested inside a branch chain never runs its head hook (a `head_classifier`
 placed inside a branch chain silently does nothing), and a head filter inside
 an `iterative_request_router` step is rejected at config build — the head phase
-runs once at ingress, never inside an iterative exchange. Facts it publishes
+runs once at ingress, never inside an iterative exchange — unless it declares
+`repeats_request_head`, because its `on_request` does the same work. Facts it publishes
 (extensions, metadata, filter results, trusted header mutations) are visible
 both during a later `stream_buffer` pre-read and the request phase.
+
+A filter whose head hook may reject the request, as an admission check does,
+declares `admits_at_request_head`. The pipeline skips that hook when an
+earlier top-level filter, or a filter in one of its branches, can end the
+request in its request phase (one
+that answers like `static_response` or `redirect`, or any filter that does not
+declare `may_end_request` false, as `forwarded_headers` and `headers` do), and
+the filter admits in `on_request` instead, so the earlier filter still
+runs first. A `stream_buffer` pre-read runs body hooks before any request
+phase, so there the pipeline holds that filter's body-phase rejection until
+the request phase reaches it, and runs no later body hook. A filter with
+request `conditions` skips its head hook and admits in `on_request`, where its
+conditions see the headers that head filters publish; a pre-read still runs
+its body hook first when those conditions already match. The `policy` filter uses the head
+phase this way: where it can, it rate-limits and authenticates before any
+filter reads the body. When a route replaces or extends authentication in a
+way the head can't match, the head only rate-limits and identity waits for
+the route, with the body buffered until then; see
+[`policy`](http/security/policy.md).
 
 Request `conditions` gate the request and ordinary body hooks. Response
 `response_conditions` gate only the response hooks. A filter skipped on

@@ -170,6 +170,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | [guardrails.yaml](configs/security/guardrails.yaml) | Reject requests that match header or body inspection rules |
 | [ip-acl.yaml](configs/security/ip-acl.yaml) | Allow or deny requests by source IP/CIDR |
 | [peer-identity-trust.yaml](configs/security/peer-identity-trust.yaml) | Validates downstream mTLS peer identity against a set of trusted peers |
+| [policy-admission.yaml](configs/security/policy-admission.yaml) | The `policy` filter rate-limits and authenticates from the request head, before any filter reads the body, even when a body-reading filter comes first in the chain |
 | [policy-api-key.yaml](configs/security/policy-api-key.yaml) | Authenticates generic HTTP traffic with API keys using the Praxis Policy Engine |
 | [policy-assertions.yaml](configs/security/policy-assertions.yaml) | Projects policy-derived identity into request headers and removes credentials that should not reach the upstream |
 | [policy-context.yaml](configs/security/policy-context.yaml) | Demonstrates the host-supplied context surface: `context_headers` maps reserved-prefix HTTP headers to agent / framework extension fields so APL rules can reference them; `context_meta` stamps operator-defined scope, tags, and properties onto every policy evaluation |

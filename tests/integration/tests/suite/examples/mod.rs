@@ -87,6 +87,8 @@ mod peer_identity_trust;
 mod pipeline;
 #[cfg(feature = "policy-builtins")]
 mod policy;
+#[cfg(feature = "policy-builtins")]
+mod policy_admission;
 #[cfg(any(
     feature = "policy-builtins",
     feature = "policy-api-key-fips",

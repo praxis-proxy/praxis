@@ -400,6 +400,10 @@ impl HttpFilter for LoadBalancerFilter {
         "load_balancer"
     }
 
+    fn may_end_request(&self) -> bool {
+        false
+    }
+
     fn selects_upstream_endpoint(&self) -> bool {
         true
     }

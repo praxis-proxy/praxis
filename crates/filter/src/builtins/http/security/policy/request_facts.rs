@@ -45,7 +45,21 @@ impl RequestFacts {
     /// The scheme comes from the connection, never `X-Forwarded-Proto`; the
     /// client address is resolved against `trusted_proxies`.
     pub(super) fn capture(ctx: &HttpFilterContext<'_>, trusted_proxies: &[CidrRange]) -> Self {
-        let request = ctx.request;
+        Self::of(ctx, ctx.request, trusted_proxies)
+    }
+
+    /// Capture request facts including trusted mutations from earlier head filters.
+    pub(super) fn capture_head(ctx: &HttpFilterContext<'_>, trusted_proxies: &[CidrRange]) -> Self {
+        let request = Request {
+            method: ctx.request.method.clone(),
+            uri: ctx.request.uri.clone(),
+            headers: head_headers(ctx),
+        };
+        Self::of(ctx, &request, trusted_proxies)
+    }
+
+    /// The facts of `request` on `ctx`'s connection.
+    fn of(ctx: &HttpFilterContext<'_>, request: &Request, trusted_proxies: &[CidrRange]) -> Self {
         Self {
             method: request.method.as_str().to_owned(),
             path: request.uri.path().to_owned(),
@@ -56,6 +70,11 @@ impl RequestFacts {
                 .map(|address| address.ip),
             headers: snapshot_headers(&request.headers),
         }
+    }
+
+    /// The captured headers.
+    pub(super) fn headers(&self) -> HashMap<String, String> {
+        self.headers.clone()
     }
 
     /// The captured headers, with the reserved-prefix headers of `current`
@@ -134,6 +153,15 @@ impl RequestView {
 // -----------------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------------
+
+/// Request headers including this pass's queued trusted mutations.
+fn head_headers(ctx: &HttpFilterContext<'_>) -> HeaderMap {
+    let mut headers = ctx.request.headers.clone();
+    for mutation in ctx.pass_header_mutations() {
+        mutation.apply_to(&mut headers);
+    }
+    headers
+}
 
 /// The bare request host, ASCII-lowercased and without a port: the URI's
 /// (HTTP/2 `:authority`, or an absolute-form target admission matched against
