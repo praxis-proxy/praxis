@@ -214,7 +214,12 @@ impl FilterPipeline {
         let action = self.run_request_filters(ctx, &mut held).await?;
         // A branch that skipped past the holder must not admit the request.
         Ok(match held {
-            Some(held) if matches!(action, FilterAction::Continue) => FilterAction::Reject(held.rejection),
+            Some(held) if matches!(action, FilterAction::Continue) => {
+                if let Some(executed) = ctx.executed_filter_indices.get_mut(held.index) {
+                    *executed = true;
+                }
+                FilterAction::Reject(held.rejection)
+            },
             _ => action,
         })
     }

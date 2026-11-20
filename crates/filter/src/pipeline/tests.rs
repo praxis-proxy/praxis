@@ -10444,6 +10444,28 @@ async fn a_held_rejection_skipped_by_a_branch_still_rejects() {
 }
 
 #[tokio::test]
+async fn a_held_rejection_past_the_end_of_the_walk_keeps_its_response_hook() {
+    let mut earlier = named_noop_pf(0, "cors");
+    earlier
+        .branches
+        .push(unwind_branch("skip", RejoinTarget::SkipTo(2), vec![]));
+    let pipeline = with_body_indices(held_pipeline(earlier));
+    let req = crate::test_utils::make_request(Method::POST, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let _action = pre_read(&pipeline, &mut ctx).await;
+    let action = pipeline.execute_http_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(&action, FilterAction::Reject(rejection) if rejection.status == 401),
+        "a branch rejoining at the end must not admit the request: {action:?}"
+    );
+    assert_eq!(
+        ctx.executed_filter_indices,
+        vec![true, true],
+        "the holder must stay paired with its on_response"
+    );
+}
+
+#[tokio::test]
 async fn an_unshielded_or_post_request_rejection_is_not_held() {
     let unshielded = test_pipeline(
         BodyCapabilities::default(),
