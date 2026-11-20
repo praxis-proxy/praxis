@@ -43,7 +43,11 @@ jobs:
 
   fuzz:
     if: github.event_name != 'pull_request'
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     permissions:
       contents: read
@@ -55,7 +59,7 @@ jobs:
       - name: Set up Rust
         uses: praxis-proxy/conventions/.github/actions/setup-rust-lint@2a0d28ddd3690ed73347ddbe59d08dac02f604ce # v0.5.0
         with:
-          cache-suffix: fuzz
+          cache-suffix: fuzz-${{ matrix.runner }}
 
       - name: Install cargo-fuzz
         # setup-rust-lint's rust-cache also restores ~/.cargo/bin, so a
@@ -77,7 +81,9 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: fuzz-artifacts
+          # Runner label in the name keeps the matrix legs' uploads from
+          # colliding (same-named artifacts clobber each other).
+          name: fuzz-artifacts-${{ matrix.runner }}
           path: tests/fuzz/artifacts/
           if-no-files-found: ignore
 
@@ -91,7 +97,14 @@ jobs:
 
   fuzz-build:
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-24.04
+    # Same matrix as the fuzz job: a PR should prove the fuzz targets still
+    # compile on both SIMD backends (SSE2 on x86_64, NEON on aarch64), not
+    # only the backend the x86_64 runner happens to build.
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     permissions:
       contents: read
@@ -103,7 +116,7 @@ jobs:
       - name: Set up Rust
         uses: praxis-proxy/conventions/.github/actions/setup-rust-lint@2a0d28ddd3690ed73347ddbe59d08dac02f604ce # v0.5.0
         with:
-          cache-suffix: fuzz
+          cache-suffix: fuzz-${{ matrix.runner }}
 
       - name: Install cargo-fuzz
         # Same version check as the fuzz job above: a cached binary of a
