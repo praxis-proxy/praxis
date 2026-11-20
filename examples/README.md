@@ -197,6 +197,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | [circuit-breaker.yaml](configs/traffic-management/circuit-breaker.yaml) | Prevents cascading failures by tracking consecutive upstream errors per cluster |
 | [cluster-application-metadata.yaml](configs/traffic-management/cluster-application-metadata.yaml) | Tags an upstream cluster with opaque application metadata that consuming filters interpret |
 | [cluster-base-path.yaml](configs/traffic-management/cluster-base-path.yaml) | Prepends a path to the upstream request for the cluster the load balancer selected, so one gateway can front several upstreams that each serve the same API under their own prefix |
+| [cluster-max-connections.yaml](configs/traffic-management/cluster-max-connections.yaml) | Caps the concurrent in-flight requests the load balancer will send to one cluster, so a single slow upstream cannot consume all available capacity |
 | [cluster-references.yaml](configs/traffic-management/cluster-references.yaml) | An inline load-balancer cluster that shares its name with a top-level declaration may omit its endpoints: validation fills them in from the declaration, so the routed addresses and the health-checked addresses cannot drift apart |
 | [endpoint-selector.yaml](configs/traffic-management/endpoint-selector.yaml) | Selects an upstream endpoint from a trusted mutation source (e.g. external processing) |
 | [grpc-detection.yaml](configs/traffic-management/grpc-detection.yaml) | Detects gRPC requests from the content-type header and promotes the variant to filter metadata and results |
@@ -206,6 +207,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | [hedged-requests.yaml](configs/traffic-management/hedged-requests.yaml) | Races one idempotent request across two endpoints and returns the first 2xx, 3xx, or 4xx response |
 | [hostname-upstream.yaml](configs/traffic-management/hostname-upstream.yaml) | Demonstrates using DNS hostnames instead of IP addresses for upstream endpoints |
 | [hosts.yaml](configs/traffic-management/hosts.yaml) | One listener serves multiple domains |
+| [http-query.yaml](configs/traffic-management/http-query.yaml) | Forwards body-bearing QUERY requests with bounded retries and explicit browser CORS and CSRF settings for a read-only query resource |
 | [iterative-request-router-failover.yaml](configs/traffic-management/iterative-request-router-failover.yaml) | Demonstrates provider failover using the iterative_request_router filter |
 | [iterative-request-router-origin-failover.yaml](configs/traffic-management/iterative-request-router-origin-failover.yaml) | Demonstrates origin-aware failover: only an upstream 429 (rate limit) triggers the fallback |
 | [least-connections.yaml](configs/traffic-management/least-connections.yaml) | Routes each request to the backend with the fewest in-flight requests |

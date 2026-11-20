@@ -8,19 +8,28 @@ local report predicts a clean scan. The build targets (`make release-fips`,
 [Getting Started](getting-started.md#fips-build-and-compliance-check), and
 the operator guide is [FIPS 140-3](../operating/fips.md).
 
-The report, the image verification and the signature-store setup are
-`cargo xtask fips` commands (`xtask/src/fips/`) with Makefile wrappers. The
-Makefile builds xtask without its default features (`XTASK_FIPS`), so these
-targets never compile the standard proxy build; the report stage of
-`Containerfile.fips` runs the same invocation.
+The report, the image verification, the signature-store setup and the host
+attestation are [`cargo fips-check`](https://github.com/praxis-proxy/cargo-fips-check)
+commands with Makefile wrappers. It is a separate tool, shared with other Rust
+projects: the checks are its own, and [`fips-check.toml`](../../fips-check.toml)
+at the workspace root tells it what is specific to this tree (the shipped
+package, the paths the source guards scan, where a denied crate usually comes
+from, what the unit tests may link). The Makefile installs it at a pinned
+commit (`FIPS_CHECK_REV`) under `target/fips/tools` on first use; set
+`FIPS_CHECK` to use another build. The toolchain stage of `Containerfile.fips`
+installs the same commit, and `make fips-deps` fails while the two differ.
+
+Only the runtime probe is specific to Praxis and remains `cargo xtask fips`
+(`xtask/src/fips/`). The Makefile builds xtask without its default features
+(`XTASK_FIPS`), so it never compiles the standard proxy build.
 
 | Command | Makefile | Purpose |
 |---|---|---|
-| `cargo xtask fips report [--deps-only] [--features LIST] [--offline] [--out FILE] [BINARY]` | `fips-deps`, `fips-report`, `fips-check` | The compliance report (below). Exits 1 while findings remain. |
-| `cargo xtask fips verify-image [--pinned-in CONTAINERFILE] REFERENCE` | `fips-verify-image`, run first by `container-fips` and `fips-check` | Refuses a base image that is not digest-pinned, not from `registry.access.redhat.com`, or not signed by Red Hat's release key; with `--pinned-in`, also checks that the supported UBI base stage consumes the matching named digest argument and its default matches the verified reference. This checks the recipe and defaults, not arbitrary build-argument overrides or adversarial source changes. |
-| `cargo xtask fips signature-store [--install]` | `fips-signature-store` | Checks that podman's `registries.d` names Red Hat's signature store, without which every Red Hat image looks unsigned. `--install` adds the bundled entry for the current user where the podman packaging ships none (Debian, Ubuntu, GitHub's runners). CI runs it before `fips-verify-image`. |
+| `cargo fips-check report [--deps-only] [--features LIST] [--offline] [--out FILE] [BINARY]` | `fips-deps`, `fips-report`, `fips-check` | The compliance report (below). Exits 1 while findings remain. |
+| `cargo fips-check verify-image [--pinned-in CONTAINERFILE] REFERENCE` | `fips-verify-image`, run first by `container-fips` and `fips-check` | Refuses a base image that is not digest-pinned, not from `registry.access.redhat.com`, or not signed by Red Hat's release key; with `--pinned-in`, also checks that the supported UBI base stage consumes the matching named digest argument and its default matches the verified reference. This checks the recipe and defaults, not arbitrary build-argument overrides or adversarial source changes. |
+| `cargo fips-check signature-store [--install]` | `fips-signature-store` | Checks that podman's `registries.d` names Red Hat's signature store, without which every Red Hat image looks unsigned. `--install` adds the bundled entry for the current user where the podman packaging ships none (Debian, Ubuntu, GitHub's runners). CI runs it before `fips-verify-image`. |
 | `check-payload scan image ...` | `fips-scanner`, `fips-scan` | Red Hat's own scanner at a pinned revision, run on the FIPS image with warnings fatal. This is the actual gate for what is in the image. |
-| `cargo xtask fips host-check [--image IMAGE] [--require-certified] [--out FILE] [--json FILE]` | `fips-host-check` | On a FIPS host: attest the kernel flag, `fips=1`, the crypto policy, `fips-mode-setup --check` and the module the host's OpenSSL loads; with `--image`, the crypto policy podman propagated into the container and the build of `fips.so` the image carries, looked up in `certified-modules.json`. Exit 1 on any unmet requirement. |
+| `cargo fips-check host-check [--image IMAGE] [--require-certified] [--out FILE] [--json FILE]` | `fips-host-check` | On a FIPS host: attest the kernel flag, `fips=1`, the crypto policy, `fips-mode-setup --check` and the module the host's OpenSSL loads; with `--image`, the crypto policy podman propagated into the container and the build of `fips.so` the image carries, looked up in the list of module builds the tool carries. Exit 1 on any unmet requirement. |
 | `cargo xtask fips runtime-probe IMAGE [--toolchain-image IMAGE] [--host-cargo] [--log FILE]` | `fips-runtime-probe` | On a FIPS host: start the image under `PRAXIS_REQUIRE_FIPS=1` with a TLS listener, run the listener probes of the integration suite against it (inside the toolchain image, or with the host's cargo), and check the startup status line. |
 
 ## The FIPS host run
@@ -154,8 +163,8 @@ the runtime probe signs its own with keys generated for the run.
 and, separately, the unit-test graph `make test-fips` compiles. A test edge
 may not add a feature to a crypto-selecting crate (`jsonwebtoken`, the Policy
 crates, rustls, openssl), may never bring in `aws-lc-rs`, and may bring in
-another denied crate only with a reason in `TEST_ONLY`
-(`xtask/src/fips/test_graph.rs`).
+another denied crate only with a reason under `[test_graph.test_only]` in
+`fips-check.toml`.
 
 **The fixtures.** `tests/integration/fixtures/fips/` holds a short RSA key
 and a SHA-1-signed certificate, with the commands that made them in its
@@ -188,15 +197,21 @@ infrastructure only: the application never activates a provider itself.
 The `fips-host` job of the `FIPS` workflow runs on the self-hosted runner
 labeled `fips` and `rhel`: a RHEL 9 host in FIPS mode with `git`, `make`,
 `podman`, `gnupg2`, `gcc`, `gcc-c++`, `cmake` and `openssl-devel` installed
-(the host-side commands are `cargo xtask fips` and compile there, and
-`verify-image` checks Red Hat's signatures through gpg; the suites compile
-inside the toolchain image). The runner's group must grant this public
+(the host-side commands, `cargo fips-check` and `cargo xtask fips`, compile
+there, and `verify-image` checks Red Hat's signatures through gpg; the suites
+compile inside the toolchain image). The runner's group must grant this public
 repository access, which GitHub does not do by default. Its steps are the composite action
 `.github/actions/fips-host`, so the release workflow can run the same checks
 against a pushed image.
 
-It tests the exact image the hosted `ubi-image` job built and scanned: that
-job saves the image as an artifact with its id (`make fips-image-save`), and
+The hosted `ubi-image` job is the
+[cargo-fips-check action](https://github.com/praxis-proxy/cargo-fips-check#github-action),
+pinned by commit: the dependency report, the base image verification, the
+build and report on UBI 9, the runtime image, one run of it and the scan,
+followed here by the Policy startup scenarios.
+
+The runner tests the exact image that job built and scanned: the action
+saves the image as an artifact with its id (as `make fips-image-save` does), and
 the runner loads it and checks the id against the one the hosted job
 recorded (`make fips-image-load`). A self-hosted runner must never run a
 fork's code, so on pull requests the job runs only for branches of this
@@ -225,32 +240,19 @@ Each finding says why the scanner cares, where to look and what to do.
 way, after checking that the `CARGO_FEATURES` default in `Containerfile.fips`
 matches `FIPS_FEATURES`, and `make lint` runs `make fips-deps`.
 
-## Data compiled into xtask
+## Bundled data
 
-From `xtask/assets/fips/`:
+Red Hat's release key, the `registries.d` entry for its signature store and
+the list of FIPS provider module builds with their standing at NIST are
+compiled into `cargo fips-check`; their provenance is in
+[its README](https://github.com/praxis-proxy/cargo-fips-check#bundled-data).
+A change to any of them is a change to that tool, picked up here by moving
+`FIPS_CHECK_REV` (and `CARGO_FIPS_CHECK_REV` in `Containerfile.fips`).
 
-| File | Purpose |
-|---|---|
-| `redhat-release-key-2.asc` | Red Hat, Inc. (release key 2), the GPG key Red Hat signs its container images with. See provenance below. |
-| `registry.access.redhat.com.yaml` | The `registries.d` entry that tells podman where Red Hat's signature store is. podman reads one `registries.d`: `~/.config/containers/registries.d` when it exists, else `/etc/containers/registries.d`. `verify-image` checks that this directory names the store, and `signature-store --install` writes the file into the user's directory when it does not. Fedora and RHEL ship the same entry in containers-common; Debian and Ubuntu ship no `registries.d` at all. |
-| `fips-provider.cnf` | An `OPENSSL_CONF` that activates the RHEL FIPS provider for one process, so the report can probe FIPS behavior on hosts that are not in FIPS mode. Test infrastructure only; the application never enables FIPS itself. |
-| `certified-modules.json` | The builds of Red Hat's FIPS provider module, by the version string the module reports, with their standing at NIST: on an active certificate, in validation, or historical, each with the packages that carry it and the source that was checked. `host-check` looks the loaded build up here. Re-verify the sources whenever a UBI pin or a RHEL release changes, and add new builds as Red Hat ships them. |
-
-### Provenance of the signing key
-
-`redhat-release-key-2.asc` was downloaded on 2026-09-22 from
-`https://access.redhat.com/security/data/fd431d51.txt`. Its fingerprint,
-`567E 347A D004 4ADE 55BA 8A5F 199E 2F91 FD43 1D51`, matches the one Red Hat
-publishes for "Red Hat, Inc. (release key 2)" at
-`https://access.redhat.com/security/team/key`. `verify-image` recomputes the
-fingerprint on every run (RFC 4880 v4: SHA-1 over the public key packet, in
-Rust) and stops if it differs; `cargo test -p xtask fips` checks the same.
-podman's signature check needs gnupg (it verifies `signedBy` policies through
-gpgme), and `verify-image` checks for it first.
-
-The copy of this key inside the UBI image is an older export that lacks the
-binding for the subkey Red Hat now signs with, so the published file is used
-instead.
+One file stays in this tree, `xtask/assets/fips/fips-provider.cnf`: an
+`OPENSSL_CONF` that activates the RHEL FIPS provider for one process, which
+the FIPS test targets use on hosts that are not in FIPS mode. Test
+infrastructure only; the application never enables FIPS itself.
 
 ## cargo-auditable
 
@@ -337,7 +339,7 @@ it:
 ```console
 curl -sI -H 'Accept: application/vnd.docker.distribution.manifest.list.v2+json' \
   https://registry.access.redhat.com/v2/ubi9/ubi/manifests/latest | grep -i docker-content-digest
-cargo xtask fips verify-image registry.access.redhat.com/ubi9/ubi@sha256:<new digest>
+target/fips/tools/bin/cargo-fips-check verify-image registry.access.redhat.com/ubi9/ubi@sha256:<new digest>
 ```
 
 Update both files only once verification passes. `make fips-verify-image`

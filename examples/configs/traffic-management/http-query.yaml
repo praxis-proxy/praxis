@@ -1,0 +1,60 @@
+# HTTP QUERY
+#
+# Forwards body-bearing QUERY requests with bounded retries and explicit
+# browser CORS and CSRF settings for a read-only query resource.
+#
+# Usage:
+#   # Start QUERY-capable upstreams on ports 3001 and 3002.
+#   cargo run -p praxis-proxy -- -c examples/configs/traffic-management/http-query.yaml
+#   curl -X QUERY http://localhost:8080/products \
+#     -H 'Content-Type: application/json' -d '{"category":"books"}'
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: cors
+        allow_origins: ["https://app.example.com"]
+        allow_methods: [QUERY]
+        allow_headers: [Content-Type]
+
+      # QUERY is safe under RFC 10008. The upstream must implement read-only
+      # query semantics; declaring it here bypasses this filter's origin check.
+      - filter: csrf
+        trusted_origins: ["https://app.example.com"]
+        safe_methods: [GET, HEAD, OPTIONS, QUERY]
+
+      - filter: headers
+        request_set:
+          - name: X-Query-Processed
+            value: "true"
+        conditions:
+          - when:
+              methods: [QUERY]
+
+      - filter: router
+        routes:
+          - path_prefix: /products
+            cluster: backend
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            load_balancer_strategy: round_robin
+            endpoints:
+              - "127.0.0.1:3001"
+              - "127.0.0.1:3002"
+            retry_policy:
+              max_retries: 1
+              retriable_conditions: [connect_failure, reset, status_5xx]
+              retry_body_limit_bytes: 65536 # 64 KiB
+              backoff:
+                base_interval_ms: 25
+                max_interval_ms: 250
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends
