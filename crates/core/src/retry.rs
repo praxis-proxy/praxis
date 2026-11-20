@@ -42,10 +42,13 @@ use std::{
         Arc, OnceLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
-use crate::config::RetryBudgetConfig;
+use rand::RngExt as _;
+use tracing::debug;
+
+use crate::config::{BackoffConfig, RetriableCondition, RetryBudgetConfig, RetryPolicy};
 
 // -----------------------------------------------------------------------------
 // RetryBudget
@@ -421,6 +424,207 @@ pub const fn reused_only_replay_safe(client_reused: bool, retry_buffer_truncated
 }
 
 // -----------------------------------------------------------------------------
+// Retry Decision
+// -----------------------------------------------------------------------------
+
+/// Classification of an upstream failure outcome.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RetryOutcome {
+    /// TCP/TLS connect failure.
+    ConnectFailure,
+    /// Connection reset by peer.
+    Reset,
+    /// HTTP/2 refused stream.
+    RefusedStream,
+    /// Upstream returned an HTTP status code.
+    StatusCode(u16),
+    /// Any error not covered by an explicit classification.
+    ///
+    /// Never retriable: broadening unknown error types into a retriable
+    /// class would silently retry internal errors, proxy bugs, and other
+    /// conditions no policy opted into.
+    Other,
+}
+
+/// Decision returned by [`should_retry`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RetryDecision {
+    /// Retry is allowed; the caller applies `backoff`, then re-attempts.
+    Retry {
+        /// Delay before the next attempt.
+        backoff: Duration,
+    },
+    /// Retry is not allowed.
+    DoNotRetry,
+}
+
+/// The facts about a failed attempt that [`should_retry`] weighs.
+#[derive(Clone, Copy, Debug)]
+pub struct RetryAttempt {
+    /// Retries already made for this request (0 after the first attempt).
+    pub retries: u32,
+    /// Whether the request method is idempotent.
+    pub idempotent: bool,
+    /// Size of the body a retry would replay, in bytes.
+    pub replay_body_bytes: u64,
+    /// Whether an authoritative copy of the body exists to replay.
+    pub replay_safe: bool,
+    /// Time since the logical request started.
+    pub elapsed: Duration,
+}
+
+/// Return whether `outcome` is retriable under `policy`.
+///
+/// `retriable_status_codes` and `Status5xx` are OR-combined: either match
+/// independently triggers retriability.
+#[must_use]
+pub fn is_retriable(policy: &RetryPolicy, outcome: RetryOutcome) -> bool {
+    match outcome {
+        RetryOutcome::ConnectFailure => policy
+            .retriable_conditions
+            .contains(&RetriableCondition::ConnectFailure),
+        RetryOutcome::Reset => policy.retriable_conditions.contains(&RetriableCondition::Reset),
+        RetryOutcome::RefusedStream => policy.retriable_conditions.contains(&RetriableCondition::RefusedStream),
+        RetryOutcome::StatusCode(code) => {
+            let in_list = policy.retriable_status_codes.iter().any(|listed| listed.get() == code);
+            let is_5xx =
+                (500..600).contains(&code) && policy.retriable_conditions.contains(&RetriableCondition::Status5xx);
+            in_list || is_5xx
+        },
+        RetryOutcome::Other => false,
+    }
+}
+
+/// Decide whether a failed attempt is retried, and after what delay.
+///
+/// A passing budget check consumes one token from `budget`; callers must not
+/// re-invoke this for the same failure.
+///
+/// Guards (all must pass):
+/// - outcome is retriable under the policy
+/// - `attempt.retries < policy.max_retries`
+/// - an authoritative replay copy of the body exists
+/// - body size ≤ `retry_body_limit_bytes`
+/// - method is idempotent OR `allow_non_idempotent`
+/// - `elapsed < request_timeout` (when configured)
+/// - retry budget has remaining capacity (when `budget` is provided)
+///
+/// ```
+/// use std::time::Duration;
+///
+/// use praxis_core::{
+///     config::RetryPolicy,
+///     retry::{RetryAttempt, RetryDecision, RetryOutcome, should_retry},
+/// };
+///
+/// let attempt = RetryAttempt {
+///     retries: 0,
+///     idempotent: true,
+///     replay_body_bytes: 0,
+///     replay_safe: true,
+///     elapsed: Duration::ZERO,
+/// };
+/// let decision = should_retry(
+///     &attempt,
+///     &RetryPolicy::legacy_default(),
+///     RetryOutcome::ConnectFailure,
+///     None,
+/// );
+/// assert!(matches!(decision, RetryDecision::Retry { .. }));
+/// ```
+#[must_use]
+pub fn should_retry(
+    attempt: &RetryAttempt,
+    policy: &RetryPolicy,
+    outcome: RetryOutcome,
+    budget: Option<&ClusterRetryState>,
+) -> RetryDecision {
+    if !request_allows_retry(attempt, policy, outcome) {
+        return RetryDecision::DoNotRetry;
+    }
+    if let Some(state) = budget
+        && !state.try_admit_retry()
+    {
+        debug!("skipping retry: budget exhausted");
+        return RetryDecision::DoNotRetry;
+    }
+    let backoff = compute_backoff(attempt.retries.saturating_add(1), policy.backoff.as_ref());
+    RetryDecision::Retry { backoff }
+}
+
+/// Every [`should_retry`] guard that does not consume budget.
+fn request_allows_retry(attempt: &RetryAttempt, policy: &RetryPolicy, outcome: RetryOutcome) -> bool {
+    if !is_retriable(policy, outcome) {
+        debug!(?outcome, "outcome not retriable under policy");
+        return false;
+    }
+    if attempt.retries >= policy.effective_max_retries() {
+        debug!(
+            retries = attempt.retries,
+            max = policy.effective_max_retries(),
+            "retry limit reached"
+        );
+        return false;
+    }
+    if !attempt.replay_safe {
+        debug!("skipping retry: streamed writer output was not retained");
+        return false;
+    }
+    body_and_method_allow_retry(attempt, policy)
+}
+
+/// The body-size, idempotency, and overall-timeout guards.
+fn body_and_method_allow_retry(attempt: &RetryAttempt, policy: &RetryPolicy) -> bool {
+    let body_limit = policy.body_limit_bytes();
+    if attempt.replay_body_bytes > body_limit {
+        debug!(
+            body_bytes = attempt.replay_body_bytes,
+            limit = body_limit,
+            "skipping retry: body exceeds replay limit"
+        );
+        return false;
+    }
+    if !attempt.idempotent && !policy.allow_non_idempotent() {
+        debug!("skipping retry: non-idempotent method without opt-in");
+        return false;
+    }
+    if let Some(timeout_ms) = policy.request_timeout_ms
+        && attempt.elapsed >= Duration::from_millis(timeout_ms)
+    {
+        debug!(
+            elapsed_ms = attempt.elapsed.as_millis(),
+            timeout_ms, "skipping retry: overall request timeout exceeded"
+        );
+        return false;
+    }
+    true
+}
+
+/// Compute full-jitter exponential backoff for the given 1-based attempt.
+///
+/// ```text
+/// delay = min(base * 2^(attempt-1), max)
+/// jittered = random_uniform(0, delay)
+/// ```
+#[must_use]
+pub fn compute_backoff(attempt: u32, config: Option<&BackoffConfig>) -> Duration {
+    let cfg = config.cloned().unwrap_or_default();
+    if attempt == 0 {
+        return Duration::ZERO;
+    }
+
+    let exp = attempt.saturating_sub(1).min(63);
+    let scaled = cfg.base_interval_ms.saturating_mul(1_u64 << exp);
+    let capped = scaled.min(cfg.max_interval_ms);
+    if capped == 0 {
+        return Duration::ZERO;
+    }
+
+    let jittered = rand::rng().random_range(0..=capped);
+    Duration::from_millis(jittered)
+}
+
+// -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
 
@@ -429,7 +633,156 @@ pub const fn reused_only_replay_safe(client_reused: bool, retry_buffer_truncated
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::min_ident_chars, reason = "tests")]
 mod tests {
     use super::*;
-    use crate::config::BudgetPercent;
+    use crate::config::{BudgetPercent, HttpStatusCode};
+
+    // An idempotent first attempt with a small replayable body.
+    fn attempt() -> RetryAttempt {
+        RetryAttempt {
+            retries: 0,
+            idempotent: true,
+            replay_body_bytes: 0,
+            replay_safe: true,
+            elapsed: Duration::ZERO,
+        }
+    }
+
+    #[test]
+    fn status5xx_and_explicit_codes_are_or_combined() {
+        let policy = RetryPolicy {
+            retriable_status_codes: vec![HttpStatusCode::try_from(429).unwrap()],
+            retriable_conditions: vec![RetriableCondition::Status5xx],
+            ..RetryPolicy::legacy_default()
+        };
+        assert!(is_retriable(&policy, RetryOutcome::StatusCode(503)), "5xx condition");
+        assert!(is_retriable(&policy, RetryOutcome::StatusCode(429)), "explicit code");
+        assert!(!is_retriable(&policy, RetryOutcome::StatusCode(404)), "neither");
+        assert!(!is_retriable(&policy, RetryOutcome::Other), "other is never retriable");
+    }
+
+    #[test]
+    fn legacy_policy_retries_an_idempotent_connect_failure() {
+        let decision = should_retry(
+            &attempt(),
+            &RetryPolicy::legacy_default(),
+            RetryOutcome::ConnectFailure,
+            None,
+        );
+        assert!(
+            matches!(decision, RetryDecision::Retry { .. }),
+            "legacy retries connect failures"
+        );
+    }
+
+    #[test]
+    fn should_retry_respects_max_retries() {
+        let at_limit = RetryAttempt {
+            retries: 3,
+            ..attempt()
+        };
+        let decision = should_retry(
+            &at_limit,
+            &RetryPolicy::legacy_default(),
+            RetryOutcome::ConnectFailure,
+            None,
+        );
+        assert_eq!(decision, RetryDecision::DoNotRetry, "retry limit reached");
+    }
+
+    #[test]
+    fn should_retry_blocks_non_idempotent_without_opt_in() {
+        let post = RetryAttempt {
+            idempotent: false,
+            ..attempt()
+        };
+        let without = should_retry(
+            &post,
+            &RetryPolicy::legacy_default(),
+            RetryOutcome::ConnectFailure,
+            None,
+        );
+        assert_eq!(without, RetryDecision::DoNotRetry, "non-idempotent needs opt-in");
+        let opted_in = RetryPolicy {
+            allow_non_idempotent: Some(true),
+            ..RetryPolicy::legacy_default()
+        };
+        let with = should_retry(&post, &opted_in, RetryOutcome::ConnectFailure, None);
+        assert!(matches!(with, RetryDecision::Retry { .. }), "opt-in allows it");
+    }
+
+    #[test]
+    fn should_retry_blocks_oversized_or_unreplayable_bodies() {
+        let policy = RetryPolicy::legacy_default();
+        let big = RetryAttempt {
+            replay_body_bytes: 100_000,
+            ..attempt()
+        };
+        assert_eq!(
+            should_retry(&big, &policy, RetryOutcome::ConnectFailure, None),
+            RetryDecision::DoNotRetry,
+            "body over the replay limit"
+        );
+        let unsafe_replay = RetryAttempt {
+            replay_safe: false,
+            ..attempt()
+        };
+        assert_eq!(
+            should_retry(&unsafe_replay, &policy, RetryOutcome::ConnectFailure, None),
+            RetryDecision::DoNotRetry,
+            "no authoritative replay copy"
+        );
+    }
+
+    #[test]
+    fn should_retry_blocks_after_request_timeout() {
+        let policy = RetryPolicy {
+            request_timeout_ms: Some(1_000),
+            ..RetryPolicy::legacy_default()
+        };
+        let late = RetryAttempt {
+            elapsed: Duration::from_secs(10),
+            ..attempt()
+        };
+        assert_eq!(
+            should_retry(&late, &policy, RetryOutcome::ConnectFailure, None),
+            RetryDecision::DoNotRetry,
+            "overall request timeout passed"
+        );
+    }
+
+    #[test]
+    fn should_retry_blocks_when_budget_exhausted() {
+        let state = ClusterRetryState::new(Some(&RetryBudgetConfig {
+            percent: BudgetPercent::try_from(20.0).unwrap(),
+            min_retries_per_second: 1,
+        }));
+        while state.budget().try_acquire() {}
+        state.budget().last_refill_ms.store(now_ms(), Ordering::Relaxed);
+        assert_eq!(
+            should_retry(
+                &attempt(),
+                &RetryPolicy::legacy_default(),
+                RetryOutcome::ConnectFailure,
+                Some(&state)
+            ),
+            RetryDecision::DoNotRetry,
+            "budget exhausted"
+        );
+    }
+
+    #[test]
+    fn compute_backoff_respects_max() {
+        let cfg = BackoffConfig {
+            base_interval_ms: 25,
+            max_interval_ms: 100,
+        };
+        assert_eq!(compute_backoff(0, Some(&cfg)), Duration::ZERO, "attempt 0 has no delay");
+        for attempt in 1..=10 {
+            assert!(
+                compute_backoff(attempt, Some(&cfg)) <= Duration::from_millis(100),
+                "attempt {attempt} capped at max"
+            );
+        }
+    }
 
     fn budget(percent: f64, min_rps: u32) -> RetryBudget {
         RetryBudget::new(&RetryBudgetConfig {
