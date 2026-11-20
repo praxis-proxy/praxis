@@ -10,9 +10,10 @@ description: >-
 # Runner prerequisites (docs/developing/fips.md): a RHEL 9 host in FIPS mode
 # with git, make, podman, gnupg2, gcc, gcc-c++, cmake and openssl-devel
 # installed, checked up front by .github/actions/fips-runner-check; the Rust
-# toolchain is set up here. The host-side commands (make fips-host-check, the
-# probe orchestration) are `cargo xtask fips` and compile on the host; the
-# test suites compile and run inside the toolchain image.
+# toolchain is set up here. The host-side commands (make fips-host-check, which
+# is `cargo fips-check`, and the probe orchestration, which is `cargo xtask
+# fips`) compile on the host; the test suites compile and run inside the
+# toolchain image.
 # ------------------------------------------------------------------------------
 
 inputs:
@@ -31,8 +32,8 @@ inputs:
 runs:
   using: composite
   steps:
-      # xtask (make fips-host-check, make fips-runtime-probe) compiles on the
-      # host; the suites do not.
+      # cargo-fips-check (make fips-host-check) and xtask (make
+      # fips-runtime-probe) compile on the host; the suites do not.
     - name: Set up Rust
       uses: praxis-proxy/conventions/.github/actions/setup-rust@c5837c3fdd35066b05d337594fabe9d641d08df2 # v0.3.0
       with:

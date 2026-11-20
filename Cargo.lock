@@ -2821,15 +2821,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "object"
-version = "0.41.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11dbdb66876026054e4ffc8d757d862bdf5df5aebd5c0b95a41f17832a94f7d2"
-dependencies = [
- "memchr",
-]
-
-[[package]]
 name = "oid-registry"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6223,9 +6214,7 @@ dependencies = [
  "cargo_metadata",
  "chrono",
  "clap",
- "flate2",
  "nix",
- "object 0.41.0",
  "openssl",
  "plotters",
  "praxis-proxy",
@@ -6233,7 +6222,6 @@ dependencies = [
  "praxis-proxy-core",
  "praxis-tests-rollout",
  "quote",
- "regex",
  "serde",
  "serde_json",
  "syn 3.0.10",

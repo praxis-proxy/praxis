@@ -433,6 +433,39 @@ fn cors_preflight_disallowed_headers_rejected() {
     );
 }
 
+#[test]
+fn cors_query_preflight_requires_an_explicit_method_allowlist() {
+    let backend = start_backend_with_shutdown("ok");
+    for enabled in [false, true] {
+        let methods = if enabled {
+            "        allow_methods: [QUERY]\n"
+        } else {
+            ""
+        };
+        let block = format!(
+            "      - filter: cors\n        allow_origins: [\"https://app.example.com\"]\n        allow_headers: [Content-Type]\n{methods}"
+        );
+        let config = Config::from_yaml(&cors_yaml(free_port(), backend.port(), &block)).unwrap();
+        let proxy = start_proxy(&config);
+
+        let raw = http_send(
+            proxy.addr(),
+            "OPTIONS /products HTTP/1.1\r\nHost: localhost\r\nOrigin: https://app.example.com\r\nAccess-Control-Request-Method: QUERY\r\nAccess-Control-Request-Headers: Content-Type\r\nConnection: close\r\n\r\n",
+        );
+
+        assert_eq!(parse_status(&raw), 204, "preflight should complete: {raw}");
+        assert_eq!(
+            parse_header(&raw, "access-control-allow-methods"),
+            enabled.then(|| "QUERY".to_owned()),
+            "QUERY should be advertised only when explicitly allowed"
+        );
+        assert_eq!(
+            parse_header(&raw, "access-control-allow-origin"),
+            enabled.then(|| "https://app.example.com".to_owned())
+        );
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------

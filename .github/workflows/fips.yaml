@@ -21,12 +21,13 @@ name: FIPS
 # requests it runs only for same-repository branches; it also runs on every
 # push to main, nightly, and on dispatch.
 #
-# Everything runs through the Makefile targets developers use locally (see
-# docs/developing/fips.md), with podman: Red Hat's image signatures can only
-# be verified with podman, and the scanner reads podman's image store.
-# Ubuntu's podman packaging ships no registries.d entry for Red Hat's
-# registry, so the hosted job first tells podman where the signatures live
-# (make fips-signature-store), as a developer on Debian or Ubuntu would.
+# The hosted gate is the cargo-fips-check action
+# (https://github.com/praxis-proxy/cargo-fips-check), which other Rust
+# projects share: the same checks the Makefile's FIPS targets run locally
+# through `cargo fips-check` (see docs/developing/fips.md), with podman,
+# since Red Hat's image signatures can only be verified with podman and the
+# scanner reads podman's image store. What is specific to Praxis stays here:
+# the Policy startup scenarios and everything on the FIPS host.
 
 on:
   push:
@@ -64,64 +65,48 @@ jobs:
       - name: Set up Rust
         uses: praxis-proxy/conventions/.github/actions/setup-rust@f671c1215f89562d286310a6cabdcbaa5da9605c # v0.4.0
         with:
-          # Only xtask (without its default features) is built on the host;
-          # keep that off the shared cache key and skip caching its target.
+          # Nothing of the workspace is built on the host; keep this job off
+          # the shared cache key and skip caching its target.
           cache-suffix: fips
           cache-target: "false"
 
-      - name: Set up Go (builds Red Hat's scanner)
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: "1.26"
-          # The scanner is fetched by make fips-scanner and vendors its modules.
-          cache: false
-
-      - name: Build Red Hat's scanner (check-payload) at the pinned revision
-        run: make fips-scanner
-
-      - name: Install the OpenShift CLI (check-payload refuses to scan without oc)
-        env:
-          # A fixed release from Red Hat's mirror; the digest is the one in that
-          # release's sha256sum.txt, which is signed with Red Hat's release key 2.
-          OC_URL: https://mirror.openshift.com/pub/openshift-v4/x86_64/clients/ocp/4.21.33/openshift-client-linux-amd64-rhel9-4.21.33.tar.gz
-          OC_SHA256: 59b83765c889d9ae8b05ead5e2a4559d913bb24fd9065ab3c08279317da52f67
+      # The digests and the image tag live in the Makefile; the action takes
+      # them from there so they are not repeated here.
+      - name: Read the base image pins and the image tag
+        id: pins
         run: |
-          mkdir -p "$RUNNER_TEMP/oc"
-          curl -sSfL -o "$RUNNER_TEMP/oc.tar.gz" "$OC_URL"
-          echo "$OC_SHA256  $RUNNER_TEMP/oc.tar.gz" | sha256sum -c
-          tar xzf "$RUNNER_TEMP/oc.tar.gz" -C "$RUNNER_TEMP/oc" oc
-          echo "$RUNNER_TEMP/oc" >> "$GITHUB_PATH"
+          {
+            echo "base-images<<EOF"
+            make -s fips-base-images
+            echo "EOF"
+            echo "image=localhost/praxis:$(make -s fips-version)-fips"
+          } >> "$GITHUB_OUTPUT"
 
-      - name: Point podman at Red Hat's signature store (Ubuntu's podman has no entry for it)
-        run: make fips-signature-store
-
-      - name: Verify the Red Hat base images are signed by Red Hat
-        run: make fips-verify-image
-
-      - name: Build on UBI 9 with Red Hat's toolchain and print the compliance report
-        run: make fips-check
+      # In order: the dependency report from the checkout, Red Hat's scanner
+      # (check-payload) built at its pinned revision, the base images verified
+      # as signed by Red Hat and pinned in Containerfile.fips, the build on
+      # UBI 9 with Red Hat's toolchain and its compliance report, the runtime
+      # image, one run of it (which validates its config with the system
+      # OpenSSL), and the scan with warnings fatal. The fips-host job tests
+      # this exact image, not a rebuild: it is saved with its id.
+      - name: Build, report and scan the FIPS image
+        id: save
+        uses: praxis-proxy/cargo-fips-check@a8dae23f90eb77e6890cc86df5ec6cf6da4e2e79 # main
+        with:
+          base-images: ${{ steps.pins.outputs.base-images }}
+          image: ${{ steps.pins.outputs.image }}
+          smoke: podman run --rm --entrypoint praxis "$IMAGE" --validate -c /etc/praxis/config.yaml
+          save-image: target/fips/praxis-fips-image.tar
 
       # Both environments are required: this proves negative startup cases;
       # fips-host proves the same configs retain kernel-enforced FIPS crypto.
+      # After the action, so the base images are already verified and the
+      # toolchain stage is already built.
       - name: Policy startup with configurable providers (all four scenarios)
+        env:
+          # The build the action installed, instead of a second one.
+          FIPS_CHECK: cargo-fips-check
         run: make test-fips-policy-provider
-
-      - name: Build the FIPS runtime image
-        run: make container-fips
-
-      - name: Run the image once (validates its config with the system OpenSSL)
-        run: make fips-smoke
-
-      - name: Scan the image with check-payload (warnings fatal)
-        run: make fips-scan
-
-      # The runner job tests this exact image, not a rebuild: hand it over as
-      # an archive, with its id recorded here so the other job can check it.
-      - name: Save the image for the FIPS runner
-        id: save
-        run: |
-          make fips-image-save
-          echo "image-id=$(cat target/fips/praxis-fips-image.tar.id)" >> "$GITHUB_OUTPUT"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
