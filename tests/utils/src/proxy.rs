@@ -1044,6 +1044,25 @@ impl ReloadableProxyGuard {
 ///
 /// [`ReloadableProxyGuard::reload_until`]: ReloadableProxyGuard::reload_until
 pub fn start_reloadable_proxy(yaml: &str) -> ReloadableProxyGuard {
+    start_reloadable(yaml, None)
+}
+
+/// Start a reloadable proxy using `registry` for initial and reloaded pipelines.
+///
+/// See [`start_reloadable_proxy`] for reload usage.
+///
+/// # Panics
+///
+/// Panics if the config cannot be parsed or the server fails
+/// to start.
+///
+/// [`start_reloadable_proxy`]: start_reloadable_proxy
+pub fn start_reloadable_proxy_with_registry(yaml: &str, registry: FilterRegistry) -> ReloadableProxyGuard {
+    start_reloadable(yaml, Some(registry))
+}
+
+/// Start a reloadable proxy with an optional custom filter registry.
+fn start_reloadable(yaml: &str, registry: Option<FilterRegistry>) -> ReloadableProxyGuard {
     let mut config = Config::from_yaml(yaml).expect("test config should parse");
     // Cap worker threads for the reloadable path: run_server builds the
     // initial runtime from this config's runtime.threads.
@@ -1062,7 +1081,7 @@ pub fn start_reloadable_proxy(yaml: &str) -> ReloadableProxyGuard {
     let config_path = temp_file.path().to_path_buf();
 
     let config_file = ConfigFile::read(&config_path).expect("reloadable test config should remain readable");
-    spawn_process_lifetime_server(config, Some(config_file), &addr);
+    spawn_process_lifetime_server(config, Some(config_file), registry, &addr);
 
     ReloadableProxyGuard {
         addr,
@@ -1072,10 +1091,19 @@ pub fn start_reloadable_proxy(yaml: &str) -> ReloadableProxyGuard {
 }
 
 /// Start a process-lifetime test server while surfacing early errors to its caller.
-pub(crate) fn spawn_process_lifetime_server(config: Config, config_file: Option<ConfigFile>, addr: &str) {
+pub(crate) fn spawn_process_lifetime_server(
+    config: Config,
+    config_file: Option<ConfigFile>,
+    registry: Option<FilterRegistry>,
+    addr: &str,
+) {
     let (sender, receiver) = mpsc::sync_channel(1);
     std::thread::spawn(move || {
-        let result = praxis::try_run_server(config, config_file, None).map_err(|error| error.to_string());
+        let result = match registry {
+            Some(registry) => praxis::try_run_server_with_registry(config, registry, config_file, None),
+            None => praxis::try_run_server(config, config_file, None),
+        }
+        .map_err(|error| error.to_string());
         let _ = sender.send(result);
     });
 

@@ -22,3 +22,6 @@ jobs:
     permissions:
       contents: read
     uses: praxis-proxy/conventions/.github/workflows/supply-chain.yaml@2a0d28ddd3690ed73347ddbe59d08dac02f604ce # v0.5.0
+    secrets:
+      PRAXIS_BOT_APP_ID: ${{ secrets.PRAXIS_BOT_APP_ID }}
+      PRAXIS_BOT_APP_PRIVATE_KEY: ${{ secrets.PRAXIS_BOT_APP_PRIVATE_KEY }}

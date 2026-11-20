@@ -52,6 +52,61 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- The `policy` filter admits at the request head: it runs
+  `ratelimit.pre_identity` and the baseline identity check before any filter
+  reads the body, even one listed before it, so over-limit and
+  unauthenticated requests are rejected without a body read. Entity routes
+  still authorize once the request is classified; `http.request` rules still
+  run in the request phase, on the head identity. Head denials now come
+  before the declared-body-size 413 and inference model and body denials,
+  and inference and pre-read MCP requests resolve the global identity once
+  more. Behind an earlier filter that can answer or reject the request
+  (`cors`, `ip_acl`, `static_response`, `redirect`, ...), the policy admits
+  in the request phase as before, so that filter still runs first. With a
+  pre-read, the pipeline holds the policy's body-phase denial until the
+  request phase reaches it, so the earlier filter answers or rejects first
+  here too, where it used to lose to the policy.
+  `HttpFilter::admits_at_request_head` declares a head hook that may reject,
+  and `HttpFilter::may_end_request` (default true) whether a filter's request
+  phase can reject or answer; built-ins that only continue, such as
+  `forwarded_headers`, `credential_injection` and `headers`, declare false;
+  `cloud_events` with `on: request` keeps true, so its event is still
+  published when the policy would deny the request.
+  When an entity default, group or route sets `replace_inherited`, or
+  `global.defaults.http`, an `http:` route or a group one joins adds
+  authentication, the policy
+  never runs the global gate: the route judges the credential, the head runs
+  the limiter only, the body is buffered until the route decides, and a
+  startup warning names the section. The buffer holds at least
+  `max_buffer_bytes` (inference policies keep `llm.max_request_bytes`),
+  more if another filter asks for more, within the global
+  `body_limits.max_buffer_bytes` and `body_limits.max_request_bytes`; a
+  larger body now gets 413, where a
+  `read_only` policy used to stream it. If the route never judges such a
+  request because the policy's body hook was skipped (a request condition
+  that changes after the body is read, or `failure_mode: open`), the request
+  phase rejects it with 500 instead of forwarding it. Policies with
+  `context_headers` or request conditions keep the previous timing, but in
+  the cases above the route still judges identity alone.
+  Pipeline construction warns when an earlier filter or request conditions
+  move admission out of the head.
+- Routes with `replace_inherited` are now judged by their own
+  authentication steps only, in every pipeline. Pipelines that streamed the
+  body used to also require the global credential, so such a route (or one
+  with `steps: []`) now accepts requests the global steps would have
+  rejected.
+- `grpc_status` arms gRPC error responses at the request head, so a later
+  head denial such as `policy` admission reaches gRPC clients as a
+  `grpc-status`. `HttpFilter::repeats_request_head` declares a head hook whose
+  work `on_request` repeats; such a filter may sit in an
+  `iterative_request_router` step.
+- The FIPS compliance checks (`report`, `verify-image`, `signature-store`,
+  `host-check`) moved out of `cargo xtask fips` into the shared
+  [`cargo fips-check`](https://github.com/praxis-proxy/cargo-fips-check) tool,
+  configured by `fips-check.toml`. The Makefile's FIPS targets install it at a
+  pinned commit and are otherwise unchanged; `cargo xtask fips` keeps only
+  `runtime-probe`. A full report now fails, instead of warning, when the
+  binary is missing, unreadable, not ELF, or cannot be inspected with `ldd`.
 - Temporarily disable KIND rollout acceptance in CI and local commands
   because the cluster exhausts the shared inotify instance budget, pending
   migration to [gateway-controller](https://github.com/praxis-proxy/gateway-controller).
@@ -99,6 +154,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Behavior change:** `/ready` defaults to `admin.readiness: serving`, so a
   serving replica stays ready when a checked cluster has no healthy endpoints.
   Set `admin.readiness: upstreams` to preserve upstream-dependent readiness.
+
+- Treat HTTP QUERY as eligible for automatic retries on both network backends
+  and for configured hedged requests. Existing attempt, body replay, and
+  transport safety limits still apply. Existing retry configurations now apply
+  to QUERY automatically, as do existing Pingora hedge configurations. Origins
+  must honor QUERY's safe, idempotent semantics. Add forwarding, replay, and
+  resource discovery coverage and an HTTP QUERY example with explicit
+  CORS/CSRF settings.
 
 ### Fixed
 
@@ -299,6 +362,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   handshakes remain healthy when that deadline expires without a response.
   Rust consumers matching `HealthCheckType` exhaustively must handle the new
   `Tls` variant even when the feature is disabled.
+- `praxis_cluster_overload_rejects_total{cluster}` counts requests shed by a
+  cluster's `max_connections` ceiling. Kept separate from
+  `praxis_overload_rejects_total`, which covers only the pre-filter
+  protections and carries no cluster label.
+- `praxis_core::retry::ClusterRetryState` gains `try_enter`,
+  `with_max_concurrent` and a `max_concurrent` field, exposing the per-cluster
+  admission counter the ceiling is built on.
+- `praxis_core::retry::AdmissionLease` owns one request's claim on that
+  counter: `claim` takes a slot or reports the cluster full, `release` returns
+  it idempotently, and dropping the lease returns it too. It replaces the
+  `cluster_retry_state` and `cluster_retry_state_released` fields on
+  `HttpFilterContext` and `PingoraRequestCtx` with a single
+  `cluster_admission` field holding the lease. Rust consumers that read or
+  wrote either field must move to the lease.
+- `tcp_load_balancer` rejects a cluster that sets `max_connections` at startup
+  rather than ignoring it: a TCP connection has no status code to shed with.
+  Cap TCP concurrency on the listener instead.
 - Granular Policy Engine Cargo features. `policy-builtins` (on by default)
   is the complete bundle; a `--no-default-features` build names
   `policy-engine` or individual builtins (`policy-api-key`, `policy-jwt`,
@@ -406,6 +486,60 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Cluster admission and selected endpoint counters now return at final response
+  headers even when `response_conditions` skip the load balancer's response
+  hook. Long-lived SSE responses no longer keep a cluster at its
+  `max_connections` ceiling after final headers. Repeated response and fallback
+  cleanup releases each counter only once. Retry reselection clears upstream
+  copies restored by body filters, so final-header cleanup returns the current
+  endpoint and cancellation during backoff cannot release the old endpoint twice.
+- Cluster `max_connections` is now enforced. It was parsed, validated and
+  documented as shedding excess requests with 503, but nothing read it, so a
+  cluster accepted unlimited concurrent requests. The load balancer now claims
+  an in-flight slot before selecting an endpoint and sheds a request that would
+  exceed the ceiling with `503` and `Retry-After: 1`, matching the listener
+  cap. Operators who set `max_connections` expecting it to be inert will start
+  seeing 503s once a cluster saturates; raise or remove the value to restore
+  the previous behaviour. A request pinned by session affinity bypasses
+  endpoint selection and so is neither shed nor counted.
+- A sub-request running a nested pipeline (an `iterative_request_router` step
+  or a callout chain) now returns its cluster admission slot on every exit
+  path. Previously a filter ordered after the step's `load_balancer` that
+  rejected, errored or timed out ended the sub-request before its response
+  phase, leaking the slot permanently; after `max_connections` such
+  sub-requests the cluster answered 503 to everything until the config was
+  reloaded (CWE-772). The nested context now releases the slot, and the
+  endpoint's in-flight count with it, when it is dropped.
+- A terminal response produced after the load balancer ran no longer releases
+  the cluster's in-flight slot twice. The response pipeline runs against a
+  cloned context whose release flag was not carried back, so the `logging`
+  hook released a second time and took another request's slot, letting the
+  ceiling drift loose.
+- An upstream `103 Early Hints`, or any other non-final `1xx`, no longer
+  releases the cluster's in-flight slot. The response pipeline runs once per
+  response head the upstream sends, so an interim head handed the slot back
+  while the request was still being served and the final head released it a
+  second time, taking another request's slot. One `103`-emitting backend was
+  enough to let `max_connections` be exceeded.
+- A request whose client goes away mid-pipeline no longer leaks its cluster
+  in-flight slot. Each phase ran against a cloned context whose state reached
+  the request only at the end of the phase, so a phase cancelled before that
+  point stranded the slot with nothing left holding it, and a cancelled
+  response phase lost the release flag and released a second time, taking
+  another request's slot. After `max_connections` cancellations a cluster
+  answered 503 to everything until the config was reloaded (CWE-772). The
+  slot is now an `AdmissionLease` shared by every phase, which returns it
+  exactly once whether the request finishes or is dropped.
+- A request whose endpoint a preceding filter preset now counts against its
+  cluster's `max_connections` ceiling. The load balancer skips selection when
+  an upstream is already set, and the admission claim sat inside the selection
+  path, so an `endpoint_selector` -> `router` -> `load_balancer` pipeline sent
+  preset requests to a saturated cluster uncounted and unshed. A preset
+  request now takes a slot whenever a router placed it in one of the load
+  balancer's clusters, is shed with `503` and `Retry-After: 1` when that
+  cluster is full, and hands the slot back at the final response without
+  touching the endpoint counter it never took. Session affinity keeps its
+  documented exception.
 - Pingora sub-request connections now respect the cluster
   `idle_timeout_ms` when returned to the pool, avoiding reuse of idle
   connections silently dropped by NAT or firewall state.

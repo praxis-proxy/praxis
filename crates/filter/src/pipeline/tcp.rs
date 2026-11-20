@@ -514,6 +514,7 @@ mod tests {
             request_body_ceiling: None,
             response_body_ceiling: None,
             request_head_filter_indices: Vec::new(),
+            shielded_admitter_indices: Vec::new(),
             request_body_filter_indices: Vec::new(),
             response_body_filter_indices: Vec::new(),
             selected_upstream_request_body_filter_indices: Vec::new(),
