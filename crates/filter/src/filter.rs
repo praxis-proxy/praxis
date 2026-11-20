@@ -142,6 +142,41 @@ pub trait HttpFilter: Send + Sync {
         false
     }
 
+    /// Whether this filter's request-head hook may reject the request.
+    ///
+    /// If `true`, [`on_request`] must also enforce admission: the head hook is
+    /// skipped when this filter has request conditions or an earlier filter can
+    /// end the request. Filters that only publish head metadata leave this `false`.
+    ///
+    /// [`on_request`]: HttpFilter::on_request
+    fn admits_at_request_head(&self) -> bool {
+        false
+    }
+
+    /// Whether [`on_request`] can answer or reject the request, requiring later
+    /// filters to defer head admission (see [`admits_at_request_head`]).
+    ///
+    /// Return `false` when the request hook only continues. Body-hook rejections
+    /// and errors handled by `failure_mode: closed` do not count. Keep `true` if
+    /// the request hook has effects a later rejection must preserve, such as
+    /// publishing an event.
+    ///
+    /// [`on_request`]: HttpFilter::on_request
+    /// [`admits_at_request_head`]: HttpFilter::admits_at_request_head
+    fn may_end_request(&self) -> bool {
+        true
+    }
+
+    /// Whether [`on_request`] provides all request-head behavior too.
+    ///
+    /// Return `true` if the filter supports pipelines without a head phase,
+    /// such as an `iterative_request_router` step.
+    ///
+    /// [`on_request`]: HttpFilter::on_request
+    fn repeats_request_head(&self) -> bool {
+        false
+    }
+
     /// Whether this filter can assign [`HttpFilterContext::cluster`].
     ///
     /// Pipeline validation uses this to detect `load_balancer`

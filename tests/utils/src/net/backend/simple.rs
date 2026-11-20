@@ -503,7 +503,7 @@ fn start_server(mut config: Config) -> u16 {
         }
     }
 
-    crate::proxy::spawn_process_lifetime_server(config, None, &addr);
+    crate::proxy::spawn_process_lifetime_server(config, None, None, &addr);
     port
 }
 
