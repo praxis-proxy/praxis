@@ -227,10 +227,10 @@ impl TryFrom<u64> for JobQueuedBytes {
 ///
 /// The bounds are instance-wide: one queue, one worker pool, one shared byte
 /// budget, regardless of how many listeners a deployment serves. Job
-/// submission is planned to be opt-in per listener through a `job_queue`
-/// field naming the queue that listener may submit to, so listeners sharing
-/// a chain can differ in whether they can enqueue; that field lands with the
-/// runtime that reads it.
+/// submission is opt-in per listener through [`Listener::job_queue`], which
+/// names the queue that listener may submit to, so listeners sharing a chain
+/// can differ in whether they can enqueue. The field is parsed and validated
+/// here; the runtime that reads it is still pending.
 ///
 /// What each bound counts:
 ///
@@ -285,6 +285,7 @@ pub struct JobsConfig {
 #[cfg(test)]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
+    clippy::panic,
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::needless_raw_strings,
@@ -390,6 +391,75 @@ jobs: {}
     fn the_section_is_an_unknown_key_without_the_feature() {
         let parsed = crate::config::Config::from_yaml(MINIMAL_CONFIG);
         assert!(parsed.is_err(), "jobs must be an unknown key without the feature");
+    }
+
+    /// Two listeners sharing one filter chain opt into job submission
+    /// independently: the field is per-listener, so a public listener stays
+    /// unable to submit while an internal one may.
+    #[test]
+    #[cfg(feature = "jobs-config")]
+    fn listeners_sharing_a_chain_opt_into_job_submission_independently() {
+        let parsed = crate::config::Config::from_yaml(
+            r#"
+listeners:
+  - name: public
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+  - name: internal
+    address: "127.0.0.1:8081"
+    filter_chains: [main]
+    job_queue: default
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+jobs:
+  queue_size: 50
+"#,
+        )
+        .expect("the config should parse with the feature");
+
+        assert_listener_queue(&parsed, "public", None);
+        assert_listener_queue(&parsed, "internal", Some("default"));
+    }
+
+    /// Assert one parsed listener's `job_queue` value.
+    #[cfg(feature = "jobs-config")]
+    fn assert_listener_queue(config: &crate::config::Config, name: &str, expected: Option<&str>) {
+        let queue = config
+            .listeners
+            .iter()
+            .find(|listener| listener.name == name)
+            .map_or_else(
+                || panic!("the {name} listener should parse"),
+                |listener| listener.job_queue.as_deref(),
+            );
+        assert_eq!(queue, expected, "listener {name} should carry the expected job_queue");
+    }
+
+    /// Without the feature the listener key is unknown, like the section.
+    #[test]
+    #[cfg(not(feature = "jobs-config"))]
+    fn the_listener_key_is_unknown_without_the_feature() {
+        let parsed = crate::config::Config::from_yaml(
+            r#"
+listeners:
+  - name: internal
+    address: "127.0.0.1:8081"
+    filter_chains: [main]
+    job_queue: default
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#,
+        );
+        assert!(
+            parsed.is_err(),
+            "job_queue must be an unknown listener key without the feature"
+        );
     }
 
     /// With the feature enabled the section parses and selects the defaults.
