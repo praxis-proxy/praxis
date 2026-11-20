@@ -13,7 +13,8 @@
 
 use bytes::Bytes;
 use ppe::praxis_policy_core::cmf::{
-    ContentPart, Message, PromptRequest, ResourceReference, ResourceType, ToolCall, ToolResult,
+    ContentPart, Message, PromptRequest, PromptResult, Resource, ResourceReference, ResourceType, Role, ToolCall,
+    ToolResult,
 };
 
 // -----------------------------------------------------------------------------
@@ -233,9 +234,11 @@ pub(super) fn reserialize_json_rpc_body(envelope: serde_json::Value, method: &st
 // -----------------------------------------------------------------------------
 
 /// Build the typed CMF `ContentPart` list from a JSON-RPC *response*
-/// body — the post-phase mirror of [`build_content_for_method`]. Only
-/// `tools/call` produces a structured `ToolResult`; other methods,
-/// including `prompts/get` and `resources/read`, produce no content parts.
+/// body — the post-phase mirror of [`build_content_for_method`].
+/// `tools/call` produces a structured `ToolResult`, `resources/read` one
+/// `Resource` per entry and `prompts/get` one `PromptResult` (see
+/// [`build_resource_result`] and [`build_prompt_result`]). Other methods
+/// produce no content parts.
 ///
 /// The actual tool data lives in `result.content[].text` (a
 /// JSON-stringified payload) and/or `result.structuredContent`. We prefer
@@ -260,12 +263,15 @@ pub(super) fn build_response_content_for_method(
     correlation_id: &str,
     envelope: &ParsedEnvelope,
 ) -> Vec<ContentPart> {
-    if method != "tools/call" {
-        return Vec::new();
-    }
     let Some(result) = envelope.field("result") else {
         return Vec::new();
     };
+    match method {
+        "tools/call" => {},
+        "resources/read" => return build_resource_result(result, entity_name, correlation_id),
+        "prompts/get" => return build_prompt_result(result, entity_name, correlation_id),
+        _ => return Vec::new(),
+    }
     let is_error = result
         .get("isError")
         .and_then(serde_json::Value::as_bool)
@@ -316,6 +322,103 @@ pub(super) fn build_response_content_for_method(
     parts
 }
 
+/// `resources/read` response → one `ContentPart::Resource` per
+/// `result.contents[]` entry, in order.
+///
+/// Every entry gets a part, a `blob`-only entry included (with no `content`),
+/// so part `i` always corresponds to entry `i` on write-back.
+///
+/// Known gap: PPE projects only the first `Resource` part of a message, so
+/// entries after the first are not inspected until PPE issue 76 projects every
+/// part. No text is joined across entries.
+fn build_resource_result(result: &serde_json::Value, entity_name: &str, correlation_id: &str) -> Vec<ContentPart> {
+    let Some(entries) = result.get("contents").and_then(serde_json::Value::as_array) else {
+        return Vec::new();
+    };
+    // A valid read with no entries still yields a part, carrying no content,
+    // so it is not mistaken for an uninspectable response and failed closed.
+    if entries.is_empty() {
+        return vec![ContentPart::Resource {
+            content: Resource {
+                resource_request_id: correlation_id.to_owned(),
+                uri: entity_name.to_owned(),
+                resource_type: ResourceType::Uri,
+                ..Resource::default()
+            },
+        }];
+    }
+    entries
+        .iter()
+        .map(|entry| ContentPart::Resource {
+            content: Resource {
+                resource_request_id: correlation_id.to_owned(),
+                uri: string_field(entry, "uri").unwrap_or(entity_name).to_owned(),
+                mime_type: string_field(entry, "mimeType").map(str::to_owned),
+                content: string_field(entry, "text").map(str::to_owned),
+                resource_type: ResourceType::Uri,
+                ..Resource::default()
+            },
+        })
+        .collect()
+}
+
+/// `prompts/get` response → one `ContentPart::PromptResult`.
+///
+/// `content` is the first message's text, which is what PPE inspects today.
+/// `messages` carries every message, in order, for PPE issue 76, which
+/// projects them. No text is joined across messages.
+///
+/// Known gap: until issue 76, messages after the first are not inspected.
+fn build_prompt_result(result: &serde_json::Value, entity_name: &str, correlation_id: &str) -> Vec<ContentPart> {
+    // A valid prompt with no messages still yields a part (no `content`), so
+    // it is not mistaken for an uninspectable response and failed closed.
+    let Some(messages) = result.get("messages").and_then(serde_json::Value::as_array) else {
+        return Vec::new();
+    };
+
+    vec![ContentPart::PromptResult {
+        content: PromptResult {
+            prompt_request_id: correlation_id.to_owned(),
+            prompt_name: entity_name.to_owned(),
+            description: string_field(result, "description").map(str::to_owned),
+            messages: messages.iter().map(prompt_message).collect(),
+            content: messages.first().and_then(message_text).map(str::to_owned),
+            is_error: false,
+            error_message: None,
+        },
+    }]
+}
+
+/// A JSON object's string field, if present.
+fn string_field<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    value.get(key).and_then(serde_json::Value::as_str)
+}
+
+/// One MCP prompt message as a CMF message: its role, and its text as a
+/// `Text` part when it has one.
+fn prompt_message(message: &serde_json::Value) -> Message {
+    let role = match string_field(message, "role") {
+        Some("assistant") => Role::Assistant,
+        Some(_) | None => Role::User,
+    };
+    let content = message_text(message)
+        .map(|text| vec![ContentPart::Text { text: text.to_owned() }])
+        .unwrap_or_default();
+    Message::with_content(role, content)
+}
+
+/// The text of an MCP prompt message: its `content` block when that is a
+/// text block, or the first text block when `content` is an array.
+fn message_text(message: &serde_json::Value) -> Option<&str> {
+    let content = message.get("content")?;
+    let is_text = |block: &&serde_json::Value| string_field(block, "type") == Some("text");
+    let block = match content.as_array() {
+        Some(blocks) => blocks.iter().find(is_text)?,
+        None => Some(content).filter(is_text)?,
+    };
+    string_field(block, "text")
+}
+
 // -----------------------------------------------------------------------------
 // Response-side: re-serialize mutated payload back into the body
 // -----------------------------------------------------------------------------
@@ -335,18 +438,28 @@ pub(super) fn build_response_content_for_method(
 /// `result.structuredContent` is mirrored to the same value, but
 /// only when the original response already had it (we don't invent
 /// fields).
+///
+/// `resources/read` and `prompts/get` are rewritten from the one folded part
+/// [`build_response_content_for_method`] built; see [`rewrite_resource_result`]
+/// and [`rewrite_prompt_result`].
 pub(super) fn reserialize_json_rpc_response_body(
     envelope: serde_json::Value,
     method: &str,
     message: &Message,
 ) -> Option<Bytes> {
-    if method != "tools/call" {
-        return None;
-    }
     let mut envelope = envelope;
-    let result = envelope.get_mut("result")?;
-    let result_obj = result.as_object_mut()?;
+    let result_obj = envelope.get_mut("result")?.as_object_mut()?;
+    match method {
+        "tools/call" => rewrite_tool_result(result_obj, message)?,
+        "resources/read" => rewrite_resource_result(result_obj, message)?,
+        "prompts/get" => rewrite_prompt_result(result_obj, message)?,
+        _ => return None,
+    }
+    Some(Bytes::from(serde_json::to_vec(&envelope).ok()?))
+}
 
+/// Rewrite a `tools/call` result from the vetted `ToolResult`.
+fn rewrite_tool_result(result_obj: &mut serde_json::Map<String, serde_json::Value>, message: &Message) -> Option<()> {
     let new_content = message.content.iter().find_map(|part| match part {
         ContentPart::ToolResult { content } => Some(content.content.clone()),
         _ => None,
@@ -364,6 +477,90 @@ pub(super) fn reserialize_json_rpc_response_body(
     if result_obj.contains_key("structuredContent") {
         result_obj.insert("structuredContent".to_owned(), new_content);
     }
+    Some(())
+}
 
-    Some(Bytes::from(serde_json::to_vec(&envelope).ok()?))
+/// Rewrite a `resources/read` result from the vetted `Resource` parts.
+///
+/// Part `i` is written into `result.contents[i]` (see
+/// [`build_resource_result`]), so the response keeps its entries and their
+/// order. Only `text` and `mimeType` change; `uri` and `blob` stay as sent.
+fn rewrite_resource_result(
+    result_obj: &mut serde_json::Map<String, serde_json::Value>,
+    message: &Message,
+) -> Option<()> {
+    let resources = message.content.iter().filter_map(|part| match part {
+        ContentPart::Resource { content } => Some(content),
+        _ => None,
+    });
+    let entries = result_obj.get_mut("contents")?.as_array_mut()?;
+    for (entry, resource) in entries.iter_mut().zip(resources) {
+        let entry = entry.as_object_mut()?;
+        if let Some(mime_type) = &resource.mime_type {
+            entry.insert("mimeType".to_owned(), mime_type.clone().into());
+        }
+        // Policy removing the text sends empty text, never the original.
+        if resource.content.is_some() || entry.contains_key("text") {
+            let text = resource.content.clone().unwrap_or_default();
+            entry.insert("text".to_owned(), text.into());
+        }
+    }
+    Some(())
+}
+
+/// Rewrite a `prompts/get` result from the vetted `PromptResult`.
+///
+/// The response keeps its messages, roles and order. The first message's text
+/// comes from `PromptResult.content`, which is what policy inspects today;
+/// later messages' text comes from `PromptResult.messages` (see
+/// [`build_prompt_result`]). Removed text is sent as empty text, never the
+/// original. `result.description` follows the vetted value.
+fn rewrite_prompt_result(
+    result_obj: &mut serde_json::Map<String, serde_json::Value>,
+    message: &Message,
+) -> Option<()> {
+    let prompt = message.content.iter().find_map(|part| match part {
+        ContentPart::PromptResult { content } => Some(content),
+        _ => None,
+    })?;
+
+    let messages = result_obj.get_mut("messages")?.as_array_mut()?;
+    for (index, original) in messages.iter_mut().enumerate() {
+        let vetted = match index {
+            0 => Some(prompt.content.as_deref().unwrap_or_default()),
+            _ => prompt.messages.get(index).and_then(first_text_part),
+        };
+        if let Some(text) = vetted {
+            set_message_text(original, text);
+        }
+    }
+    match &prompt.description {
+        Some(description) => result_obj.insert("description".to_owned(), description.clone().into()),
+        None => result_obj.remove("description"),
+    };
+    Some(())
+}
+
+/// The first `Text` part of a CMF message.
+fn first_text_part(message: &Message) -> Option<&str> {
+    message.content.iter().find_map(|part| match part {
+        ContentPart::Text { text } => Some(text.as_str()),
+        _ => None,
+    })
+}
+
+/// Set the text of an MCP prompt message: the text block [`message_text`]
+/// reads. A message with no text block is left unchanged.
+fn set_message_text(message: &mut serde_json::Value, text: &str) {
+    let Some(content) = message.get_mut("content") else {
+        return;
+    };
+    let is_text = |block: &&mut serde_json::Value| string_field(block, "type") == Some("text");
+    let block = match content.as_array_mut() {
+        Some(blocks) => blocks.iter_mut().find(is_text),
+        None => Some(content).filter(is_text),
+    };
+    if let Some(serde_json::Value::Object(block)) = block {
+        block.insert("text".to_owned(), text.to_owned().into());
+    }
 }

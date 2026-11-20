@@ -1,19 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-//! Load-time checks for response rules whose payload is unavailable.
+//! Metadata-only response rules: the subset of a policy that runs without the
+//! response body.
 
 use std::collections::HashSet;
 
-use ppe::{
-    praxis_policy_apl_core::{
-        parser::compile_policy_block_value,
-        rules::{Condition, Effect, Expression},
-    },
-    praxis_policy_core::{
-        cmf::constants::{ENTITY_PROMPT, ENTITY_RESOURCE},
-        config::{PolicyConfig, RouteEntry, route_bundle_names, route_entity_identity},
-    },
+use ppe::praxis_policy_apl_core::{
+    parser::compile_policy_block_value,
+    rules::{Condition, Effect, Expression},
 };
 use serde_yaml::Value;
 
@@ -23,36 +18,6 @@ const METADATA_ONLY_RESPONSE_CAPABILITY: &str = "metadata_only_response";
 const LLM_OUTPUT_HOOK: &str = "cmf.llm_output";
 
 use crate::FilterError;
-
-/// Reject prompt/resource field pipelines until their result is projected.
-pub(super) fn ensure_supported_entity_results(yaml: &str, config: &PolicyConfig) -> Result<(), FilterError> {
-    let document: Value = serde_yaml::from_str(yaml)
-        .map_err(|error| -> FilterError { format!("policy: cannot validate response field rules: {error}").into() })?;
-    let mut unsupported = Vec::new();
-
-    for (index, route) in config.routes.iter().enumerate() {
-        let Some((entity, _)) =
-            route_entity_identity(route).filter(|(entity, _)| matches!(*entity, ENTITY_PROMPT | ENTITY_RESOURCE))
-        else {
-            continue;
-        };
-        unsupported.extend(result_sources(&document, route, index, entity));
-    }
-
-    unsupported.sort();
-    unsupported.dedup();
-    if unsupported.is_empty() {
-        return Ok(());
-    }
-
-    Err(format!(
-        "policy: {} declares `result:` field rules for prompt/resource routes, but their result \
-         projection is unavailable. Remove those \
-         field rules; attribute-only `post_invocation` rules remain supported.",
-        unsupported.join(", ")
-    )
-    .into())
-}
 
 /// Build a policy document whose post-invocation rules need no response body.
 pub(super) fn metadata_only_policy(yaml: &str) -> Result<Option<String>, FilterError> {
@@ -315,7 +280,8 @@ fn effect_unavailable_in_metadata_view(effect: &Effect, metadata_plugins: &HashS
         Effect::Allow | Effect::Deny { .. } | Effect::Taint { .. } | Effect::Restrict { .. } => false,
         // Delegation and elicitation need their token/approval handlers, which
         // are intentionally absent from the metadata-only response document.
-        Effect::Delegate(_) | Effect::Elicit(_) => true,
+        // Fetch likewise needs its metadata handler.
+        Effect::Delegate(_) | Effect::Elicit(_) | Effect::Fetch(_) => true,
     }
 }
 
@@ -396,7 +362,6 @@ fn key_name(value: &Value) -> String {
 #[cfg(test)]
 #[expect(
     clippy::expect_used,
-    clippy::items_after_test_module,
     reason = "focused helper tests stay adjacent to the implementation and fail fast on setup errors"
 )]
 mod metadata_only_tests {
@@ -547,33 +512,4 @@ routes:
         assert!(!filtered.contains("name: manager-approver"));
         assert!(filtered.contains("run(metadata)"));
     }
-}
-
-/// Locate direct and inherited field rules for one prompt/resource route.
-fn result_sources(document: &Value, route: &RouteEntry, index: usize, entity: &str) -> Vec<String> {
-    let global = document.get("global");
-    let defaults = global
-        .and_then(|block| block.get("defaults"))
-        .and_then(|block| block.get(entity));
-    let own = document.get("routes").and_then(|routes| routes.get(index));
-    let groups = document.get("groups");
-
-    [
-        ("global".to_owned(), global),
-        (format!("global.defaults.{entity}"), defaults),
-        (format!("routes[{index}] ({entity})"), own),
-    ]
-    .into_iter()
-    .chain(route_bundle_names(route).into_iter().map(|name| {
-        let block = groups.and_then(|groups| groups.get(&name));
-        (format!("groups.{name}"), block)
-    }))
-    .filter(|(_, block)| {
-        block
-            .and_then(|block| block.get("result"))
-            .and_then(Value::as_mapping)
-            .is_some_and(|fields| !fields.is_empty())
-    })
-    .map(|(source, _)| source)
-    .collect()
 }

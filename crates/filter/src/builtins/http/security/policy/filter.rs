@@ -60,7 +60,7 @@ use super::{
     request_facts::{RequestFacts, RequestView},
     request_headers,
     request_state::{InferenceResponseKind, MetadataResponseDispatch, state, state_mut},
-    response_rules::{ensure_supported_entity_results, metadata_only_policy},
+    response_rules::metadata_only_policy,
     transport::PolicyHttpTransport,
 };
 use crate::{
@@ -420,6 +420,10 @@ pub struct PolicyFilter {
     mcp_routes: bool,
     /// Whether a tool response hook can inspect classified tool responses.
     mcp_post_tool: bool,
+    /// Whether a prompt response hook can inspect `prompts/get` responses.
+    mcp_post_prompt: bool,
+    /// Whether a resource response hook can inspect `resources/read` responses.
+    mcp_post_resource: bool,
     /// Whether the policy declares inference routes.
     llm_routes: bool,
     /// Whether the policy declares inference response hooks.
@@ -645,15 +649,13 @@ impl PolicyFilter {
         let mcp_pre = mgr.has_hooks_for(HOOK_CMF_TOOL_PRE_INVOKE)
             || mgr.has_hooks_for(HOOK_CMF_PROMPT_PRE_INVOKE)
             || mgr.has_hooks_for(HOOK_CMF_RESOURCE_PRE_FETCH);
-        // Split by entity: tool post hooks evaluate with projected content,
-        // while prompt and resource post hooks dispatch with an empty payload
-        // (content projection is tools/call only). Attribute-only rules
-        // (identity and subject/meta predicates) work for all three;
-        // `result.<field>` projection for prompts and resources is still
-        // blocked on policy work.
+        // Split by entity: each post hook evaluates with the content
+        // projected from its response (`ToolResult`, `PromptResult`,
+        // `Resource`), and an uninspectable response fails closed.
         let mcp_post_tool = mgr.has_hooks_for(HOOK_CMF_TOOL_POST_INVOKE);
-        let mcp_post_prompt_resource =
-            mgr.has_hooks_for(HOOK_CMF_PROMPT_POST_INVOKE) || mgr.has_hooks_for(HOOK_CMF_RESOURCE_POST_FETCH);
+        let mcp_post_prompt = mgr.has_hooks_for(HOOK_CMF_PROMPT_POST_INVOKE);
+        let mcp_post_resource = mgr.has_hooks_for(HOOK_CMF_RESOURCE_POST_FETCH);
+        let mcp_post_prompt_resource = mcp_post_prompt || mcp_post_resource;
         let mcp_post = mcp_post_tool || mcp_post_prompt_resource;
         let mcp_routes = mcp_pre || mcp_post;
         let llm_post = mgr.has_hooks_for(HOOK_CMF_LLM_OUTPUT);
@@ -670,7 +672,6 @@ impl PolicyFilter {
             .into()
         })?;
         let dispatch_timeout = response_dispatch_timeout(policy_config.engine_settings.plugin_timeout);
-        ensure_supported_entity_results(&yaml, &policy_config)?;
         let response_context_mgr = if llm_post {
             metadata_only_policy(&yaml)?
                 .map(|filtered| {
@@ -738,6 +739,8 @@ impl PolicyFilter {
             entity_routes,
             mcp_routes,
             mcp_post_tool,
+            mcp_post_prompt,
+            mcp_post_resource,
             llm_routes,
             llm_post,
             limit_pre,
@@ -935,16 +938,10 @@ impl PolicyFilter {
         if post_prompt_resource && !matches!(cfg.body_access, BodyAccessMode::ReadWrite) {
             tracing::warn!(
                 target: "policy.filter",
-                "policy declares response-phase `prompt:` or `resource:` rules, but \
-                 `body_access` is `read_only`, which does not buffer the response: those \
-                 rules will never run. Set `body_access: read_write` to enable them.",
-            );
-        } else if post_prompt_resource {
-            tracing::info!(
-                target: "policy.filter",
-                "policy declares response-phase `prompt:` or `resource:` rules: \
-                 `post_invocation` predicates over identity and attributes are dispatched, but \
-                 `result.<field>` projection is unsupported for these routes.",
+                "policy declares response-phase `prompt:` or `resource:` rules (`result.<field>` \
+                 or `post_invocation`), but `body_access` is `read_only`, which does not buffer \
+                 the response: those rules will never run. Set `body_access: read_write` to \
+                 enable them.",
             );
         }
     }
@@ -1559,6 +1556,17 @@ impl PolicyFilter {
         let state = state_mut(ctx);
         state.gated = None;
         state.identity = Some(identity);
+    }
+
+    /// Whether the policy has a response hook for this MCP method, so a
+    /// response it cannot inspect must fail closed rather than pass through.
+    fn inspects_mcp_response(&self, method: &str) -> bool {
+        match method {
+            "tools/call" => self.mcp_post_tool,
+            "prompts/get" => self.mcp_post_prompt,
+            "resources/read" => self.mcp_post_resource,
+            _ => false,
+        }
     }
 
     /// The full identity this instance admitted, if any.
@@ -3120,7 +3128,7 @@ impl HttpFilter for PolicyFilter {
         let body_bytes = body.as_ref().cloned().unwrap_or_else(Bytes::new);
         // Parse once for this phase; the id string, the deny-path id
         // echoes, and the typed content all read the same DOM.
-        let parsed = if self.mcp_post_tool && method == "tools/call" && !body_bytes.is_empty() {
+        let parsed = if self.inspects_mcp_response(&method) && !body_bytes.is_empty() {
             ParsedEnvelope::try_parse(&body_bytes)
                 .map_err(|_error| -> FilterError { "policy: malformed JSON-RPC response cannot be inspected".into() })?
         } else {
@@ -3163,17 +3171,23 @@ impl HttpFilter for PolicyFilter {
         let extensions = Self::extensions_from_identity(&view, identity, entity_type, &entity_name, &self.cfg);
 
         let content = build_response_content_for_method(&method, &entity_name, &id_str, &parsed);
-        // A valid tools/call error has no result to inspect. Unknown shapes
-        // are not equivalent: treating them as errors would skip an active
-        // tool response policy without checking the upstream data. For prompts and
-        // resources, content projection is not yet implemented (tools/call
-        // only), so content is always empty, but attribute-only post rules
-        // (identity, CEL predicates over subject/meta) are still valid.
-        if content.is_empty() && method == "tools/call" {
-            if self.mcp_post_tool && !body_bytes.is_empty() && !parsed.is_json_rpc_error() {
-                return Err("policy: JSON-RPC tool response has no inspectable result or valid error".into());
+        // A valid JSON-RPC error has no result to inspect. Unknown shapes are
+        // not equivalent: treating them as errors would skip an active
+        // response policy without checking the upstream data, and send it on
+        // unchanged. So an uninspectable tool, prompt or resource response
+        // fails closed when that entity has a response hook.
+        if content.is_empty() {
+            if self.inspects_mcp_response(&method) && !body_bytes.is_empty() && !parsed.is_json_rpc_error() {
+                return Err(
+                    format!("policy: JSON-RPC {entity_type} response has no inspectable result or valid error").into(),
+                );
             }
-            return Ok(FilterAction::Continue);
+            // A tool error has nothing for a tool hook to read. Prompt and
+            // resource hooks still run, with an empty payload, so their
+            // attribute-only rules (identity, subject/meta) apply to errors.
+            if method == "tools/call" {
+                return Ok(FilterAction::Continue);
+            }
         }
         let payload = MessagePayload {
             message: Message::with_content(Role::Assistant, content),

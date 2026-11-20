@@ -3200,6 +3200,203 @@ fn reserialize_response_collapses_to_single_vetted_block() {
     );
 }
 
+// -- resources/read and prompts/get: build and write back ----------------------
+
+/// The `Resource` parts of a message, in order.
+fn resource_parts(parts: &[ppe::praxis_policy_core::cmf::ContentPart]) -> Vec<&ppe::praxis_policy_core::cmf::Resource> {
+    parts
+        .iter()
+        .filter_map(|part| match part {
+            ppe::praxis_policy_core::cmf::ContentPart::Resource { content } => Some(content),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn build_resource_result_makes_one_part_per_entry_without_joining() {
+    use super::json_rpc::{ParsedEnvelope, build_response_content_for_method};
+
+    let body = bytes::Bytes::from_static(
+        br#"{"jsonrpc":"2.0","id":1,"result":{"contents":[
+             {"uri":"hr://a","mimeType":"application/json","text":"SSN 123-45-6789"},
+             {"uri":"hr://b","mimeType":"image/png","blob":"QUJD"}]}}"#,
+    );
+    let parts = build_response_content_for_method("resources/read", "hr://a", "corr-1", &ParsedEnvelope::parse(&body));
+    let resources = resource_parts(&parts);
+    assert_eq!(resources.len(), 2, "one part per entry, blob entries included; got {parts:?}");
+    assert_eq!(resources[0].uri, "hr://a");
+    assert_eq!(resources[0].mime_type.as_deref(), Some("application/json"));
+    assert_eq!(
+        resources[0].content.as_deref(),
+        Some("SSN 123-45-6789"),
+        "entry text is not joined with other entries"
+    );
+    assert_eq!(resources[1].uri, "hr://b");
+    assert_eq!(resources[1].content, None, "a blob entry carries no text");
+}
+
+#[test]
+fn build_resource_result_keeps_an_empty_read_inspectable() {
+    use super::json_rpc::{ParsedEnvelope, build_response_content_for_method};
+
+    let empty = bytes::Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"result":{"contents":[]}}"#);
+    let parts = build_response_content_for_method("resources/read", "hr://a", "corr-1", &ParsedEnvelope::parse(&empty));
+    let resources = resource_parts(&parts);
+    assert_eq!(resources.len(), 1, "an empty read still yields a part; got {parts:?}");
+    assert_eq!(resources[0].content, None);
+
+    let shapeless = bytes::Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"result":{"contents":"oops"}}"#);
+    assert!(
+        build_response_content_for_method("resources/read", "hr://a", "corr-1", &ParsedEnvelope::parse(&shapeless))
+            .is_empty(),
+        "a `contents` that is not a list yields no part, so the response fails closed"
+    );
+}
+
+#[test]
+fn build_prompt_result_reads_the_first_message_and_carries_every_message() {
+    use ppe::praxis_policy_core::cmf::{ContentPart, Role};
+
+    use super::json_rpc::{ParsedEnvelope, build_response_content_for_method};
+
+    let body = bytes::Bytes::from_static(
+        br#"{"jsonrpc":"2.0","id":1,"result":{"description":"a report","messages":[
+             {"role":"user","content":{"type":"text","text":"first SSN 123-45-6789"}},
+             {"role":"assistant","content":[{"type":"image","data":"QUJD","mimeType":"image/png"},
+                                            {"type":"text","text":"second"}]}]}}"#,
+    );
+    let parts = build_response_content_for_method("prompts/get", "summarize", "corr-1", &ParsedEnvelope::parse(&body));
+    let [ContentPart::PromptResult { content: prompt }] = parts.as_slice() else {
+        panic!("expected one PromptResult; got {parts:?}");
+    };
+    assert_eq!(prompt.prompt_name, "summarize");
+    assert_eq!(prompt.description.as_deref(), Some("a report"));
+    assert_eq!(
+        prompt.content.as_deref(),
+        Some("first SSN 123-45-6789"),
+        "`content` is the first message's text only, never joined"
+    );
+    assert_eq!(prompt.messages.len(), 2, "every message is carried for per-message projection");
+    assert_eq!(prompt.messages[0].role, Role::User);
+    assert_eq!(prompt.messages[1].role, Role::Assistant);
+    assert!(
+        matches!(prompt.messages[1].content.as_slice(), [ContentPart::Text { text }] if text == "second"),
+        "an array `content` contributes its first text block; got {:?}",
+        prompt.messages[1].content,
+    );
+}
+
+#[test]
+fn reserialize_resource_writes_each_part_back_to_its_entry() {
+    use ppe::praxis_policy_core::cmf::{ContentPart, Message, Resource, Role};
+
+    use super::json_rpc::reserialize_json_rpc_response_body;
+
+    let original = bytes::Bytes::from_static(
+        br#"{"jsonrpc":"2.0","id":1,"result":{"contents":[
+             {"uri":"hr://a","mimeType":"application/json","text":"SSN 123-45-6789"},
+             {"uri":"hr://b","mimeType":"image/png","blob":"QUJD"},
+             {"uri":"hr://c","text":"removed by policy"}]}}"#,
+    );
+    let resource = |uri: &str, content: Option<&str>| ContentPart::Resource {
+        content: Resource {
+            uri: uri.to_owned(),
+            content: content.map(str::to_owned),
+            ..Resource::default()
+        },
+    };
+    let message = Message::with_content(
+        Role::Assistant,
+        vec![
+            resource("hr://a", Some("[REDACTED]")),
+            resource("hr://b", None),
+            resource("hr://c", None),
+        ],
+    );
+    let out = reserialize_json_rpc_response_body(parse_dom(&original), "resources/read", &message).expect("Some");
+    let parsed: serde_json::Value = serde_json::from_slice(&out).expect("valid JSON");
+    let entries = parsed["result"]["contents"].as_array().expect("contents array");
+    assert_eq!(entries.len(), 3, "the response keeps its entries; got {entries:?}");
+    assert_eq!(entries[0]["text"], "[REDACTED]");
+    assert_eq!(entries[0]["uri"], "hr://a", "uri is never rewritten");
+    assert_eq!(entries[1]["blob"], "QUJD", "a blob entry is left as sent");
+    assert!(entries[1].get("text").is_none(), "no text is invented for a blob entry");
+    assert_eq!(
+        entries[2]["text"], "",
+        "text policy removed is sent empty, never the original"
+    );
+    assert!(!String::from_utf8_lossy(&out).contains("123-45-6789"));
+}
+
+#[test]
+fn reserialize_prompt_writes_each_message_back_keeping_roles() {
+    use ppe::praxis_policy_core::cmf::{ContentPart, Message, PromptResult, Role};
+
+    use super::json_rpc::reserialize_json_rpc_response_body;
+
+    let original = bytes::Bytes::from_static(
+        br#"{"jsonrpc":"2.0","id":1,"result":{"description":"old","messages":[
+             {"role":"user","content":{"type":"text","text":"first SSN 123-45-6789"}},
+             {"role":"assistant","content":{"type":"text","text":"second"}}]}}"#,
+    );
+    let message = Message::with_content(
+        Role::Assistant,
+        vec![ContentPart::PromptResult {
+            content: PromptResult {
+                prompt_request_id: "corr-1".to_owned(),
+                prompt_name: "summarize".to_owned(),
+                description: Some("new".to_owned()),
+                messages: vec![
+                    Message::text(Role::User, "ignored: message one comes from `content`"),
+                    Message::text(Role::Assistant, "second, vetted"),
+                ],
+                content: Some("[REDACTED]".to_owned()),
+                is_error: false,
+                error_message: None,
+            },
+        }],
+    );
+    let out = reserialize_json_rpc_response_body(parse_dom(&original), "prompts/get", &message).expect("Some");
+    let parsed: serde_json::Value = serde_json::from_slice(&out).expect("valid JSON");
+    let messages = parsed["result"]["messages"].as_array().expect("messages array");
+    assert_eq!(messages.len(), 2, "the response keeps its messages; got {messages:?}");
+    assert_eq!(messages[0]["role"], "user");
+    assert_eq!(messages[0]["content"]["text"], "[REDACTED]", "message one comes from `content`");
+    assert_eq!(messages[1]["role"], "assistant");
+    assert_eq!(messages[1]["content"]["text"], "second, vetted");
+    assert_eq!(parsed["result"]["description"], "new");
+    assert!(!String::from_utf8_lossy(&out).contains("123-45-6789"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn prompt_and_resource_result_redaction_reaches_the_served_bytes() {
+    let routes = r#"routes:
+  - prompt: summarize
+    result:
+      content: "str | pii.redact"
+  - resource: "file:///data.csv"
+    result:
+      content: "str | pii.redact"
+"#;
+    let prompt_response = r#"{"jsonrpc":"2.0","id":1,"result":{"messages":[{"role":"user","content":{"type":"text","text":"Jane Smith, SSN 123-45-6789, salary 125000"}}]}}"#;
+    let resource_response = r#"{"jsonrpc":"2.0","id":1,"result":{"contents":[{"uri":"file:///data.csv","text":"Jane Smith, SSN 123-45-6789, salary 125000"}]}}"#;
+    for (method, name, request, response, pointer) in [
+        ("prompts/get", "summarize", PROMPT_REQUEST, prompt_response, "/result/messages/0/content/text"),
+        ("resources/read", "file:///data.csv", RESOURCE_REQUEST, resource_response, "/result/contents/0/text"),
+    ] {
+        let (_dir, path) = write_entity_config_with_routes(routes);
+        let served = post_only_round_trip(path, method, name, request, response).await;
+        assert_eq!(served.len(), response.len(), "the served body fits the committed length");
+        assert!(
+            !String::from_utf8_lossy(&served).contains("123-45-6789"),
+            "{method}: the SSN must not reach the client; got {served:?}",
+        );
+        let parsed: serde_json::Value = serde_json::from_slice(&served).expect("served body is JSON");
+        assert_eq!(parsed.pointer(pointer), Some(&serde_json::json!("[REDACTED]")), "{method}: {parsed}");
+    }
+}
+
 #[test]
 fn deny_envelope_fits_committed_length() {
     use ppe::praxis_policy_core::error::PluginViolation;
@@ -8202,84 +8399,42 @@ fn a_post_only_resource_route_is_an_entity_route() {
 }
 
 #[test]
-fn prompt_and_resource_result_rules_fail_filter_construction() {
+fn prompt_and_resource_result_rules_build_a_filter() {
     for entity in ["prompt", "resource"] {
         let (_dir, path) = write_entity_config_with_routes(&format!(
-            "routes:\n  - {entity}: example\n    result:\n      ssn: \"str | mask(2)\"\n"
+            "routes:\n  - {entity}: example\n    result:\n      content: \"str | mask(2)\"\n"
         ));
-        for access in ["read_only", "read_write"] {
-            let config = serde_yaml::from_str(&format!("config_path: {path}\nbody_access: {access}\n"))
-                .expect("filter configuration");
-            let error = PolicyFilter::from_config(&config)
-                .err()
-                .expect("unsupported result rules must fail at load");
-            assert!(
-                error
-                    .to_string()
-                    .contains("declares `result:` field rules for prompt/resource routes"),
-                "a {entity} field rule must be refused under {access}; got {error}",
-            );
-        }
+        let config =
+            serde_yaml::from_str(&format!("config_path: {path}\nbody_access: read_write\n")).expect("filter configuration");
+        assert!(
+            PolicyFilter::from_config(&config).is_ok(),
+            "a {entity} `result.content` rule must load now that its result is projected",
+        );
     }
 }
 
-#[test]
-fn inherited_prompt_and_resource_result_rules_are_rejected() -> Result<(), crate::FilterError> {
-    for entity in ["prompt", "resource"] {
-        for (source, yaml) in entity_result_inheritance_configs(entity) {
-            let config = ppe::praxis_policy_core::config::parse_config(&yaml)
-                .map_err(|error| -> crate::FilterError { error.to_string().into() })?;
-            let error = super::response_rules::ensure_supported_entity_results(&yaml, &config)
-                .expect_err("inherited result pipeline must fail");
-            assert!(
-                error.to_string().contains("projection is unavailable"),
-                "{entity} inherits an unsupported {source} field pipeline; got {error}",
-            );
-        }
-    }
-    Ok(())
-}
+/// A `prompts/get` response with one text message, roomy enough for a deny envelope.
+const ROOMY_PROMPT_RESPONSE: &str = r#"{"jsonrpc":"2.0","id":1,"result":{"messages":[{"role":"user","content":{"type":"text","text":"ok, and long enough that a replacement error envelope fits inside the committed content length without being trimmed"}}]}}"#;
 
-#[test]
-fn tool_result_rules_and_attribute_only_entity_rules_remain_supported() -> Result<(), crate::FilterError> {
-    let yaml = r#"groups:
-  sensitive:
-    result:
-      ssn: "str | mask(2)"
-routes:
-  - tool: echo
-    groups: sensitive
-  - prompt: summarize
-    result: {}
-    authorization:
-      post_invocation:
-        - "authenticated: deny('withheld', 'withheld')"
-  - resource: "file:///data.csv"
-    authorization:
-      post_invocation:
-        - "authenticated: deny('withheld', 'withheld')"
-"#;
-    let config = ppe::praxis_policy_core::config::parse_config(yaml)
-        .map_err(|error| -> crate::FilterError { error.to_string().into() })?;
-    super::response_rules::ensure_supported_entity_results(yaml, &config)
-}
+/// A `resources/read` response with one text entry, roomy enough for a deny envelope.
+const ROOMY_RESOURCE_RESPONSE: &str = r#"{"jsonrpc":"2.0","id":1,"result":{"contents":[{"uri":"file:///data.csv","text":"ok, and long enough that a replacement error envelope fits inside the committed content length without being trimmed"}]}}"#;
 
-/// Test configurations for every layer contributing entity result pipelines.
-fn entity_result_inheritance_configs(entity: &str) -> [(&'static str, String); 3] {
-    let route = format!("routes:\n  - {entity}: example\n");
-    let bundle = "groups:\n  sensitive:\n    result:\n      ssn: \"str | mask(2)\"\n";
-    [
-        (
-            "defaults",
-            format!("global:\n  defaults:\n    {entity}:\n      result:\n        ssn: \"str | mask(2)\"\n{route}"),
-        ),
-        ("groups", format!("{bundle}{route}    groups: sensitive\n")),
-        ("tags", format!("{bundle}{route}    meta: {{tags: [sensitive]}}\n")),
-    ]
-}
+/// The `prompts/get` request the post-only prompt tests send.
+const PROMPT_REQUEST: &[u8] = br#"{"jsonrpc":"2.0","id":1,"method":"prompts/get","params":{"name":"summarize"}}"#;
 
-/// Run a post-only entity round trip and return the served response body.
-async fn post_only_round_trip(path: String, method: &str, name: &str, request_body: &'static [u8]) -> bytes::Bytes {
+/// The `resources/read` request the post-only resource tests send.
+const RESOURCE_REQUEST: &[u8] =
+    br#"{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"file:///data.csv"}}"#;
+
+/// Run a post-only entity exchange with `response` as the upstream body.
+/// Returns the served body, or the response phase's error when it fails closed.
+async fn post_only_exchange(
+    path: String,
+    method: &str,
+    name: &str,
+    request_body: &'static [u8],
+    response: &'static str,
+) -> Result<bytes::Bytes, crate::FilterError> {
     let filter = build_read_write_filter(path);
     let req = request_for_alice();
     let mut ctx = make_filter_context(&req);
@@ -8295,25 +8450,28 @@ async fn post_only_round_trip(path: String, method: &str, name: &str, request_bo
             .await
             .expect("request phase ran"),
     );
-    let mut body = Some(bytes::Bytes::from_static(ROOMY_MCP_RESPONSE.as_bytes()));
-    drop(
-        filter
-            .on_response_body(&mut ctx, &mut body, true)
-            .expect("response phase ran"),
-    );
-    body.expect("response body")
+    let mut body = Some(bytes::Bytes::from_static(response.as_bytes()));
+    drop(filter.on_response_body(&mut ctx, &mut body, true)?);
+    Ok(body.expect("response body"))
+}
+
+/// Run a post-only entity round trip and return the served response body.
+async fn post_only_round_trip(
+    path: String,
+    method: &str,
+    name: &str,
+    request_body: &'static [u8],
+    response: &'static str,
+) -> bytes::Bytes {
+    post_only_exchange(path, method, name, request_body, response)
+        .await
+        .expect("response phase ran")
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_post_only_prompt_route_dispatches_its_hook() {
     let (_dir, path) = write_prompt_post_only_config();
-    let served = post_only_round_trip(
-        path,
-        "prompts/get",
-        "summarize",
-        br#"{"jsonrpc":"2.0","id":1,"method":"prompts/get","params":{"name":"summarize"}}"#,
-    )
-    .await;
+    let served = post_only_round_trip(path, "prompts/get", "summarize", PROMPT_REQUEST, ROOMY_PROMPT_RESPONSE).await;
     let parsed: serde_json::Value = serde_json::from_slice(&served).expect("served body is JSON");
     assert_eq!(
         parsed["error"]["data"]["violation"], "prompt_withheld",
@@ -8333,7 +8491,8 @@ async fn a_post_only_resource_route_dispatches_its_hook() {
         path,
         "resources/read",
         "file:///data.csv",
-        br#"{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"file:///data.csv"}}"#,
+        RESOURCE_REQUEST,
+        ROOMY_RESOURCE_RESPONSE,
     )
     .await;
     let parsed: serde_json::Value = serde_json::from_slice(&served).expect("served body is JSON");
@@ -8346,6 +8505,85 @@ async fn a_post_only_resource_route_dispatches_its_hook() {
         parsed.get("result").is_none(),
         "deny envelopes must not retain the upstream result",
     );
+}
+
+/// One post-only prompt or resource route, with its request.
+struct EntityCase {
+    /// The entity, for assertion messages.
+    entity: &'static str,
+    /// Writes the post-only route for this entity.
+    config: fn() -> (TempDir, String),
+    /// The JSON-RPC method.
+    method: &'static str,
+    /// The classified `mcp.name`.
+    name: &'static str,
+    /// The request body.
+    request: &'static [u8],
+    /// The violation the route's post-phase deny emits.
+    violation: &'static str,
+}
+
+/// The post-only prompt and resource routes the fail-closed tests run against.
+const ENTITY_CASES: [EntityCase; 2] = [
+    EntityCase {
+        entity: "prompt",
+        config: write_prompt_post_only_config,
+        method: "prompts/get",
+        name: "summarize",
+        request: PROMPT_REQUEST,
+        violation: "prompt_withheld",
+    },
+    EntityCase {
+        entity: "resource",
+        config: write_resource_post_only_config,
+        method: "resources/read",
+        name: "file:///data.csv",
+        request: RESOURCE_REQUEST,
+        violation: "resource_withheld",
+    },
+];
+
+#[tokio::test(flavor = "multi_thread")]
+async fn uninspectable_prompt_and_resource_responses_fail_closed() {
+    let malformed = r#"{"jsonrpc":"2.0","id":1,"result":{"contents":[{"text":"SSN 123-45-6789"#;
+    for case in ENTITY_CASES {
+        for (shape, response, expected) in [
+            ("malformed JSON", malformed, "malformed JSON-RPC response cannot be inspected"),
+            ("a tool-shaped result", ROOMY_MCP_RESPONSE, "response has no inspectable result"),
+        ] {
+            let (_dir, path) = (case.config)();
+            let error = post_only_exchange(path, case.method, case.name, case.request, response)
+                .await
+                .expect_err("an uninspectable response must not pass through");
+            assert!(
+                error.to_string().contains(expected),
+                "a {} response with {shape} must fail closed with `{expected}`; got {error}",
+                case.entity,
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn prompt_and_resource_errors_and_empty_results_still_reach_the_hook() {
+    let upstream_error = r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"upstream error, and long enough that a replacement deny envelope fits inside the committed content length without being trimmed"}}"#;
+    let empty_prompt = r#"{"jsonrpc":"2.0","id":1,"result":{"messages":[]},"padding":"long enough that a replacement deny envelope fits inside the committed content length without being trimmed"}"#;
+    let empty_resource = r#"{"jsonrpc":"2.0","id":1,"result":{"contents":[]},"padding":"long enough that a replacement deny envelope fits inside the committed content length without being trimmed"}"#;
+    for case in ENTITY_CASES {
+        let empty = if case.entity == "prompt" { empty_prompt } else { empty_resource };
+        for (shape, response) in [("a JSON-RPC error", upstream_error), ("an empty result", empty)] {
+            let (_dir, path) = (case.config)();
+            let served = post_only_exchange(path, case.method, case.name, case.request, response)
+                .await
+                .unwrap_or_else(|error| panic!("a {} response with {shape} must not fail closed: {error}", case.entity));
+            let parsed: serde_json::Value = serde_json::from_slice(&served).expect("served body is JSON");
+            assert_eq!(
+                parsed["error"]["data"]["violation"], case.violation,
+                "a {} response with {shape} must still run the route's post-phase rules; got {served:?}",
+                case.entity,
+            );
+        }
+    }
 }
 
 /// Write a route that declares both halves: a pre-phase rule only `bob`
