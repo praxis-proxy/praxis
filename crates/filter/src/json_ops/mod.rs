@@ -58,8 +58,6 @@ mod tests;
 pub use builder::{JsonOps, JsonOpsBuilder, JsonRewrite, JsonValue};
 pub use error::JsonError;
 pub use ops::ExtractDest;
-pub use store::{HttpJsonStore, JsonOpStore, MapStore};
-
 // -----------------------------------------------------------------------------
 // Fuzzing-only exports
 // -----------------------------------------------------------------------------
@@ -68,6 +66,9 @@ pub use store::{HttpJsonStore, JsonOpStore, MapStore};
 // which widens `find_json_string_delim`'s own visibility to `pub` (see
 // `simd_scan.rs`); this re-export exists only in that build and carries no
 // cost or surface in a normal one. `fuzz_simd_scan` calls it directly and
-// checks it against an inlined scalar oracle.
+// checks it against an inlined scalar oracle. The `store` re-export sits
+// below only to satisfy nightly rustfmt's alphabetical ordering of the
+// `pub use` block; it is unconditional, not fuzzing-only.
 #[cfg(fuzzing)]
 pub use simd_scan::find_json_string_delim;
+pub use store::{HttpJsonStore, JsonOpStore, MapStore};
