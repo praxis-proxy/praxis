@@ -71,7 +71,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   never runs the global gate: the route judges the credential, the head runs
   the limiter only, the body is buffered until the route decides, and a
   startup warning names the section. The buffer holds at least
-  `max_buffer_bytes`, more if another filter asks for more, within the
+  `max_buffer_bytes` (inference policies keep `llm.max_request_bytes`),
+  more if another filter asks for more, within the
   global `body_limits.max_buffer_bytes`; a larger body now gets 413, where a
   `read_only` policy used to stream it. If the route never judges such a
   request because the policy's body hook was skipped (a request condition
