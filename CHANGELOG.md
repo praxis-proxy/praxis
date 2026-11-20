@@ -148,6 +148,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   serving replica stays ready when a checked cluster has no healthy endpoints.
   Set `admin.readiness: upstreams` to preserve upstream-dependent readiness.
 
+- Treat HTTP QUERY as eligible for automatic retries on both network backends
+  and for configured hedged requests. Existing attempt, body replay, and
+  transport safety limits still apply. Existing retry configurations now apply
+  to QUERY automatically, as do existing Pingora hedge configurations. Origins
+  must honor QUERY's safe, idempotent semantics. Add forwarding, replay, and
+  resource discovery coverage and an HTTP QUERY example with explicit
+  CORS/CSRF settings.
+
 ### Fixed
 
 - Return gRPC `DEADLINE_EXCEEDED` when Pingora's rounded upstream timeout fires just before the call's exact deadline, while preserving earlier transport timeouts.
