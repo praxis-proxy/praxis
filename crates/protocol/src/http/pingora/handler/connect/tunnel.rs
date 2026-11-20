@@ -40,8 +40,10 @@ const READ_BUFFER_BYTES: usize = 16_384; // 16 KiB
 pub(super) enum TunnelCloseReason {
     /// Both peers closed their side, each passed on to the other.
     Completed,
-    /// A read or write failed mid-tunnel.
-    Error,
+    /// A read from or write to the client failed mid-tunnel.
+    ClientError,
+    /// A read from or write to the destination failed mid-tunnel.
+    DestinationError,
     /// No progress in either direction for the idle timeout.
     IdleTimeout,
     /// The hard maximum duration elapsed.
@@ -49,11 +51,13 @@ pub(super) enum TunnelCloseReason {
 }
 
 impl TunnelCloseReason {
-    /// Stable log label, matching the TCP proxy's `connection_close` reasons.
+    /// Stable log label: the TCP proxy's `connection_close` reasons, with an
+    /// error named for the peer whose read or write failed.
     pub(super) fn as_str(self) -> &'static str {
         match self {
             Self::Completed => "completed",
-            Self::Error => "error",
+            Self::ClientError => "client_error",
+            Self::DestinationError => "destination_error",
             Self::IdleTimeout => "idle_timeout",
             Self::MaxDuration => "max_duration",
         }
@@ -336,7 +340,7 @@ fn take_downstream_chunk(
         },
         Err(error) => {
             warn!(error = %error, phase = "downstream_read", "tunnel_error");
-            return Some(TunnelCloseReason::Error);
+            return Some(TunnelCloseReason::ClientError);
         },
     }
     None
@@ -386,7 +390,7 @@ fn take_destination_write(
         },
         DestinationWrite::Closed(Err(error)) => {
             warn!(error = %error, phase = "destination_shutdown", "tunnel_error");
-            Some(TunnelCloseReason::Error)
+            Some(TunnelCloseReason::DestinationError)
         },
     }
 }
@@ -408,7 +412,7 @@ fn record_destination_write(
                 phase = "destination_write",
                 "tunnel_error: destination accepted no bytes"
             );
-            Some(TunnelCloseReason::Error)
+            Some(TunnelCloseReason::DestinationError)
         },
         Ok(accepted) => {
             state.idle_deadline = Instant::now() + idle_timeout;
@@ -418,7 +422,7 @@ fn record_destination_write(
         },
         Err(error) => {
             warn!(error = %error, phase = "destination_write", "tunnel_error");
-            Some(TunnelCloseReason::Error)
+            Some(TunnelCloseReason::DestinationError)
         },
     }
 }
@@ -460,7 +464,7 @@ where
         },
         Err(error) => {
             warn!(error = %error, phase = "upstream_read", "tunnel_error");
-            Some(TunnelCloseReason::Error)
+            Some(TunnelCloseReason::DestinationError)
         },
     }
 }
@@ -479,7 +483,7 @@ fn record_client_write(
     let len = state.client_write.take();
     if let Err(error) = written {
         warn!(error = %error, phase = "downstream_write", "tunnel_error");
-        return Some(TunnelCloseReason::Error);
+        return Some(TunnelCloseReason::ClientError);
     }
     state.idle_deadline = Instant::now() + idle_timeout;
     state.bytes_out = state.bytes_out.saturating_add(len.unwrap_or(0));
@@ -822,13 +826,35 @@ mod tests {
         // client bytes cannot be delivered, and the tunnel ends on the write.
         drop(server);
         let stats = pump_task.await.unwrap();
-        assert_eq!(stats.reason, TunnelCloseReason::Error);
+        assert_eq!(stats.reason, TunnelCloseReason::DestinationError);
         assert_eq!(stats.bytes_out, 4, "destination-to-client bytes counted");
         assert!(
             stats.bytes_in < 4096,
             "only the bytes the destination accepted are counted: {}",
             stats.bytes_in
         );
+    }
+
+    #[tokio::test]
+    async fn a_client_that_goes_away_fails_the_tunnel_on_its_side() {
+        // Destination bytes are on their way when the client disappears: the
+        // write toward it fails, and the failure is the client's, not the
+        // destination's.
+        let (client, pump_side) = tokio::io::duplex(64);
+        let (upstream_side, mut server) = tokio::io::duplex(1_048_576);
+        let mut downstream = DuplexDownstream::new(pump_side);
+        let mut upstream = upstream_side;
+        server.write_all(&[b'y'; 4096]).await.unwrap();
+        drop(client);
+
+        let stats = timeout(
+            Duration::from_secs(2),
+            pump(&mut downstream, &mut upstream, Duration::from_secs(10), None),
+        )
+        .await
+        .expect("a failed write toward the client closes the tunnel");
+        assert_eq!(stats.reason, TunnelCloseReason::ClientError);
+        drop(server);
     }
 
     #[tokio::test]

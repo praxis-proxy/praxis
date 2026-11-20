@@ -47,4 +47,7 @@ filter_chains:
   - name: egress
     filters:
       - filter: request_id
+      # One record per CONNECT. Add metadata.tunnel.close_reason to its
+      # fields to see how each tunnel closed; a tunnel a peer broke off
+      # after its 200 is recorded whatever the sampling.
       - filter: access_log

@@ -22,10 +22,10 @@ use std::{
 
 use pingora_proxy::Session;
 use praxis_core::{ProxyError, config::ForwardProxyConfig, connectivity::peer::resolve_client_host};
-use praxis_filter::{FilterAction, FilterPipeline, Rejection, Request};
+use praxis_filter::{FilterAction, FilterMetadata, FilterPipeline, Rejection, Request};
 use praxis_tls::SniMatcher;
 use tracing::{Instrument as _, info, warn};
-use tunnel::{TunnelStats, pump};
+use tunnel::{TunnelCloseReason, TunnelStats, pump};
 
 use super::{
     body_util::BodyFilterOutput,
@@ -45,7 +45,10 @@ use crate::{
     http::pingora::{
         context::PingoraRequestCtx,
         convert::send_rejection_for,
-        metrics::{ERROR_TYPE_FILTER_REJECT, ERROR_TYPE_INTERNAL, ERROR_TYPE_UPSTREAM_UNAVAILABLE},
+        metrics::{
+            ERROR_TYPE_DOWNSTREAM, ERROR_TYPE_FILTER_REJECT, ERROR_TYPE_INTERNAL, ERROR_TYPE_UPSTREAM_PROTOCOL,
+            ERROR_TYPE_UPSTREAM_UNAVAILABLE,
+        },
     },
     tcp::proxy::connect_resolved,
 };
@@ -587,7 +590,12 @@ async fn open_tunnel(
     ))
     .await;
     record_tunnel_close(ctx, &stats, started);
-    finish_tunnel_response(pipeline, ctx);
+    // A tunnel a peer broke off is a response cut off midway, as on any
+    // request: its body filters see no end of stream, and the logging hook
+    // writes its access record unsampled.
+    if !record_tunnel_failure(ctx, stats.reason) {
+        finish_tunnel_response(pipeline, ctx);
+    }
     Ok(true)
 }
 
@@ -716,13 +724,15 @@ fn established_head(
     Ok(head)
 }
 
-/// End the tunnel's response once its bytes are counted.
+/// End the response of a tunnel that closed normally, once its bytes are
+/// counted.
 ///
 /// Tunneled bytes are opaque, so the response-body filters see only the
 /// end of the stream, with no body; filters that act at the end of the
 /// response (`access_log` among them) then do so with the final tunnel
 /// byte counts. The response is then delivered, so no fallback record
-/// follows.
+/// follows. A tunnel a peer broke off gets no end of stream, as a response
+/// cut off midway gets none (see [`record_tunnel_failure`]).
 fn finish_tunnel_response(pipeline: &FilterPipeline, ctx: &mut PingoraRequestCtx) {
     let Some((mut fctx, response_header)) = ctx.response_body_context_for(pipeline) else {
         return;
@@ -795,18 +805,53 @@ async fn resolve_destination(address: &str, host: &str, port: u16) -> Option<Vec
         .ok()
 }
 
-/// Fold tunnel totals into the request counters and emit the close event.
+/// Filter metadata key holding how a tunnel closed
+/// ([`TunnelCloseReason::as_str`]), which an access record or `CloudEvent`
+/// reads as `metadata.tunnel.close_reason`.
+const TUNNEL_CLOSE_REASON: &str = "tunnel.close_reason";
+
+/// Fold tunnel totals into the request counters, emit the close event, and
+/// publish the close reason as [`TUNNEL_CLOSE_REASON`].
 fn record_tunnel_close(ctx: &mut PingoraRequestCtx, stats: &TunnelStats, started: Instant) {
     ctx.request_body_bytes = ctx.request_body_bytes.saturating_add(stats.bytes_in);
     ctx.response_body_bytes = ctx.response_body_bytes.saturating_add(stats.bytes_out);
     let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let reason = stats.reason.as_str();
     info!(
         bytes_in = stats.bytes_in,
         bytes_out = stats.bytes_out,
         duration_ms,
-        reason = stats.reason.as_str(),
+        reason,
         "tunnel_close"
     );
+    ctx.filter_metadata
+        .insert(TUNNEL_CLOSE_REASON, reason)
+        .unwrap_or_else(FilterMetadata::log_loss);
+}
+
+/// Record a tunnel a peer broke off as a failed request, returning whether
+/// it was one.
+///
+/// The client already has the tunnel's 200, so the failure goes where a
+/// response cut off midway records one: a failed read or write at the
+/// destination is an upstream failure, one at the client a downstream one.
+/// A tunnel has no upstream exchange span to carry an upstream failure, so
+/// the request span does. Closing at the idle timeout or the maximum
+/// duration is the tunnel's configured end, not a failure.
+fn record_tunnel_failure(ctx: &mut PingoraRequestCtx, reason: TunnelCloseReason) -> bool {
+    match reason {
+        TunnelCloseReason::DestinationError => {
+            ctx.stamp_error_type(ERROR_TYPE_UPSTREAM_PROTOCOL);
+            ctx.request_span.record("otel.status_code", "ERROR");
+            ctx.request_span.record("error.type", reason.as_str());
+            true
+        },
+        TunnelCloseReason::ClientError => {
+            ctx.stamp_error_type(ERROR_TYPE_DOWNSTREAM);
+            true
+        },
+        TunnelCloseReason::Completed | TunnelCloseReason::IdleTimeout | TunnelCloseReason::MaxDuration => false,
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -1757,12 +1802,29 @@ allow_destinations:
         FilterPipeline::build(&mut entries, &registry).unwrap()
     }
 
+    /// How the loopback destination of [`connect_to_loopback_ending`] ends
+    /// an opened tunnel.
+    #[derive(Clone, Copy)]
+    enum DestinationEnd {
+        /// Close its side cleanly.
+        Close,
+
+        /// Reset the connection, as a destination that fails does.
+        Reset,
+    }
+
     /// Run `handle` on a CONNECT to a loopback listener and return the
     /// response head, read until the blank line, and the request context.
     ///
     /// The listener accepts and holds the dial, so an opened tunnel stays
     /// open until the head has arrived and the destination then closes.
     async fn connect_to_loopback(pipeline: &FilterPipeline) -> (String, PingoraRequestCtx) {
+        Box::pin(connect_to_loopback_ending(pipeline, DestinationEnd::Close)).await
+    }
+
+    /// [`connect_to_loopback`], with the destination ending the tunnel as
+    /// `end` says.
+    async fn connect_to_loopback_ending(pipeline: &FilterPipeline, end: DestinationEnd) -> (String, PingoraRequestCtx) {
         use tokio::io::AsyncWriteExt as _;
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1780,8 +1842,12 @@ allow_destinations:
         let handled = handle(&forward_proxy, pipeline, &mut session, &mut ctx);
         let (served, head) = tokio::join!(handled, async {
             let head = reader.await.unwrap();
-            // Closing the destination ends an opened tunnel.
-            drop(destination.await.unwrap());
+            // Ending the destination ends an opened tunnel.
+            let destination = destination.await.unwrap();
+            if let (Ok(stream), DestinationEnd::Reset) = (&destination, end) {
+                stream.set_zero_linger().unwrap();
+            }
+            drop(destination);
             head
         });
         assert!(served.unwrap(), "every CONNECT outcome is answered by the handler");
@@ -1805,6 +1871,65 @@ allow_destinations:
     fn access_record_emitted(ctx: &mut PingoraRequestCtx, pipeline: &FilterPipeline) -> bool {
         ctx.filter_context_for(pipeline, None)
             .is_some_and(|fctx| praxis_filter::access_record_already_emitted(&fctx))
+    }
+
+    // -------------------------------------------------------------------------
+    // Tunnel Close
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn a_tunnel_a_peer_breaks_off_is_recorded_as_that_peer_s_failure() {
+        for (reason, error_type, failed) in [
+            (TunnelCloseReason::Completed, None, false),
+            (TunnelCloseReason::IdleTimeout, None, false),
+            (TunnelCloseReason::MaxDuration, None, false),
+            (TunnelCloseReason::ClientError, Some(ERROR_TYPE_DOWNSTREAM), true),
+            (
+                TunnelCloseReason::DestinationError,
+                Some(ERROR_TYPE_UPSTREAM_PROTOCOL),
+                true,
+            ),
+        ] {
+            let mut ctx = PingoraRequestCtx::default();
+            let stats = TunnelStats {
+                bytes_in: 7,
+                bytes_out: 9,
+                reason,
+            };
+            record_tunnel_close(&mut ctx, &stats, Instant::now());
+            assert_eq!(record_tunnel_failure(&mut ctx, reason), failed, "{reason:?}");
+            assert_eq!(ctx.error_type, error_type, "{reason:?}");
+            assert_eq!(
+                ctx.filter_metadata.get(TUNNEL_CLOSE_REASON),
+                Some(reason.as_str()),
+                "{reason:?}: the close reason is published"
+            );
+            assert_eq!((ctx.request_body_bytes, ctx.response_body_bytes), (7, 9), "{reason:?}");
+            drop(ctx);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_tunnel_the_destination_resets_is_an_incomplete_failed_response() {
+        // The client has the 200; the logging hook then records the tunnel
+        // as a response cut off midway, unsampled, with the error.
+        let (response, ctx) = Box::pin(connect_to_loopback_ending(&pipeline(""), DestinationEnd::Reset)).await;
+        assert_eq!(status_of(&response), 200, "the tunnel opened: {response}");
+        assert_eq!(ctx.filter_metadata.get(TUNNEL_CLOSE_REASON), Some("destination_error"));
+        assert_eq!(ctx.error_type, Some(ERROR_TYPE_UPSTREAM_PROTOCOL));
+        assert!(
+            !ctx.response_delivery_complete,
+            "a broken-off tunnel is not a delivered response"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_tunnel_both_peers_close_is_a_delivered_response() {
+        let (response, ctx) = Box::pin(connect_to_loopback(&pipeline(""))).await;
+        assert_eq!(status_of(&response), 200, "the tunnel opened: {response}");
+        assert_eq!(ctx.filter_metadata.get(TUNNEL_CLOSE_REASON), Some("completed"));
+        assert_eq!(ctx.error_type, None, "a clean close is no error");
+        assert!(ctx.response_delivery_complete, "the end-of-stream pass ran");
     }
 
     #[test]

@@ -294,11 +294,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   while a peer has stopped reading, and passes each peer's half-close on to
   the other, so a client's upload keeps flowing after the destination
   finishes its answer, even while a TLS listener's `close_notify` waits on
-  a client that is not reading. The destination host is read in one
-  canonical form that filters (through the URI and `Host`), the
-  destination rules, and the dialer all share: a name lowercased without
-  a trailing dot, an IP literal in its standard text form (`[2001:DB8:0::1]`
-  reads as `2001:db8::1`, and IPv4-mapped `[::ffff:93.184.216.34]` as
+  a client that is not reading. How each tunnel closed (`completed`,
+  `idle_timeout`, `max_duration`, `client_error`, `destination_error`) is
+  the filter metadata `tunnel.close_reason`, which an access record reads
+  as `metadata.tunnel.close_reason` and a CloudEvent through
+  `metadata_fields`.
+  A tunnel a peer breaks off after its 200 counts as a failed request, as
+  a response cut off midway does: `praxis_errors_total` counts a
+  destination failure as `upstream_protocol`, which also marks the request
+  span as an error, and a client failure as `downstream`, and the tunnel's
+  access record is written whatever the sampling. The destination host is
+  read in one canonical form that filters (through the URI and `Host`),
+  the destination rules, and the dialer all share: a name lowercased
+  without a trailing dot, an IP literal in its standard text form
+  (`[2001:DB8:0::1]` reads as `2001:db8::1`, and IPv4-mapped
+  `[::ffff:93.184.216.34]` as
   `93.184.216.34`); a target whose host is not an IP literal or DNS name,
   such as `[blocked.example]:443`, is answered with 400. Destination names
   resolve under the bounded per-call DNS limits, so slow DNS fails a
