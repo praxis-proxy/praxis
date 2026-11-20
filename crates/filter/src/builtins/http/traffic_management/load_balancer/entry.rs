@@ -220,7 +220,9 @@ pub(super) fn build_cluster_entry(cluster: &Cluster) -> Result<ClusterEntry, Fil
     let authority = AuthorityResolver::build(cluster)?;
     let strategy = Arc::new(build_strategy(&cluster.load_balancer_strategy, endpoints));
     let retry_policy = Arc::new(cluster.retry_policy.clone().unwrap_or_else(RetryPolicy::legacy_default));
-    let retry_state = Arc::new(ClusterRetryState::new(retry_policy.retry_budget.as_ref()));
+    let retry_state = Arc::new(
+        ClusterRetryState::new(retry_policy.retry_budget.as_ref()).with_max_concurrent(cluster.max_connections),
+    );
     Ok(ClusterEntry {
         authority,
         opts: Arc::new(ConnectionOptions::from(cluster)),

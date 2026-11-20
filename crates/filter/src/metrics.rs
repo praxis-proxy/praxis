@@ -18,6 +18,13 @@ const CIRCUIT_BREAKER_OPEN: &str = "praxis_circuit_breaker_open";
 /// Counter for load-balancer panic-mode selections.
 const LB_PANIC_MODE_TOTAL: &str = "praxis_lb_panic_mode_total";
 
+/// Counter for requests shed by a cluster's `max_connections` ceiling.
+///
+/// Deliberately not folded into `praxis_overload_rejects_total`, which
+/// counts only the pre-filter protections (memory, descriptors, listener
+/// and process connection caps) and carries no cluster label.
+const CLUSTER_OVERLOAD_REJECTS_TOTAL: &str = "praxis_cluster_overload_rejects_total";
+
 /// Counter for requests that exceeded a `rate_limit` bucket.
 const RATE_LIMIT_LIMITED_TOTAL: &str = "praxis_rate_limit_limited_total";
 
@@ -105,6 +112,11 @@ pub(crate) fn set_circuit_breaker_state(cluster_name: SharedString, open: bool) 
 /// Increment the load-balancer panic-mode counter for a cluster.
 pub(crate) fn record_lb_panic_mode(cluster: SharedString) {
     counter!(LB_PANIC_MODE_TOTAL, "cluster" => cluster).increment(1);
+}
+
+/// Count one request shed because a cluster was at its `max_connections` cap.
+pub(crate) fn record_cluster_overload_reject(cluster: SharedString) {
+    counter!(CLUSTER_OVERLOAD_REJECTS_TOTAL, "cluster" => cluster).increment(1);
 }
 
 /// Count one request that exceeded a rate limit.
