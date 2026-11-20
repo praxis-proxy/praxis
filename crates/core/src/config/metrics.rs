@@ -580,8 +580,14 @@ mod tests {
         ] {
             let parsed: Result<MetricLabelsConfig, _> = serde_yaml::from_str(yaml);
             let err = parsed.expect_err("both entries are invalid").to_string();
-            assert!(err.contains(expected), "{yaml} should report {expected} first, got: {err}");
-            assert!(!err.contains(ignored), "{yaml} should stop before {ignored}, got: {err}");
+            assert!(
+                err.contains(expected),
+                "{yaml} should report {expected} first, got: {err}"
+            );
+            assert!(
+                !err.contains(ignored),
+                "{yaml} should stop before {ignored}, got: {err}"
+            );
         }
     }
 
