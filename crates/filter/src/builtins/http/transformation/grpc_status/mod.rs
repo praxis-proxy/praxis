@@ -92,7 +92,8 @@ impl Default for GrpcStatusConfig {
 /// failure with no usable status. This filter marks the request so
 /// those errors are emitted as Trailers-Only responses instead: a
 /// single header block, no body, with `grpc-status` mapped from the
-/// HTTP status Praxis chose.
+/// HTTP status Praxis chose. Applies to rejections from later request-head
+/// filters too, including `policy` admission.
 ///
 /// Successful short-circuits (a CORS preflight, a `static_response`)
 /// are left as real HTTP responses: only error statuses become gRPC
@@ -135,6 +136,16 @@ impl GrpcStatusFilter {
         }))
     }
 
+    /// Enable gRPC error mapping for requests matching the configured detection mode.
+    fn arm(&self, ctx: &mut HttpFilterContext<'_>) {
+        let kind = GrpcKind::from_headers(&ctx.request.headers);
+        if self.detect == DetectMode::ContentType && !kind.is_grpc() {
+            return;
+        }
+        trace!(grpc_kind = kind.as_str(), "arming gRPC error responses");
+        ctx.extensions.insert(self.mapping_for(kind));
+    }
+
     /// The mapping to install for a request of this gRPC kind.
     fn mapping_for(&self, kind: GrpcKind) -> GrpcErrorMapping {
         match self.content_type {
@@ -153,14 +164,27 @@ impl HttpFilter for GrpcStatusFilter {
         "grpc_status"
     }
 
-    async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        let kind = GrpcKind::from_headers(&ctx.request.headers);
-        if self.detect == DetectMode::ContentType && !kind.is_grpc() {
-            return Ok(FilterAction::Continue);
-        }
+    fn may_end_request(&self) -> bool {
+        false
+    }
 
-        trace!(grpc_kind = kind.as_str(), "arming gRPC error responses");
-        ctx.extensions.insert(self.mapping_for(kind));
+    // Arming at the head shapes rejections from head filters too, such as
+    // `policy` admission; `on_request` arms again where no head phase runs.
+    fn runs_request_head(&self) -> bool {
+        true
+    }
+
+    fn repeats_request_head(&self) -> bool {
+        true
+    }
+
+    async fn on_request_head(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        self.arm(ctx);
+        Ok(FilterAction::Continue)
+    }
+
+    async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        self.arm(ctx);
         Ok(FilterAction::Continue)
     }
 }

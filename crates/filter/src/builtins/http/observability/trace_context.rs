@@ -98,6 +98,10 @@ impl HttpFilter for TraceContextFilter {
         "trace_context"
     }
 
+    fn may_end_request(&self) -> bool {
+        false
+    }
+
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         ensure_trace_context(ctx);
         let Some(tc) = ctx.extensions.get::<TraceContext>().cloned() else {

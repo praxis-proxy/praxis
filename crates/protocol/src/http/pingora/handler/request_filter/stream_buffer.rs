@@ -10,10 +10,9 @@ use pingora_proxy::Session;
 #[cfg(test)]
 use praxis_core::config::DEFAULT_MAX_BUFFER_BYTES;
 use praxis_filter::{
-    BodyBuffer, BodyMode, FilterAction, FilterError, FilterPipeline, HttpFilterContext, Rejection, Request,
-    TrustedHeaderMutation,
+    BodyBuffer, BodyMode, FilterAction, FilterError, FilterPipeline, Rejection, Request, TrustedHeaderMutation,
 };
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::http::{
     body_limit::{BodyLimitPhase, body_limit_rejection},
@@ -287,7 +286,7 @@ impl PreReadPass {
             // header provenance: either the ordered pre_read_mutations log or
             // these legacy grouped queues. Mixing them would make ordering
             // ambiguous, so the ordered log takes precedence when present.
-            push_grouped_queues(&filter_ctx, &mut self.mutation_log);
+            self.mutation_log.extend(filter_ctx.grouped_queue_mutations());
         } else {
             self.mutation_log.extend(filter_ctx.pre_read_mutations);
         }
@@ -376,31 +375,6 @@ impl PreReadPass {
     }
 }
 
-/// Append a pre-read context's legacy grouped header queues to `log` as
-/// ordered trusted mutations (remove -> set -> add).
-///
-/// Used only when a pass wrote no ordered `pre_read_mutations`, so the two
-/// mechanisms never mix within one pass. Shared with the request-head phase,
-/// which captures head-filter mutations with the same precedence.
-pub(super) fn push_grouped_queues(filter_ctx: &HttpFilterContext<'_>, log: &mut Vec<TrustedHeaderMutation>) {
-    for name in &filter_ctx.request_headers_to_remove {
-        log.push(TrustedHeaderMutation::Remove(name.clone()));
-    }
-    for (name, value) in &filter_ctx.request_headers_to_set {
-        log.push(TrustedHeaderMutation::Set(name.clone(), value.clone()));
-    }
-    for (name, value) in &filter_ctx.extra_request_headers {
-        if let (Ok(hname), Ok(_)) = (
-            http::header::HeaderName::from_bytes(name.as_bytes()),
-            http::header::HeaderValue::from_str(value),
-        ) {
-            log.push(TrustedHeaderMutation::Add(hname, value.clone()));
-        } else {
-            warn!(header = %name, "skipping invalid promoted header");
-        }
-    }
-}
-
 // -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
@@ -417,6 +391,7 @@ pub(super) fn push_grouped_queues(filter_ctx: &HttpFilterContext<'_>, log: &mut 
     reason = "generated state-machine fixtures"
 )]
 mod tests {
+    use praxis_filter::HttpFilterContext;
     use tracing::instrument::WithSubscriber as _;
 
     use super::*;
