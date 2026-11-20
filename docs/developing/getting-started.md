@@ -46,6 +46,7 @@ and coverage workflows have additional requirements below.
 - `cargo-semver-checks` (SemVer compliance, optional)
 - `cargo-mutants` (mutation testing, optional)
 - `cargo-hack` (feature matrix checks, optional)
+- `cargo-fuzz` (fuzz testing, `make fuzz`/`fuzz-build`, optional)
 - `typos`, `taplo`, `shellcheck`, `actionlint`
   (non-Rust lint, `make lint-extra`)
 
@@ -209,6 +210,40 @@ make test-conformance-hyper   # the conformance suite on hyper
 
 See [hyper backend](../architecture/hyper-backend.md) for what the backend
 covers and what is not at parity with Pingora yet.
+
+### Fuzz Testing
+
+Fuzz targets live under `tests/fuzz`, excluded from the main workspace
+because they carry their own nightly-only dependency tree and `Cargo.lock`.
+They need `cargo-fuzz` and the nightly toolchain named by `NIGHTLY_VERSION`
+in the `Makefile`:
+
+```console
+cargo install cargo-fuzz --version 0.13.2 --locked
+make fuzz-build  # build every target in tests/fuzz/fuzz_targets, without running it
+make fuzz        # run every target for FUZZ_DURATION seconds each (default 120)
+```
+
+Each target's seed corpus lives in `tests/fuzz/seeds/<target>/` and is
+committed; the working corpus a run accumulates new finds into
+(`tests/fuzz/corpus/<target>/`) is not. CI runs `make fuzz` on a bounded
+nightly schedule (`.github/workflows/fuzz.yaml`) and `make fuzz-build` on a
+PR that touches a fuzzed target's own code.
+
+When a run finds a crash, the exact input is saved as a file under
+`tests/fuzz/artifacts/<target>/`. Replay it from the repository root:
+
+```console
+cargo +nightly-2026-03-28 fuzz run --fuzz-dir tests/fuzz fuzz_simd_scan \
+    tests/fuzz/artifacts/fuzz_simd_scan/crash-<hash>
+```
+
+`--fuzz-dir tests/fuzz` selects the fuzz crate and `fuzz_simd_scan` the
+target; the last argument is the saved crash file, and passing it makes the
+fuzzer run only that input instead of searching. Use the nightly toolchain
+currently named by `NIGHTLY_VERSION` in the `Makefile`. Once the crash
+reproduces, turn it into a regression test in the target's crate (see
+issue #1392).
 
 ## Security: Binding Low Ports
 

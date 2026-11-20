@@ -34,7 +34,18 @@ mod generic;
 /// assert_eq!(find_json_string_delim(b"hel\"lo"), Some(3));
 /// assert_eq!(find_json_string_delim(b"ab\x01cd"), Some(2));
 /// ```
+// `cargo fuzz` compiles the whole dependency graph with `--cfg fuzzing`, so
+// the fuzz build widens this to `pub` (and `json_ops::mod` re-exports it)
+// so `tests/fuzz/fuzz_targets/fuzz_simd_scan.rs` can call it directly; a
+// normal build keeps it crate-internal.
+#[cfg(not(fuzzing))]
 pub(super) fn find_json_string_delim(haystack: &[u8]) -> Option<usize> {
+    imp::find(haystack)
+}
+
+/// See the `cfg(not(fuzzing))` definition above.
+#[cfg(fuzzing)]
+pub fn find_json_string_delim(haystack: &[u8]) -> Option<usize> {
     imp::find(haystack)
 }
 
