@@ -160,8 +160,12 @@ impl HttpFilter for JsonBodyFieldFilter {
         "json_body_field"
     }
 
+    fn may_end_request(&self) -> bool {
+        false
+    }
+
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(crate::BodyRequirement::Required)
     }
 
     fn request_body_mode(&self) -> BodyMode {

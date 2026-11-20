@@ -1,0 +1,71 @@
+name: Payload size and resource profiles
+
+on:
+  schedule:
+    - cron: "23 4 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  payloads:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        adapter: [pingora, hyper]
+    env:
+      CARGO_BUILD_JOBS: "2"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Rust
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@f671c1215f89562d286310a6cabdcbaa5da9605c # v0.4.0
+        with:
+          cache-suffix: payload-${{ matrix.adapter }}
+      - name: Run all scheduled selectors
+        run: make test-payload-scheduled BACKEND=${{ matrix.adapter }}
+      - name: Preserve measurements and test logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: payload-${{ matrix.adapter }}-${{ github.sha }}
+          path: target/payload-results-${{ matrix.adapter }}/
+          if-no-files-found: error
+
+  heap:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      CARGO_BUILD_JOBS: "2"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Rust
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@f671c1215f89562d286310a6cabdcbaa5da9605c # v0.4.0
+        with:
+          cache-suffix: payload-heap
+      - name: Measure live allocations
+        run: |
+          mkdir -p target/payload-heap
+          PRAXIS_HEAP_STRESS=1 PRAXIS_HEAP_OUTPUT=target/payload-heap cargo bench -p praxis-tests-benches \
+            --bench json_body_heap --features dhat-heap \
+            > target/payload-heap/results.log 2>&1
+      - name: Preserve heap measurements
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: payload-heap-${{ github.sha }}
+          path: target/payload-heap/
+          if-no-files-found: error

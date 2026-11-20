@@ -76,6 +76,23 @@ insecure_options:
     );
     assert_eq!(parse_status(&raw), 413, "large body should be rejected with 413");
 
+    let boundary = "x".repeat(1024);
+    let request =
+        format!("POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 1024\r\nConnection: close\r\n\r\n{boundary}");
+    let raw = http_send(proxy.addr(), &request);
+    assert_eq!(parse_status(&raw), 200, "exactly 1024 declared bytes are accepted");
+    assert_eq!(parse_body(&raw), "accepted");
+
+    let raw = http_send(
+        proxy.addr(),
+        "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 1025\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(
+        parse_status(&raw),
+        413,
+        "one byte over is rejected from the header alone"
+    );
+
     let (status, body) = http_get(proxy.addr(), "/", None);
     assert_eq!(status, 200, "GET without content-length should be accepted");
     assert_eq!(body, "accepted", "GET response should match backend");

@@ -12,7 +12,7 @@ automatically excluded from selection.
 | -------- | ------------ | -------- |
 | Round-robin | `round_robin` | General-purpose, uniform backends |
 | Least connections | `least_connections` | Variable latency or cost |
-| P2C | `p2c` | Large endpoint pools |
+| P2C | `p2c` | Load-aware selection from two sampled endpoints |
 | Consistent hash | `consistent_hash` | Session affinity, caching |
 
 The default strategy is `round_robin`. Set
@@ -78,18 +78,21 @@ times (mixed fast/slow endpoints, heterogeneous
 hardware, or request types with different costs).
 
 **Trade-offs:** scans all endpoints on every
-request. For clusters with many endpoints, consider
-P2C instead.
+request.
 
 ## P2C (Power of Two Choices)
 
-Samples two random endpoints and picks the one with
-fewer in-flight requests. This achieves
-near-optimal load distribution with O(1) selection
-cost, regardless of the number of endpoints.
+Samples two distinct random endpoints and picks the
+one with fewer in-flight requests. Building the
+weighted candidate set and drawing the samples scan
+eligible endpoints; only comparing their load counts
+is constant-time. Exclusion checks add work as the
+exclusion set grows.
 
 Higher-weight endpoints occupy more of the sampling
-space and are chosen more often.
+space and win equal-load ties. Unequal in-flight
+counts decide between the sampled endpoints, so
+weights do not guarantee proportional final traffic.
 
 ```yaml
 clusters:
@@ -103,10 +106,8 @@ clusters:
       - "10.0.0.5:8080"
 ```
 
-**When to use:** large endpoint pools (5+
-endpoints) where scanning all endpoints per request
-is wasteful. P2C is preferred over least connections
-for large clusters.
+**When to use:** load-sensitive routing where
+comparing two sampled endpoints is suitable.
 
 **Trade-offs:** with only 2 endpoints, P2C is
 equivalent to least connections. With a single
@@ -121,12 +122,11 @@ Hashes a stable request attribute to always route
 the same key to the same endpoint. This provides
 session affinity without server-side session storage.
 
-The hash ring is built at startup from virtual nodes.
-Each endpoint receives virtual nodes proportional to
-its weight - an endpoint with weight 3 occupies
-three times as many ring positions as one with
-weight 1. The hash function is FNV-1a (64-bit),
-chosen for speed and determinism.
+The slot array is built at startup by repeating each
+endpoint according to its weight. An endpoint with
+weight 3 occupies three times as many slots as one
+with weight 1. The FNV-1a (64-bit) hash selects a slot
+by taking the remainder modulo the array length.
 
 ### Hash Key Selection
 
@@ -221,7 +221,7 @@ How weights affect each strategy:
 | Round-robin | More rotation slots |
 | Least connections | Tie-breaker at equal load |
 | P2C | Larger random sampling space |
-| Consistent hash | More virtual ring nodes |
+| Consistent hash | More slots in the weighted modulo array |
 
 **Round-robin:** higher weight gives an endpoint
 more slots in the cumulative weight cycle.
@@ -230,13 +230,14 @@ in-flight counts, the higher-weight endpoint wins.
 **P2C:** higher weight occupies a larger share of
 the random sampling space, increasing selection
 probability. **Consistent hash:** higher weight
-creates more virtual nodes on the hash ring.
+creates more slots in the weighted modulo array.
 
 ### Use Cases
 
-- **Canary rollouts:** give the canary endpoint
-  weight 1 and the stable endpoints weight 9 to
-  send 10% of traffic to the canary.
+- **Canary rollouts:** with a proportional strategy
+  such as round-robin or weighted random, give one
+  canary endpoint weight 1 and one stable endpoint
+  weight 9 for an approximate 10% canary share.
 - **Heterogeneous hardware:** assign weights
   proportional to backend capacity (e.g. a machine
   with 8 cores gets weight 4, a 2-core machine
@@ -363,6 +364,32 @@ clusters:
 
 All fields are optional. Omitted fields use
 Pingora's built-in defaults.
+
+### Per-Cluster Concurrency Ceiling
+
+`max_connections` bounds the requests in flight to one
+cluster, so a single slow upstream cannot consume all
+available capacity. A request routed to a cluster already
+at its ceiling is shed with `503` and `Retry-After: 1`
+before an endpoint is selected, and counted under
+`praxis_cluster_overload_rejects_total{cluster}`.
+
+This is a per-cluster ceiling, not a per-listener one:
+clusters on the same listener have independent budgets, so
+saturating one leaves the others serving. Use the listener
+or `runtime` cap for a process- or port-wide bound.
+
+A request pinned by session affinity bypasses endpoint
+selection, and with it this ceiling: it is neither shed nor
+counted. Pair `max_connections` with one of those caps when
+a hard bound matters.
+
+A sub-request running a nested pipeline — an
+`iterative_request_router` step, or a callout chain — takes a
+slot from the cluster its own `load_balancer` selects, and
+returns it however the step ends: a normal response, a
+rejection by a later filter, an error, the step budget
+expiring, or the client disconnecting mid-step.
 
 ### Upstream HTTP Version
 
@@ -559,9 +586,10 @@ Use this flowchart to choose a strategy:
 2. **Do backends have uniform latency?** Use
    `round_robin`. Add weights if hardware differs.
 3. **Do backends have variable latency?**
-   - Fewer than 5 endpoints: use
-     `least_connections`.
-   - 5 or more endpoints: use `p2c`.
+   Use `least_connections` to compare every eligible
+   endpoint's load, or `p2c` to compare two sampled
+   endpoints. Both scan the endpoint pool; measure
+   your workload to choose between them.
 4. **Unsure?** Start with `round_robin` (the
    default) and switch if monitoring reveals uneven
    load.

@@ -20,7 +20,6 @@ use crate::{
     FilterError,
     actions::{FilterAction, Rejection, SelectedUpstreamBodyOutcome},
     any_filter::AnyFilter,
-    body::BodyAccess,
     condition::{SelectedUpstream, should_execute_from, should_execute_response_ref},
     context::{EffectiveHeaders, HttpFilterContext, Response},
     metrics::{
@@ -35,10 +34,10 @@ use crate::{actions::BoundUpstreamBodyOutcome, metrics::PHASE_BOUND_UPSTREAM};
 // Body Filter Utilities
 // -----------------------------------------------------------------------------
 
-/// Add chunk size to accumulator.
+/// Add chunk size to the accumulator, saturating if its range is exhausted.
 pub(super) fn accumulate_body_bytes(counter: &mut u64, body: Option<&Bytes>) {
     if let Some(b) = body {
-        *counter += b.len() as u64;
+        *counter = counter.saturating_add(u64::try_from(b.len()).unwrap_or(u64::MAX));
     }
 }
 
@@ -552,7 +551,7 @@ pub(super) async fn run_selected_upstream_request_body_filter(
     // undone before a fail-open swallows the error.
     let before = body.clone();
     let mut scratch = body.clone();
-    let target = if http_filter.selected_upstream_request_body_access() == BodyAccess::ReadWrite {
+    let target = if http_filter.selected_upstream_request_body_access().is_writable() {
         &mut *body
     } else {
         &mut scratch
@@ -597,7 +596,7 @@ pub(super) async fn run_bound_upstream_request_body_filter(
     // body it was promised not to; a writer that errors gets its partial edit
     // undone before a fail-open swallows the error. The flag says whether the
     // body may now differ from `before`.
-    let writer = http_filter.bound_upstream_request_body_access() == BodyAccess::ReadWrite;
+    let writer = http_filter.bound_upstream_request_body_access().is_writable();
     let before = body.clone();
     let mut scratch = body.clone();
     let target = if writer { &mut *body } else { &mut scratch };
@@ -784,6 +783,16 @@ mod tests {
         accumulate_body_bytes(&mut counter, None);
         accumulate_body_bytes(&mut counter, Some(&Bytes::from_static(b"ij")));
         assert_eq!(counter, 10, "counter should be sum of all Some chunk lengths");
+    }
+
+    #[test]
+    fn accumulate_body_bytes_saturates_without_wrapping() {
+        let mut counter = u64::MAX - 1;
+        accumulate_body_bytes(&mut counter, Some(&Bytes::from_static(b"ab")));
+        assert_eq!(counter, u64::MAX);
+        accumulate_body_bytes(&mut counter, Some(&Bytes::new()));
+        accumulate_body_bytes(&mut counter, None);
+        assert_eq!(counter, u64::MAX);
     }
 
     #[test]

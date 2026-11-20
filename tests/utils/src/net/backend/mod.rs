@@ -3,17 +3,23 @@
 
 //! HTTP backends for integration testing.
 
+mod counting;
 mod echo;
 mod grpc;
+mod payload_response;
 mod raw;
 mod simple;
 mod specialized;
 mod websocket;
 
+pub use counting::{BackendReceipt, CountingBackend, start_counting_backend};
 pub use echo::{
     start_echo_backend, start_header_echo_backend, start_tagged_header_echo_backend, start_uri_echo_backend,
 };
 pub use grpc::{GrpcBackend, GrpcBackendGuard, start_grpc_backend};
+pub use payload_response::{
+    PayloadResponseBackend, PayloadResponseFraming, PayloadResponseReceipt, start_payload_response_backend,
+};
 pub use raw::{read_http_request, spawn_raw_http_backend};
 pub use simple::{
     Backend, ChunkedBackend, RoutedBackend, start_backend, start_backend_v6, start_backend_with_shutdown,
@@ -21,7 +27,7 @@ pub use simple::{
 pub use specialized::{
     BackendGuard, ReusedConnectionLog, start_gzip_encoded_backend, start_hop_by_hop_response_backend,
     start_keepalive_backend, start_keepalive_poison_backend, start_malicious_response_header_backend,
-    start_reserved_header_response_backend, start_response_header_backend, start_reused_connection_kill_backend,
-    start_slow_backend, start_stateful_backend,
+    start_request_counting_backend, start_reserved_header_response_backend, start_response_header_backend,
+    start_reused_connection_kill_backend, start_slow_backend, start_stateful_backend,
 };
 pub use websocket::{WsBackendGuard, start_websocket_echo_backend};

@@ -258,6 +258,36 @@ fn emit_version_env() {
         None => pkg_version,
     };
     println!("cargo:rustc-env=PRAXIS_VERSION={version}");
+    println!("cargo:rustc-env=PRAXIS_POLICY_FEATURES={}", policy_features());
+    println!("cargo:rustc-env=PRAXIS_NETWORK_BACKEND={}", network_backend());
+}
+
+/// The network backend this build compiled in, `hyper` or `pingora`, which
+/// `praxis --version` reports beside the Policy features.
+fn network_backend() -> &'static str {
+    if std::env::var_os("CARGO_FEATURE_HYPER").is_some() {
+        "hyper"
+    } else if std::env::var_os("CARGO_FEATURE_PINGORA").is_some() {
+        "pingora"
+    } else {
+        "none"
+    }
+}
+
+/// The `policy-*` features this build compiled in, sorted and comma-joined,
+/// or `none`. `praxis --version` reports it so a test harness can check a
+/// prebuilt binary carries the Policy selection it claims.
+fn policy_features() -> String {
+    let mut names: Vec<String> = std::env::vars()
+        .filter_map(|(key, _)| key.strip_prefix("CARGO_FEATURE_POLICY_").map(str::to_owned))
+        .map(|suffix| format!("policy-{}", suffix.to_ascii_lowercase().replace('_', "-")))
+        .collect();
+    names.sort();
+    if names.is_empty() {
+        "none".to_owned()
+    } else {
+        names.join(",")
+    }
 }
 
 /// Return the git short SHA, optionally suffixed with `-dirty`.

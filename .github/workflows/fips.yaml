@@ -4,8 +4,9 @@ name: FIPS
 # Workflow Settings
 # ------------------------------------------------------------------------------
 #
-# Two jobs. `ubi-image` is the static proof, on GitHub's runners: the FIPS
-# build on UBI 9, checked the way Red Hat checks it, first the compliance
+# Two jobs. `ubi-image` checks the image and configurable-provider startup
+# behavior on GitHub's runners: the FIPS build on UBI 9, checked the way
+# Red Hat checks it, first the compliance
 # report (a reason and a pointer for every finding), then Red Hat's own
 # scanner, openshift/check-payload at its Rust-support revision, against the
 # runtime image with warnings fatal. It runs on every pull request and push to
@@ -99,6 +100,11 @@ jobs:
 
       - name: Build on UBI 9 with Red Hat's toolchain and print the compliance report
         run: make fips-check
+
+      # Both environments are required: this proves negative startup cases;
+      # fips-host proves the same configs retain kernel-enforced FIPS crypto.
+      - name: Policy startup with configurable providers (all four scenarios)
+        run: make test-fips-policy-provider
 
       - name: Build the FIPS runtime image
         run: make container-fips

@@ -16,8 +16,8 @@ use tracing::info;
 /// Add a single HTTP listener to an HTTP proxy service.
 ///
 /// Returns an optional shutdown sender for the TLS certificate
-/// watcher. The caller must keep this sender alive; dropping it
-/// signals the watcher task to stop.
+/// watcher. The caller must explicitly send `true` to stop it;
+/// dropping the sender leaves it running.
 pub(crate) fn add_listener<H>(
     service: &mut Service<HttpProxy<H>>,
     listener: &praxis_core::config::Listener,

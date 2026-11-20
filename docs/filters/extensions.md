@@ -396,6 +396,15 @@ filter_chains:
               methods: ["POST", "PUT", "PATCH"]
 ```
 
+`MaxBodyGuard` checks only the declared `Content-Length` when the
+request arrives. Chunked uploads and other requests without that
+header are not compared with its `max_content_length` value. For a
+cumulative request transfer ceiling, configure
+`body_limits.max_request_bytes` as described in the
+[payload size limits guide](../operating/configuration.md#payload-size-limits).
+With streaming requests, a body-limit rejection may occur after the
+headers or an earlier body prefix has reached the upstream.
+
 Custom filters participate identically to built-ins: same
 ordering, context access, and short-circuit capability.
 
@@ -434,6 +443,25 @@ Only declare `request_body_access()` or
 inspects or modifies the body. Use `ReadOnly` if you
 inspect but do not modify, and `ReadWrite` only if you
 mutate chunks in place.
+
+Every body-access declaration also states whether the
+processing is optional or required:
+
+```rust
+fn request_body_access(&self) -> BodyAccess {
+    BodyAccess::ReadOnly(BodyRequirement::Required)
+}
+```
+
+`Required` means an explicitly permitted opaque WebSocket
+upgrade must be refused when this selected filter would
+otherwise need HTTP body processing. Use `Optional` when
+missing body hooks for an opaque upgraded connection is
+acceptable, as for a best-effort observer. The default
+`BodyAccess::None` needs no requirement. This is a Rust API
+change: external filters that return `ReadOnly` or
+`ReadWrite` must now provide `BodyRequirement::Optional`
+or `BodyRequirement::Required`.
 
 ### Choose the right body mode
 

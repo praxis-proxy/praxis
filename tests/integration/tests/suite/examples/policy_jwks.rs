@@ -6,7 +6,7 @@
 use std::{
     collections::HashMap,
     io::{Read as _, Write as _},
-    net::{SocketAddr, TcpListener},
+    net::SocketAddr,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -142,7 +142,7 @@ impl JwksEndpoint {
             document.len()
         );
 
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind JWKS listener");
+        let (listener, _) = praxis_test_utils::bind_unique_port();
         let address = listener.local_addr().expect("JWKS listener address");
         let fetches = Arc::new(AtomicUsize::new(0));
 

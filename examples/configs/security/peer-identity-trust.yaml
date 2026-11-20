@@ -10,6 +10,23 @@
 # or serial number. All configured fields on an entry
 # must match.
 #
+# Setup: replace the server certificate/key and client CA paths
+# below with local PEM files. The client CA verifies client
+# identities; the server certificate must cover localhost, and
+# curl must trust its issuing CA in server-ca.pem. Replace the
+# sample cert_digest with the lowercase SHA-256 digest of the
+# trusted client's DER certificate (for example, use
+# `openssl x509 -in client.pem -outform DER | openssl dgst -sha256`).
+# The gateway-peer client certificate must have O=gateway-peer
+# and be signed by the configured client CA.
+# The trusted-sidecar entry matches any CA-verified certificate
+# with that organization; digest pinning is stronger.
+# Start an HTTP backend on 127.0.0.1:3000 before running Praxis.
+# Then connect with:
+#   curl --cert client.pem --key client-key.pem --cacert server-ca.pem \
+#     https://localhost:8080/
+# A client without a certificate is refused during TLS handshake.
+#
 # ⚠️  EXPERIMENTAL: This example uses the `spiffe` experimental feature.
 # Not recommended for production use. Build with --features spiffe.
 #
@@ -22,6 +39,13 @@ listeners:
     address: "127.0.0.1:8080"
     filter_chains:
       - trusted-peers
+    tls:
+      certificates:
+        - cert_path: /etc/praxis/server.pem
+          key_path: /etc/praxis/server-key.pem
+      client_ca:
+        ca_path: /etc/praxis/client-ca.pem
+      client_cert_mode: require
 
 filter_chains:
   - name: trusted-peers

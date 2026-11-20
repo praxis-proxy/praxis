@@ -63,7 +63,8 @@ pub(super) async fn execute(
     // map on every response for listeners with no filters.
     let name_fingerprint_before = (!pipeline.is_empty()).then(|| header_name_fingerprint(&resp.headers));
     ctx.connection_upgraded = is_upgrade_response;
-    if super::fail_to_proxy::is_final_response(upstream_response) {
+    let is_final = super::fail_to_proxy::is_final_response(upstream_response);
+    if is_final {
         ctx.upstream_response_status = Some(upstream_response.status.as_u16());
         praxis_core::subrequest::record_http_client_status(
             &ctx.upstream_client_span,
@@ -85,7 +86,9 @@ pub(super) async fn execute(
         return Err(err);
     }
 
-    ctx.response_phase_done = true;
+    if is_final {
+        ctx.response_phase_done = true;
+    }
 
     let (result, filter_flagged_modification) = run_response_pipeline(pipeline, ctx, &mut resp).await?;
     let rewritten_is_bodyless = ctx
@@ -96,6 +99,14 @@ pub(super) async fn execute(
         .request_snapshot
         .as_ref()
         .is_some_and(|request| successful_connect_tunnel(&request.method, resp.status));
+    let reframed_event_stream = matches!(
+        &result,
+        Ok(FilterAction::Continue | FilterAction::Release | FilterAction::BodyDone)
+    ) && reframe_http11_event_stream(
+        &mut resp,
+        ctx.client_http_version,
+        is_bodyless || rewritten_is_bodyless || is_connect_tunnel || is_upgrade_response,
+    );
     let restored_chunked_framing = matches!(
         &result,
         Ok(FilterAction::Continue | FilterAction::Release | FilterAction::BodyDone)
@@ -109,6 +120,7 @@ pub(super) async fn execute(
     // write-back is safe. Re-fingerprint and treat any change to the name
     // sequence as a modification, independent of what filters self-reported.
     let headers_modified = filter_flagged_modification
+        || reframed_event_stream
         || restored_chunked_framing
         || name_fingerprint_before.is_some_and(|before| header_name_fingerprint(&resp.headers) != before);
     // Upstream-supplied reserved internal headers were stripped before the
@@ -139,6 +151,26 @@ pub(super) async fn execute(
 /// A successful CONNECT switches to tunnel bytes instead of a response body.
 pub(in crate::http) fn successful_connect_tunnel(method: &http::Method, status: http::StatusCode) -> bool {
     method == http::Method::CONNECT && status.is_success()
+}
+
+/// Use chunked framing for HTTP/1.1 event streams so Pingora flushes each
+/// event instead of retaining small writes until the declared body completes.
+#[cfg(feature = "pingora")]
+fn reframe_http11_event_stream(
+    resp: &mut praxis_filter::Response,
+    client_version: Option<http::Version>,
+    is_bodyless: bool,
+) -> bool {
+    let is_event_stream = resp
+        .headers
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|media_type| media_type.trim().eq_ignore_ascii_case("text/event-stream"));
+    if client_version != Some(http::Version::HTTP_11) || is_bodyless || !is_event_stream {
+        return false;
+    }
+    resp.headers.remove(http::header::CONTENT_LENGTH).is_some()
 }
 
 /// Reframe a body rewritten by a filter so an HTTP/1.1 connection can persist
@@ -197,7 +229,6 @@ pub(in crate::http) async fn run_response_filters(
         headers_modified,
         response_body_mode,
         cluster,
-        cluster_retry_state_released,
         extensions,
         filter_metadata,
         filter_state,
@@ -213,7 +244,6 @@ pub(in crate::http) async fn run_response_filters(
             fctx.response_headers_modified,
             fctx.response_body_mode,
             fctx.cluster,
-            fctx.cluster_retry_state_released,
             fctx.extensions,
             fctx.filter_metadata,
             fctx.filter_state,
@@ -223,9 +253,10 @@ pub(in crate::http) async fn run_response_filters(
             fctx.attempted_endpoints,
         )
     };
+    let headers_modified = strip_no_content_framing(resp) || headers_modified;
     ctx.cluster = cluster;
-    ctx.cluster_retry_state_released = cluster_retry_state_released;
-    ctx.response_body_mode = clamp_body_mode_to_ceiling(response_body_mode, baseline_response_body_mode);
+    ctx.response_body_mode =
+        clamp_body_mode_to_ceiling(response_body_mode, baseline_response_body_mode, pipeline.buffer_cap());
     ctx.extensions = extensions;
     ctx.filter_metadata = filter_metadata;
     ctx.filter_state = filter_state;
@@ -236,12 +267,23 @@ pub(in crate::http) async fn run_response_filters(
     Some((r, headers_modified))
 }
 
+/// Remove forbidden 204 framing after filters have had their last header edit.
+/// HEAD and 304 may retain a hypothetical representation length.
+fn strip_no_content_framing(resp: &mut praxis_filter::Response) -> bool {
+    if resp.status != http::StatusCode::NO_CONTENT {
+        return false;
+    }
+    let length = resp.headers.remove(http::header::CONTENT_LENGTH).is_some();
+    let transfer = resp.headers.remove(http::header::TRANSFER_ENCODING).is_some();
+    length || transfer
+}
+
 /// Map the filter pipeline result to a Pingora Result, restoring headers on success.
 ///
 /// Headers were copied out of the Pingora response earlier, so they must
 /// always be written back. When the header name sequence is unchanged the map
 /// is moved straight back; when it changed we rebuild through Pingora's API.
-/// Either way the whole value is replaced, since 0.9.0 removed `DerefMut` on
+/// Either way the whole value is replaced, since Pingora has no `DerefMut` on
 /// `ResponseHeader`.
 ///
 /// The status is written back unconditionally: it lives in the plain
@@ -275,7 +317,11 @@ fn handle_response_result(
             // Bodyless responses skip the body phase, so a successful
             // header phase is their delivery completion. Marking earlier
             // would hide responses the pipeline itself rejects.
-            if is_bodyless {
+            if is_bodyless
+                && !(upstream_response.status.is_informational()
+                    && upstream_response.status != http::StatusCode::SWITCHING_PROTOCOLS)
+                && !(resp.status.is_informational() && resp.status != http::StatusCode::SWITCHING_PROTOCOLS)
+            {
                 ctx.response_delivery_complete = true;
             }
             write_back_response(upstream_response, &mut resp, headers_modified);
@@ -435,6 +481,87 @@ mod tests {
     use praxis_filter::{FilterRegistry, Request};
 
     use super::*;
+
+    #[tokio::test]
+    async fn no_content_response_phase_removes_framing_and_reports_modified_headers() {
+        for status in [
+            http::StatusCode::NO_CONTENT,
+            http::StatusCode::NOT_MODIFIED,
+            http::StatusCode::OK,
+        ] {
+            let mut response = event_response("application/octet-stream");
+            response.status = status;
+            response
+                .headers
+                .insert(http::header::TRANSFER_ENCODING, "chunked".parse().unwrap());
+            let pipeline = make_pipeline();
+            let mut ctx = make_ctx();
+            let (result, changed) = run_response_filters(&pipeline, &mut ctx, &mut response).await.unwrap();
+            assert!(matches!(result, Ok(FilterAction::Continue)));
+            let removed = status == http::StatusCode::NO_CONTENT;
+            assert_eq!(changed, removed, "write-back must see removed header names");
+            assert_eq!(response.headers.contains_key(http::header::CONTENT_LENGTH), !removed);
+            assert_eq!(response.headers.contains_key(http::header::TRANSFER_ENCODING), !removed);
+        }
+    }
+
+    #[test]
+    fn event_stream_http11_reframes_and_restores_chunking() {
+        let mut resp = event_response("Text/Event-Stream; charset=utf-8");
+        assert!(reframe_http11_event_stream(
+            &mut resp,
+            Some(http::Version::HTTP_11),
+            false
+        ));
+        assert!(!resp.headers.contains_key(http::header::CONTENT_LENGTH));
+        assert!(restore_http11_framing(&mut resp, Some(http::Version::HTTP_11), false));
+        assert_eq!(resp.headers.get(http::header::TRANSFER_ENCODING).unwrap(), "chunked");
+    }
+
+    #[test]
+    fn event_stream_framing_preserves_bodyless_and_other_protocols() {
+        for (version, bodyless) in [
+            (Some(http::Version::HTTP_11), true),
+            (Some(http::Version::HTTP_10), false),
+            (Some(http::Version::HTTP_2), false),
+            (None, false),
+        ] {
+            let mut resp = event_response("text/event-stream");
+            assert!(!reframe_http11_event_stream(&mut resp, version, bodyless));
+            assert_eq!(resp.headers.get(http::header::CONTENT_LENGTH).unwrap(), "16");
+        }
+    }
+
+    #[test]
+    fn non_event_content_type_preserves_content_length() {
+        for content_type in [
+            "application/json",
+            "text/event-stream-other",
+            "text/plain; x=text/event-stream",
+        ] {
+            let mut resp = event_response(content_type);
+            assert!(!reframe_http11_event_stream(
+                &mut resp,
+                Some(http::Version::HTTP_11),
+                false
+            ));
+            assert_eq!(resp.headers.get(http::header::CONTENT_LENGTH).unwrap(), "16");
+        }
+    }
+
+    /// Create a response with a finite content length and a supplied media type.
+    fn event_response(content_type: &str) -> praxis_filter::Response {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_str(content_type).unwrap(),
+        );
+        headers.insert(http::header::CONTENT_LENGTH, http::HeaderValue::from_static("16"));
+        praxis_filter::Response {
+            headers,
+            status: http::StatusCode::OK,
+        }
+    }
 
     #[test]
     fn removed_content_length_restores_only_http11_body_framing() {
@@ -808,6 +935,39 @@ mod tests {
             upstream.status, 418,
             "a status-only edit must reach the response even on the direct write-back path"
         );
+    }
+
+    /// Feed one accepted response head through completion bookkeeping.
+    fn accept_response_head(ctx: &mut PingoraRequestCtx, status: http::StatusCode, is_bodyless: bool) {
+        let mut upstream = pingora_http::ResponseHeader::build(status.as_u16(), None).unwrap();
+        let response = praxis_filter::Response {
+            headers: http::HeaderMap::new(),
+            status,
+        };
+        handle_response_result(
+            Ok(FilterAction::Continue),
+            &mut upstream,
+            response,
+            false,
+            is_bodyless,
+            ctx,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn early_hints_do_not_complete_response_delivery() {
+        let mut ctx = PingoraRequestCtx::default();
+        accept_response_head(&mut ctx, http::StatusCode::EARLY_HINTS, true);
+        assert!(!ctx.response_delivery_complete, "103 has no body but is not final");
+        accept_response_head(&mut ctx, http::StatusCode::OK, false);
+        assert!(!ctx.response_delivery_complete, "streaming 200 waits for EOS");
+        accept_response_head(&mut ctx, http::StatusCode::NO_CONTENT, true);
+        assert!(ctx.response_delivery_complete, "final bodyless response completes");
+
+        let mut upgrade_ctx = PingoraRequestCtx::default();
+        accept_response_head(&mut upgrade_ctx, http::StatusCode::SWITCHING_PROTOCOLS, true);
+        assert!(upgrade_ctx.response_delivery_complete, "101 upgrade remains final");
     }
 
     #[test]

@@ -146,6 +146,9 @@ drain window.
 With the default Pingora backend, the request grace period
 after SIGTERM is at most five seconds. Increasing
 `shutdown_timeout_secs` does not extend that period.
+Long-lived and streaming responses can therefore be
+interrupted when the grace period expires; drain them before
+SIGTERM when they need more time.
 Allow time for shutdown and for logs and spans to flush
 before forcing the process to exit.
 See [Graceful Shutdown] for the timeout behaviour.

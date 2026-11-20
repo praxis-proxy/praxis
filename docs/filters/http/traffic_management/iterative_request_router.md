@@ -23,9 +23,9 @@ Steps inherit the request's logical upstream binding, so a step's `load_balancer
 |-------|------|---------|-------------|
 | `initial_step` | string | yes | Name of the first step to execute. |
 | `max_iterations` | integer | no | Maximum iterations before aborting (default 10, max 100). |
-| `max_response_bytes` | integer | no | Maximum response body bytes per sub-request (at most 1 GiB). |
+| `max_response_bytes` | integer | no | Maximum buffered response body bytes per sub-request (also bounded by `body_limits.max_buffer_bytes`). |
 | `max_stream_response_bytes` | integer | no | Optional cumulative byte ceiling for one logical streamed response. This is intentionally distinct from buffered per-step response limits. |
-| `max_state_bytes` | integer | no | Maximum accumulated iteration state bytes (at most 1 GiB). |
+| `max_state_bytes` | integer | no | Maximum accumulated iteration state bytes (also bounded by `body_limits.max_buffer_bytes`). |
 | `step_timeout_ms` | integer | no | Per-step timeout in milliseconds. Defaults to `timeout_ms`. |
 | `steps` | StepConfig[] | yes | Named steps, each with filters and transition rules. |
 | `steps[].name` | string | yes | Step name (must be unique within the router). |
@@ -44,7 +44,7 @@ Steps inherit the request's logical upstream binding, so a step's `load_balancer
 | `steps[].filters[].branch_chains[].on_result.result.any_of` | string[] | one of | Values that fire the branch when the result equals one of them. |
 | `steps[].filters[].branch_chains[].on_result.result.contains` | string | one of | Text that fires the branch when the result contains it. |
 | `steps[].filters[].branch_chains[].on_result.result.not` | string | one of | The one value that doesn't fire the branch; any other value, or no value at all, does. |
-| `steps[].filters[].branch_chains[].rejoin` | string | no | Where to resume in the parent pipeline after the branch. - `"next"` (default): continue at the filter immediately after the branch point, processing the rest of the pipeline normally. - `"terminal"` or `"client"`: stop pipeline execution and return the response to the client without running further filters. - `"<name>"`: skip to a named filter (the `name` field on a [`FilterEntry`], not the filter type). If the target appears later in the pipeline, this becomes a forward skip. If earlier, it becomes re-entrance and requires [`max_iterations`] to prevent infinite loops. Named targets work across chains because all listener chains are concatenated into one flat pipeline during startup. Cross-chain rejoin targets use `"chain:filter"` syntax. |
+| `steps[].filters[].branch_chains[].rejoin` | string | no | Where to resume in the parent pipeline after the branch. - `"next"` (default): continue at the filter immediately after the branch point, processing the rest of the pipeline normally. - `"terminal"` or `"client"`: stop pipeline execution and return the response to the client without running further filters. - `"<name>"`: skip to a named filter (the `name` field on a [`FilterEntry`], not the filter type). If the target appears later in the pipeline, this becomes a forward skip. If earlier, it becomes re-entrance and requires [`max_iterations`] to prevent infinite loops. Named targets use the bare filter name, which must be unique across the listener's flattened pipeline. Listener chains are concatenated during startup, so a target in another chain uses the same syntax. |
 | `steps[].filters[].conditions` | Condition[] | no | Ordered conditions that gate whether this filter runs on requests. Empty means the filter always runs. |
 | `steps[].filters[].name` | string | no | Optional user-assigned name for this filter entry. Used as a rejoin target by branch chains. |
 | `steps[].filters[].response_conditions` | ResponseCondition[] | no | Ordered conditions that gate whether this filter runs on responses. Evaluated against the upstream response (status, headers). Empty means the filter always runs on responses. |

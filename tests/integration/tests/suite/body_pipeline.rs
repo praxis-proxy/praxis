@@ -3,6 +3,12 @@
 
 //! Integration tests for multi-filter body pipelines exercising Stream, Buffer, and StreamBuffer modes.
 
+use std::{
+    io::{BufReader, Write as _},
+    sync::mpsc::{self, Receiver, Sender},
+    time::{Duration, Instant},
+};
+
 use bytes::Bytes;
 use praxis_core::config::Config;
 use praxis_filter::{
@@ -10,8 +16,9 @@ use praxis_filter::{
     Rejection,
 };
 use praxis_test_utils::{
-    free_port, free_port_guard, http_post, http_send, json_post, parse_body, parse_status, start_backend_with_shutdown,
-    start_echo_backend, start_proxy_with_registry, wait_for_tcp,
+    free_port, free_port_guard, http_post, http_send, json_post, parse_body, parse_status, read_h1_response,
+    start_backend_with_shutdown, start_echo_backend, start_full_proxy_with_registry, start_proxy_with_registry,
+    wait_for_tcp,
 };
 
 // -----------------------------------------------------------------------------
@@ -189,17 +196,40 @@ fn multi_listener_each_mode_processes_independently() {
 listeners:
   - name: stream
     address: "127.0.0.1:{stream_guard}"
-    filter_chains: [main]
+    filter_chains: [stream-chain]
   - name: buffer
     address: "127.0.0.1:{buffer_guard}"
-    filter_chains: [main]
+    filter_chains: [buffer-chain]
   - name: passthrough
     address: "127.0.0.1:{passthrough_guard}"
-    filter_chains: [main]
+    filter_chains: [passthrough-chain]
 filter_chains:
-  - name: main
+  - name: stream-chain
     filters:
-      - filter: stream_uppercase
+      - filter: observed_stream_uppercase
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:{echo_port}"
+  - name: buffer-chain
+    filters:
+      - filter: observed_buffer_uppercase
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:{echo_port}"
+  - name: passthrough-chain
+    filters:
       - filter: router
         routes:
           - path_prefix: "/"
@@ -215,25 +245,175 @@ insecure_options:
     );
 
     let config = Config::from_yaml(&yaml).unwrap();
-    let registry = stream_uppercase_registry();
+    let (stream_tx, stream_rx) = mpsc::channel();
+    let (buffer_tx, buffer_rx) = mpsc::channel();
+    let mut registry = FilterRegistry::with_builtins();
+    registry
+        .register(
+            "observed_stream_uppercase",
+            FilterFactory::Http(std::sync::Arc::new(move |_| {
+                Ok(Box::new(ObservedUppercaseFilter {
+                    mode: BodyMode::Stream,
+                    observations: stream_tx.clone(),
+                }))
+            })),
+        )
+        .unwrap();
+    registry
+        .register(
+            "observed_buffer_uppercase",
+            FilterFactory::Http(std::sync::Arc::new(move |_| {
+                Ok(Box::new(ObservedUppercaseFilter {
+                    mode: BodyMode::StreamBuffer { max_bytes: Some(128) },
+                    observations: buffer_tx.clone(),
+                }))
+            })),
+        )
+        .unwrap();
     let stream_port = stream_guard.release();
     let buffer_port = buffer_guard.release();
     let passthrough_port = passthrough_guard.release();
-    let _proxy = start_proxy_with_registry(&config, &registry);
+    let _proxy = start_full_proxy_with_registry(&config, &registry);
+    wait_for_tcp(&format!("127.0.0.1:{stream_port}"));
     wait_for_tcp(&format!("127.0.0.1:{buffer_port}"));
     wait_for_tcp(&format!("127.0.0.1:{passthrough_port}"));
 
-    let (status_a, body_a) = http_post(&format!("127.0.0.1:{stream_port}"), "/echo", "test alpha");
-    assert_eq!(status_a, 200, "stream listener should return 200");
-    assert_eq!(body_a, "TEST ALPHA", "stream listener should uppercase body");
+    let payload = b"MiXeD body for all listeners";
+    let stream_body = send_split_body(&format!("127.0.0.1:{stream_port}"), payload, Some(&stream_rx));
+    assert_eq!(
+        stream_body,
+        payload.to_ascii_uppercase(),
+        "Stream writer must transform every byte"
+    );
 
-    let (status_b, body_b) = http_post(&format!("127.0.0.1:{buffer_port}"), "/echo", "test beta");
-    assert_eq!(status_b, 200, "buffer listener should return 200");
-    assert_eq!(body_b, "TEST BETA", "buffer listener should uppercase body");
+    let buffer_body = send_split_body(&format!("127.0.0.1:{buffer_port}"), payload, None);
+    let buffer_event = buffer_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("buffer EOS observation");
+    assert_eq!(
+        buffer_event.mode,
+        BodyMode::StreamBuffer { max_bytes: Some(128) },
+        "buffer writer must observe its configured runtime mode"
+    );
+    assert!(
+        buffer_event.end_of_stream,
+        "buffer writer must receive the aggregate at EOS"
+    );
+    assert_eq!(
+        buffer_event.body,
+        payload.to_vec(),
+        "buffer writer must receive the exact aggregate"
+    );
+    assert_eq!(
+        buffer_body,
+        payload.to_ascii_uppercase(),
+        "buffer writer must transform every byte"
+    );
 
-    let (status_c, body_c) = http_post(&format!("127.0.0.1:{passthrough_port}"), "/echo", "test gamma");
-    assert_eq!(status_c, 200, "passthrough listener should return 200");
-    assert_eq!(body_c, "TEST GAMMA", "passthrough listener should uppercase body");
+    let passthrough_body = send_split_body(&format!("127.0.0.1:{passthrough_port}"), payload, None);
+    assert_eq!(
+        passthrough_body,
+        payload.to_vec(),
+        "passthrough must preserve request bytes"
+    );
+}
+
+/// The body observed by an actual writer hook.
+struct ModeObservation {
+    mode: BodyMode,
+    body: Vec<u8>,
+    end_of_stream: bool,
+}
+
+/// Test writer whose observed callback mode is part of the assertion.
+struct ObservedUppercaseFilter {
+    mode: BodyMode,
+    observations: Sender<ModeObservation>,
+}
+
+#[async_trait::async_trait]
+impl HttpFilter for ObservedUppercaseFilter {
+    fn name(&self) -> &'static str {
+        "observed_uppercase"
+    }
+
+    fn request_body_access(&self) -> BodyAccess {
+        BodyAccess::ReadWrite(praxis_filter::BodyRequirement::Optional)
+    }
+
+    fn request_body_mode(&self) -> BodyMode {
+        self.mode
+    }
+
+    async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Continue)
+    }
+
+    async fn on_request_body(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+        body: &mut Option<Bytes>,
+        end_of_stream: bool,
+    ) -> Result<FilterAction, FilterError> {
+        if let Some(bytes) = body
+            && (self.mode == BodyMode::Stream || end_of_stream)
+        {
+            self.observations
+                .send(ModeObservation {
+                    mode: ctx.request_body_mode,
+                    body: bytes.to_vec(),
+                    end_of_stream,
+                })
+                .expect("record body hook");
+            *bytes = Bytes::from(bytes.iter().map(u8::to_ascii_uppercase).collect::<Vec<_>>());
+        }
+        Ok(FilterAction::Continue)
+    }
+}
+
+/// Split one upload; a Stream hook acknowledgment can gate the second half.
+fn send_split_body(address: &str, payload: &[u8], stream_events: Option<&Receiver<ModeObservation>>) -> Vec<u8> {
+    let mut stream = std::net::TcpStream::connect(address).expect("connect split upload");
+    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    stream.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+    let request_head = format!(
+        "POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        payload.len()
+    );
+    stream.write_all(request_head.as_bytes()).unwrap();
+    let midpoint = payload.len() / 2;
+    stream.write_all(&payload[..midpoint]).unwrap();
+    if let Some(events) = stream_events {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut observed = Vec::new();
+        while observed.len() < midpoint {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let event = events.recv_timeout(remaining).expect("nonfinal Stream hook");
+            assert_eq!(event.mode, BodyMode::Stream, "prefix must reach a streaming writer");
+            assert!(!event.end_of_stream, "prefix hook must precede the tail");
+            observed.extend_from_slice(&event.body);
+        }
+        assert_eq!(
+            observed,
+            payload[..midpoint].to_vec(),
+            "writer must observe the exact prefix before the tail is sent"
+        );
+    }
+    stream.write_all(&payload[midpoint..]).unwrap();
+    let mut body = Vec::new();
+    let response = read_h1_response(&mut BufReader::new(stream), false, 128, |chunk| {
+        body.extend_from_slice(chunk);
+        Ok(())
+    });
+    assert_eq!(response.status, Some(200), "{response:?}");
+    assert!(response.completion.is_some(), "{response:?}");
+    assert_eq!(response.abort, None, "{response:?}");
+    assert_eq!(
+        response.body_bytes,
+        payload.len() as u64,
+        "echo must preserve the complete payload length"
+    );
+    body
 }
 
 #[test]
@@ -344,18 +524,6 @@ insecure_options:
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
-
-/// Build a registry with a single stream-mode uppercase filter.
-fn stream_uppercase_registry() -> FilterRegistry {
-    let mut registry = FilterRegistry::with_builtins();
-    registry
-        .register(
-            "stream_uppercase",
-            FilterFactory::Http(std::sync::Arc::new(|_| Ok(Box::new(StreamUppercaseFilter)))),
-        )
-        .unwrap();
-    registry
-}
 
 /// Build a registry with three stream-mode filters.
 fn stream_registry() -> FilterRegistry {
@@ -520,7 +688,7 @@ impl HttpFilter for StreamUppercaseFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadWrite
+        BodyAccess::ReadWrite(praxis_filter::BodyRequirement::Optional)
     }
 
     fn request_body_mode(&self) -> BodyMode {
@@ -555,7 +723,7 @@ impl HttpFilter for StreamScannerFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional)
     }
 
     fn request_body_mode(&self) -> BodyMode {
@@ -586,7 +754,7 @@ impl HttpFilter for StreamRejectBlockedFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional)
     }
 
     fn request_body_mode(&self) -> BodyMode {
@@ -627,7 +795,7 @@ impl HttpFilter for BufferRejectBlockedFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional)
     }
 
     async fn on_request_body(
@@ -663,7 +831,7 @@ impl HttpFilter for BufferUppercaseFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadWrite
+        BodyAccess::ReadWrite(praxis_filter::BodyRequirement::Optional)
     }
 
     async fn on_request_body(
@@ -698,7 +866,7 @@ impl HttpFilter for BufferScannerFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional)
     }
 
     async fn on_request_body(

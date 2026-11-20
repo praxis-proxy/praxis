@@ -62,6 +62,7 @@ mod pressure;
 // -----------------------------------------------------------------------------
 
 /// Serializes the tests in this binary.
+#[cfg(target_os = "linux")]
 static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Raises this binary's own open file limit once, before its first test.
@@ -73,6 +74,7 @@ static RAISE_LIMIT: std::sync::Once = std::sync::Once::new();
 /// The first call also raises this process's soft open file limit to its hard
 /// limit: the load these tests drive needs a client and a backend socket per
 /// request here, beyond the 1024 a runner may start the tests with.
+#[cfg(target_os = "linux")]
 fn serial() -> std::sync::MutexGuard<'static, ()> {
     #[cfg(target_os = "linux")]
     RAISE_LIMIT.call_once(praxis_test_utils::raise_own_open_file_limit);

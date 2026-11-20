@@ -16,7 +16,7 @@ use tracing::{Instrument as _, Span};
 use super::service::Flight;
 use crate::http::pingora::handler::{
     health_util::{ended_by_client_origin, record_passive_health_outcome},
-    logging_util::{logging_cleanup, maybe_emit_fallback_access_log},
+    logging_util::{emit_completion_observers, logging_cleanup},
     metrics_util::emit_request_metrics_for,
     retry_util::release_retry_state,
     span_util::record_response_span_status,
@@ -52,7 +52,7 @@ async fn finish(flight: &mut Flight) {
     release_retry_state(ctx);
     ctx.ended_by_client = ended_by_client_origin(flight.error, ctx.upstream_response_status);
     logging_cleanup(pipeline, ctx).await;
-    maybe_emit_fallback_access_log(pipeline, flight.written_status, ctx);
+    emit_completion_observers(pipeline, flight.written_status, ctx);
 }
 
 // -----------------------------------------------------------------------------
@@ -86,7 +86,7 @@ mod tests {
 
     use praxis_core::{
         health::{ClusterHealthEntry, EndpointHealth, HealthRegistry},
-        retry::ClusterRetryState,
+        retry::{AdmissionLease, ClusterRetryState},
     };
     use praxis_filter::FilterPipeline;
     use tracing::info_span;
@@ -181,9 +181,9 @@ mod tests {
     #[tokio::test]
     async fn completion_releases_the_cluster_retry_lease() {
         let state = Arc::new(ClusterRetryState::new(None));
-        state.enter();
+        let lease = AdmissionLease::claim(&state).expect("an uncapped cluster admits");
         let mut flight = Flight::for_tests(empty_pipeline());
-        flight.ctx.cluster_retry_state = Some(Arc::clone(&state));
+        flight.ctx.cluster_admission = Some(Arc::clone(&lease));
 
         run(&mut flight).await;
 
@@ -192,10 +192,7 @@ mod tests {
             0,
             "the request no longer counts as active on its cluster"
         );
-        assert!(
-            flight.ctx.cluster_retry_state_released,
-            "the lease is marked released so nothing releases it twice"
-        );
+        assert!(lease.is_released(), "the lease is spent, so nothing releases it twice");
     }
 
     #[tokio::test]

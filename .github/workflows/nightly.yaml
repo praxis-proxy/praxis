@@ -24,6 +24,9 @@ jobs:
   # ----------------------------------------------------------------------------
 
   lint:
+    env:
+      # 0.10.1 uses a Path API unavailable on our pinned Rust toolchain.
+      CARGO_MACHETE_VERSION: "0.9.2"
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
@@ -34,13 +37,14 @@ jobs:
           persist-credentials: false
 
       - name: Set up Rust (stable + nightly fmt)
-        uses: praxis-proxy/conventions/.github/actions/setup-rust-lint@f671c1215f89562d286310a6cabdcbaa5da9605c # v0.4.0
+        uses: praxis-proxy/conventions/.github/actions/setup-rust-lint@2a0d28ddd3690ed73347ddbe59d08dac02f604ce # v0.5.0
 
       - name: Install cargo-machete
-        # setup-rust-lint's rust-cache also restores ~/.cargo/bin, so the binary
-        # may already be present. Install only when it is absent; otherwise
-        # `cargo install` aborts with "binary already exists".
-        run: command -v cargo-machete > /dev/null || cargo install cargo-machete --locked
+        # The shared Rust cache can restore a different or broken binary.
+        run: |
+          if [ "$(cargo machete --version 2>/dev/null || true)" != "$CARGO_MACHETE_VERSION" ]; then
+            cargo install cargo-machete --locked --version "$CARGO_MACHETE_VERSION" --force
+          fi
 
       - name: Lint
         run: make lint
@@ -147,7 +151,7 @@ jobs:
           persist-credentials: false
 
       - name: Supply chain audit
-        uses: praxis-proxy/conventions/.github/actions/supply-chain-audit@f671c1215f89562d286310a6cabdcbaa5da9605c # v0.4.0
+        uses: praxis-proxy/conventions/.github/actions/supply-chain-audit@2a0d28ddd3690ed73347ddbe59d08dac02f604ce # v0.5.0
 
   # ----------------------------------------------------------------------------
   # Coverage gate
@@ -224,13 +228,13 @@ jobs:
   # Nightly container image (published to GHCR)
   #
   # Publishes a rolling `nightly` tag plus a dated `nightly-YYYYMMDD` tag and a
-  # commit-sha tag, but only once the functional test suites are green, and
+  # commit-sha tag, but only once lint and the functional tests are green, and
   # the same three tags with a `-fips` suffix for the FIPS image. This
   # publishes the container images only; crates are never published from here.
   # ----------------------------------------------------------------------------
 
   container:
-    needs: [test-unit, test-integration, test-conformance]
+    needs: [lint, test-unit, test-integration, test-conformance]
     runs-on: ubuntu-24.04
     # Two images; the FIPS one is a from-scratch LTO release build on UBI 9.
     timeout-minutes: 60
@@ -258,7 +262,7 @@ jobs:
         run: make fips-verify-image
 
       - name: Log in to GHCR
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}

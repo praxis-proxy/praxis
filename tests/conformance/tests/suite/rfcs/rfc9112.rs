@@ -18,9 +18,58 @@ use praxis_test_utils::{
     start_proxy,
 };
 
-use super::test_utils::{
-    start_417_backend, start_crlf_response_backend, start_request_line_echo_backend, start_status_line_backend,
+use super::{
+    expect_continue::{staged_upload, start_upload_backend, withheld_upload},
+    test_utils::{start_crlf_response_backend, start_request_line_echo_backend, start_status_line_backend},
 };
+
+/// [RFC 9112 Section 9.6]: a staged close delivers the complete rejection
+/// and EOF before discarding the unread request body, avoiding a TCP reset.
+///
+/// [RFC 9112 Section 9.6]: https://datatracker.ietf.org/doc/html/rfc9112#section-9.6
+#[cfg(feature = "pingora")]
+#[test]
+fn rfc9112_rejection_half_close_preserves_the_unread_upload() {
+    let port = free_port();
+    let yaml = format!(
+        r#"
+body_limits:
+  max_request_bytes: 1024
+listeners:
+  - name: web
+    address: "127.0.0.1:{port}"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+        body: ok
+"#
+    );
+    let proxy = start_proxy(&Config::from_yaml(&yaml).unwrap());
+    let mut stream = TcpStream::connect(proxy.addr()).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    stream.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+    stream
+        .write_all(b"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 16777216\r\n\r\n")
+        .unwrap();
+
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .expect("the response and write-side EOF must arrive before the body is sent");
+
+    assert_eq!(parse_status(&response), 413, "header admission must reject the upload");
+    assert_eq!(
+        parse_body(&response),
+        r#"{"error":"request body too large"}"#,
+        "the complete response must precede EOF"
+    );
+    stream
+        .write_all(&vec![b'a'; 16_777_216])
+        .expect("the read side must remain open after the response half-close");
+}
 
 /// [RFC 9112 Sections 6.3 and 9.3]: after a response filter removes a stale
 /// Content-Length, the HTTP/1.1 response needs self-defined framing to remain
@@ -432,34 +481,27 @@ fn rfc9112_proxy_sends_http11_to_upstream() {
 /// [RFC 9112 Section 9.3]: https://datatracker.ietf.org/doc/html/rfc9112#section-9.3
 #[test]
 fn rfc9112_expect_100_continue_post_succeeds() {
-    let backend_port = start_backend("continue-ok");
+    let path = "/expect-upload-rfc9112";
+    let backend = start_upload_backend(path, false);
     let proxy_port = free_port();
-    let yaml = simple_proxy_yaml(proxy_port, backend_port);
+    let yaml = simple_proxy_yaml(proxy_port, backend.port());
     let config = Config::from_yaml(&yaml).unwrap();
     let proxy = start_proxy(&config);
+    let payload = b"hello world";
+    let (status, body, _) = staged_upload(proxy.addr(), path, payload, &[payload.len()], true);
+    assert_eq!(status, 200);
+    assert_eq!(body, "upload-ok");
+    assert_eq!(backend.finish(), payload);
 
-    let body_data = "hello world";
-    let raw = http_send(
-        proxy.addr(),
-        &format!(
-            "POST / HTTP/1.1\r\n\
-             Host: localhost\r\n\
-             Expect: 100-continue\r\n\
-             Content-Length: {}\r\n\
-             Connection: close\r\n\
-             \r\n\
-             {body_data}",
-            body_data.len()
-        ),
-    );
-    let status = parse_status(&raw);
-    let body = parse_body(&raw);
-
-    assert_eq!(
-        status, 200,
-        "POST with Expect: 100-continue must succeed (Pingora handles negotiation)"
-    );
-    assert_eq!(body, "continue-ok", "body from upstream should be forwarded correctly");
+    let control_path = "/expect-upload-rfc9112-control";
+    let control = start_upload_backend(control_path, false);
+    let control_proxy_port = free_port();
+    let yaml = simple_proxy_yaml(control_proxy_port, control.port());
+    let control_proxy = start_proxy(&Config::from_yaml(&yaml).unwrap());
+    let (status, body, _) = staged_upload(control_proxy.addr(), control_path, payload, &[payload.len()], false);
+    assert_eq!(status, 200);
+    assert_eq!(body, "upload-ok");
+    assert_eq!(control.finish(), payload);
 }
 
 /// [RFC 9112 Section 9.3]: when the upstream rejects an Expect:
@@ -469,31 +511,18 @@ fn rfc9112_expect_100_continue_post_succeeds() {
 /// [RFC 9112 Section 9.3]: https://datatracker.ietf.org/doc/html/rfc9112#section-9.3
 #[test]
 fn rfc9112_expect_100_continue_417_forwarded() {
-    let backend_port = start_417_backend();
+    let path = "/expect-upload-rejected";
+    let backend = start_upload_backend(path, true);
     let proxy_port = free_port();
-    let yaml = simple_proxy_yaml(proxy_port, backend_port);
+    let yaml = simple_proxy_yaml(proxy_port, backend.port());
     let config = Config::from_yaml(&yaml).unwrap();
     let proxy = start_proxy(&config);
-
-    let body_data = "test";
-    let raw = http_send(
-        proxy.addr(),
-        &format!(
-            "POST / HTTP/1.1\r\n\
-             Host: localhost\r\n\
-             Expect: 100-continue\r\n\
-             Content-Length: {}\r\n\
-             Connection: close\r\n\
-             \r\n\
-             {body_data}",
-            body_data.len()
-        ),
-    );
-    let status = parse_status(&raw);
-
+    let (status, body) = withheld_upload(proxy.addr(), path, 4);
+    assert_eq!(status, 417, "upstream rejection must remain the final status");
+    assert_eq!(body, "expectation-rejected");
     assert!(
-        status == 417 || status == 200,
-        "upstream 417 must be forwarded (or Pingora may absorb 100-continue and proxy body anyway), got {status}"
+        backend.finish().is_empty(),
+        "backend must receive no rejected upload bytes"
     );
 }
 

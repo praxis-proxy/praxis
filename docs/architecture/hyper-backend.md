@@ -22,7 +22,7 @@ and names what it wants:
 
 ```console
 cargo build -p praxis-proxy --release --no-default-features \
-    --features hyper,config-reload,admin-api,policy-engine
+    --features hyper,config-reload,admin-api,policy-builtins
 ```
 
 Because the two cannot be combined, `make lint`, `make doc` and the test
@@ -83,7 +83,13 @@ the attempt loop, the replay buffer, error classification) are its own.
    lines Pingora's HTTP/1 parser allows. Plaintext listeners accept HTTP/2
    prior knowledge. The listener's keep-alive timeout (one minute when
    unset) bounds the wait for a request head on an idle connection; the
-   read timeout bounds every body frame on HTTP/1 and HTTP/2 alike.
+   read timeout bounds every body frame on HTTP/1 and HTTP/2 alike. A
+   successfully authenticated client certificate supplies one immutable
+   connection-scoped peer identity (SHA-256 leaf digest, organization, and
+   hexadecimal serial) to every request on that connection, including
+   HTTP/2 streams. Absent client certificates supply no identity. If any
+   subject organization cannot be decoded by the certificate parser, the
+   digest and serial remain available but organization matching sees no value.
 2. **Admission and validation.** Memory, file-descriptor, global and
    per-listener limits, then the request-validation rules (Host, duplicate
    framing headers, obs-fold, reserved headers, `..` paths,
@@ -160,9 +166,14 @@ listener accepts, so a signal that lands during startup is honoured.
 HTTP, TCP and management listeners are required services: an unexpected exit
 stops the other services within the fast shutdown bound and fails the runtime.
 A failed socket in a TCP listener group stops the whole group.
-`SIGTERM` and `SIGHUP` start a graceful shutdown: listeners stop accepting,
-in-flight connections finish through hyper's graceful shutdown, bounded by
-`shutdown_timeout_secs`; `SIGINT` stops quickly. The harness path
+`SIGTERM` starts a readiness-first graceful shutdown: `/ready` becomes
+unavailable immediately, listeners keep accepting during the optional
+`shutdown_drain_delay_secs` handoff, and then stop accepting so in-flight
+connections can finish through hyper's graceful shutdown, bounded by
+`shutdown_timeout_secs`. Existing HTTP/2 connections receive GOAWAY when the
+drain begins.
+`SIGHUP` is ignored because configuration reload owns that signal; `SIGINT`
+stops quickly. The harness path
 (`run_with_shutdown`) stops quickly too, like Pingora's.
 
 ## What is not at parity
@@ -199,10 +210,6 @@ hyper.
   lowercase; Pingora keeps the spelling a filter wrote. Header names are
   case-insensitive, so clients are unaffected, but raw-byte comparisons
   differ.
-- **mTLS peer identity.** `TlsPeerIdentity` (certificate digest,
-  organization, serial) is not computed from the client certificate, so
-  filters that authorize by peer identity see none. The protocol crate has
-  no X.509 parser; the one in `praxis-tls` sits behind its `spiffe` feature.
 - **HTTP/1 parsing differences.** hyper's parser serves pipelined
   requests, accepts a chunk size of `u64::MAX` and answers an over-long
   request target with 414 rather than 400. Pingora drops a pipelined

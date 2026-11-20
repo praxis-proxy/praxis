@@ -180,6 +180,27 @@ impl<'de> Deserialize<'de> for MaxEntries {
 }
 
 // -----------------------------------------------------------------------------
+// StorageConfig
+// -----------------------------------------------------------------------------
+
+/// Where session-to-endpoint bindings are kept.
+///
+/// Selecting the store is mandatory: an operator who omits it would
+/// otherwise get process-local bindings without having asked for them, and
+/// stickiness would silently degrade behind a load balancer.
+///
+/// Only `local` exists today. A distributed backend (so replicas share
+/// bindings and they survive a restart) is future work; this enum is the
+/// slot it will occupy.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum StorageConfig {
+    /// Bindings live in this process only; they are not shared with other
+    /// replicas and do not survive a restart.
+    Local,
+}
+
+// -----------------------------------------------------------------------------
 // ClusterSessionConfig
 // -----------------------------------------------------------------------------
 
@@ -209,6 +230,9 @@ pub(crate) struct ClusterSessionConfig {
     /// Eviction policy when at capacity.
     #[serde(default)]
     pub eviction: EvictionPolicy,
+
+    /// Where session bindings are stored.
+    pub storage: StorageConfig,
 }
 
 /// Default idle TTL for session entries (1 hour).
@@ -286,6 +310,7 @@ clusters:
     failover: true
     max_entries: 100000
     eviction: lru
+    storage: local
 "#;
         let config: StickySessionsConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.clusters.len(), 1);
@@ -295,8 +320,7 @@ clusters:
         assert_eq!(c.persistence.cookie_name(), Some("_praxis_route"));
         assert_eq!(c.ttl_secs, 3600);
         let attrs = c.persistence.cookie_attributes().unwrap();
-        assert!(attrs.http_only);
-        assert!(attrs.secure);
+        assert!(attrs.http_only && attrs.secure);
         assert_eq!(attrs.same_site, Some(SameSite::Lax));
         assert!(c.failover);
         assert_eq!(c.max_entries.get(), 100_000);
@@ -313,6 +337,7 @@ clusters:
     header_name: "X-Session-Id"
     ttl_secs: 3600
     max_entries: 50000
+    storage: local
 "#;
         let config: StickySessionsConfig = serde_yaml::from_str(yaml).unwrap();
         let c = config.clusters.first().unwrap();
@@ -329,6 +354,7 @@ clusters:
     type: learn
     cookie_name: "JSESSIONID"
     ttl_secs: 1800
+    storage: local
 "#;
         let config: StickySessionsConfig = serde_yaml::from_str(yaml).unwrap();
         let c = config.clusters.first().unwrap();
@@ -344,6 +370,7 @@ clusters:
     type: cookie
     cookie_name: \"\"
     ttl_secs: 100
+    storage: local
 ";
         let config: StickySessionsConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(config.clusters.first().unwrap().validate().is_err());
@@ -357,6 +384,7 @@ clusters:
     type: header
     header_name: \"\"
     ttl_secs: 100
+    storage: local
 ";
         let config: StickySessionsConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(config.clusters.first().unwrap().validate().is_err());
@@ -370,6 +398,7 @@ clusters:
     type: header
     header_name: "X-Id"
     max_entries: 999999
+    storage: local
 "#;
         let err = serde_yaml::from_str::<StickySessionsConfig>(yaml).unwrap_err();
         assert!(err.to_string().contains("200000"), "got: {err}");
@@ -383,8 +412,47 @@ clusters:
     type: header
     header_name: "X-Id"
     ttl_secs: 0
+    storage: local
 "#;
         let config: StickySessionsConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(config.clusters.first().unwrap().validate().is_err());
+    }
+
+    #[test]
+    fn reject_omitted_storage() {
+        let yaml = r#"
+clusters:
+  - name: x
+    type: header
+    header_name: "X-Id"
+"#;
+        let err = serde_yaml::from_str::<StickySessionsConfig>(yaml).unwrap_err();
+        assert!(err.to_string().contains("storage"), "got: {err}");
+    }
+
+    #[test]
+    fn reject_unsupported_storage() {
+        let yaml = r#"
+clusters:
+  - name: x
+    type: header
+    header_name: "X-Id"
+    storage: redis
+"#;
+        let err = serde_yaml::from_str::<StickySessionsConfig>(yaml).unwrap_err();
+        assert!(err.to_string().contains("redis"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_local_storage() {
+        let yaml = r#"
+clusters:
+  - name: x
+    type: header
+    header_name: "X-Id"
+    storage: local
+"#;
+        let config: StickySessionsConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.clusters.first().unwrap().storage, StorageConfig::Local);
     }
 }

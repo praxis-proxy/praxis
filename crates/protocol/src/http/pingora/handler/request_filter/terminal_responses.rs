@@ -19,7 +19,9 @@ use tracing::debug;
 use tracing::{error, warn};
 
 #[cfg(feature = "pingora")]
-use super::super::super::convert::{send_rejection, send_rejection_for};
+use super::super::super::convert::send_rejection_for;
+#[cfg(feature = "pingora")]
+use super::super::with_body::add_drain_connection_close;
 use super::super::{
     super::context::PingoraRequestCtx,
     body_util::clamp_body_mode_to_ceiling,
@@ -61,7 +63,7 @@ pub(super) async fn run_terminal_response(
     }
     strip_hop_by_hop_header_map(&mut resp.headers, RESPONSE_HOP_BY_HOP);
     strip_reserved_internal_header_map(&mut resp.headers);
-    send_terminal_to_session(session, &resp, body).await;
+    send_terminal_to_session(session, &resp, body, ctx).await;
 }
 
 /// Run response-header filters and persist their request-scoped state.
@@ -128,7 +130,8 @@ pub(in crate::http) async fn prepare_terminal_response(
     ctx.cached_executed_branch_filters = executed_branch_filters;
     ctx.cached_executed_filter_indices = executed_indices;
     ctx.cached_body_done_indices = body_done;
-    ctx.response_body_mode = clamp_body_mode_to_ceiling(response_body_mode, baseline_response_body_mode);
+    ctx.response_body_mode =
+        clamp_body_mode_to_ceiling(response_body_mode, baseline_response_body_mode, pipeline.buffer_cap());
 
     match result {
         Ok(FilterAction::Reject(rejection)) => {
@@ -272,12 +275,13 @@ pub(super) async fn run_streaming_terminal_response(
 
     let http_version = session.req_header().version;
     prepare_streaming_headers(&mut resp, false, false, http_version);
-    let Some(header) = build_streaming_terminal_header(&resp) else {
+    let Some(mut header) = build_streaming_terminal_header(&resp) else {
         streaming_body.swap_extensions(&mut ctx.extensions);
         streaming_body.cancel().await;
         send_rejection_for(session, Rejection::status(500), ctx).await;
         return;
     };
+    add_terminal_drain_connection_close(session, &mut header, ctx);
     if let Err(e) = session.write_response_header(Box::new(header), false).await {
         debug!(error = %e, "failed to write streaming terminal response header");
         streaming_body.swap_extensions(&mut ctx.extensions);
@@ -371,11 +375,12 @@ async fn suppress_streaming_terminal_response(
 
     let is_not_modified = resp.status == http::StatusCode::NOT_MODIFIED;
     prepare_streaming_headers(resp, is_head, is_not_modified, http::Version::HTTP_10);
-    let Some(header) = build_streaming_terminal_header(resp) else {
+    let Some(mut header) = build_streaming_terminal_header(resp) else {
         streaming_body.cancel().await;
         send_rejection_for(session, Rejection::status(500), ctx).await;
         return;
     };
+    add_terminal_drain_connection_close(session, &mut header, ctx);
     if let Err(e) = session.write_response_header(Box::new(header), true).await {
         debug!(error = %e, "failed to write suppressed streaming terminal response");
         session.as_downstream_mut().shutdown().await;
@@ -489,17 +494,38 @@ fn build_terminal_header(
     Some(header)
 }
 
+/// Mark a terminal response for connection close when the drain has begun.
+#[cfg(feature = "pingora")]
+fn add_terminal_drain_connection_close(
+    session: &mut Session,
+    header: &mut pingora_http::ResponseHeader,
+    ctx: &PingoraRequestCtx,
+) {
+    let Some(lifecycle) = ctx.lifecycle.as_ref() else {
+        return;
+    };
+    if let Err(error) = add_drain_connection_close(session, header, ctx, lifecycle) {
+        debug!(%error, "failed to mark a draining terminal response for connection close");
+    }
+}
+
 /// Write a terminal response (headers + optional body) to the Pingora session.
 #[cfg(feature = "pingora")]
-async fn send_terminal_to_session(session: &mut Session, resp: &praxis_filter::Response, body: Option<Bytes>) {
+async fn send_terminal_to_session(
+    session: &mut Session,
+    resp: &praxis_filter::Response,
+    body: Option<Bytes>,
+    ctx: &mut PingoraRequestCtx,
+) {
     let is_head = session.req_header().method == http::Method::HEAD;
     let status = resp.status;
     let body_prohibited = status == http::StatusCode::NO_CONTENT || status == http::StatusCode::NOT_MODIFIED;
 
-    let Some(header) = build_terminal_header(resp, body.as_ref(), body_prohibited, is_head) else {
-        send_rejection(session, Rejection::status(500)).await;
+    let Some(mut header) = build_terminal_header(resp, body.as_ref(), body_prohibited, is_head) else {
+        send_rejection_for(session, Rejection::status(500), ctx).await;
         return;
     };
+    add_terminal_drain_connection_close(session, &mut header, ctx);
     let send_body = !is_head && !body_prohibited;
     if let Err(e) = session
         .write_response_header(Box::new(header), !send_body || body.is_none())
@@ -508,6 +534,7 @@ async fn send_terminal_to_session(session: &mut Session, resp: &praxis_filter::R
         debug!(error = %e, "failed to write terminal response header");
         return;
     }
+    ctx.rejection_cleanup_pending = true;
     if send_body
         && let Some(b) = body
         && let Err(e) = session.write_response_body(Some(b), true).await

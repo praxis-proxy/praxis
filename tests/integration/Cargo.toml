@@ -14,12 +14,36 @@ tls-health-check = ["praxis/tls-health-check"]
 # configuration the standard build ships. `--no-default-features` builds the
 # proxy under test with the FIPS build's feature set instead
 # (`make test-integration-fips`).
-default = ["pingora", "policy-engine"]
+default = ["pingora", "policy-builtins"]
 # The network backend of the proxy under test; exactly one. `make
 # test-integration-hyper` builds with `--no-default-features --features hyper`.
 pingora = ["praxis-test-utils/pingora", "praxis/pingora"]
 hyper = ["praxis-test-utils/hyper", "praxis/hyper"]
-policy-engine = ["praxis/policy-engine", "praxis-filter/policy-engine"]
+# Policy selections, forwarded to the in-process proxy and to the harness so a
+# subprocess proxy it builds carries the same selection.
+policy-engine = ["praxis/policy-engine", "praxis-filter/policy-engine", "praxis-test-utils/policy-engine"]
+policy-builtins = [
+    "policy-engine",
+    "policy-experimental-ratelimit",
+    "praxis/policy-builtins",
+    "praxis-test-utils/policy-builtins",
+]
+policy-crypto-default = ["policy-engine", "praxis/policy-crypto-default", "praxis-test-utils/policy-crypto-default"]
+policy-crypto-fips = ["policy-engine", "praxis/policy-crypto-fips", "praxis-test-utils/policy-crypto-fips"]
+policy-api-key = ["policy-engine", "praxis/policy-api-key", "praxis-test-utils/policy-api-key"]
+policy-api-key-fips = ["policy-api-key", "policy-crypto-fips"]
+policy-jwt = ["policy-engine", "praxis/policy-jwt", "praxis-test-utils/policy-jwt"]
+policy-jwt-openssl-fips = [
+    "policy-engine",
+    "praxis/policy-jwt-openssl-fips",
+    "praxis-test-utils/policy-jwt-openssl-fips",
+]
+policy-jwt-fips = ["policy-jwt-openssl-fips", "policy-crypto-fips"]
+policy-experimental-ratelimit = [
+    "policy-engine",
+    "praxis/policy-experimental-ratelimit",
+    "praxis-test-utils/policy-experimental-ratelimit",
+]
 basic-auth-filter = ["praxis-filter/basic-auth-filter"]
 cloud-events-filter = ["praxis/cloud-events-filter"]
 upstream-binding = ["praxis/upstream-binding"]

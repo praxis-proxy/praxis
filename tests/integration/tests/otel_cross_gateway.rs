@@ -110,10 +110,12 @@ fn exported_parentage_links_edge_provider_and_backend() {
         .build()
         .expect("collector runtime");
 
-    let collector_listener = collector_runtime
-        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
-        .expect("collector listener");
-    let collector_port = collector_listener.local_addr().expect("collector address").port();
+    let (collector_listener, collector_port) = praxis_test_utils::bind_unique_port();
+    collector_listener.set_nonblocking(true).expect("nonblocking collector");
+    let collector_listener = {
+        let _entered = collector_runtime.enter();
+        tokio::net::TcpListener::from_std(collector_listener).expect("collector listener")
+    };
 
     let collector_service = collector.clone();
     collector_runtime.spawn(async move {
@@ -127,11 +129,17 @@ fn exported_parentage_links_edge_provider_and_backend() {
 
     let backend = start_header_echo_backend();
     let subrequest_backend = start_header_echo_backend();
+    // Keep this port bound without listening so another test process cannot
+    // turn the intended connect refusal into a successful backend response.
+    let retry_dead_socket = tokio::net::TcpSocket::new_v4().expect("create refused retry endpoint");
+    retry_dead_socket
+        .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+        .expect("reserve refused retry endpoint");
+    let retry_dead_port = retry_dead_socket.local_addr().expect("refused endpoint address").port();
     let provider_port = free_port();
     let edge_port = free_port();
     let routing_edge_port = free_port();
     let retry_edge_port = free_port();
-    let retry_dead_port = free_port();
     let mid_proxy_failure_port = start_slow_backend("late response", Duration::from_millis(500));
     let mid_proxy_edge_port = free_port();
     let not_found_backend = Backend::status(404, "not found").start_with_shutdown();
@@ -258,6 +266,7 @@ fn exported_parentage_links_edge_provider_and_backend() {
     drop(mid_proxy_edge);
     drop(not_found_edge);
     drop(internal_error_edge);
+    drop(retry_dead_socket);
     drop(not_found_backend);
     drop(internal_error_backend);
     drop(tracing_guard);
@@ -313,6 +322,8 @@ fn exported_parentage_links_edge_provider_and_backend() {
         .find(|span| span.span_id != failed_client.span_id)
         .expect("retry must create a fresh successful CLIENT span");
     assert_ne!(failed_client.span_id, successful_client.span_id);
+    assert_eq!(u16_attribute(failed_client, "server.port"), Some(retry_dead_port));
+    assert_eq!(u16_attribute(successful_client, "server.port"), Some(backend.port()));
     assert_eq!(
         string_attribute(failed_client, "error.type"),
         Some("connect_refused"),
@@ -364,6 +375,10 @@ fn exported_parentage_links_edge_provider_and_backend() {
         Some(mid_proxy_failure_port),
         "the failed CLIENT span names the connected but unresponsive endpoint; attrs={:?}",
         failed_mid_proxy_client.attributes
+    );
+    assert_eq!(
+        u16_attribute(successful_mid_proxy_client, "server.port"),
+        Some(backend.port())
     );
     assert_backend_parent(
         &mid_proxy_backend_headers,
@@ -936,7 +951,13 @@ fn cloud_events_delivery_keeps_the_request_span_as_parent() {
             .expect("signal CloudEvents delivery finished");
     });
     let endpoint = format!("http://127.0.0.1:{collector_port}");
-    let config = cloud_events_proxy_config(free_port(), backend.port(), event_port, &endpoint, false);
+    let config = cloud_events_proxy_config(
+        free_port(),
+        backend.port(),
+        event_port,
+        &endpoint,
+        CloudEventsScenario::CompletedResponse,
+    );
     let tracing_guard = praxis_core::logging::init_tracing(&config).expect("OTLP tracing setup");
     let proxy = start_full_proxy(&config);
     wait_for_tcp(proxy.addr());
@@ -1082,7 +1103,13 @@ fn cloud_events_fallback_dispatch_keeps_the_request_span_as_parent() {
             .expect("write incomplete upstream response body");
     });
     let endpoint = format!("http://127.0.0.1:{collector_port}");
-    let config = cloud_events_proxy_config(free_port(), truncated_port, event_port, &endpoint, true);
+    let config = cloud_events_proxy_config(
+        free_port(),
+        truncated_port,
+        event_port,
+        &endpoint,
+        CloudEventsScenario::AbortedWithAccessLog,
+    );
     let tracing_guard = praxis_core::logging::init_tracing(&config).expect("OTLP tracing setup");
     let proxy = start_full_proxy(&config);
     wait_for_tcp(proxy.addr());
@@ -1135,17 +1162,26 @@ fn cloud_events_fallback_dispatch_keeps_the_request_span_as_parent() {
 }
 
 #[cfg(feature = "cloud-events-filter")]
+/// `CloudEvents` phase and access-log composition for the two tracing fixtures.
+#[derive(Clone, Copy)]
+enum CloudEventsScenario {
+    /// A normal response reaches body end-of-stream.
+    CompletedResponse,
+    /// A response aborts after headers, with independent access logging.
+    AbortedWithAccessLog,
+}
+
+#[cfg(feature = "cloud-events-filter")]
 fn cloud_events_proxy_config(
     listener_port: u16,
     backend_port: u16,
     event_port: u16,
     endpoint: &str,
-    include_access_log: bool,
+    scenario: CloudEventsScenario,
 ) -> Config {
-    let access_log_filter = if include_access_log {
-        "      - filter: access_log\n"
-    } else {
-        ""
+    let (phase, access_log_filter) = match scenario {
+        CloudEventsScenario::CompletedResponse => ("response_complete", ""),
+        CloudEventsScenario::AbortedWithAccessLog => ("request_complete", "      - filter: access_log\n"),
     };
     let yaml = format!(
         r#"
@@ -1158,7 +1194,7 @@ filter_chains:
     filters:
       - filter: trace_context
       - filter: cloud_events
-        on: response_complete
+        on: {phase}
         destination: "http://127.0.0.1:{event_port}/events"
         source: urn:praxis:test
         type: test.response.completed
@@ -1537,7 +1573,7 @@ filter_chains:
       - filter: trace_context
       - filter: router
         routes:
-          - path_prefix: "/"
+          - path_prefix: "/retry"
             cluster: backend
       - filter: load_balancer
         clusters:

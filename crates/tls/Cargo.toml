@@ -16,15 +16,16 @@ name = "praxis_tls"
 workspace = true
 
 [features]
-config-reload = ["dep:arc-swap", "dep:notify", "dep:tokio"]
+config-reload = ["dep:arc-swap", "dep:notify", "dep:openssl", "dep:tokio"]
 # SPIFFE X.509-SVID mTLS peer identity. Off by default; experimental.
-spiffe = ["dep:spiffe", "dep:x509-parser"]
+spiffe = ["dep:spiffe"]
 # Expose test utilities for benchmarks.
 bench-utils = ["dep:rcgen", "dep:tempfile"]
 
 [dependencies]
 arc-swap = { workspace = true, optional = true }
 notify = { workspace = true, optional = true }
+openssl = { workspace = true, optional = true }
 rcgen = { workspace = true, optional = true }
 rustls = { workspace = true }
 # The one crypto provider: system OpenSSL through rustls. See src/provider.rs.
@@ -37,7 +38,7 @@ tokio = { workspace = true, features = ["sync", "time", "rt"], optional = true }
 tracing = { workspace = true }
 # Parsing only: the `verify`/`ring` features stay off so all crypto goes through
 # the injected rustls provider (FIPS). Do not enable them here.
-x509-parser = { workspace = true, optional = true }
+x509-parser = { workspace = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]
@@ -47,4 +48,4 @@ proptest = { workspace = true }
 rcgen = { workspace = true }
 serde_yaml = { workspace = true }
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["sync", "time", "rt", "macros"] }
+tokio = { workspace = true, features = ["sync", "time", "rt", "macros", "test-util"] }

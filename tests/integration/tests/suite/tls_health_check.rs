@@ -23,7 +23,7 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 #[tokio::test]
 async fn https_probe_recovers_a_tls_endpoint() {
     let certs = TestCertificates::generate();
-    let backend = Backend::new(&certs, false).await;
+    let backend = Backend::new(&certs, false);
     let cluster = cluster(&certs, &backend.address, HealthCheckType::Http);
     assert_health(cluster, None, true).await;
     let requests = backend.requests.lock().unwrap();
@@ -64,7 +64,7 @@ fn explicit_ca_probes_do_not_load_platform_roots() {
 #[tokio::test]
 async fn backend_discards_abruptly_closed_incomplete_requests() {
     let certs = TestCertificates::generate();
-    let backend = Backend::new(&certs, false).await;
+    let backend = Backend::new(&certs, false);
     let mut roots = rustls::RootCertStore::empty();
     roots.add(certs.ca_cert_der.clone().into()).unwrap();
     let config = rustls::ClientConfig::builder()
@@ -94,7 +94,7 @@ async fn backend_discards_abruptly_closed_incomplete_requests() {
 #[tokio::test]
 async fn tls_probe_checks_server_identity_and_sends_close_notify() {
     let certs = TestCertificates::generate();
-    let backend = Backend::new(&certs, false).await;
+    let backend = Backend::new(&certs, false);
     assert_health(cluster(&certs, &backend.address, HealthCheckType::Tls), None, true).await;
     wait_until(|| backend.closes.load(Ordering::Relaxed) > 0).await;
     assert!(
@@ -113,7 +113,7 @@ async fn tls_probe_rejects_untrusted_expired_and_wrong_name_certificates() {
         (&expired, &expired, "localhost"),
         (&trusted, &trusted, "wrong.example"),
     ] {
-        let backend = Backend::new(server, false).await;
+        let backend = Backend::new(server, false);
         let mut config = cluster(roots, &backend.address, HealthCheckType::Tls);
         config.tls.as_mut().unwrap().sni = Some(sni.to_owned());
         assert_health(config, None, false).await;
@@ -123,7 +123,7 @@ async fn tls_probe_rejects_untrusted_expired_and_wrong_name_certificates() {
 #[tokio::test]
 async fn tls_probe_honors_verify_false() {
     let certs = TestCertificates::generate_expired();
-    let backend = Backend::new(&certs, false).await;
+    let backend = Backend::new(&certs, false);
     let mut config = cluster(&certs, &backend.address, HealthCheckType::Tls);
     config.tls.as_mut().unwrap().verify = false;
     assert_health(config, None, true).await;
@@ -132,15 +132,15 @@ async fn tls_probe_honors_verify_false() {
 #[tokio::test]
 async fn tls_probe_rejects_missing_tls13_client_credentials() {
     let certs = TestCertificates::generate();
-    let backend = Backend::new(&certs, true).await;
+    let backend = Backend::new(&certs, true);
     assert_health(cluster(&certs, &backend.address, HealthCheckType::Tls), None, false).await;
 }
 
 #[tokio::test]
 async fn tls_probe_waits_for_rejection_on_slow_tls13_connection() {
     let certs = TestCertificates::generate();
-    let backend = Backend::new(&certs, true).await;
-    let (address, relay) = delayed_server_traffic(&backend.address).await;
+    let backend = Backend::new(&certs, true);
+    let (address, relay) = delayed_server_traffic(&backend.address);
     let mut config = cluster(&certs, &address, HealthCheckType::Tls);
     config.health_check.as_mut().unwrap().timeout_ms = 5000;
     config.health_check.as_mut().unwrap().interval_ms = 10_000;
@@ -156,7 +156,9 @@ async fn tls_probe_waits_for_rejection_on_slow_tls13_connection() {
 #[tokio::test]
 async fn tls_probe_accepts_silent_peer_after_handshake_near_deadline() {
     let certs = TestCertificates::generate();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (listener, _) = praxis_test_utils::bind_unique_port();
+    listener.set_nonblocking(true).unwrap();
+    let listener = tokio::net::TcpListener::from_std(listener).unwrap();
     let address = listener.local_addr().unwrap().to_string();
     let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config(&certs, false)));
     let (closed_tx, closed_rx) = tokio::sync::oneshot::channel();
@@ -185,7 +187,7 @@ async fn tls_probe_accepts_silent_peer_after_handshake_near_deadline() {
 #[tokio::test]
 async fn tls_probe_rejects_untrusted_tls13_client_credentials() {
     let certs = TestCertificates::generate();
-    let backend = Backend::new(&certs, true).await;
+    let backend = Backend::new(&certs, true);
     let other = TestCertificates::generate();
     let untrusted = other.generate_client_cert();
     let mut config = cluster(&certs, &backend.address, HealthCheckType::Tls);
@@ -203,7 +205,7 @@ async fn tls_probe_rejects_untrusted_tls13_client_credentials() {
 #[tokio::test]
 async fn https_probe_requires_accepted_tls13_client_credentials() {
     let certs = TestCertificates::generate();
-    let backend = Backend::new(&certs, true).await;
+    let backend = Backend::new(&certs, true);
     let client = certs.generate_client_cert();
     let other = TestCertificates::generate();
     let untrusted = other.generate_client_cert();
@@ -235,7 +237,7 @@ async fn https_probe_requires_accepted_tls13_client_credentials() {
 async fn runtime_ca_replaces_system_trust_and_cluster_ca_takes_precedence() {
     let certs = TestCertificates::generate();
     let other = TestCertificates::generate();
-    let backend = Backend::new(&certs, false).await;
+    let backend = Backend::new(&certs, false);
     let roots = praxis_tls::CachedCaCerts::from_pem_file(certs.ca_cert_path.to_str().unwrap()).unwrap();
     let wrong_roots = praxis_tls::CachedCaCerts::from_pem_file(other.ca_cert_path.to_str().unwrap()).unwrap();
     let mut config = cluster(&certs, &backend.address, HealthCheckType::Tls);
@@ -249,7 +251,7 @@ async fn runtime_ca_replaces_system_trust_and_cluster_ca_takes_precedence() {
 #[tokio::test]
 async fn https_probe_observes_status_and_fragmented_response() {
     let certs = TestCertificates::generate();
-    let backend = Backend::new(&certs, false).await;
+    let backend = Backend::new(&certs, false);
     backend.status.store(204, Ordering::Relaxed);
     let mut config = cluster(&certs, &backend.address, HealthCheckType::Http);
     assert_health(config.clone(), None, false).await;
@@ -261,7 +263,7 @@ async fn https_probe_observes_status_and_fragmented_response() {
 #[tokio::test]
 async fn fixed_authority_and_endpoint_fallback_control_sni_and_host() {
     let certs = TestCertificates::generate_for_san("virtual.example");
-    let backend = Backend::new(&certs, false).await;
+    let backend = Backend::new(&certs, false);
     let mut config = cluster(&certs, &backend.address, HealthCheckType::Http);
     config.tls.as_mut().unwrap().sni = None;
     config.http.authority = Some("virtual.example:8443".into());
@@ -305,7 +307,7 @@ async fn fixed_authority_and_endpoint_fallback_control_sni_and_host() {
 async fn ip_authorities_preserve_endpoint_identity_and_http_host() {
     let certs = TestCertificates::generate();
     for authority in ["127.0.0.2:8443", "[2001:db8::1]:8443", "127.0.0.2.:8443"] {
-        let backend = Backend::new(&certs, false).await;
+        let backend = Backend::new(&certs, false);
         let mut config = cluster(&certs, &backend.address, HealthCheckType::Tls);
         config.tls.as_mut().unwrap().sni = None;
         config.http.authority = Some(authority.into());
@@ -331,7 +333,7 @@ async fn ip_authorities_preserve_endpoint_identity_and_http_host() {
 #[tokio::test]
 async fn hostname_probes_use_the_upstream_address_policy() {
     let certs = TestCertificates::generate();
-    let backend = Backend::new(&certs, false).await;
+    let backend = Backend::new(&certs, false);
     let address = format!("localhost:{}", backend.address.rsplit_once(':').unwrap().1);
     assert_health(cluster(&certs, &address, HealthCheckType::Http), None, true).await;
 }
@@ -343,7 +345,7 @@ async fn handshake_probe_honors_h2_only_alpn() {
         praxis_core::config::UpstreamHttpVersion::H2,
         praxis_core::config::UpstreamHttpVersion::Auto,
     ] {
-        let backend = Backend::new(&certs, false).await;
+        let backend = Backend::new(&certs, false);
         let mut server = server_config(&certs, false);
         server.alpn_protocols = vec![b"h2".to_vec()];
         backend.config.store(Arc::new(server));
@@ -365,7 +367,7 @@ async fn handshake_probe_honors_h2_only_alpn() {
 #[tokio::test]
 async fn bad_cached_material_marks_endpoint_unhealthy() {
     let certs = TestCertificates::generate();
-    let backend = Backend::new(&certs, false).await;
+    let backend = Backend::new(&certs, false);
     let mut config = cluster(&certs, &backend.address, HealthCheckType::Tls);
     config.tls.as_mut().unwrap().ca.as_mut().unwrap().ca_path = "/nonexistent/health-ca.pem".to_owned();
     assert_health(config, None, false).await;
@@ -373,7 +375,9 @@ async fn bad_cached_material_marks_endpoint_unhealthy() {
 
 #[tokio::test]
 async fn tls_probe_times_out_a_stalled_handshake_and_tcp_still_succeeds() {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (listener, _) = praxis_test_utils::bind_unique_port();
+    listener.set_nonblocking(true).unwrap();
+    let listener = tokio::net::TcpListener::from_std(listener).unwrap();
     let address = listener.local_addr().unwrap().to_string();
     let held = tokio::spawn(async move {
         let (tls_socket, _) = listener.accept().await.unwrap();
@@ -397,7 +401,9 @@ async fn tls_probe_times_out_a_stalled_handshake_and_tcp_still_succeeds() {
 
 #[tokio::test]
 async fn tls_probe_rejects_plaintext_responses() {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (listener, _) = praxis_test_utils::bind_unique_port();
+    listener.set_nonblocking(true).unwrap();
+    let listener = tokio::net::TcpListener::from_std(listener).unwrap();
     let address = listener.local_addr().unwrap().to_string();
     let task = tokio::spawn(async move {
         while let Ok((mut socket, _)) = listener.accept().await {
@@ -417,7 +423,7 @@ async fn tls_probe_rejects_plaintext_responses() {
 async fn repeated_probes_do_not_resume_an_old_server_identity() {
     let certs = TestCertificates::generate();
     let replacement = TestCertificates::generate();
-    let backend = Backend::new(&certs, false).await;
+    let backend = Backend::new(&certs, false);
     let mut config = cluster(&certs, &backend.address, HealthCheckType::Http);
     config.health_check.as_mut().unwrap().interval_ms = 300;
     config.health_check.as_mut().unwrap().timeout_ms = 250;
@@ -446,7 +452,7 @@ async fn repeated_probes_do_not_resume_an_old_server_identity() {
 async fn reload_keeps_startup_runtime_trust_across_two_generations() {
     let certs = TestCertificates::generate();
     let wrong = TestCertificates::generate();
-    let backend = Backend::new(&certs, false).await;
+    let backend = Backend::new(&certs, false);
     let proxy_port = praxis_test_utils::free_port();
     let yaml = |generation: &str, roots: &std::path::Path| {
         format!(
@@ -488,8 +494,10 @@ async fn reload_keeps_startup_runtime_trust_across_two_generations() {
 // -----------------------------------------------------------------------------
 
 /// Delay the server handshake flight by 300 ms and later TLS alerts by 150 ms.
-async fn delayed_server_traffic(upstream: &str) -> (String, tokio::task::JoinHandle<()>) {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+fn delayed_server_traffic(upstream: &str) -> (String, tokio::task::JoinHandle<()>) {
+    let (listener, _) = praxis_test_utils::bind_unique_port();
+    listener.set_nonblocking(true).unwrap();
+    let listener = tokio::net::TcpListener::from_std(listener).unwrap();
     let address = listener.local_addr().unwrap().to_string();
     let upstream = upstream.to_owned();
     let task = tokio::spawn(async move {
@@ -549,8 +557,10 @@ pub(super) struct Backend {
 
 impl Backend {
     /// Start a real TLS server that fragments its status line.
-    pub(super) async fn new(certs: &TestCertificates, mtls: bool) -> Self {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    pub(super) fn new(certs: &TestCertificates, mtls: bool) -> Self {
+        let (listener, _) = praxis_test_utils::bind_unique_port();
+        listener.set_nonblocking(true).unwrap();
+        let listener = tokio::net::TcpListener::from_std(listener).unwrap();
         let address = listener.local_addr().unwrap().to_string();
         let config = Arc::new(ArcSwap::from_pointee(server_config(certs, mtls)));
         let closes = Arc::new(AtomicUsize::new(0));

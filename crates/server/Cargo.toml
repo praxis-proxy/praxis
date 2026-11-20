@@ -50,7 +50,7 @@ tracing-subscriber = { workspace = true }
 [features]
 # TLS and HTTPS active probes. Off by default.
 tls-health-check = ["praxis-protocol/tls-health-check", "experimental"]
-default = ["pingora", "config-reload", "admin-api", "policy-engine"]
+default = ["pingora", "config-reload", "admin-api", "policy-builtins"]
 
 # The network backend. A build with no backend feature refuses to compile
 # (see src/lib.rs). `pingora` is on by default; a `--no-default-features`
@@ -84,6 +84,9 @@ router-json-aliases = ["praxis-filter/router-json-aliases", "experimental"]
 # Per-cluster slow start. Off by default; experimental. With the feature on,
 # weighted strategies apply the ramp. Hash strategies do not.
 slow-start = ["praxis-filter/slow-start", "experimental"]
+# The listener `forward_proxy` block (HTTP CONNECT forward proxying). Off by
+# default; experimental. Without it the block is an unknown key.
+forward-proxy = ["praxis-core/forward-proxy", "experimental"]
 # The bound-upstream request-body hook. Off by default; experimental.
 bound-upstream-request-body = ["praxis-filter/bound-upstream-request-body", "upstream-binding", "experimental"]
 # The chain-binding registry extension API. Off by default; experimental.
@@ -95,12 +98,43 @@ hedged-requests = ["praxis-protocol/hedged-requests", "experimental"]
 # The `access_log` syslog sink (RFC 3164 over unix/UDP/TCP). Off by default;
 # experimental. Pulls in the `syslog` crate, kept out of the default/FIPS builds.
 access-log-syslog = ["praxis-filter/access-log-syslog", "experimental"]
-# The `policy` filter (Praxis Policy Engine). On by default. The workspace
-# declares praxis-filter with `default-features = false`, so this feature is
-# the only thing that turns the filter's `policy-engine` on; a
-# `--no-default-features` build (`make build-fips`) excludes the filter and
-# the whole `ppe` tree.
+# The `policy` filter (Praxis Policy Engine). `policy-builtins`, on by
+# default, is the standard bundle: every builtin, the RustCrypto backend and
+# the experimental rate limiter. A narrower build names `policy-engine` or
+# individual `policy-*` builtins plus exactly one shared crypto backend
+# (`policy-crypto-default` or `policy-crypto-fips`); the engine refuses to
+# compile with neither or both. `policy-api-key-fips` and `policy-jwt-fips`
+# are convenience aliases that add the FIPS backend.
 policy-engine = ["praxis-filter/policy-engine", "praxis-protocol/policy-engine"]
+policy-builtins = [
+    "policy-engine",
+    "policy-experimental-ratelimit",
+    "praxis-filter/policy-builtins",
+    "praxis-protocol/policy-builtins",
+]
+policy-jwt = ["policy-engine", "praxis-filter/policy-jwt", "praxis-protocol/policy-jwt"]
+policy-jwt-openssl-fips = ["policy-engine", "praxis-filter/policy-jwt-openssl-fips", "praxis-protocol/policy-jwt-openssl-fips"]
+policy-jwt-fips = ["policy-jwt-openssl-fips", "policy-crypto-fips"]
+policy-api-key = ["policy-engine", "praxis-filter/policy-api-key", "praxis-protocol/policy-api-key"]
+policy-crypto-default = ["policy-engine", "praxis-filter/policy-crypto-default", "praxis-protocol/policy-crypto-default"]
+policy-crypto-fips = ["policy-engine", "praxis-filter/policy-crypto-fips", "praxis-protocol/policy-crypto-fips"]
+policy-api-key-fips = ["policy-api-key", "policy-crypto-fips"]
+policy-oauth = ["policy-engine", "praxis-filter/policy-oauth", "praxis-protocol/policy-oauth"]
+policy-delegator-vault = ["policy-engine", "praxis-filter/policy-delegator-vault", "praxis-protocol/policy-delegator-vault"]
+policy-elicitation-ciba = ["policy-engine", "praxis-filter/policy-elicitation-ciba", "praxis-protocol/policy-elicitation-ciba"]
+policy-cedar = ["policy-engine", "praxis-filter/policy-cedar", "praxis-protocol/policy-cedar"]
+policy-cel = ["policy-engine", "praxis-filter/policy-cel", "praxis-protocol/policy-cel"]
+policy-opa = ["policy-engine", "praxis-filter/policy-opa", "praxis-protocol/policy-opa"]
+policy-valkey = ["policy-engine", "praxis-filter/policy-valkey", "praxis-protocol/policy-valkey"]
+policy-secrets-vault = ["policy-engine", "praxis-filter/policy-secrets-vault", "praxis-protocol/policy-secrets-vault"]
+# PPE's embedded request rate limiter, in the default bundle through
+# `policy-builtins`. Experimental.
+policy-experimental-ratelimit = [
+    "policy-engine",
+    "praxis-filter/policy-experimental-ratelimit",
+    "praxis-protocol/policy-experimental-ratelimit",
+    "experimental",
+]
 # Marker feature activated transitively by any experimental feature.
 # Used to gate the startup warning in startup_checks::warn_experimental_features.
 experimental = []

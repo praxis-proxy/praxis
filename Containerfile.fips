@@ -15,10 +15,13 @@
 #             result (make fips-check)
 #   runtime   the shippable image on ubi9/ubi-minimal (make container-fips)
 #
-# The FIPS build differs from the standard build only in its cargo features:
-# it turns off what is known not to be FIPS compliant yet (the policy engine,
-# whose dependencies carry their own cryptography). CARGO_FEATURES defaults to
-# the Makefile's FIPS_FEATURES; keep the two in sync.
+# The FIPS build differs from the standard build only in its cargo features.
+# The default leaves Policy out: its ordinary bundle carries its own
+# cryptography, and only the profiles built on Policy's OpenSSL FIPS backend
+# are FIPS candidates. CARGO_FEATURES defaults to the Makefile's
+# FIPS_BASE_FEATURES (make fips-deps checks the two match); a Policy profile
+# (make container-fips FIPS_POLICY_PROFILE=jwt) passes its own list as a
+# build arg and is tagged apart from the published image.
 #
 # Both base images are pinned by digest and their Red Hat signatures are
 # verified by `make fips-verify-image` before any build. Update the digests

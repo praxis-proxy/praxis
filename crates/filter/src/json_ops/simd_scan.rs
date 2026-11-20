@@ -191,6 +191,23 @@ mod tests {
     }
 
     #[test]
+    fn unaligned_offsets_and_truncated_tails_match_scalar() {
+        for alignment in 0..16 {
+            for length in [0, 1, 15, 16, 17, 31, 32, 33, 63, 64, 65, 4096] {
+                for delimiter in [b'"', b'\\', 0_u8, 0x1F] {
+                    let mut bytes = vec![b'x'; alignment + length];
+                    if length > 0 {
+                        bytes[alignment + length - 1] = delimiter;
+                    }
+                    let view = &bytes[alignment..];
+                    assert_both(view, length.checked_sub(1));
+                    assert_both(&view[..length.saturating_sub(1)], None);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn high_bytes_are_safe() {
         let buf: Vec<u8> = (0x20..=0xFF).filter(|&bb| bb != b'"' && bb != b'\\').collect();
         assert_both(&buf, None);

@@ -22,7 +22,7 @@ Non-gRPC-Web requests pass through untouched.
 | `encodings` | Encodings | yes | Downstream encodings to translate. |
 | `encodings.binary` | bool | yes | Accept `application/grpc-web[+codec]` — raw frames. |
 | `encodings.text` | bool | yes | Accept `application/grpc-web-text[+codec]` — base64 frames. |
-| `max_buffer_bytes` | integer | yes | Maximum bytes buffered while decoding a base64 request body. |
+| `max_buffer_bytes` | integer | yes | Maximum bytes buffered while decoding a base64 request body (also bounded by `body_limits.max_buffer_bytes`). |
 | `on_missing_trailers` | `synthesize` \| `passthrough` | yes | Behaviour when the upstream response carries no gRPC status. |
 
 ## Example

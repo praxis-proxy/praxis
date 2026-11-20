@@ -10,8 +10,8 @@
 //! What is checked, and why it matters for Red Hat's gate
 //! (openshift/check-payload, Rust support in its PR #360):
 //!
-//! 1. dependency graph: crates on the scanner's `rust_denied_crypto` list must not be in the shipped binary's normal
-//!    dependency graph
+//! 1. dependency graph: crates on the scanner's `rust_denied_crypto` list must not be in the shipped binary's normal or
+//!    build dependency graph; the unit-test graph may add only classified ones and must not unify crypto features
 //! 2. binary: must link the system libcrypto dynamically, define no symbol of a bundled crypto backend, and carry a
 //!    cargo-auditable manifest
 //! 3. source: the application must never enable a FIPS provider itself, must not use OpenSSL's legacy (non-provider)
@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 
 use clap::Parser;
 
-use super::{binary, environment, graph, guards};
+use super::{binary, environment, graph, guards, test_graph};
 use crate::paths::workspace_root;
 
 // -----------------------------------------------------------------------------
@@ -242,6 +242,7 @@ pub(crate) fn run(args: &Args) {
     let mut report = Report::default();
     environment::section(&mut report, &context);
     graph::section(&mut report, &context);
+    test_graph::section(&mut report, &context);
     if !args.deps_only {
         binary::section(&mut report, args.binary.as_deref());
     }

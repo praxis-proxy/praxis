@@ -9,16 +9,18 @@
 //! deployments use RS256 with JWKS endpoints; the YAML schema
 //! supports both via the `decoding_key.kind` discriminant.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use http::{HeaderValue, Method};
-use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+use openssl::{hash::MessageDigest, pkey::PKey, sign::Signer};
 use serde_json::json;
 use tempfile::TempDir;
 
 use super::{
     config::{BodyAccessMode, ContextField, ContextMetaConfig, PolicyFilterConfig},
-    filter::PolicyFilter,
+    context::{PolicyResponseContext, PolicyResponseOutput},
+    filter::{PolicyFilter, ResponseCustomState},
 };
 use crate::{
     AuthenticatedIdentity, BodyAccess, BodyMode, FilterAction, FilterEntry, FilterFactory, FilterPipeline,
@@ -38,11 +40,27 @@ fn now_unix() -> u64 {
         .as_secs()
 }
 
+/// Mint a compact HS256 JWT over `claims`, signed with `secret` through the
+/// system OpenSSL (RFC 7515 section 5.1).
+fn hs256(claims: &serde_json::Value, secret: &[u8]) -> String {
+    let header = json!({ "alg": "HS256", "typ": "JWT" });
+    let signing_input = format!(
+        "{}.{}",
+        URL_SAFE_NO_PAD.encode(header.to_string()),
+        URL_SAFE_NO_PAD.encode(claims.to_string())
+    );
+    let key = PKey::hmac(secret).expect("HMAC key");
+    let mut signer = Signer::new(MessageDigest::sha256(), &key).expect("HMAC-SHA256 signer");
+    signer
+        .update(signing_input.as_bytes())
+        .expect("feed the JWT signing input");
+    let signature = signer.sign_to_vec().expect("HMAC-SHA256 signature");
+    format!("{signing_input}.{}", URL_SAFE_NO_PAD.encode(signature))
+}
+
 /// Mint an HS256 JWT signed with [`TEST_SECRET`].
 fn mint_jwt(claims: &serde_json::Value) -> String {
-    let header = Header::new(Algorithm::HS256);
-    let key = EncodingKey::from_secret(TEST_SECRET.as_bytes());
-    encode(&header, claims, &key).expect("sign JWT")
+    hs256(claims, TEST_SECRET.as_bytes())
 }
 
 /// Standard token claims: test issuer + audience, fresh `exp`.
@@ -425,8 +443,12 @@ async fn dispatch_echo_method(filter: &PolicyFilter, subject: &str, method: Meth
         HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
     );
     let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", "echo");
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
     let body = bytes::Bytes::from_static(
         br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{}}}"#,
     );
@@ -506,8 +528,12 @@ async fn dispatch_tool_session(filter: &PolicyFilter, subject: &str, tool: &str,
         HeaderValue::from_str(session_id).expect("session header"),
     );
     let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", tool);
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", tool)
+        .expect("entry must fit in the filter's metadata");
     let body = bytes::Bytes::from_static(
         br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"t","arguments":{}}}"#,
     );
@@ -517,10 +543,8 @@ async fn dispatch_tool_session(filter: &PolicyFilter, subject: &str, tool: &str,
         .expect("filter ran")
 }
 
-/// Write a policy document with two identity plugins, each reading its own
-/// header. Demonstrates the multi-source agentic identity story PR1
-/// targets — one request can carry user + agent JWTs simultaneously,
-/// both validated, both contributing to a typed `Extensions` context.
+/// Write a policy document that independently validates user and agent JWTs
+/// from separate headers and contributes both identities to `Extensions`.
 #[expect(
     clippy::too_many_lines,
     reason = "test fixture — the YAML literal is the bulk; splitting utilities would obscure the shape under test"
@@ -678,8 +702,12 @@ async fn dispatch_tool_with_header(
         HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
     );
     let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", tool);
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", tool)
+        .expect("entry must fit in the filter's metadata");
     let body = bytes::Bytes::from_static(
         br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"t","arguments":{}}}"#,
     );
@@ -779,18 +807,22 @@ async fn route_scoped_identity_is_published_only_after_authoritative_resolution(
     );
     let mut ctx = make_filter_context(&req);
 
-    let gate = filter.on_request(&mut ctx).await.expect("identity gate ran");
+    let head = filter.on_request_head(&mut ctx).await.expect("head ran");
     assert!(
-        matches!(&gate, FilterAction::Continue),
-        "identity gate should continue before route resolution; got {gate:?}",
+        matches!(&head, FilterAction::Continue),
+        "the head should continue before route resolution; got {head:?}",
     );
     assert!(
         ctx.extensions.get::<AuthenticatedIdentity>().is_none(),
-        "unscoped header gate must not publish a route-dependent principal",
+        "the head must not publish a route-dependent principal",
     );
 
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", "open-tool");
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "open-tool")
+        .expect("entry must fit in the filter's metadata");
     let mut body = Some(bytes::Bytes::from_static(
         br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"open-tool","arguments":{}}}"#,
     ));
@@ -809,6 +841,11 @@ async fn route_scoped_identity_is_published_only_after_authoritative_resolution(
             .map(AuthenticatedIdentity::subject_id),
         Some("alice"),
         "open-tool inherits the global resolver; the route-only Bob token must not win",
+    );
+    let request = filter.on_request(&mut ctx).await.expect("request phase ran");
+    assert!(
+        matches!(&request, FilterAction::Continue),
+        "the request phase finds the route's admission; got {request:?}",
     );
 }
 
@@ -894,6 +931,7 @@ fn build_filter_with_meta(config_path: String, context_meta: ContextMetaConfig) 
             config_path,
             allow_private_idp: false,
             trusted_private_endpoints: vec![],
+            trusted_proxies: vec![],
             body_access: BodyAccessMode::ReadOnly,
             require_protocol_metadata: true,
             init_timeout_secs: 30,
@@ -1015,6 +1053,7 @@ fn build_filter_with_context(
             config_path,
             allow_private_idp: false,
             trusted_private_endpoints: vec![],
+            trusted_proxies: vec![],
             body_access: BodyAccessMode::ReadOnly,
             require_protocol_metadata: true,
             init_timeout_secs: 30,
@@ -1046,8 +1085,12 @@ async fn dispatch_tool_with_extra_headers(
             .insert(name, HeaderValue::from_str(value).expect("header value"));
     }
     let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", tool);
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", tool)
+        .expect("entry must fit in the filter's metadata");
     let body = bytes::Bytes::from_static(
         br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"t","arguments":{}}}"#,
     );
@@ -1121,8 +1164,12 @@ async fn context_headers_pending_mutation_flows_into_apl() {
         http::header::HeaderName::from_static("x-ext-agent-id"),
         HeaderValue::from_static("planner"),
     ));
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", "ctx-tool");
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "ctx-tool")
+        .expect("entry must fit in the filter's metadata");
     let body = bytes::Bytes::from_static(
         br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"t","arguments":{}}}"#,
     );
@@ -1136,6 +1183,127 @@ async fn context_headers_pending_mutation_flows_into_apl() {
     assert!(
         has_header(&rejection, "x-policy-violation", "agent_id_seen"),
         "`agent.agent_id` from a pending mutation must be readable in APL; got {:?}",
+        rejection.headers,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// entity-less response fallback — stamp_operator_context
+// ---------------------------------------------------------------------------
+
+/// Identity-only policy (authentication plus a response half, no request
+/// authorization and no entity route). The response half is run with no
+/// admitted identity in filter state, so `response_extensions` takes the
+/// entity-less fallback. The post rules read `meta.tags`,
+/// `meta.properties.region`, and `agent.agent_id`. Dropping
+/// `stamp_operator_context` from that fallback makes the allow case deny
+/// with `tags_missing`.
+#[expect(clippy::too_many_lines, reason = "test fixture: the YAML literal is the bulk")]
+fn write_entity_less_response_config() -> (TempDir, String) {
+    let dir = TempDir::new().expect("create tempdir");
+    let cfg_path = dir.path().join("cpex.yaml");
+    let yaml = format!(
+        r#"plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "{TEST_ISSUER}"
+          audiences: ["{TEST_AUDIENCE}"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "{TEST_SECRET}"
+          leeway_seconds: 60
+      claim_mapper: standard
+global:
+  authentication:
+    - jwt-user
+  authorization:
+    post_invocation:
+      - "!(meta.tags contains 'regulated'): deny('operator tags missing on the response half', 'tags_missing')"
+      - "!(meta.properties.region == 'us-east-1'): deny('operator region missing on the response half', 'region_missing')"
+      - "!(agent.agent_id == 'planner-v2'): deny('mapped header missing on the response half', 'agent_id_missing')"
+"#
+    );
+    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
+    (dir, cfg_path.to_str().expect("utf8 path").to_owned())
+}
+
+fn regulated_context() -> ContextMetaConfig {
+    ContextMetaConfig {
+        tags: vec!["regulated".to_owned()],
+        properties: HashMap::from([("region".to_owned(), "us-east-1".to_owned())]),
+        ..Default::default()
+    }
+}
+
+fn agent_id_header() -> HashMap<ContextField, String> {
+    HashMap::from([(ContextField::AgentAgentId, "x-ext-agent-id".to_owned())])
+}
+
+/// Admit through the identity gate, clear the identity `admitted_identity`
+/// reads, then run the response half on the entity-less fallback.
+async fn respond_without_stashed_identity(filter: &PolicyFilter) -> FilterAction {
+    let mut req = request_for_alice();
+    req.headers
+        .insert("x-ext-agent-id", HeaderValue::from_static("planner-v2"));
+    let mut ctx = make_filter_context(&req);
+    let admitted = filter.on_request(&mut ctx).await.expect("request phase ran");
+    assert!(
+        matches!(admitted, FilterAction::Continue),
+        "the identity gate must admit alice; got {admitted:?}",
+    );
+    super::request_state::state_mut(&mut ctx).identity = None;
+    assert!(
+        super::request_state::state(&ctx).is_none_or(|state| state.identity.is_none()),
+        "the response half must see no admitted identity",
+    );
+    let mut response = crate::test_utils::make_response();
+    ctx.response_header = Some(&mut response);
+    filter.on_response(&mut ctx).await.expect("response phase ran")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn entity_less_response_keeps_operator_context() {
+    let (_dir, path) = write_entity_less_response_config();
+    let filter = build_filter_with_context(path, agent_id_header(), regulated_context());
+    assert_eq!(
+        filter.derived_shape(),
+        (false, false),
+        "a post-only global policy is identity-only; the response half must use the entity-less fallback",
+    );
+
+    let action = respond_without_stashed_identity(&filter).await;
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "stamped tags, region, and agent.agent_id must satisfy the response rules; got {action:?}",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn entity_less_response_denies_without_regulated_tag() {
+    let (_dir, path) = write_entity_less_response_config();
+    let filter = build_filter_with_context(
+        path,
+        agent_id_header(),
+        ContextMetaConfig {
+            properties: HashMap::from([("region".to_owned(), "us-east-1".to_owned())]),
+            ..Default::default()
+        },
+    );
+
+    let action = respond_without_stashed_identity(&filter).await;
+    let FilterAction::Reject(rejection) = action else {
+        panic!("without the regulated tag the response rule must deny; got {action:?}");
+    };
+    assert!(
+        has_header(&rejection, "x-policy-violation", "tags_missing"),
+        "the deny must report tags_missing; got {:?}",
         rejection.headers,
     );
 }
@@ -1207,6 +1375,7 @@ fn filter_config(config_path: String) -> PolicyFilterConfig {
         config_path,
         allow_private_idp: false,
         trusted_private_endpoints: vec![],
+        trusted_proxies: vec![],
         body_access: BodyAccessMode::ReadOnly,
         require_protocol_metadata: true,
         init_timeout_secs: 30,
@@ -1234,7 +1403,7 @@ impl crate::HttpFilter for IdentityBodyObserver {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn request_body_mode(&self) -> BodyMode {
@@ -1442,6 +1611,7 @@ fn rejects_zero_max_buffer_bytes() {
         config_path: "/nonexistent/policy.yaml".to_owned(),
         allow_private_idp: false,
         trusted_private_endpoints: vec![],
+        trusted_proxies: vec![],
         body_access: BodyAccessMode::ReadWrite,
         require_protocol_metadata: true,
         init_timeout_secs: 30,
@@ -1463,10 +1633,11 @@ fn rejects_oversized_max_buffer_bytes() {
         config_path: "/nonexistent/policy.yaml".to_owned(),
         allow_private_idp: false,
         trusted_private_endpoints: vec![],
+        trusted_proxies: vec![],
         body_access: BodyAccessMode::ReadWrite,
         require_protocol_metadata: true,
         init_timeout_secs: 30,
-        max_buffer_bytes: praxis_core::config::ABSOLUTE_MAX_BODY_BYTES + 1,
+        max_buffer_bytes: praxis_core::config::MAX_BUFFER_BYTES + 1,
         llm: super::config::LlmOptions::default(),
         context_headers: HashMap::default(),
         context_meta: ContextMetaConfig::default(),
@@ -1658,8 +1829,12 @@ async fn request_assertions_reach_the_upstream_request() {
     req.headers.insert("x-auth-user-id", HeaderValue::from_static("root"));
     req.headers.insert("x-drop-me", HeaderValue::from_static("secret"));
     let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", "echo");
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
 
     let mut body = Some(bytes::Bytes::from_static(
         br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{}}}"#,
@@ -1724,8 +1899,12 @@ async fn a_policy_without_assertions_touches_no_upstream_header() {
         HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
     );
     let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", "echo");
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
 
     let mut body = Some(bytes::Bytes::from_static(
         br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{}}}"#,
@@ -1772,20 +1951,9 @@ async fn request_without_auth_header_rejects_401() {
     }
 }
 
-/// When a downstream pre-read ran `on_request_body` first and stashed
-/// `ResolvedIdentity` (having stripped the inbound credential for the
-/// upstream), the early `identity_gate` must skip rather than re-resolve
-/// against the now-missing headers. A credential-less request that would
-/// normally 401 here passes because the body phase is authoritative.
-///
-/// The routes-only config is what puts `on_request` on the `identity_gate`
-/// path, and stashing `ResolvedIdentity` is what a body phase that already
-/// resolved and enforced identity leaves behind.
 #[tokio::test(flavor = "multi_thread")]
 async fn identity_gate_skips_when_body_phase_already_resolved() {
     use ppe::praxis_policy_core::identity::{IdentityPayload, TokenSource};
-
-    use super::filter::ResolvedIdentity;
 
     let (_dir, path) = write_cel_policy_config();
     let filter = build_filter(path);
@@ -1793,22 +1961,15 @@ async fn identity_gate_skips_when_body_phase_already_resolved() {
     let req = make_request(Method::POST, "/");
     let mut ctx = make_filter_context(&req);
 
-    ctx.extensions.insert(ResolvedIdentity(IdentityPayload::new(
-        String::new(),
-        TokenSource::Bearer,
-    )));
+    super::request_state::state_mut(&mut ctx).identity = Some(IdentityPayload::new(String::new(), TokenSource::Bearer));
 
     let action = filter.on_request(&mut ctx).await.expect("on_request ran");
     assert!(
         matches!(action, FilterAction::Continue),
-        "gate must be skipped when ResolvedIdentity is already stashed; got {action:?}",
+        "gate must be skipped when this instance already admitted an identity; got {action:?}",
     );
 }
 
-/// Control for `identity_gate_skips_when_body_phase_already_resolved`: the
-/// same credential-less request with no `ResolvedIdentity` stashed must run
-/// the gate and reject — proving the skip (not something else) is what flips
-/// the outcome to `Continue`.
 #[tokio::test(flavor = "multi_thread")]
 async fn identity_gate_rejects_when_identity_not_yet_resolved() {
     let (_dir, path) = write_cel_policy_config();
@@ -2061,6 +2222,38 @@ async fn dotted_role_does_not_satisfy_its_prefix() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn apl_settled_operand_decides_past_an_unorderable_one() {
+    for rule in [
+        r#""subject.id > 10 & role.guest: deny('blocked', 'blocked')""#,
+        r#""role.guest & subject.id > 10: deny('blocked', 'blocked')""#,
+        r#""require(subject.id <= 10 | role.admin)""#,
+        r#""require(role.admin | subject.id <= 10)""#,
+    ] {
+        let action = dispatch_with_roles(rule, &["admin"]).await;
+        assert!(
+            matches!(action, FilterAction::Continue),
+            "a settled operand must decide {rule}; got {action:?}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn apl_unsettled_unorderable_operand_fails_closed() {
+    for rule in [
+        r#""subject.id > 10: deny('blocked', 'blocked')""#,
+        r#""subject.id <= 10: deny('blocked', 'blocked')""#,
+        r#""require(subject.id <= 10 | role.guest)""#,
+        r#""subject.id > 10 & role.admin: deny('blocked', 'blocked')""#,
+    ] {
+        let action = dispatch_with_roles(rule, &["admin"]).await;
+        assert!(
+            matches!(&action, FilterAction::Reject(_)),
+            "an unsettled unorderable predicate must deny {rule}; got {action:?}"
+        );
+    }
+}
+
 /// Write a pure-L7 JWT policy decided by `data.authz.allow` over `modules`,
 /// each an inline Rego module.
 #[expect(
@@ -2166,6 +2359,10 @@ allow if l.is_admin(input.subject.id)";
 /// Entity-aware policies resolve identity in the body phase. That producer
 /// path must publish the extension before later body filters execute.
 #[tokio::test(flavor = "multi_thread")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "linear scenario; seeded metadata writes span several lines"
+)]
 async fn entity_allow_publishes_authenticated_identity() {
     let (_dir, path) = write_tool_route_config();
     let filter = build_filter(path);
@@ -2177,8 +2374,12 @@ async fn entity_allow_publishes_authenticated_identity() {
         HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
     );
     let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", "echo");
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
     let mut body = Some(bytes::Bytes::from_static(
         br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{}}}"#,
     ));
@@ -2253,9 +2454,6 @@ async fn auth_rejection_carries_diagnostic_headers() {
     assert!(violation.is_some(), "X-Policy-Violation header is expected");
 }
 
-/// The PR1 multi-source story: one request carries a user JWT in
-/// `Authorization` and an agent JWT in `X-Agent-Token`. Both plugins
-/// validate their respective headers and the request passes.
 #[tokio::test(flavor = "multi_thread")]
 async fn multi_source_both_identities_continue() {
     let (_dir, path) = write_multi_source_config();
@@ -2414,6 +2612,10 @@ async fn missing_protocol_metadata_rejects_when_required() {
 /// route-scoped resolver. The filter must reject instead of admitting the
 /// request with neither authorization nor a trusted identity projection.
 #[tokio::test(flavor = "multi_thread")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "linear scenario; seeded metadata writes span several lines"
+)]
 async fn missing_entity_name_rejects_after_successful_identity_gate() {
     let (_dir, path) = write_tool_route_config();
     let filter = build_filter(path);
@@ -2432,7 +2634,9 @@ async fn missing_entity_name_rejects_after_successful_identity_gate() {
         ctx.extensions.get::<AuthenticatedIdentity>().is_none(),
         "header gate must not publish identity before authoritative entity resolution",
     );
-    ctx.set_metadata("mcp.method", "tools/call");
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
 
     let action = filter
         .on_request_body(&mut ctx, &mut Some(bytes::Bytes::new()), true)
@@ -2459,6 +2663,7 @@ async fn missing_protocol_metadata_passes_when_not_required() {
         config_path: path,
         allow_private_idp: false,
         trusted_private_endpoints: vec![],
+        trusted_proxies: vec![],
         body_access: BodyAccessMode::ReadOnly,
         require_protocol_metadata: false,
         init_timeout_secs: 30,
@@ -2922,7 +3127,7 @@ fn build_response_content_for_method_prefers_structured_content() {
         "corr-1",
         &super::json_rpc::ParsedEnvelope::parse(&body),
     );
-    assert_eq!(parts.len(), 1);
+    assert_eq!(parts.len(), 2);
     match &parts[0] {
         ContentPart::ToolResult { content } => {
             assert!(content.is_error);
@@ -2930,6 +3135,7 @@ fn build_response_content_for_method_prefers_structured_content() {
         },
         other => panic!("expected ToolResult; got {other:?}"),
     }
+    assert!(matches!(&parts[1], ContentPart::Text { text } if text == "ignored"));
 }
 
 #[test]
@@ -3036,8 +3242,12 @@ async fn on_request_body_dispatches_cmf_when_metadata_present() {
         HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
     );
     let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", "echo");
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
 
     let body = bytes::Bytes::from_static(
         br#"{"jsonrpc":"2.0","id":1,"method":"tools/call",
@@ -3299,6 +3509,7 @@ async fn response_phase_without_request_identity_fails_closed() {
         config_path: path,
         allow_private_idp: false,
         trusted_private_endpoints: vec![],
+        trusted_proxies: vec![],
         body_access: BodyAccessMode::ReadWrite,
         require_protocol_metadata: true,
         init_timeout_secs: 30,
@@ -3311,8 +3522,12 @@ async fn response_phase_without_request_identity_fails_closed() {
 
     let req = make_request(Method::POST, "/");
     let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", "echo");
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
 
     let original = bytes::Bytes::from(format!(
         r#"{{"jsonrpc":"2.0","id":1,"result":{{"content":[{{"type":"text","text":"{}"}}]}}}}"#,
@@ -3371,7 +3586,7 @@ fn attach_delegated_tokens_first_writer_wins_per_outbound_header() {
 
     let req = make_request(Method::POST, "/");
     let mut ctx = make_filter_context(&req);
-    let count = attach_delegated_tokens(&mut ctx, Some(&ext));
+    let count = attach_delegated_tokens(&mut ctx, Some(&ext)).expect("header credentials attach");
 
     assert_eq!(count, 1, "exactly one token attaches for a colliding header");
     assert_eq!(ctx.request_headers_to_set.len(), 1, "exactly one header push");
@@ -3415,7 +3630,7 @@ fn attach_delegated_tokens_uses_each_tokens_outbound_prefix() {
 
     let req = make_request(Method::POST, "/");
     let mut ctx = make_filter_context(&req);
-    assert_eq!(attach_delegated_tokens(&mut ctx, Some(&ext)), 2);
+    assert_eq!(attach_delegated_tokens(&mut ctx, Some(&ext)).expect("tokens attach"), 2);
 
     let attached: HashMap<&str, &str> = ctx
         .request_headers_to_set
@@ -3461,7 +3676,7 @@ fn attach_delegated_tokens_distinct_outbound_headers_all_attach() {
 
     let req = make_request(Method::POST, "/");
     let mut ctx = make_filter_context(&req);
-    let count = attach_delegated_tokens(&mut ctx, Some(&ext));
+    let count = attach_delegated_tokens(&mut ctx, Some(&ext)).expect("header credentials attach");
 
     assert_eq!(count, 2, "two distinct headers must both attach");
     assert_eq!(ctx.request_headers_to_set.len(), 2);
@@ -3532,7 +3747,7 @@ async fn concurrent_cmf_dispatch_completes_without_blocking() {
 // -----------------------------------------------------------------------------
 
 use std::sync::{
-    Arc, Mutex,
+    Mutex,
     atomic::{AtomicUsize, Ordering},
 };
 
@@ -3565,11 +3780,196 @@ impl HookHandler<CmfHook> for StubPlugin {
     }
 }
 
+/// Host scanner that examines both selected tool data and parallel CMF text.
+struct WholeMessageScanner {
+    cfg: PluginConfig,
+    observed: Arc<Mutex<Vec<String>>>,
+}
+
+impl Plugin for WholeMessageScanner {
+    fn config(&self) -> &PluginConfig {
+        &self.cfg
+    }
+}
+
+impl HookHandler<CmfHook> for WholeMessageScanner {
+    async fn handle(
+        &self,
+        payload: &MessagePayload,
+        _extensions: &Extensions,
+        _ctx: &mut PluginContext,
+    ) -> PluginResult<MessagePayload> {
+        use ppe::praxis_policy_core::cmf::ContentPart;
+
+        let observed = payload
+            .message
+            .content
+            .iter()
+            .filter_map(|part| match part {
+                ContentPart::ToolResult { content } => Some(content.content.to_string()),
+                ContentPart::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.observed
+            .lock()
+            .expect("scanner observations")
+            .push(observed.clone());
+        if observed.contains("SENTINEL") {
+            return PluginResult::deny(ppe::praxis_policy_core::error::PluginViolation::new(
+                "tool.text_withheld",
+                "tool output contains a forbidden marker",
+            ));
+        }
+        PluginResult::allow()
+    }
+}
+
+/// Factory for the whole-message tool response scanner.
+struct WholeMessageScannerFactory {
+    observed: Arc<Mutex<Vec<String>>>,
+}
+
+impl PluginFactory for WholeMessageScannerFactory {
+    fn create(&self, config: &PluginConfig) -> Result<PluginInstance, Box<PluginError>> {
+        let plugin = Arc::new(WholeMessageScanner {
+            cfg: config.clone(),
+            observed: Arc::clone(&self.observed),
+        });
+        let adapter: Arc<dyn AnyHookHandler> = Arc::new(TypedHandlerAdapter::<CmfHook, _>::new(Arc::clone(&plugin)));
+        Ok(PluginInstance {
+            plugin,
+            handlers: vec![("cmf.tool_post_invoke", adapter)],
+        })
+    }
+}
+
+/// Host plugin that accepts a real CMF payload mutation on either LLM hook.
+struct InferencePayloadMutator {
+    cfg: PluginConfig,
+}
+
+impl Plugin for InferencePayloadMutator {
+    fn config(&self) -> &PluginConfig {
+        &self.cfg
+    }
+}
+
+impl HookHandler<CmfHook> for InferencePayloadMutator {
+    async fn handle(
+        &self,
+        payload: &MessagePayload,
+        _extensions: &Extensions,
+        _ctx: &mut PluginContext,
+    ) -> PluginResult<MessagePayload> {
+        let mut updated = payload.clone();
+        updated
+            .message
+            .content
+            .push(ppe::praxis_policy_core::cmf::ContentPart::Text {
+                text: "accepted test mutation".to_owned(),
+            });
+        PluginResult::modify_payload(updated)
+    }
+}
+
+/// Factory serving the same mutation on input and output hooks.
+struct InferencePayloadMutatorFactory;
+
+impl PluginFactory for InferencePayloadMutatorFactory {
+    fn create(&self, config: &PluginConfig) -> Result<PluginInstance, Box<PluginError>> {
+        let plugin = Arc::new(InferencePayloadMutator { cfg: config.clone() });
+        let adapter: Arc<dyn AnyHookHandler> = Arc::new(TypedHandlerAdapter::<CmfHook, _>::new(Arc::clone(&plugin)));
+        Ok(PluginInstance {
+            plugin,
+            handlers: vec![("cmf.llm_input", Arc::clone(&adapter)), ("cmf.llm_output", adapter)],
+        })
+    }
+}
+
 /// Counts how many times it built a plugin, so a test can tell one construction
 /// from two. Deliberately accepts any config, including one a bundled factory
 /// would reject — that difference is what the override test keys on.
 struct StubFactory {
     builds: Arc<AtomicUsize>,
+}
+
+/// Test plugin that proves host response context traverses PPE and comes back
+/// through modified extensions.
+struct ResponseContextPlugin {
+    cfg: PluginConfig,
+}
+
+impl Plugin for ResponseContextPlugin {
+    fn config(&self) -> &PluginConfig {
+        &self.cfg
+    }
+}
+
+impl HookHandler<CmfHook> for ResponseContextPlugin {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the test handler records request state and exposes each response input independently"
+    )]
+    async fn handle(
+        &self,
+        _payload: &MessagePayload,
+        extensions: &Extensions,
+        ctx: &mut PluginContext,
+    ) -> PluginResult<MessagePayload> {
+        if extensions.custom.is_none() {
+            ctx.set_local("request_quota", json!({"reserved": 50}));
+            ctx.set_local("response_invocations", json!(0));
+            return PluginResult::allow();
+        }
+        let observed = extensions
+            .custom
+            .as_ref()
+            .and_then(|custom| custom.get("quota_input"))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let request_quota = ctx
+            .get_local("request_quota")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let response_invocations = ctx
+            .get_local("response_invocations")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or_default()
+            + 1;
+        ctx.set_local("response_invocations", json!(response_invocations));
+        let mut modified = extensions.cow_copy();
+        let custom = modified.custom.get_or_insert_default();
+        custom.insert(
+            "quota_output".to_owned(),
+            json!({"engine": "ppe", "observed": observed}),
+        );
+        custom.insert("request_quota".to_owned(), request_quota);
+        custom.insert("response_invocations".to_owned(), json!(response_invocations));
+        let http = extensions.http.as_deref();
+        custom.insert(
+            "response_http".to_owned(),
+            json!({
+                "status": http.and_then(|http| http.status),
+                "quota": http.and_then(|http| http.response_headers.get("x-quota-state")),
+            }),
+        );
+        PluginResult::modify_extensions(modified)
+    }
+}
+
+struct ResponseContextFactory;
+
+impl PluginFactory for ResponseContextFactory {
+    fn create(&self, config: &PluginConfig) -> Result<PluginInstance, Box<PluginError>> {
+        let plugin = Arc::new(ResponseContextPlugin { cfg: config.clone() });
+        let adapter: Arc<dyn AnyHookHandler> = Arc::new(TypedHandlerAdapter::<CmfHook, _>::new(Arc::clone(&plugin)));
+        Ok(PluginInstance {
+            plugin,
+            handlers: vec![("cmf.llm_input", Arc::clone(&adapter)), ("cmf.llm_output", adapter)],
+        })
+    }
 }
 
 impl PluginFactory for StubFactory {
@@ -3638,6 +4038,7 @@ fn try_build_filter_allowing_private(
             config_path,
             allow_private_idp,
             trusted_private_endpoints: vec![],
+            trusted_proxies: vec![],
             body_access: BodyAccessMode::ReadOnly,
             require_protocol_metadata: true,
             init_timeout_secs: 30,
@@ -3749,12 +4150,7 @@ fn mint_route_jwt(subject: &str) -> String {
         "exp": now_unix() + 300,
         "iat": now_unix(),
     });
-    encode(
-        &Header::new(Algorithm::HS256),
-        &claims,
-        &EncodingKey::from_secret(ROUTE_SECRET.as_bytes()),
-    )
-    .expect("sign route JWT")
+    hs256(&claims, ROUTE_SECRET.as_bytes())
 }
 
 /// Return identity plugins that trust distinct global and route issuers.
@@ -3875,7 +4271,7 @@ async fn an_http_route_authentication_list_governs_its_own_path() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[expect(clippy::too_many_lines, reason = "test fixture: the YAML literal is the bulk")]
-async fn the_early_identity_gate_honors_an_http_route_authentication_list() {
+async fn an_http_route_authentication_list_defers_identity_to_the_route() {
     let dir = TempDir::new().expect("create tempdir");
     let cfg_path = dir.path().join("cpex.yaml");
     let yaml = format!(
@@ -3905,17 +4301,26 @@ routes:
         "the fixture is entity-routed, which takes the early-gate path",
     );
 
+    assert!(
+        matches!(filter.request_body_mode(), BodyMode::StreamBuffer { .. }),
+        "the route judges identity once the body is read",
+    );
+
     let mut req = make_request(Method::POST, "/mcp/rpc");
     req.headers.insert(
         "Authorization",
         HeaderValue::from_str(&format!("Bearer {}", mint_route_jwt("alice"))).expect("header value"),
     );
     let mut ctx = make_filter_context(&req);
-    let action = filter.on_request(&mut ctx).await.expect("header phase ran");
+    let head = filter.on_request_head(&mut ctx).await.expect("head ran");
     assert!(
-        matches!(action, FilterAction::Continue),
-        "the gate must dispatch the route's list for a path it covers; got {action:?}",
+        matches!(head, FilterAction::Continue),
+        "the global gate must not judge a credential only the route accepts; got {head:?}",
     );
+    let FilterAction::Reject(rejection) = filter.on_request(&mut ctx).await.expect("header phase ran") else {
+        panic!("a request phase the route never judged must fail closed");
+    };
+    assert_eq!(rejection.status, 500);
 }
 
 /// Write an assertion fixture with caller-selected header casing.
@@ -3972,8 +4377,12 @@ struct Queued {
 /// Run the `echo` policy and collect upstream header mutations.
 #[expect(clippy::too_many_lines, reason = "one linear dispatch plus three queue projections")]
 async fn queued_for_echo(filter: &PolicyFilter, ctx: &mut crate::HttpFilterContext<'_>) -> Queued {
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", "echo");
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
     let mut body = Some(bytes::Bytes::from_static(
         br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{}}}"#,
     ));
@@ -4313,7 +4722,7 @@ async fn an_asserted_secret_stays_redacted_on_the_response_half() {
     let mut response_ctx = make_filter_context(&forwarded);
     response_ctx.extensions = std::mem::take(&mut ctx.extensions);
 
-    let extensions = PolicyFilter::response_extensions(&response_ctx, HashMap::new(), 200, &filter_config(path));
+    let extensions = PolicyFilter::response_extensions(&response_ctx, HashMap::new(), 200, &filter_config(path), &[]);
     let http = extensions.http.as_deref().expect("the response half carries http");
     let view = serde_json::to_string(http).expect("serialize http extension");
     assert!(!view.contains(&secret), "response view leaks the secret: {view}");
@@ -4381,6 +4790,7 @@ routes:
         config_path: cfg_path.to_str().expect("utf8 path").to_owned(),
         allow_private_idp: false,
         trusted_private_endpoints: vec![],
+        trusted_proxies: vec![],
         body_access: BodyAccessMode::ReadOnly,
         require_protocol_metadata: true,
         init_timeout_secs: 30,
@@ -4744,6 +5154,209 @@ routes:
     (dir, cfg_path.to_str().expect("utf8 path").to_owned())
 }
 
+/// Write an inference policy with the requested output rule.
+fn write_llm_output_rule(rule: &str) -> (TempDir, String) {
+    let (dir, path) = write_llm_post_config();
+    let original = std::fs::read_to_string(&path).expect("read inference policy");
+    let updated = original.replace(
+        "completion.tokens.total > 100: deny('completion too long', 'completion_too_long')",
+        rule,
+    );
+    std::fs::write(&path, updated).expect("write inference policy");
+    (dir, path)
+}
+
+/// Result of both policy response phases for one admitted inference request.
+struct InferenceResponseResult {
+    /// The head-phase action, including an early rejection when present.
+    head: FilterAction,
+    /// The bytes after the body hook, if it ran.
+    body: Option<bytes::Bytes>,
+    /// Metadata-only output returned to a host filter.
+    output: Option<PolicyResponseOutput>,
+}
+
+/// Run a response with adapter-like body context after admitting the request.
+async fn evaluate_inference_response(
+    filter: &PolicyFilter,
+    mut response: crate::context::Response,
+    upstream: &[u8],
+    host: Option<PolicyResponseContext>,
+) -> InferenceResponseResult {
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    admit_inference(filter, &mut ctx).await;
+    if let Some(host) = host {
+        ctx.extensions.insert(host);
+    }
+    ctx.response_header = Some(&mut response);
+    let head = filter.on_response(&mut ctx).await.expect("response head policy");
+    ctx.response_header = None;
+    let body = (!matches!(head, FilterAction::Reject(_)))
+        .then(|| apply_inference_response_body(filter, &mut ctx, upstream))
+        .flatten();
+    InferenceResponseResult {
+        head,
+        body,
+        output: ctx.extensions.get::<PolicyResponseOutput>().cloned(),
+    }
+}
+
+/// Evaluate a buffered body after the final head has left the filter context.
+fn apply_inference_response_body(
+    filter: &PolicyFilter,
+    ctx: &mut crate::HttpFilterContext<'_>,
+    upstream: &[u8],
+) -> Option<bytes::Bytes> {
+    let mut body = Some(bytes::Bytes::copy_from_slice(upstream));
+    let action = filter
+        .on_response_body(ctx, &mut body, true)
+        .expect("response body policy");
+    assert!(matches!(action, FilterAction::Continue), "body action: {action:?}");
+    body
+}
+
+/// Build a final JSON response head for policy boundary tests.
+fn json_response() -> crate::context::Response {
+    let mut response = crate::test_utils::make_response();
+    response
+        .headers
+        .insert("content-type", HeaderValue::from_static("application/json"));
+    response
+}
+
+/// Require a denied completion to suppress the upstream sentinel.
+async fn assert_json_completion_withheld(filter: &PolicyFilter, upstream: &[u8]) {
+    let result = evaluate_inference_response(filter, json_response(), upstream, None).await;
+    let served = result.body.expect("body hook ran");
+    assert!(
+        !served.windows(8).any(|part| part == b"SENTINEL"),
+        "uninspected bytes escaped"
+    );
+    assert_eq!(served.len(), upstream.len(), "committed response length remains valid");
+}
+
+/// Require clean JSON to retain its original bytes.
+async fn assert_json_completion_unchanged(filter: &PolicyFilter, upstream: &[u8]) {
+    let result = evaluate_inference_response(filter, json_response(), upstream, None).await;
+    assert_eq!(
+        result.body.as_deref(),
+        Some(upstream),
+        "clean JSON keeps original bytes"
+    );
+}
+
+/// Write an inference response policy whose decision depends on the request path.
+fn write_llm_http_response_config() -> (TempDir, String) {
+    let (dir, path) = write_llm_post_config();
+    let yaml = std::fs::read_to_string(&path)
+        .expect("read inference policy")
+        .replace(
+            "global:\n  authentication:\n    - jwt-user\nroutes:",
+            "global:\n  authentication:\n    - jwt-user\n  pdp:\n    - kind: cel\nroutes:",
+        )
+        .replace(
+            "        - \"completion.tokens.total > 100: deny('completion too long', 'completion_too_long')\"",
+            "        - cel:\n            expr: \"http.path == '/v1/chat/completions'\"",
+        );
+    std::fs::write(&path, yaml).expect("rewrite inference policy");
+    (dir, path)
+}
+
+/// Write an inference policy that runs a host plugin over metadata-only
+/// response context.
+#[expect(
+    clippy::too_many_lines,
+    reason = "test fixture — the YAML literal is the bulk; splitting utilities would obscure the shape under test"
+)]
+fn write_llm_response_context_config(deny: bool) -> (TempDir, String) {
+    register_policy_plugin_factory("test/response-context", Arc::new(|| Box::new(ResponseContextFactory)));
+    let dir = TempDir::new().expect("create tempdir");
+    let cfg_path = dir.path().join("cpex.yaml");
+    let metadata_deny = if deny {
+        "        - \"deny('metadata denied', 'metadata_denied')\"\n"
+    } else {
+        ""
+    };
+    let yaml = format!(
+        r#"plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "{TEST_ISSUER}"
+          audiences: ["{TEST_AUDIENCE}"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "{TEST_SECRET}"
+          leeway_seconds: 60
+      claim_mapper: standard
+  - name: response-context
+    kind: test/response-context
+    hooks:
+      - cmf.llm_output
+    capabilities:
+      - metadata_only_response
+      - read_headers
+    mode: sequential
+    on_error: fail
+global:
+  authentication:
+    - jwt-user
+routes:
+  - llm: "*"
+    authorization:
+      pre_invocation:
+        - "require(authenticated)"
+      post_invocation:
+        - "require(completion.tokens.total > 100)"
+{metadata_deny}        - "run(response-context)"
+"#
+    );
+    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
+    (dir, cfg_path.to_str().expect("utf8 path").to_owned())
+}
+
+/// Write a hook-dispatch policy whose plugin-local state crosses LLM phases.
+fn write_llm_hook_response_context_config() -> (TempDir, String) {
+    let (dir, path) = write_llm_response_context_config(false);
+    let yaml = std::fs::read_to_string(&path)
+        .expect("read response-context policy")
+        .replace(
+            "    hooks:\n      - cmf.llm_output\n    capabilities:",
+            "    hooks:\n      - cmf.llm_input\n      - cmf.llm_output\n    capabilities:",
+        );
+    let mut document: serde_yaml::Value = serde_yaml::from_str(&yaml).expect("parse response-context policy");
+    let root = document.as_mapping_mut().expect("policy document is a mapping");
+    root.remove("global");
+    root.remove("routes");
+    root.insert(
+        serde_yaml::Value::String("engine_settings".to_owned()),
+        serde_yaml::from_str("dispatch: hooks").expect("parse engine settings"),
+    );
+    std::fs::write(&path, serde_yaml::to_string(&document).expect("render hook policy"))
+        .expect("write hook-dispatch response-context policy");
+    (dir, path)
+}
+
+/// Write metadata-only rules that depend on upstream response facts.
+fn write_llm_response_fact_config() -> (TempDir, String) {
+    let (dir, path) = write_llm_response_context_config(false);
+    let yaml = std::fs::read_to_string(&path)
+        .expect("read response-context policy")
+        .replace(
+            "        - \"require(completion.tokens.total > 100)\"",
+            "        - \"require(http.status == 429)\"\n        - \"require(http.response_headers.server == 'quota')\"",
+        );
+    std::fs::write(&path, yaml).expect("write response-fact policy");
+    (dir, path)
+}
+
 /// Build a policy filter with custom inference options.
 fn build_filter_with_llm(config_path: String, llm: super::config::LlmOptions) -> PolicyFilter {
     PolicyFilter::new(
@@ -4751,6 +5364,7 @@ fn build_filter_with_llm(config_path: String, llm: super::config::LlmOptions) ->
             config_path,
             allow_private_idp: false,
             trusted_private_endpoints: vec![],
+            trusted_proxies: vec![],
             body_access: BodyAccessMode::ReadOnly,
             require_protocol_metadata: true,
             init_timeout_secs: 30,
@@ -5025,6 +5639,10 @@ async fn require_model_false_admits_a_request_with_no_model() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "linear scenario; seeded metadata writes span several lines"
+)]
 async fn a_body_carrying_both_entity_coordinates_is_denied() {
     let (_dir, path) = write_llm_and_tool_config();
     let filter = build_filter(path);
@@ -5036,8 +5654,12 @@ async fn a_body_carrying_both_entity_coordinates_is_denied() {
         HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
     );
     let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", "echo");
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
     let body = bytes::Bytes::from_static(
         br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{}},"model":"other-model"}"#,
     );
@@ -5071,8 +5693,12 @@ async fn a_plain_mcp_request_still_takes_the_mcp_path() {
         HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
     );
     let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", "echo");
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
     let body = bytes::Bytes::from_static(
         br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{}}}"#,
     );
@@ -5124,6 +5750,7 @@ fn the_lower_ceiling_binds_when_both_apply() {
             config_path: path,
             allow_private_idp: false,
             trusted_private_endpoints: vec![],
+            trusted_proxies: vec![],
             body_access: BodyAccessMode::ReadWrite,
             require_protocol_metadata: true,
             init_timeout_secs: 30,
@@ -5149,10 +5776,55 @@ fn the_lower_ceiling_binds_when_both_apply() {
 }
 
 #[test]
+fn policy_body_capabilities_reflect_both_limits_and_access_tiers() {
+    for (access, inference, buffer, expected_request, expected_response) in [
+        (BodyAccessMode::ReadOnly, 4_096, 8_192, 4_096, None),
+        (BodyAccessMode::ReadWrite, 4_096, 8_192, 4_096, Some(8_192)),
+        (BodyAccessMode::ReadWrite, 8_192, 4_096, 4_096, Some(4_096)),
+    ] {
+        assert_policy_body_capabilities(access, inference, buffer, expected_request, expected_response);
+    }
+}
+
+/// Verify request and response body capabilities for one configuration.
+fn assert_policy_body_capabilities(
+    access: BodyAccessMode,
+    inference: usize,
+    buffer: usize,
+    expected_request: usize,
+    expected_response: Option<usize>,
+) {
+    let (_dir, path) = write_llm_route_config();
+    let mut cfg = filter_config(path);
+    cfg.body_access = access;
+    cfg.max_buffer_bytes = buffer;
+    cfg.llm.max_request_bytes = inference;
+    let filter = PolicyFilter::new(cfg, None).unwrap();
+    assert_eq!(
+        filter.request_body_mode(),
+        BodyMode::StreamBuffer {
+            max_bytes: Some(expected_request)
+        }
+    );
+    assert_eq!(
+        filter.response_body_mode(),
+        expected_response.map_or(BodyMode::Stream, |limit| BodyMode::StreamBuffer {
+            max_bytes: Some(limit)
+        })
+    );
+    let expected_access = if matches!(access, BodyAccessMode::ReadWrite) {
+        BodyAccess::ReadWrite(crate::BodyRequirement::Required)
+    } else {
+        BodyAccess::ReadOnly(crate::BodyRequirement::Required)
+    };
+    assert_eq!(filter.request_body_access(), expected_access);
+}
+
+#[test]
 fn rejects_an_out_of_range_inference_ceiling() {
     for (max_request_bytes, expected) in [
         (0, "llm.max_request_bytes must be > 0"),
-        (praxis_core::config::ABSOLUTE_MAX_BODY_BYTES + 1, "exceeds the maximum"),
+        (praxis_core::config::MAX_BUFFER_BYTES + 1, "exceeds the maximum"),
     ] {
         let (_dir, path) = write_llm_route_config();
         let err = PolicyFilter::new(
@@ -5160,6 +5832,7 @@ fn rejects_an_out_of_range_inference_ceiling() {
                 config_path: path,
                 allow_private_idp: false,
                 trusted_private_endpoints: vec![],
+                trusted_proxies: vec![],
                 body_access: BodyAccessMode::ReadOnly,
                 require_protocol_metadata: true,
                 init_timeout_secs: 30,
@@ -5201,9 +5874,9 @@ async fn the_parsed_model_reaches_filter_metadata() {
             .expect("filter ran"),
     );
 
-    assert_eq!(ctx.get_metadata("llm.model"), Some("allowed-model"));
+    assert_eq!(ctx.filter_metadata.get("llm.model"), Some("allowed-model"));
     assert_eq!(
-        ctx.get_metadata("llm.stream"),
+        ctx.filter_metadata.get("llm.stream"),
         Some("true"),
         "the streaming flag is recorded so the response half can skip an SSE body",
     );
@@ -5235,6 +5908,7 @@ fn build_read_write_filter(config_path: String) -> PolicyFilter {
             config_path,
             allow_private_idp: false,
             trusted_private_endpoints: vec![],
+            trusted_proxies: vec![],
             body_access: BodyAccessMode::ReadWrite,
             require_protocol_metadata: true,
             init_timeout_secs: 30,
@@ -5246,6 +5920,31 @@ fn build_read_write_filter(config_path: String) -> PolicyFilter {
         None,
     )
     .expect("filter should construct")
+}
+
+/// Build a read-write inference filter whose hook policy needs no LLM route.
+fn build_hook_read_write_filter(config_path: String) -> PolicyFilter {
+    let llm = super::config::LlmOptions {
+        require_route: false,
+        ..Default::default()
+    };
+    PolicyFilter::new(
+        PolicyFilterConfig {
+            config_path,
+            allow_private_idp: false,
+            trusted_private_endpoints: vec![],
+            trusted_proxies: vec![],
+            body_access: BodyAccessMode::ReadWrite,
+            require_protocol_metadata: true,
+            init_timeout_secs: 30,
+            max_buffer_bytes: 10_485_760,
+            llm,
+            context_headers: HashMap::default(),
+            context_meta: ContextMetaConfig::default(),
+        },
+        None,
+    )
+    .expect("hook-dispatch filter should construct")
 }
 
 /// Run an inference request admitted by the test policy.
@@ -5289,21 +5988,19 @@ async fn inference_round_trip(
 ) -> bytes::Bytes {
     let req = request_for_alice();
     let mut ctx = make_filter_context(&req);
-    let mut request = Some(bytes::Bytes::from_static(request_body.as_bytes()));
-    let action = filter
-        .on_request_body(&mut ctx, &mut request, true)
-        .await
-        .expect("request phase ran");
-    assert!(
-        matches!(action, FilterAction::BodyDone),
-        "the request half must admit before the response half is meaningful; got {action:?}",
-    );
+    admit_inference_payload(filter, &mut ctx, request_body).await;
 
     let mut response = crate::test_utils::make_response();
     response
         .headers
         .insert("content-type", HeaderValue::from_static(content_type));
     ctx.response_header = Some(&mut response);
+    let head_action = filter.on_response(&mut ctx).await.expect("response head phase ran");
+    assert!(
+        matches!(head_action, FilterAction::Continue),
+        "response head action: {head_action:?}"
+    );
+    ctx.response_header = None;
 
     let mut body = Some(bytes::Bytes::from_static(response_body.as_bytes()));
     drop(
@@ -5312,6 +6009,23 @@ async fn inference_round_trip(
             .expect("response phase ran"),
     );
     body.expect("response body")
+}
+
+/// Admit the caller's inference payload before response-phase assertions.
+async fn admit_inference_payload(
+    filter: &PolicyFilter,
+    ctx: &mut crate::HttpFilterContext<'_>,
+    request_body: &'static str,
+) {
+    let mut request = Some(bytes::Bytes::from_static(request_body.as_bytes()));
+    let action = filter
+        .on_request_body(ctx, &mut request, true)
+        .await
+        .expect("request phase ran");
+    assert!(
+        matches!(action, FilterAction::BodyDone),
+        "the request half must admit before the response half is meaningful; got {action:?}",
+    );
 }
 
 #[test]
@@ -5408,6 +6122,52 @@ async fn a_field_mutator_leaves_an_inference_response_untouched() {
         body,
         bytes::Bytes::from_static(WITHIN_BUDGET_RESPONSE.as_bytes()),
         "the client must receive the upstream body, not a partial redaction",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn allowed_inference_without_mutation_does_not_warn() {
+    let (_dir, path) = write_llm_post_only_config();
+    let filter = build_read_write_filter(path);
+    let body = inference_round_trip(
+        &filter,
+        r#"{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}"#,
+        WITHIN_BUDGET_RESPONSE,
+        "application/json",
+    )
+    .await;
+    assert_eq!(
+        body,
+        bytes::Bytes::from_static(WITHIN_BUDGET_RESPONSE.as_bytes()),
+        "clean response is unchanged"
+    );
+    assert_eq!(
+        filter.mutation_warning_flags(),
+        (false, false),
+        "no CMF payload changed"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn accepted_inference_payload_mutation_sets_both_warning_flags() {
+    let (_dir, path) = write_inference_payload_mutator_config();
+    let filter = build_read_write_filter(path);
+    let body = inference_round_trip(
+        &filter,
+        r#"{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}"#,
+        WITHIN_BUDGET_RESPONSE,
+        "application/json",
+    )
+    .await;
+    assert_eq!(
+        body,
+        bytes::Bytes::from_static(WITHIN_BUDGET_RESPONSE.as_bytes()),
+        "unsupported rewrite keeps wire bytes"
+    );
+    assert_eq!(
+        filter.mutation_warning_flags(),
+        (true, true),
+        "both CMF mutations were accepted"
     );
 }
 
@@ -5580,6 +6340,225 @@ async fn a_body_past_the_inference_ceiling_is_rejected() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn malformed_json_completion_runs_output_denial() {
+    let (_dir, path) = write_llm_output_rule("authenticated: deny('withheld', 'output_withheld')");
+    let filter = build_read_write_filter(path);
+    for upstream in [
+        &br#"{"choices":[{"message":{"content":"SENTINEL"}}]}"#[..],
+        &br#"["SENTINEL", "more content to fit a denial envelope"]"#[..],
+        &br#""SENTINEL with enough content to fit a denial envelope""#[..],
+        &br#"{"choices":["SENTINEL"],"broken": "unfinished""#[..],
+    ] {
+        assert_json_completion_withheld(&filter, upstream).await;
+    }
+    let (_dir, path) = write_llm_output_rule("result == 'SENTINEL': deny('withheld', 'output_withheld')");
+    let filter = build_read_write_filter(path);
+    let clean = br#"{"choices":[{"message":{"content":"clean"}}]}"#;
+    assert_json_completion_unchanged(&filter, clean).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn non_json_inference_response_contract_is_preserved() {
+    let (_dir, path) = write_llm_output_rule("authenticated: deny('withheld', 'output_withheld')");
+    let filter = build_read_write_filter(path);
+    assert_nonjson_status_controls(&filter).await;
+    assert_empty_json_and_error_status(&filter).await;
+    assert_host_nonobject_fallback().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn declared_json_media_types_fail_closed_for_unreadable_completions() {
+    let (_dir, path) = write_llm_output_rule("authenticated: deny('withheld', 'output_withheld')");
+    let filter = build_read_write_filter(path);
+    let malformed = b"{\"choices\":[{\"message\":{\"content\":\"SENTINEL with enough room for a fitted denial envelope\"}}],\"broken\":";
+    for (content_type, declared_json) in [
+        ("application/json", true),
+        ("APPLICATION/JSON; charset=utf-8", true),
+        ("application/problem+json", true),
+        ("Application/Vnd.Example+Json; version=1", true),
+        ("application/json-seq", false),
+        ("application/vnd.example+json-suffix", false),
+        ("text/json", false),
+        ("audio/mpeg", false),
+    ] {
+        let response = response_with_content_type(content_type);
+        let result = evaluate_inference_response(&filter, response, malformed, None).await;
+        assert!(matches!(result.head, FilterAction::Continue), "{content_type}");
+        let served = result.body.expect("body hook ran");
+        if declared_json {
+            assert_ne!(served.as_ref(), malformed.as_slice(), "{content_type} must fail closed");
+            assert!(!served.windows(8).any(|part| part == b"SENTINEL"), "{content_type}");
+        } else {
+            assert_eq!(
+                served.as_ref(),
+                malformed.as_slice(),
+                "{content_type} is outside declared JSON"
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn object_completions_are_inspected_even_without_declared_json() {
+    let (_dir, path) = write_llm_output_rule("authenticated: deny('withheld', 'output_withheld')");
+    let filter = build_read_write_filter(path);
+    let upstream = br#"{"choices":[{"message":{"content":"SENTINEL with enough room for a fitted denial envelope"}}]}"#;
+    for content_type in ["application/problem+json", "text/plain", "audio/mpeg"] {
+        let response = response_with_content_type(content_type);
+        let result = evaluate_inference_response(&filter, response, upstream, None).await;
+        let served = result.body.expect("body hook ran");
+        assert!(!served.windows(8).any(|part| part == b"SENTINEL"), "{content_type}");
+    }
+}
+
+/// Build a successful response advertising one static media type.
+fn response_with_content_type(content_type: &'static str) -> crate::context::Response {
+    let mut response = crate::test_utils::make_response();
+    response
+        .headers
+        .insert("content-type", HeaderValue::from_static(content_type));
+    response
+}
+
+/// Preserve media types, provider errors, and empty/bodyless response bytes.
+async fn assert_nonjson_status_controls(filter: &PolicyFilter) {
+    for (status, content_type, upstream) in [
+        (http::StatusCode::OK, "audio/mpeg", &b"binary\0SENTINEL"[..]),
+        (
+            http::StatusCode::BAD_GATEWAY,
+            "application/json",
+            &b"[\"provider error\"]"[..],
+        ),
+        (http::StatusCode::OK, "application/json", &b""[..]),
+        (http::StatusCode::NO_CONTENT, "application/json", &b""[..]),
+        (http::StatusCode::NOT_MODIFIED, "application/json", &b""[..]),
+    ] {
+        let mut response = crate::test_utils::make_response();
+        response.status = status;
+        response
+            .headers
+            .insert("content-type", HeaderValue::from_str(content_type).expect("media type"));
+        let result = evaluate_inference_response(filter, response, upstream, None).await;
+        assert_eq!(
+            result.body.as_deref(),
+            Some(upstream),
+            "{status} {content_type} remains intact"
+        );
+    }
+}
+
+/// Preserve a declared zero-length result while still evaluating error objects.
+async fn assert_empty_json_and_error_status(filter: &PolicyFilter) {
+    let mut response = json_response();
+    response.headers.insert("content-length", HeaderValue::from_static("0"));
+    let result = evaluate_inference_response(filter, response, b"", None).await;
+    assert!(matches!(result.head, FilterAction::Continue));
+    assert_eq!(result.body.as_deref(), Some(&b""[..]));
+    let mut response = json_response();
+    response.status = http::StatusCode::BAD_GATEWAY;
+    let upstream = br#"{"error":"provider error with enough room for a fitted policy denial"}"#;
+    let result = evaluate_inference_response(filter, response, upstream, None).await;
+    assert_ne!(
+        result.body.as_deref(),
+        Some(upstream.as_slice()),
+        "object-shaped errors still run post policy",
+    );
+}
+
+/// A trusted host keeps metadata-only output for a non-object body.
+async fn assert_host_nonobject_fallback() {
+    let (_dir, path) = write_llm_response_context_config(true);
+    let filter = build_read_write_filter(path);
+    let result = evaluate_inference_response(
+        &filter,
+        json_response(),
+        b"[\"provider-shaped but non-object\"]",
+        Some(PolicyResponseContext::default()),
+    )
+    .await;
+    assert_eq!(
+        result
+            .output
+            .as_ref()
+            .and_then(PolicyResponseOutput::violation)
+            .map(|item| item.code.as_str()),
+        Some("metadata_denied"),
+        "non-object host context must publish its metadata denial",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn head_response_preserves_metadata_only_behavior() {
+    let (_dir, path) = write_llm_response_context_config(false);
+    let filter = build_read_write_filter(path);
+    let mut req = request_for_alice();
+    req.method = Method::HEAD;
+    let mut ctx = make_filter_context(&req);
+    admit_inference(&filter, &mut ctx).await;
+    ctx.extensions.insert(PolicyResponseContext::default());
+    let mut response = crate::test_utils::make_response();
+    response
+        .headers
+        .insert("content-type", HeaderValue::from_static("application/json"));
+    response
+        .headers
+        .insert("content-encoding", HeaderValue::from_static("gzip"));
+    ctx.response_header = Some(&mut response);
+    let action = filter.on_response(&mut ctx).await.expect("HEAD response policy");
+    assert!(matches!(action, FilterAction::Continue), "HEAD has no body to inspect");
+    assert!(
+        ctx.extensions.get::<PolicyResponseOutput>().is_some(),
+        "metadata publishes at the head"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn responses_output_text_reaches_completion_policy() {
+    let (_dir, path) = write_llm_output_rule(
+        r#"result == 'cleanSENTINEL' | result == '{\"query\":\"SENTINEL\"}': deny('withheld', 'output_withheld')"#,
+    );
+    let filter = build_read_write_filter(path);
+    for output in [
+        json!([
+            {"type":"message","content":[{"type":"output_text","text":"clean"}]},
+            {"type":"message","content":[{"type":"output_text","text":"SENTINEL"}]}
+        ]),
+        json!([
+            {"type":"message","content":[{"type":"output_image","text":"ignored"}]},
+            {"type":"function_call","name":"lookup","arguments":"{\"query\":\"SENTINEL\"}"}
+        ]),
+    ] {
+        let upstream = json!({"id":"resp_1","output":output,"metadata":{"benign":true}}).to_string();
+        assert_json_completion_withheld(&filter, upstream.as_bytes()).await;
+    }
+    let clean = json!({"output":[{"type":"message","content":[{"type":"output_image","text":"ignored"}]}]}).to_string();
+    assert_json_completion_unchanged(&filter, clean.as_bytes()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn chat_tool_arguments_reach_completion_policy() {
+    let (_dir, path) =
+        write_llm_output_rule("result == 'cleanSENTINEL' | result == 'SENTINEL': deny('withheld', 'output_withheld')");
+    let filter = build_read_write_filter(path);
+    for body in [
+        json!({"choices":[
+            {"message":{"content":"clean"}},
+            {"message":{"tool_calls":[{"function":{"name":"lookup","arguments":"SENTINEL"}}]}}
+        ]}),
+        json!({"choices":[{"message":{"function_call":{"name":"lookup","arguments":"SENTINEL"}}}]}),
+        json!({"choices":[{"text":"SENTINEL"}]}),
+        json!({"content":[{"type":"text","text":"SENTINEL"}]}),
+    ] {
+        let upstream = body.to_string();
+        assert_json_completion_withheld(&filter, upstream.as_bytes()).await;
+    }
+    let clean =
+        json!({"choices":[{"message":{"content":null,"tool_calls":[{"function":{"name":"f","arguments":"{}"}}]}}]})
+            .to_string();
+    assert_json_completion_unchanged(&filter, clean.as_bytes()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_content_encoded_completion_fails_closed() {
     let (_dir, path) = write_llm_post_config();
     let filter = build_read_write_filter(path);
@@ -5597,18 +6576,233 @@ async fn a_content_encoded_completion_fails_closed() {
         .insert("content-encoding", HeaderValue::from_static("gzip"));
     ctx.response_header = Some(&mut response);
 
-    let mut body = Some(bytes::Bytes::from_static(WITHIN_BUDGET_RESPONSE.as_bytes()));
-    drop(
-        filter
-            .on_response_body(&mut ctx, &mut body, true)
-            .expect("response phase ran"),
-    );
-
-    let served = body.expect("response body");
-    let parsed: serde_json::Value = serde_json::from_slice(&served).expect("deny body is JSON");
+    let action = filter.on_response(&mut ctx).await.expect("response head policy");
+    let FilterAction::Reject(rejection) = action else {
+        panic!("encoded declared JSON must be rejected before head commit; got {action:?}");
+    };
+    let parsed: serde_json::Value =
+        serde_json::from_slice(rejection.body.as_deref().expect("deny body")).expect("deny body is JSON");
     assert_eq!(
         parsed["error"]["code"], "llm.response_unreadable",
-        "an encoded completion must not skip the response-phase policy; got {served:?}",
+        "an encoded completion must be rejected at the head; got {:?}",
+        rejection.body,
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn all_declared_json_encoding_fields_are_checked_at_final_head() {
+    let (_dir, path) = write_llm_output_rule("authenticated: deny('withheld', 'output_withheld')");
+    let filter = build_read_write_filter(path);
+    assert_ascii_encoding_cases(&filter).await;
+    let unreadable = HeaderValue::from_bytes(&[0xFF]).expect("obs-text header value");
+    assert_encoding_case(&filter, vec![unreadable.clone()], true).await;
+    assert_encoding_case(
+        &filter,
+        vec![unreadable.clone(), HeaderValue::from_static("gzip")],
+        true,
+    )
+    .await;
+    assert_encoding_case(&filter, vec![HeaderValue::from_static("gzip"), unreadable], true).await;
+    assert_encoded_binary_response_allowed(&filter).await;
+}
+
+/// Exercise missing, identity, mixed and ambiguous ASCII encoding fields.
+async fn assert_ascii_encoding_cases(filter: &PolicyFilter) {
+    for (values, rejected) in [
+        (&[][..], false),
+        (&["identity"][..], false),
+        (&["identity", "IDENTITY"][..], false),
+        (&["identity, identity"][..], false),
+        (&["gzip"][..], true),
+        (&["identity,gzip"][..], true),
+        (&["identity", "gzip"][..], true),
+        (&["gzip", "identity"][..], true),
+        (&[""][..], true),
+        (&["identity,"][..], true),
+    ] {
+        let fields = values
+            .iter()
+            .map(|value| HeaderValue::from_str(value).expect("encoding"))
+            .collect();
+        assert_encoding_case(filter, fields, rejected).await;
+    }
+}
+
+/// Check each Content-Encoding field at the head, including host-context precedence.
+async fn assert_encoding_case(filter: &PolicyFilter, values: Vec<HeaderValue>, rejected: bool) {
+    let mut response = json_response();
+    response
+        .headers
+        .insert("content-type", HeaderValue::from_static("application/problem+json"));
+    for value in values {
+        response.headers.append(http::header::CONTENT_ENCODING, value);
+    }
+    let result = evaluate_inference_response(
+        filter,
+        response,
+        WITHIN_BUDGET_RESPONSE.as_bytes(),
+        Some(PolicyResponseContext::default()),
+    )
+    .await;
+    assert_eq!(matches!(result.head, FilterAction::Reject(_)), rejected);
+    if rejected {
+        assert!(result.output.is_none(), "head rejection precedes host publication");
+    }
+}
+
+/// Encoded binary output remains outside the declared JSON contract.
+async fn assert_encoded_binary_response_allowed(filter: &PolicyFilter) {
+    let mut response = crate::test_utils::make_response();
+    response
+        .headers
+        .insert("content-type", HeaderValue::from_static("audio/mpeg"));
+    response
+        .headers
+        .insert("content-encoding", HeaderValue::from_static("gzip"));
+    let result = evaluate_inference_response(filter, response, b"opaque", None).await;
+    assert!(
+        matches!(result.head, FilterAction::Continue),
+        "encoded binary remains supported"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn early_hints_sse_does_not_release_json_policy_body() {
+    let (_dir, path) = write_llm_output_rule("result == 'SENTINEL': deny('withheld', 'output_withheld')");
+    let filter = build_read_write_filter(path);
+    for (with_host, forbidden) in [(false, true), (true, true), (false, false), (true, false)] {
+        assert_early_hints_json_case(&filter, with_host, forbidden).await;
+    }
+}
+
+/// Run 103 SSE followed by a final JSON head on one admitted request.
+async fn assert_early_hints_json_case(filter: &PolicyFilter, with_host: bool, forbidden: bool) {
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    admit_inference(filter, &mut ctx).await;
+    if with_host {
+        ctx.extensions.insert(PolicyResponseContext::default());
+    }
+    let mut early = sse_response(http::StatusCode::EARLY_HINTS);
+    ctx.response_header = Some(&mut early);
+    assert!(matches!(filter.on_response(&mut ctx).await, Ok(FilterAction::Continue)));
+    let mut final_head = json_response();
+    ctx.response_header = Some(&mut final_head);
+    assert!(matches!(filter.on_response(&mut ctx).await, Ok(FilterAction::Continue)));
+    ctx.response_header = None;
+    assert_json_body_after_hints(filter, &mut ctx, forbidden, with_host);
+}
+
+/// Require a split JSON response to stay buffered and receive its final decision.
+fn assert_json_body_after_hints(
+    filter: &PolicyFilter,
+    ctx: &mut crate::HttpFilterContext<'_>,
+    forbidden: bool,
+    with_host: bool,
+) {
+    let answer = if forbidden { "SENTINEL" } else { "clean" };
+    let upstream = json!({"choices":[{"message":{"content":answer}}]}).to_string();
+    let mut first = Some(bytes::Bytes::copy_from_slice(&upstream.as_bytes()[..12]));
+    let first_action = filter.on_response_body(ctx, &mut first, false).expect("first chunk");
+    assert!(
+        matches!(first_action, FilterAction::Continue),
+        "JSON first chunk stays buffered"
+    );
+    let mut complete = Some(bytes::Bytes::copy_from_slice(upstream.as_bytes()));
+    let eof_action = filter.on_response_body(ctx, &mut complete, true).expect("JSON EOF");
+    assert!(matches!(eof_action, FilterAction::Continue));
+    let served = complete.expect("served body");
+    assert_json_after_hints_content(&served, &upstream, forbidden);
+    assert_eq!(ctx.extensions.get::<PolicyResponseOutput>().is_some(), with_host);
+}
+
+/// Check either sentinel suppression or exact clean-body preservation.
+fn assert_json_after_hints_content(served: &bytes::Bytes, upstream: &str, forbidden: bool) {
+    if forbidden {
+        assert!(
+            !served.windows(8).any(|part| part == b"SENTINEL"),
+            "forbidden text escaped"
+        );
+    } else {
+        assert_eq!(
+            served.as_ref(),
+            upstream.as_bytes(),
+            "clean output remains byte-identical"
+        );
+    }
+}
+
+/// Build an SSE head with a caller-selected status.
+fn sse_response(status: http::StatusCode) -> crate::context::Response {
+    let mut response = crate::test_utils::make_response();
+    response.status = status;
+    response
+        .headers
+        .insert("content-type", HeaderValue::from_static("text/event-stream"));
+    response
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn final_sse_policy_classification_ignores_early_hints() {
+    let (_dir, path) = write_llm_response_context_config(false);
+    let filter = build_read_write_filter(path);
+    assert_final_sse_after_hints(&filter).await;
+    assert_upgrade_keeps_existing_hook_behavior(&filter).await;
+}
+
+/// Multiple informational JSON heads do not prevent final SSE release.
+async fn assert_final_sse_after_hints(filter: &PolicyFilter) {
+    let mut early_heads = [json_response(), json_response()];
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    admit_inference(filter, &mut ctx).await;
+    ctx.extensions.insert(PolicyResponseContext::default());
+    for early in &mut early_heads {
+        early.status = http::StatusCode::EARLY_HINTS;
+        ctx.response_header = Some(early);
+        assert!(matches!(filter.on_response(&mut ctx).await, Ok(FilterAction::Continue)));
+        ctx.response_header = None;
+    }
+    let mut final_head = sse_response(http::StatusCode::OK);
+    ctx.response_header = Some(&mut final_head);
+    assert!(matches!(filter.on_response(&mut ctx).await, Ok(FilterAction::Continue)));
+    ctx.response_header = None;
+    assert_sse_stream_body(filter, &mut ctx);
+}
+
+/// A genuine final SSE response releases chunks and publishes host output at EOF.
+fn assert_sse_stream_body(filter: &PolicyFilter, ctx: &mut crate::HttpFilterContext<'_>) {
+    let mut first = Some(bytes::Bytes::from_static(b"data: hello\n\n"));
+    let first_action = filter.on_response_body(ctx, &mut first, false).expect("SSE chunk");
+    assert!(
+        matches!(first_action, FilterAction::Release),
+        "final SSE must release its chunks"
+    );
+    assert!(ctx.extensions.get::<PolicyResponseOutput>().is_none());
+    let mut eof = Some(bytes::Bytes::from_static(b"data: [DONE]\n\n"));
+    let eof_action = filter.on_response_body(ctx, &mut eof, true).expect("SSE EOF");
+    assert!(matches!(eof_action, FilterAction::Continue));
+    assert!(
+        ctx.extensions.get::<PolicyResponseOutput>().is_some(),
+        "host metadata output at EOF"
+    );
+}
+
+/// A 101 protocol switch remains terminal without a new metadata invocation.
+async fn assert_upgrade_keeps_existing_hook_behavior(filter: &PolicyFilter) {
+    let req = request_for_alice();
+    let mut upgrade_ctx = make_filter_context(&req);
+    admit_inference(filter, &mut upgrade_ctx).await;
+    upgrade_ctx.extensions.insert(PolicyResponseContext::default());
+    let mut upgrade = sse_response(http::StatusCode::SWITCHING_PROTOCOLS);
+    upgrade_ctx.response_header = Some(&mut upgrade);
+    assert!(matches!(
+        filter.on_response(&mut upgrade_ctx).await,
+        Ok(FilterAction::Continue)
+    ));
+    assert!(
+        upgrade_ctx.extensions.get::<PolicyResponseOutput>().is_none(),
+        "101 retains its hook behavior"
     );
 }
 
@@ -5668,6 +6862,8 @@ async fn a_streamed_response_releases_the_buffer_on_the_first_chunk() {
         .headers
         .insert("content-type", HeaderValue::from_static("text/event-stream"));
     ctx.response_header = Some(&mut response);
+    assert!(matches!(filter.on_response(&mut ctx).await, Ok(FilterAction::Continue)));
+    ctx.response_header = None;
 
     let mut first = Some(bytes::Bytes::from_static(b"data: {\"delta\":\"hi\"}\n\n"));
     let action = filter
@@ -5677,6 +6873,352 @@ async fn a_streamed_response_releases_the_buffer_on_the_first_chunk() {
         matches!(action, FilterAction::Release),
         "a mid-stream SSE chunk must release the buffer, not be held to EOS; got {action:?}",
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the regression covers both SSE delivery phases and the published PPE output"
+)]
+async fn metadata_only_response_context_runs_through_ppe_without_buffering_sse() {
+    let (_dir, path) = write_llm_hook_response_context_config();
+    let filter = build_hook_read_write_filter(path);
+
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    admit_inference(&filter, &mut ctx).await;
+    ctx.extensions.insert(PolicyResponseContext::new(HashMap::from([(
+        "quota_input".to_owned(),
+        json!({"tokens": 42}),
+    )])));
+
+    let mut response = crate::test_utils::make_response();
+    response.status = http::StatusCode::TOO_MANY_REQUESTS;
+    response
+        .headers
+        .insert("content-type", HeaderValue::from_static("text/event-stream"));
+    response
+        .headers
+        .insert("x-quota-state", HeaderValue::from_static("limited"));
+    ctx.response_header = Some(&mut response);
+    let response_action = filter.on_response(&mut ctx).await.expect("response header phase ran");
+    assert!(matches!(response_action, FilterAction::Continue));
+    ctx.response_header = None;
+    let mut body = Some(bytes::Bytes::from_static(b"data: {\"delta\":\"hi\"}\n\n"));
+    let action = filter
+        .on_response_body(&mut ctx, &mut body, false)
+        .expect("streaming response phase ran");
+    assert!(matches!(action, FilterAction::Release));
+    assert!(ctx.extensions.get::<PolicyResponseOutput>().is_none());
+
+    let mut body = Some(bytes::Bytes::from_static(b"data: [DONE]\n\n"));
+    let action = filter
+        .on_response_body(&mut ctx, &mut body, true)
+        .expect("metadata-only response policy ran");
+
+    assert!(matches!(action, FilterAction::Continue));
+    assert_eq!(body, Some(bytes::Bytes::from_static(b"data: [DONE]\n\n")));
+    let output = ctx
+        .extensions
+        .get::<PolicyResponseOutput>()
+        .expect("PPE output is available to downstream filters");
+    assert_eq!(
+        output.get("quota_output"),
+        Some(&json!({"engine": "ppe", "observed": {"tokens": 42}})),
+    );
+    assert_eq!(output.get("request_quota"), Some(&json!({"reserved": 50})));
+    assert_eq!(output.get("response_invocations"), Some(&json!(1)));
+    assert_eq!(
+        output.get("response_http"),
+        Some(&json!({"status": 429, "quota": "limited"})),
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the regression verifies header dispatch and a defensive EOF do not double invoke"
+)]
+async fn pingora_zero_length_response_dispatches_metadata_policy_on_headers_once() {
+    let (_dir, path) = write_llm_response_context_config(false);
+    let filter = build_read_write_filter(path);
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    admit_inference(&filter, &mut ctx).await;
+    ctx.extensions.insert(PolicyResponseContext::default());
+
+    let mut response = crate::test_utils::make_response();
+    response
+        .headers
+        .insert(http::header::CONTENT_LENGTH, HeaderValue::from_static("0"));
+    ctx.response_header = Some(&mut response);
+    let action = filter.on_response(&mut ctx).await.expect("response header phase ran");
+    assert!(matches!(action, FilterAction::Continue));
+    assert_eq!(
+        ctx.extensions
+            .get::<PolicyResponseOutput>()
+            .and_then(|output| output.get("response_invocations")),
+        Some(&json!(1)),
+    );
+
+    ctx.response_header = None;
+    let mut body = None;
+    let action = filter
+        .on_response_body(&mut ctx, &mut body, true)
+        .expect("defensive EOF callback ran");
+    assert!(matches!(action, FilterAction::Continue));
+    assert_eq!(
+        ctx.extensions
+            .get::<PolicyResponseOutput>()
+            .and_then(|output| output.get("response_invocations")),
+        Some(&json!(1)),
+        "a defensive body EOF must not dispatch metadata policy twice",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn hyper_no_content_response_dispatches_metadata_policy_on_headers() {
+    let (_dir, path) = write_llm_response_context_config(false);
+    let filter = build_filter(path);
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    admit_inference(&filter, &mut ctx).await;
+    ctx.extensions.insert(PolicyResponseContext::default());
+
+    let mut response = crate::test_utils::make_response();
+    response.status = http::StatusCode::NO_CONTENT;
+    ctx.response_header = Some(&mut response);
+    let action = filter.on_response(&mut ctx).await.expect("response header phase ran");
+
+    assert!(matches!(action, FilterAction::Continue));
+    let output = ctx
+        .extensions
+        .get::<PolicyResponseOutput>()
+        .expect("204 completion publishes metadata policy output during the header phase");
+    assert_eq!(output.get("response_invocations"), Some(&json!(1)));
+    assert_eq!(
+        output.get("response_http"),
+        Some(&json!({"status": 204, "quota": null})),
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the regression exercises both the matching and rejecting response-fact cases"
+)]
+async fn metadata_only_rules_read_response_status_and_headers() {
+    for (status, server, allowed) in [
+        (http::StatusCode::TOO_MANY_REQUESTS, "quota", true),
+        (http::StatusCode::OK, "origin", false),
+    ] {
+        let (_dir, path) = write_llm_response_fact_config();
+        let filter = build_read_write_filter(path);
+        let req = request_for_alice();
+        let mut ctx = make_filter_context(&req);
+        admit_inference(&filter, &mut ctx).await;
+        ctx.extensions.insert(PolicyResponseContext::default());
+
+        let mut response = crate::test_utils::make_response();
+        response.status = status;
+        response
+            .headers
+            .insert("content-type", HeaderValue::from_static("text/event-stream"));
+        response
+            .headers
+            .insert("server", HeaderValue::from_str(server).expect("server header"));
+        ctx.response_header = Some(&mut response);
+        let response_action = filter.on_response(&mut ctx).await.expect("response header phase ran");
+        assert!(matches!(response_action, FilterAction::Continue));
+        ctx.response_header = None;
+        let mut body = Some(bytes::Bytes::from_static(b"data: [DONE]\n\n"));
+        let body_action = filter
+            .on_response_body(&mut ctx, &mut body, true)
+            .expect("metadata response rules ran");
+        assert!(matches!(body_action, FilterAction::Continue));
+
+        let violation = ctx
+            .extensions
+            .get::<PolicyResponseOutput>()
+            .and_then(PolicyResponseOutput::violation);
+        assert_eq!(violation.is_none(), allowed, "status={status}, server={server}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the test covers both allowed and denied buffered response paths"
+)]
+async fn buffered_response_policy_reads_http_request_attributes() {
+    let (_dir, path) = write_llm_http_response_config();
+    let filter = build_read_write_filter(path);
+
+    for (request_path, allowed) in [("/v1/chat/completions", true), ("/v1/other", false)] {
+        let mut req = request_for_alice();
+        req.uri = request_path.parse().expect("valid request path");
+        let mut ctx = make_filter_context(&req);
+        let mut request = Some(bytes::Bytes::from_static(INFERENCE_REQUEST));
+        let request_action = filter
+            .on_request_body(&mut ctx, &mut request, true)
+            .await
+            .expect("request phase ran");
+        assert!(
+            matches!(request_action, FilterAction::BodyDone),
+            "request must be admitted before the response hook for {request_path}; got {request_action:?}"
+        );
+
+        let mut response = crate::test_utils::make_response();
+        response
+            .headers
+            .insert("content-type", HeaderValue::from_static("application/json"));
+        ctx.response_header = Some(&mut response);
+        let original = bytes::Bytes::from_static(WITHIN_BUDGET_RESPONSE.as_bytes());
+        let mut body = Some(original.clone());
+        let action = filter
+            .on_response_body(&mut ctx, &mut body, true)
+            .expect("buffered response policy ran");
+        assert!(matches!(action, FilterAction::Continue));
+
+        if allowed {
+            assert_eq!(
+                body,
+                Some(original),
+                "allowed response must remain unchanged for {request_path}"
+            );
+        } else {
+            let served = body.expect("denied response must have a body");
+            let envelope: serde_json::Value =
+                serde_json::from_slice(&served).expect("denied response must be valid JSON");
+            assert_eq!(envelope["error"]["type"], "policy_violation");
+            assert_eq!(envelope["error"]["code"], "cel");
+            assert_eq!(envelope["error"]["message"], "CEL expression evaluated to false");
+            assert_ne!(served, original, "denied response must replace the upstream body");
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn metadata_only_response_denial_is_published_without_rewriting_the_body() {
+    let (_dir, path) = write_llm_response_context_config(true);
+    let filter = build_read_write_filter(path);
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    admit_inference(&filter, &mut ctx).await;
+    ctx.extensions.insert(PolicyResponseContext::default());
+
+    let mut response = crate::test_utils::make_response();
+    response
+        .headers
+        .insert("content-type", HeaderValue::from_static("text/event-stream"));
+    ctx.response_header = Some(&mut response);
+    let response_action = filter.on_response(&mut ctx).await.expect("response header phase ran");
+    assert!(matches!(response_action, FilterAction::Continue));
+    ctx.response_header = None;
+    let original = bytes::Bytes::from_static(b"data: [DONE]\n\n");
+    let mut body = Some(original.clone());
+    let action = filter
+        .on_response_body(&mut ctx, &mut body, true)
+        .expect("metadata-only denial ran");
+
+    assert!(matches!(action, FilterAction::Continue));
+    assert_eq!(body, Some(original));
+    let violation = ctx
+        .extensions
+        .get::<PolicyResponseOutput>()
+        .and_then(PolicyResponseOutput::violation)
+        .expect("the downstream host must receive the late denial");
+    assert_eq!(violation.code, "metadata_denied");
+}
+
+#[test]
+fn later_unmodified_policy_preserves_earlier_custom_output() {
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    let host_custom = HashMap::from([("quota_input".to_owned(), json!({"tokens": 1}))]);
+    let earlier_custom = Arc::new(HashMap::from([("quota_input".to_owned(), json!({"tokens": 2}))]));
+
+    PolicyFilter::publish_response_output(
+        &mut ctx,
+        &host_custom,
+        ResponseCustomState::Replaced(earlier_custom),
+        None,
+    );
+    PolicyFilter::publish_response_output(&mut ctx, &host_custom, ResponseCustomState::Unmodified, None);
+
+    let output = ctx
+        .extensions
+        .get::<PolicyResponseOutput>()
+        .expect("policy output is published");
+    assert_eq!(output.get("quota_input"), Some(&json!({"tokens": 2})));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn read_only_non_streamed_response_publishes_metadata_policy_output() {
+    let (_dir, path) = write_llm_response_context_config(false);
+    let filter = build_filter(path);
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    admit_inference(&filter, &mut ctx).await;
+    ctx.extensions.insert(PolicyResponseContext::new(HashMap::from([(
+        "quota_input".to_owned(),
+        json!({"tokens": 7}),
+    )])));
+
+    let mut response = crate::test_utils::make_response();
+    response
+        .headers
+        .insert("content-type", HeaderValue::from_static("application/json"));
+    ctx.response_header = Some(&mut response);
+    let original = bytes::Bytes::from_static(b"{\"answer\":\"ok\"}");
+    let mut body = Some(original.clone());
+    let action = filter
+        .on_response_body(&mut ctx, &mut body, true)
+        .expect("read-only metadata policy ran");
+
+    assert!(matches!(action, FilterAction::Continue));
+    assert_eq!(body, Some(original));
+    let output = ctx
+        .extensions
+        .get::<PolicyResponseOutput>()
+        .expect("PPE output is available to downstream filters");
+    assert_eq!(
+        output.get("quota_output"),
+        Some(&json!({"engine": "ppe", "observed": {"tokens": 7}})),
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn content_only_response_policy_preserves_host_context_without_dispatch() {
+    let (_dir, path) = write_llm_post_config();
+    let filter = build_filter(path);
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    admit_inference(&filter, &mut ctx).await;
+    ctx.extensions.insert(PolicyResponseContext::new(HashMap::from([(
+        "quota_input".to_owned(),
+        json!({"tokens": 11}),
+    )])));
+
+    let mut response = crate::test_utils::make_response();
+    response
+        .headers
+        .insert("content-type", HeaderValue::from_static("application/json"));
+    ctx.response_header = Some(&mut response);
+    let original = bytes::Bytes::from_static(b"{\"answer\":\"ok\"}");
+    let mut body = Some(original.clone());
+    let action = filter
+        .on_response_body(&mut ctx, &mut body, true)
+        .expect("host context publication ran");
+
+    assert!(matches!(action, FilterAction::Continue));
+    assert_eq!(body, Some(original));
+    let output = ctx
+        .extensions
+        .get::<PolicyResponseOutput>()
+        .expect("host context is available to downstream filters");
+    assert_eq!(output.get("quota_input"), Some(&json!({"tokens": 11})));
+    assert!(output.violation().is_none());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -5758,7 +7300,7 @@ async fn a_non_json_response_body_passes_through() {
         &filter,
         r#"{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}"#,
         NON_JSON_RESPONSE,
-        "application/json",
+        "text/plain; charset=utf-8",
     )
     .await;
     assert_eq!(body, bytes::Bytes::from_static(NON_JSON_RESPONSE.as_bytes()));
@@ -5771,14 +7313,22 @@ fn the_mixed_fixture_opens_the_inference_response_half() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "linear scenario; seeded metadata writes span several lines"
+)]
 async fn the_inference_response_half_does_not_claim_mcp_responses() {
     let (_dir, path) = write_llm_and_tool_config();
     let filter = build_read_write_filter(path);
 
     let req = request_for_alice();
     let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", "echo");
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
     let request_body =
         bytes::Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#);
     drop(
@@ -6073,6 +7623,95 @@ async fn a_malformed_body_is_not_reported_as_a_duplicate_key() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn large_late_duplicates_and_malformed_json_have_distinct_policy_outcomes() {
+    let (_dir, path) = write_llm_structured_config(CEL_TOOL_GUARD);
+    let filter = build_filter(path);
+    let padding = "x".repeat(900_000);
+    let duplicate = format!(r#"{{"model":"m","padding":"{padding}","mo\u0064el":"m"}}"#);
+    let malformed = format!(r#"{{"model":"m","padding":"{padding}","mo\u0064el":"m""#);
+    let allowed = format!(r#"{{"padding":"{padding}","model":"m","tools":[]}}"#);
+    assert!(matches!(
+        dispatch_inference_as(&filter, "alice", &allowed).await,
+        FilterAction::BodyDone
+    ));
+    for (body, status, violation) in [
+        (duplicate, 400, "llm.duplicate_key"),
+        (malformed, 403, "llm.model_missing"),
+    ] {
+        let action = dispatch_inference_as(&filter, "alice", &body).await;
+        let FilterAction::Reject(rejection) = action else {
+            panic!("expected rejection, got {action:?}");
+        };
+        assert_eq!(rejection.status, status);
+        assert!(has_header(&rejection, "x-policy-violation", violation));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn large_policy_request_uses_the_late_model_and_tool_content() {
+    let (_dir, path) = write_llm_structured_config(CEL_TOOL_GUARD);
+    let filter = build_filter_with_llm(
+        path,
+        super::config::LlmOptions {
+            max_request_bytes: 1_000_000,
+            ..Default::default()
+        },
+    );
+    let padding = "x".repeat(900_000);
+    let body =
+        |tool: &str| format!(r#"{{"padding":"{padding}","model":"m","tools":[{{"function":{{"name":"{tool}"}}}}]}}"#);
+    let allowed = body("weather");
+    let forbidden = body("transfer_funds");
+    assert!(matches!(
+        dispatch_inference_as(&filter, "alice", &allowed).await,
+        FilterAction::BodyDone
+    ));
+    assert!(
+        matches!(dispatch_inference_as(&filter, "alice", &forbidden).await, FilterAction::Reject(rejection) if rejection.status == 403)
+    );
+    let missing = format!(r#"{{"padding":"{padding}"}}"#);
+    let wrong_type = format!(r#"{{"padding":"{padding}","model":123}}"#);
+    for body in [missing, wrong_type] {
+        let FilterAction::Reject(rejection) = dispatch_inference_as(&filter, "alice", &body).await else {
+            panic!("missing or unusable model must be denied");
+        };
+        assert!(has_header(&rejection, "x-policy-violation", "llm.model_missing"));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn policy_size_failure_is_distinct_from_invalid_input_at_the_limit() {
+    let (_dir, path) = write_llm_structured_config(CEL_TOOL_GUARD);
+    let filter = build_filter_with_llm(
+        path,
+        super::config::LlmOptions {
+            max_request_bytes: 1_000_000,
+            ..Default::default()
+        },
+    );
+    let prefix = r#"{"padding":""#;
+    let suffix = r#"","model":"m"}"#;
+    let exact = format!(
+        "{prefix}{}{suffix}",
+        "x".repeat(1_000_000 - prefix.len() - suffix.len())
+    );
+    assert_eq!(exact.len(), 1_000_000);
+    assert!(matches!(
+        dispatch_inference_as(&filter, "alice", &exact).await,
+        FilterAction::BodyDone
+    ));
+    let over = format!("{exact} ");
+    let malformed = format!("{}!", exact.strip_suffix('}').unwrap());
+    for (body, status, violation) in [(over, 413, "llm.body_too_large"), (malformed, 403, "llm.model_missing")] {
+        let FilterAction::Reject(rejection) = dispatch_inference_as(&filter, "alice", &body).await else {
+            panic!("expected rejection");
+        };
+        assert_eq!(rejection.status, status);
+        assert!(has_header(&rejection, "x-policy-violation", violation));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_streaming_request_still_records_the_stream_flag() {
     let (_dir, path) = write_llm_structured_config(CEL_TOOL_GUARD);
     let filter = build_filter(path);
@@ -6092,7 +7731,7 @@ async fn a_streaming_request_still_records_the_stream_flag() {
         .expect("filter ran");
     assert!(matches!(action, FilterAction::BodyDone), "got {action:?}");
     assert_eq!(
-        ctx.get_metadata("llm.stream"),
+        ctx.filter_metadata.get("llm.stream"),
         Some("true"),
         "the flag is read before the document moves to the policy",
     );
@@ -6192,6 +7831,243 @@ fn write_tool_post_only_config() -> (TempDir, String) {
     )
 }
 
+/// Write a tool response route invoking a registered whole-message scanner.
+fn write_tool_scanner_config() -> (TempDir, String, Arc<Mutex<Vec<String>>>) {
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let factory_observed = Arc::clone(&observed);
+    register_policy_plugin_factory(
+        "test/whole-message-scanner",
+        Arc::new(move || {
+            Box::new(WholeMessageScannerFactory {
+                observed: Arc::clone(&factory_observed),
+            })
+        }),
+    );
+    let (dir, path) = write_entity_config_with_routes(
+        "routes:\n  - tool: echo\n    authorization:\n      post_invocation:\n        - \"run(whole-message-scanner)\"\n",
+    );
+    let original = std::fs::read_to_string(&path).expect("read tool policy");
+    let declaration = "  - name: whole-message-scanner\n    kind: test/whole-message-scanner\n    hooks:\n      - cmf.tool_post_invoke\n    mode: sequential\n    on_error: fail\n";
+    std::fs::write(&path, original.replace("global:\n", &format!("{declaration}global:\n")))
+        .expect("write scanner policy");
+    (dir, path, observed)
+}
+
+/// Write an LLM route whose hook plugin modifies the CMF payload twice.
+fn write_inference_payload_mutator_config() -> (TempDir, String) {
+    register_policy_plugin_factory(
+        "test/inference-payload-mutator",
+        Arc::new(|| Box::new(InferencePayloadMutatorFactory)),
+    );
+    let (dir, path) = write_entity_config_with_routes(
+        "routes:\n  - llm: \"*\"\n    authorization:\n      pre_invocation:\n        - \"run(inference-payload-mutator)\"\n      post_invocation:\n        - \"run(inference-payload-mutator)\"\n",
+    );
+    let original = std::fs::read_to_string(&path).expect("read LLM policy");
+    let declaration = "  - name: inference-payload-mutator\n    kind: test/inference-payload-mutator\n    hooks:\n      - cmf.llm_input\n      - cmf.llm_output\n    mode: sequential\n    on_error: fail\n";
+    std::fs::write(&path, original.replace("global:\n", &format!("{declaration}global:\n")))
+        .expect("write LLM mutator policy");
+    (dir, path)
+}
+
+/// Admit a classified tool request and evaluate its response body.
+async fn scan_tool_response(filter: &PolicyFilter, upstream: &[u8]) -> bytes::Bytes {
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
+    let mut request = Some(bytes::Bytes::from_static(
+        br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#,
+    ));
+    let action = filter
+        .on_request_body(&mut ctx, &mut request, true)
+        .await
+        .expect("tool admission");
+    assert!(matches!(action, FilterAction::BodyDone), "tool request was admitted");
+    let mut body = Some(bytes::Bytes::copy_from_slice(upstream));
+    let action = filter
+        .on_response_body(&mut ctx, &mut body, true)
+        .expect("tool response policy");
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "tool response policy completed"
+    );
+    body.expect("response body")
+}
+
+/// Admit a classified tool request and return the bytes sent upstream.
+async fn forward_tool_request(filter: &PolicyFilter, upstream: &[u8]) -> bytes::Bytes {
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
+    let mut body = Some(bytes::Bytes::copy_from_slice(upstream));
+    let action = filter
+        .on_request_body(&mut ctx, &mut body, true)
+        .await
+        .expect("tool admission");
+    assert!(matches!(action, FilterAction::BodyDone), "tool request was admitted");
+    body.expect("forwarded request body")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mcp_request_rewrite_requires_payload_mutation() {
+    let (_allow_dir, allow_path) = write_entity_config_with_routes(
+        "routes:\n  - tool: echo\n    authorization:\n      pre_invocation:\n        - \"require(authenticated)\"\n",
+    );
+    let original = br#"{ "jsonrpc" : "2.0", "id": 1, "method":"tools/call", "trace":"keep",
+      "params": { "name":"echo", "arguments": {"note":"clean"}, "extra":"keep" } }"#;
+    let forwarded = forward_tool_request(&build_read_write_filter(allow_path), original).await;
+    assert_eq!(
+        forwarded.as_ref(),
+        original,
+        "allowed request keeps whitespace and unknown fields"
+    );
+
+    let (_mask_dir, mask_path) =
+        write_entity_config_with_routes("routes:\n  - tool: echo\n    args:\n      ssn: \"str | mask(2)\"\n");
+    assert_masked_tool_request_rewrites(&build_read_write_filter(mask_path)).await;
+}
+
+/// A field mutation still updates the forwarded arguments and keeps siblings.
+async fn assert_masked_tool_request_rewrites(filter: &PolicyFilter) {
+    let original = br#"{ "jsonrpc":"2.0", "id":1, "method":"tools/call", "trace":"keep",
+      "params":{"name":"echo","arguments":{"ssn":"123-45-6789","note":"clean"}} }"#;
+    let forwarded = forward_tool_request(filter, original).await;
+    let parsed: serde_json::Value = serde_json::from_slice(&forwarded).expect("rewritten tool request");
+    assert_ne!(
+        parsed["params"]["arguments"]["ssn"], "123-45-6789",
+        "mask changed the secret"
+    );
+    assert_eq!(parsed["params"]["arguments"]["note"], "clean", "unrelated args survive");
+    assert_eq!(parsed["trace"], "keep", "unknown top-level fields survive");
+    assert!(
+        !forwarded.windows(11).any(|part| part == b"123-45-6789"),
+        "secret is absent upstream"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dual_representation_tool_text_reaches_post_policy() {
+    let (_dir, path, observed) = write_tool_scanner_config();
+    let filter = build_read_write_filter(path);
+    assert_scanner_denies_all_representations(&filter).await;
+    assert_scanner_preserves_clean_and_error(&filter).await;
+    assert_scanner_observed_each_text_source(&observed);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mcp_result_mutation_rewrites_and_growth_fails_closed() {
+    let (_mask_dir, mask_path) = write_tool_result_pipeline_config();
+    assert_masked_tool_result_rewrites(&build_read_write_filter(mask_path)).await;
+    let (_redact_dir, redact_path) =
+        write_entity_config_with_routes("routes:\n  - tool: echo\n    result:\n      secret: \"str | redact\"\n");
+    assert_growing_tool_result_fails_closed(&build_read_write_filter(redact_path)).await;
+}
+
+/// A real result mutation is returned at the committed response length.
+async fn assert_masked_tool_result_rewrites(filter: &PolicyFilter) {
+    let upstream = json!({"jsonrpc":"2.0","id":1,"result":{"structuredContent":{
+        "ssn":"123-45-6789","note":"unchanged","padding":"x".repeat(512)
+    }}})
+    .to_string();
+    let served = scan_tool_response(filter, upstream.as_bytes()).await;
+    let parsed: serde_json::Value = serde_json::from_slice(&served).expect("rewritten JSON-RPC response");
+    assert_eq!(served.len(), upstream.len(), "committed length is preserved");
+    assert_masked_tool_result_value(&parsed, &served);
+}
+
+/// The selected structured result changed while its sibling data survived.
+fn assert_masked_tool_result_value(parsed: &serde_json::Value, served: &[u8]) {
+    assert_ne!(
+        parsed["result"]["structuredContent"]["ssn"], "123-45-6789",
+        "mask changed the secret"
+    );
+    assert_eq!(
+        parsed["result"]["structuredContent"]["note"], "unchanged",
+        "unrelated result survives"
+    );
+    assert!(
+        !served.windows(11).any(|part| part == b"123-45-6789"),
+        "secret is absent downstream"
+    );
+}
+
+/// A growing result mutation emits a fitted error, never partial output.
+async fn assert_growing_tool_result_fails_closed(filter: &PolicyFilter) {
+    let upstream = json!({"jsonrpc":"2.0","id":1,"result":{"structuredContent":{
+        "secret":"s","padding":"x".repeat(512)
+    }}})
+    .to_string();
+    let served = scan_tool_response(filter, upstream.as_bytes()).await;
+    let parsed: serde_json::Value = serde_json::from_slice(&served).expect("fitted JSON-RPC error");
+    assert_eq!(served.len(), upstream.len(), "committed length is preserved");
+    assert_eq!(
+        parsed["error"]["data"]["violation"], "gateway.response_rewrite_overflow",
+        "a rewrite that grows past the committed length fails closed"
+    );
+    assert!(parsed.get("result").is_none(), "upstream result is withheld");
+}
+
+/// A scanner denial removes forbidden text from either representation.
+async fn assert_scanner_denies_all_representations(filter: &PolicyFilter) {
+    let pad = "padding".repeat(64);
+    for result in [
+        json!({"structuredContent":{"text":"clean"},"content":[
+            {"type":"text","text":pad},{"type":"text","text":"SENTINEL"}]}),
+        json!({"structuredContent":{"text":"SENTINEL"},"content":[{"type":"text","text":pad}]}),
+        json!({"content":[{"type":"text","text":"SENTINEL"},{"type":"text","text":pad}]}),
+    ] {
+        let upstream = json!({"jsonrpc":"2.0","id":1,"result":result}).to_string();
+        let served = scan_tool_response(filter, upstream.as_bytes()).await;
+        assert!(
+            !served.windows(8).any(|part| part == b"SENTINEL"),
+            "scanner denial must hide text"
+        );
+        assert!(served.len() == upstream.len(), "committed length is preserved");
+    }
+}
+
+/// Clean dual representations and valid JSON-RPC errors retain original bytes.
+async fn assert_scanner_preserves_clean_and_error(filter: &PolicyFilter) {
+    let clean = json!({"jsonrpc":"2.0","id":1,"result":{
+        "structuredContent":{"ssn":"clean"},
+        "content":[{"type":"text","text":"clean summary"},
+                   {"type":"image","data":"opaque-binary"},
+                   {"type":"resource_link","uri":"file:///safe"}]
+    }})
+    .to_string();
+    let served = scan_tool_response(filter, clean.as_bytes()).await;
+    assert_eq!(
+        served.as_ref(),
+        clean.as_bytes(),
+        "clean dual representation keeps every block"
+    );
+    let error = br#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"upstream"}}"#;
+    let served = scan_tool_response(filter, error).await;
+    assert_eq!(served.as_ref(), error, "valid JSON-RPC errors pass unchanged");
+}
+
+/// The host scanner receives structured and secondary text once per success.
+fn assert_scanner_observed_each_text_source(observed: &Arc<Mutex<Vec<String>>>) {
+    let observed = observed.lock().expect("scanner observations");
+    assert_eq!(observed.len(), 4, "the error response does not invoke the scanner");
+    assert!(
+        observed[0].contains("SENTINEL"),
+        "secondary text reached the whole-message scanner"
+    );
+    assert!(observed[1].contains("SENTINEL"), "structured data reached the scanner");
+    assert!(observed[2].contains("SENTINEL"), "fallback text reached the scanner");
+    drop(observed);
+}
+
 /// Write an `echo` tool route with only a `result:` field pipeline.
 fn write_tool_result_pipeline_config() -> (TempDir, String) {
     write_entity_config_with_routes(
@@ -6228,14 +8104,22 @@ fn a_result_pipeline_alone_is_an_entity_route() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "linear scenario; seeded metadata writes span several lines"
+)]
 async fn a_post_only_tool_route_dispatches_its_hook() {
     let (_dir, path) = write_tool_post_only_config();
     let filter = build_read_write_filter(path);
 
     let req = request_for_alice();
     let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", "echo");
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
     let request_body =
         bytes::Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#);
     let action = filter
@@ -6269,8 +8153,12 @@ async fn a_tools_call_error_response_skips_post_hook() {
     let filter = build_read_write_filter(path);
     let req = request_for_alice();
     let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", "echo");
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
     let request_body =
         bytes::Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#);
     let action = filter
@@ -6409,8 +8297,12 @@ async fn post_only_round_trip(path: String, method: &str, name: &str, request_bo
     let filter = build_read_write_filter(path);
     let req = request_for_alice();
     let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("mcp.method", method);
-    ctx.set_metadata("mcp.name", name);
+    ctx.filter_metadata
+        .insert("mcp.method", method)
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", name)
+        .expect("entry must fit in the filter's metadata");
     drop(
         filter
             .on_request_body(&mut ctx, &mut Some(bytes::Bytes::from_static(request_body)), true)
@@ -6492,8 +8384,12 @@ async fn a_route_declaring_both_phases_still_dispatches_the_pre_half() {
 
     let req = request_for_alice();
     let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", "echo");
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
     let request_body =
         bytes::Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#);
     let action = filter
@@ -6523,8 +8419,12 @@ async fn a_result_pipeline_alone_redacts_the_response() {
 
     let req = request_for_alice();
     let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", "echo");
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
     let request_body =
         bytes::Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#);
     drop(
@@ -6546,6 +8446,643 @@ async fn a_result_pipeline_alone_redacts_the_response() {
         !served.contains("123-45-6789"),
         "the `result:` pipeline is the only declaration on the route; it still has to mask the \
          value on the way back. got {served}",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "linear scenario; seeded metadata writes span several lines"
+)]
+async fn large_policy_mutations_preserve_unrelated_request_and_response_content() {
+    let (_dir, path) = write_entity_config_with_routes(
+        r#"routes:
+  - tool: echo
+    args:
+      ssn: "str | mask(2)"
+    result:
+      ssn: "str | mask(2)"
+"#,
+    );
+    let filter = build_read_write_filter(path);
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
+    let padding = "x".repeat(900_000);
+    let original = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{"padding":padding,"ssn":"123-45-6789"}}}).to_string();
+    let mut request = Some(bytes::Bytes::from(original));
+    let action = filter.on_request_body(&mut ctx, &mut request, true).await.unwrap();
+    assert!(matches!(action, FilterAction::BodyDone));
+    let transformed = request.unwrap();
+    assert_large_masked_value(&transformed, "/params/arguments", &padding);
+
+    let original_response = serde_json::json!({"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"padding":padding,"ssn":"123-45-6789"}}}).to_string();
+    let original_len = original_response.len();
+    let mut response = Some(bytes::Bytes::from(original_response));
+    let action = filter.on_response_body(&mut ctx, &mut response, true).unwrap();
+    assert!(matches!(action, FilterAction::Continue));
+    let transformed = response.unwrap();
+    assert_eq!(transformed.len(), original_len);
+    assert_large_masked_value(&transformed, "/result/structuredContent", &padding);
+}
+
+/// Check that masking preserves the unrelated large field and removes the secret.
+fn assert_large_masked_value(transformed: &[u8], pointer: &str, padding: &str) {
+    let parsed: serde_json::Value = serde_json::from_slice(transformed).unwrap();
+    let value = parsed.pointer(pointer).unwrap();
+    assert_ne!(value["ssn"], "123-45-6789");
+    assert_eq!(value["padding"], padding);
+    assert!(!transformed.windows(11).any(|part| part == b"123-45-6789"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the fixture checks admission, a growing rewrite and its fitted denial"
+)]
+async fn large_policy_response_growth_fails_closed_with_fitted_error() {
+    let (_dir, path) = write_entity_config_with_routes(
+        r#"routes:
+  - tool: echo
+    result:
+      secret: "str | redact"
+"#,
+    );
+    let filter = build_read_write_filter(path);
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
+    let request =
+        bytes::Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#);
+    assert!(matches!(
+        filter
+            .on_request_body(&mut ctx, &mut Some(request), true)
+            .await
+            .unwrap(),
+        FilterAction::BodyDone
+    ));
+    let original = serde_json::json!({"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"padding":"x".repeat(900_000),"secret":"s"}}}).to_string();
+    let original_len = original.len();
+    let mut response = Some(bytes::Bytes::from(original));
+    assert!(matches!(
+        filter.on_response_body(&mut ctx, &mut response, true).unwrap(),
+        FilterAction::Continue
+    ));
+    let served = response.unwrap();
+    assert_eq!(served.len(), original_len);
+    let parsed: serde_json::Value = serde_json::from_slice(&served).unwrap();
+    assert_eq!(
+        parsed["error"]["data"]["violation"],
+        "gateway.response_rewrite_overflow"
+    );
+    assert!(parsed.get("result").is_none());
+    assert!(!served.windows(b"\"secret\"".len()).any(|part| part == b"\"secret\""));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn large_policy_response_without_identity_emits_a_fitted_error() {
+    let (_dir, path) = write_tool_result_pipeline_config();
+    let filter = build_read_write_filter(path);
+    let req = make_request(Method::POST, "/");
+    let mut ctx = make_filter_context(&req);
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
+    let original = serde_json::json!({"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"padding":"x".repeat(900_000),"ssn":"123-45-6789"}}}).to_string();
+    let original_len = original.len();
+    let mut response = Some(bytes::Bytes::from(original));
+    assert!(matches!(
+        filter.on_response_body(&mut ctx, &mut response, true).unwrap(),
+        FilterAction::Continue
+    ));
+    let served = response.unwrap();
+    assert_eq!(served.len(), original_len);
+    let parsed: serde_json::Value = serde_json::from_slice(&served).unwrap();
+    assert_eq!(parsed["error"]["data"]["violation"], "identity.post_phase_unavailable");
+    assert!(parsed.get("result").is_none());
+    assert!(!served.windows(11).any(|part| part == b"123-45-6789"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "compares malformed variants with a valid JSON-RPC error in the same admitted context"
+)]
+async fn malformed_classified_tool_response_returns_filter_error_without_partial_rewrite() {
+    let (_dir, path) = write_tool_result_pipeline_config();
+    let filter = build_read_write_filter(path);
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
+    let request =
+        bytes::Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#);
+    assert!(matches!(
+        filter
+            .on_request_body(&mut ctx, &mut Some(request), true)
+            .await
+            .unwrap(),
+        FilterAction::BodyDone
+    ));
+    let valid = format!(
+        r#"{{"jsonrpc":"2.0","id":1,"result":{{"structuredContent":{{"padding":"{}","ssn":"123-45-6789"}}}}}}"#,
+        "x".repeat(900_000)
+    );
+    let mut truncated = valid.as_bytes().to_vec();
+    truncated.pop();
+    let mut suffix = valid.as_bytes().to_vec();
+    suffix.push(b'!');
+    let mut invalid_utf8 = valid.as_bytes().to_vec();
+    *invalid_utf8.get_mut(1_000).unwrap() = 0xFF;
+    for malformed in [truncated, suffix, invalid_utf8] {
+        let original = bytes::Bytes::from(malformed);
+        let mut body = Some(original.clone());
+        let error = filter
+            .on_response_body(&mut ctx, &mut body, true)
+            .expect_err("invalid JSON must surface an inspection error");
+        assert!(!error.to_string().contains("123-45-6789"));
+        assert_eq!(body, Some(original), "error must not partially rewrite the response");
+    }
+    let upstream_error =
+        bytes::Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"error":{"code":-32001,"message":"unavailable"}}"#);
+    let mut body = Some(upstream_error.clone());
+    assert!(matches!(
+        filter.on_response_body(&mut ctx, &mut body, true).unwrap(),
+        FilterAction::Continue
+    ));
+    assert_eq!(body, Some(upstream_error));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "checks unknown JSON shapes, genuine errors and empty results after one admitted call"
+)]
+async fn uninspectable_tool_response_is_error_but_empty_results_and_valid_errors_pass() {
+    // An admitting post hook isolates envelope validation from result rewriting.
+    // With no mutator, even an empty or mixed content array keeps its wire bytes.
+    let (_dir, path) = write_entity_config_with_routes(
+        r#"routes:
+  - tool: echo
+    authorization:
+      post_invocation:
+        - "require(subject.id == 'alice')"
+"#,
+    );
+    let filter = build_read_write_filter(path);
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
+    let request =
+        bytes::Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#);
+    assert!(matches!(
+        filter
+            .on_request_body(&mut ctx, &mut Some(request), true)
+            .await
+            .unwrap(),
+        FilterAction::BodyDone
+    ));
+    let invalid_shapes = [
+        serde_json::json!("confidential-marker"),
+        serde_json::json!(["confidential-marker"]),
+        serde_json::json!({"jsonrpc":"2.0","id":1,"message":"confidential-marker"}),
+        serde_json::json!({"jsonrpc":"2.0","id":1,"error":"confidential-marker"}),
+        serde_json::json!({"jsonrpc":"2.0","id":1,"error":{"message":"confidential-marker"}}),
+        serde_json::json!({"id":1,"error":{"code":-32000,"message":"confidential-marker"}}),
+    ];
+    for value in invalid_shapes {
+        let original = bytes::Bytes::from(serde_json::to_vec(&value).unwrap());
+        let mut body = Some(original.clone());
+        let error = filter
+            .on_response_body(&mut ctx, &mut body, true)
+            .expect_err("no result or genuine error cannot be inspected");
+        assert!(!error.to_string().contains("confidential-marker"));
+        assert_eq!(body, Some(original));
+    }
+    for value in [
+        serde_json::json!({"jsonrpc":"2.0","id":1,"error":{"code":-32001,"message":"upstream error"}}),
+        serde_json::json!({"jsonrpc":"2.0","id":1,"result":null}),
+        serde_json::json!({"jsonrpc":"2.0","id":1,"result":{}}),
+        serde_json::json!({"jsonrpc":"2.0","id":1,"result":{"content":[]}}),
+        serde_json::json!({"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"answer":42},"content":[
+            {"type":"text","text":"clean summary"},
+            {"type":"image","data":"opaque-binary"},
+            {"type":"resource_link","uri":"file:///safe"}
+        ]}}),
+    ] {
+        for padded in [false, true] {
+            let mut original = serde_json::to_vec(&value).unwrap();
+            if padded {
+                original.resize(512, b' ');
+            }
+            let original = bytes::Bytes::from(original);
+            let mut body = Some(original.clone());
+            assert!(matches!(
+                filter.on_response_body(&mut ctx, &mut body, true).unwrap(),
+                FilterAction::Continue
+            ));
+            assert_eq!(body, Some(original));
+        }
+    }
+    let mut empty = Some(bytes::Bytes::new());
+    assert!(matches!(
+        filter.on_response_body(&mut ctx, &mut empty, true).unwrap(),
+        FilterAction::Continue
+    ));
+    assert_eq!(empty, Some(bytes::Bytes::new()));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "linear scenario; seeded metadata writes span several lines"
+)]
+async fn malformed_unclassified_and_request_only_policy_responses_are_not_newly_parsed() {
+    let (_dir, path) = write_tool_route_config();
+    let filter = build_read_write_filter(path);
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    let original = bytes::Bytes::from_static(b"not a JSON-RPC response");
+    let mut body = Some(original.clone());
+    assert!(matches!(
+        filter.on_response_body(&mut ctx, &mut body, true).unwrap(),
+        FilterAction::Continue
+    ));
+    assert_eq!(body, Some(original.clone()));
+
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
+    let request =
+        bytes::Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#);
+    assert!(matches!(
+        filter
+            .on_request_body(&mut ctx, &mut Some(request), true)
+            .await
+            .unwrap(),
+        FilterAction::BodyDone
+    ));
+    let mut body = Some(original.clone());
+    assert!(matches!(
+        filter.on_response_body(&mut ctx, &mut body, true).unwrap(),
+        FilterAction::Continue
+    ));
+    assert_eq!(body, Some(original));
+}
+
+/// Owns the incoming allocation and records its eventual release.
+struct PolicyBodyOwner {
+    bytes: Vec<u8>,
+    drops: Arc<AtomicUsize>,
+}
+
+impl AsRef<[u8]> for PolicyBodyOwner {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+impl Drop for PolicyBodyOwner {
+    fn drop(&mut self) {
+        self.drops.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// Observes destruction of request state retained across response processing.
+struct PolicyResponseStateOwner(Arc<AtomicUsize>);
+
+impl Drop for PolicyResponseStateOwner {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// Counts releases of the input, rewritten output and response state.
+#[derive(Clone, Default)]
+struct PolicyResponseDrops {
+    /// Releases of the original body allocation.
+    input: Arc<AtomicUsize>,
+    /// Releases of the rewritten body allocation.
+    output: Arc<AtomicUsize>,
+    /// Releases of response state retained in the request context.
+    state: Arc<AtomicUsize>,
+}
+
+/// Hold a real tool response at an I/O wait before or after the synchronous policy callback.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the fixture coordinates policy, owned buffers and a pending I/O operation"
+)]
+async fn hold_tool_response_at_io_boundary(
+    filter: Arc<PolicyFilter>,
+    drops: PolicyResponseDrops,
+    mut io: tokio::io::DuplexStream,
+    ready: tokio::sync::oneshot::Sender<()>,
+    after_callback: bool,
+) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    ctx.extensions
+        .insert(PolicyResponseStateOwner(Arc::clone(&drops.state)));
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
+    let request =
+        bytes::Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#);
+    assert!(matches!(
+        filter
+            .on_request_body(&mut ctx, &mut Some(request), true)
+            .await
+            .unwrap(),
+        FilterAction::BodyDone
+    ));
+    let response = format!(
+        r#"{{"jsonrpc":"2.0","id":1,"result":{{"structuredContent":{{"padding":"{}","ssn":"123-45-6789"}}}}}}"#,
+        "x".repeat(900_000)
+    );
+    let mut body = Some(bytes::Bytes::from_owner(PolicyBodyOwner {
+        bytes: response.into_bytes(),
+        drops: Arc::clone(&drops.input),
+    }));
+    assert!(matches!(
+        filter.on_response_body(&mut ctx, &mut body, after_callback).unwrap(),
+        FilterAction::Continue
+    ));
+    if after_callback {
+        let rewritten = body.take().unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&rewritten).unwrap();
+        assert_ne!(value["result"]["structuredContent"]["ssn"], "123-45-6789");
+        assert_eq!(drops.input.load(Ordering::SeqCst), 1);
+        body = Some(bytes::Bytes::from_owner(PolicyBodyOwner {
+            bytes: rewritten.to_vec(),
+            drops: drops.output,
+        }));
+    }
+    let held = body.unwrap();
+    let operation = async {
+        if after_callback {
+            io.write_all(&held).await.unwrap();
+        } else {
+            let mut byte = [0];
+            io.read_exact(&mut byte).await.unwrap();
+        }
+    };
+    tokio::pin!(operation);
+    tokio::select! {
+        () = &mut operation => panic!("the peer must leave this response I/O pending"),
+        () = tokio::time::sleep(std::time::Duration::from_millis(25)) => {},
+    }
+    ready.send(()).unwrap();
+    operation.await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "checks both I/O waits and a subsequent clean response"
+)]
+async fn cancelled_response_io_releases_policy_state_and_owned_body_on_both_sides_of_callback() {
+    let (_dir, path) = write_tool_result_pipeline_config();
+    let filter = Arc::new(build_read_write_filter(path));
+    for after_callback in [false, true] {
+        let drops = PolicyResponseDrops::default();
+        let (io, _peer) = tokio::io::duplex(1_024);
+        let (ready, observed) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(hold_tool_response_at_io_boundary(
+            Arc::clone(&filter),
+            drops.clone(),
+            io,
+            ready,
+            after_callback,
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(5), observed)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(drops.input.load(Ordering::SeqCst), usize::from(after_callback));
+        assert_eq!(drops.output.load(Ordering::SeqCst), 0);
+        assert_eq!(drops.state.load(Ordering::SeqCst), 0);
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(drops.input.load(Ordering::SeqCst), 1);
+        assert_eq!(drops.output.load(Ordering::SeqCst), usize::from(after_callback));
+        assert_eq!(drops.state.load(Ordering::SeqCst), 1);
+    }
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
+    let request =
+        bytes::Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#);
+    assert!(matches!(
+        filter
+            .on_request_body(&mut ctx, &mut Some(request), true)
+            .await
+            .unwrap(),
+        FilterAction::BodyDone
+    ));
+    let mut response = Some(bytes::Bytes::from_static(STRUCTURED_MCP_RESPONSE.as_bytes()));
+    assert!(matches!(
+        filter.on_response_body(&mut ctx, &mut response, true).unwrap(),
+        FilterAction::Continue
+    ));
+    assert!(!response.unwrap().windows(11).any(|part| part == b"123-45-6789"));
+}
+
+/// Notifies the test when the suspended policy hook's future is dropped.
+struct PolicyHookDrop(Arc<tokio::sync::Notify>);
+
+impl Drop for PolicyHookDrop {
+    fn drop(&mut self) {
+        self.0.notify_one();
+    }
+}
+
+/// A host plugin that suspends its first real policy invocation.
+struct SuspendedPolicyPlugin {
+    cfg: PluginConfig,
+    started: Arc<tokio::sync::Notify>,
+    dropped: Arc<tokio::sync::Notify>,
+    calls: Arc<AtomicUsize>,
+}
+
+impl Plugin for SuspendedPolicyPlugin {
+    fn config(&self) -> &PluginConfig {
+        &self.cfg
+    }
+}
+
+impl HookHandler<CmfHook> for SuspendedPolicyPlugin {
+    async fn handle(
+        &self,
+        _payload: &MessagePayload,
+        _ext: &Extensions,
+        _ctx: &mut PluginContext,
+    ) -> PluginResult<MessagePayload> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            let guard = PolicyHookDrop(Arc::clone(&self.dropped));
+            self.started.notify_one();
+            std::future::pending::<()>().await;
+            drop(guard);
+        }
+        PluginResult::allow()
+    }
+}
+
+/// Factory for a plugin whose test signals are shared with its caller.
+struct SuspendedPolicyFactory {
+    started: Arc<tokio::sync::Notify>,
+    dropped: Arc<tokio::sync::Notify>,
+    calls: Arc<AtomicUsize>,
+}
+
+impl PluginFactory for SuspendedPolicyFactory {
+    fn create(&self, config: &PluginConfig) -> Result<PluginInstance, Box<PluginError>> {
+        let plugin = Arc::new(SuspendedPolicyPlugin {
+            cfg: config.clone(),
+            started: Arc::clone(&self.started),
+            dropped: Arc::clone(&self.dropped),
+            calls: Arc::clone(&self.calls),
+        });
+        let adapter: Arc<dyn AnyHookHandler> = Arc::new(TypedHandlerAdapter::<CmfHook, _>::new(Arc::clone(&plugin)));
+        Ok(PluginInstance {
+            plugin,
+            handlers: vec![("cmf.tool_pre_invoke", adapter)],
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the fixture coordinates a real suspended policy hook and owned body"
+)]
+async fn cancelling_suspended_policy_releases_payload_and_next_request_is_clean() {
+    let started = Arc::new(tokio::sync::Notify::new());
+    let dropped = Arc::new(tokio::sync::Notify::new());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let body_drops = Arc::new(AtomicUsize::new(0));
+    let factory_started = Arc::clone(&started);
+    let factory_dropped = Arc::clone(&dropped);
+    let factory_calls = Arc::clone(&calls);
+    register_policy_plugin_factory(
+        "test/payload-cancellation",
+        Arc::new(move || {
+            Box::new(SuspendedPolicyFactory {
+                started: Arc::clone(&factory_started),
+                dropped: Arc::clone(&factory_dropped),
+                calls: Arc::clone(&factory_calls),
+            })
+        }),
+    );
+    let (_dir, path) = write_entity_config_with_routes(
+        r#"routes:
+  - tool: echo
+    authorization:
+      pre_invocation:
+        - "run(payload-suspender)"
+"#,
+    );
+    let yaml = std::fs::read_to_string(&path).unwrap().replace("\nglobal:", "\n  - name: payload-suspender\n    kind: test/payload-cancellation\n    hooks: [cmf.tool_pre_invoke]\n    mode: sequential\n    on_error: fail\nglobal:");
+    std::fs::write(&path, yaml).unwrap();
+    let filter = Arc::new(build_read_write_filter(path));
+    let running_filter = Arc::clone(&filter);
+    let running_drops = Arc::clone(&body_drops);
+    let task = tokio::spawn(async move {
+        let req = request_for_alice();
+        let mut ctx = make_filter_context(&req);
+        ctx.filter_metadata
+            .insert("mcp.method", "tools/call")
+            .expect("entry must fit in the filter's metadata");
+        ctx.filter_metadata
+            .insert("mcp.name", "echo")
+            .expect("entry must fit in the filter's metadata");
+        let text = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"echo","arguments":{{"padding":"{}"}}}}}}"#,
+            "x".repeat(900_000)
+        );
+        let owner = PolicyBodyOwner {
+            bytes: text.into_bytes(),
+            drops: running_drops,
+        };
+        running_filter
+            .on_request_body(&mut ctx, &mut Some(bytes::Bytes::from_owner(owner)), true)
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), started.notified())
+        .await
+        .unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(body_drops.load(Ordering::SeqCst), 0);
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    tokio::time::timeout(std::time::Duration::from_secs(5), dropped.notified())
+        .await
+        .unwrap();
+    assert_eq!(body_drops.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        dispatch_echo_as(&filter, "alice").await,
+        FilterAction::BodyDone
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_crypto_failure_in_a_policy_hook_denies_the_request() {
+    register_policy_plugin_factory("test/crypto-failing", Arc::new(|| Box::new(CryptoFailingFactory)));
+    let (_dir, path) = write_entity_config_with_routes(
+        r#"routes:
+  - tool: echo
+    authorization:
+      pre_invocation:
+        - "run(crypto-failing)"
+"#,
+    );
+    let yaml = std::fs::read_to_string(&path).unwrap().replace(
+        "\nglobal:",
+        "\n  - name: crypto-failing\n    kind: test/crypto-failing\n    hooks: [cmf.tool_pre_invoke]\n    mode: sequential\n    on_error: fail\nglobal:",
+    );
+    std::fs::write(&path, yaml).unwrap();
+    let filter = build_filter(path);
+
+    let action = dispatch_echo_as(&filter, "alice").await;
+    assert!(
+        matches!(action, FilterAction::Reject(_)),
+        "a crypto backend failure must deny an authenticated request, never allow it; got {action:?}",
     );
 }
 
@@ -6601,6 +9138,16 @@ fn a_read_only_tool_response_policy_warns_that_the_rules_will_not_run() {
     assert!(
         logs.contains("response-phase `tool:` rules") && logs.contains("body_access: read_write"),
         "a `read_only` filter must name the remedy for tool response rules; got {logs}",
+    );
+}
+
+#[test]
+fn a_legacy_header_credential_loads_with_a_deprecation_warning() {
+    let (_dir, path) = write_l7_global_config();
+    let logs = capture_warnings(|| drop(build_filter(path)));
+    assert!(
+        logs.contains("deprecated `header:` setting"),
+        "the legacy `header:` form must still load and name its replacement; got {logs}",
     );
 }
 
@@ -6721,6 +9268,7 @@ fn an_http_route_beside_entity_routes_fails_filter_construction() {
         config_path: path,
         allow_private_idp: false,
         trusted_private_endpoints: vec![],
+        trusted_proxies: vec![],
         body_access: BodyAccessMode::ReadWrite,
         require_protocol_metadata: true,
         init_timeout_secs: 30,
@@ -6737,6 +9285,10 @@ fn an_http_route_beside_entity_routes_fails_filter_construction() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "linear scenario; seeded metadata writes span several lines"
+)]
 async fn a_global_block_does_authorize_classified_mcp_traffic() {
     let (_dir, path) = write_entity_config_with_global_authz(
         r#"routes:
@@ -6754,8 +9306,12 @@ async fn a_global_block_does_authorize_classified_mcp_traffic() {
         HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
     );
     let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", "echo");
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
     let request_body =
         bytes::Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#);
     let action = filter
@@ -6922,6 +9478,7 @@ fn minimal_cfg() -> PolicyFilterConfig {
         require_protocol_metadata: true,
         allow_private_idp: false,
         trusted_private_endpoints: vec![],
+        trusted_proxies: vec![],
         llm: super::config::LlmOptions::default(),
         context_headers: HashMap::default(),
         context_meta: ContextMetaConfig::default(),
@@ -6964,6 +9521,7 @@ fn policy_filter_new_rejects_non_reserved_context_header() {
         config_path: "/nonexistent/policy.yaml".to_owned(),
         allow_private_idp: false,
         trusted_private_endpoints: vec![],
+        trusted_proxies: vec![],
         body_access: BodyAccessMode::ReadOnly,
         require_protocol_metadata: true,
         init_timeout_secs: 30,
@@ -7215,4 +9773,58 @@ context_headers:
         Some("x-ext-agent-id")
     );
     cfg.validate_context_headers().unwrap();
+}
+
+// -----------------------------------------------------------------------------
+// Test Utilities
+// -----------------------------------------------------------------------------
+
+/// A host plugin whose policy hook fails with a crypto backend error.
+struct CryptoFailingPlugin {
+    /// Configuration of the failing test plugin.
+    cfg: PluginConfig,
+}
+
+impl Plugin for CryptoFailingPlugin {
+    fn config(&self) -> &PluginConfig {
+        &self.cfg
+    }
+}
+
+/// Type-erased handler that reports a crypto failure instead of a decision.
+struct CryptoFailingHandler;
+
+#[async_trait::async_trait]
+impl AnyHookHandler for CryptoFailingHandler {
+    async fn invoke(
+        &self,
+        _payload: &dyn ppe::prelude::PluginPayload,
+        _extensions: &Extensions,
+        _ctx: &mut PluginContext,
+    ) -> Result<Box<dyn std::any::Any + Send + Sync>, Box<PluginError>> {
+        Err(PluginError::Crypto {
+            source: ppe::CryptoError::DigestLength,
+        }
+        .boxed())
+    }
+
+    fn hook_type_name(&self) -> &'static str {
+        <CmfHook as ppe::prelude::HookTypeDef>::NAME
+    }
+}
+
+/// Factory for [`CryptoFailingPlugin`].
+///
+/// [`CryptoFailingPlugin`]: CryptoFailingPlugin
+struct CryptoFailingFactory;
+
+impl PluginFactory for CryptoFailingFactory {
+    fn create(&self, config: &PluginConfig) -> Result<PluginInstance, Box<PluginError>> {
+        let plugin = Arc::new(CryptoFailingPlugin { cfg: config.clone() });
+        let adapter: Arc<dyn AnyHookHandler> = Arc::new(CryptoFailingHandler);
+        Ok(PluginInstance {
+            plugin,
+            handlers: vec![("cmf.tool_pre_invoke", adapter)],
+        })
+    }
 }

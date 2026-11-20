@@ -305,16 +305,16 @@ admin:
 listeners:
   - name: web
     address: "127.0.0.1:{proxy_port}"
-    filter_chains: [main]
+    filter_chains: [reloaded]
   - name: unused_until_restart
     address: "127.0.0.1:{empty_port}"
-    filter_chains: [main]
+    filter_chains: [reloaded]
 clusters:
   - name: backend
     endpoints:
       - address: "127.0.0.1:{backend_port}"
 filter_chains:
-  - name: main
+  - name: reloaded
     filters:
       - filter: static_response
         status: 204
@@ -338,12 +338,16 @@ filter_chains:
     let after = guard.reload_until(
         &updated,
         || get_pipelines_json(&admin_addr, "/api/pipelines?listener=web").1,
-        |view| view["listener"]["filters"][0]["filter"] == "static_response",
+        |view| {
+            view["listener"]["filters"][0]["filter"] == "static_response"
+                && view["listener"]["chain_names"] == serde_json::json!(["reloaded"])
+        },
     );
     assert_eq!(
         after["listener"]["filters"][0]["filter"], "static_response",
         "after reload first filter: {after}"
     );
+    assert_eq!(after["listener"]["chain_names"], serde_json::json!(["reloaded"]));
     assert_eq!(
         after["listener"]["filter_count"], 1,
         "after reload filter_count: {after}"
@@ -362,6 +366,104 @@ filter_chains:
         !names.contains(&"unused_until_restart"),
         "new hot-reload listeners stay absent: {names:?}"
     );
+    let (status, missing) = get_pipelines_json(&admin_addr, "/api/pipelines?listener=unused_until_restart");
+    assert_eq!(status, 404, "unbound listener has no named live pipeline: {missing}");
+}
+
+#[test]
+fn removed_http_listener_remains_in_live_admin_view() {
+    let web_port = free_port();
+    let legacy_port = free_port();
+    let admin_port = free_port();
+    let initial = format!(
+        "admin:\n  address: 127.0.0.1:{admin_port}\nlisteners:\n  - name: web\n    address: 127.0.0.1:{web_port}\n    filter_chains: [current]\n  - name: legacy\n    address: 127.0.0.1:{legacy_port}\n    filter_chains: [old]\nfilter_chains:\n  - name: current\n    filters: [{{ filter: static_response, status: 200, body: before }}]\n  - name: old\n    filters: [{{ filter: static_response, status: 200, body: legacy }}]\n"
+    );
+    let updated = format!(
+        "admin:\n  address: 127.0.0.1:{admin_port}\nlisteners:\n  - name: web\n    address: 127.0.0.1:{web_port}\n    filter_chains: [reloaded]\nfilter_chains:\n  - name: reloaded\n    filters: [{{ filter: static_response, status: 200, body: after }}]\n"
+    );
+    let guard = start_reloadable_proxy(&initial);
+    let web_addr = format!("127.0.0.1:{web_port}");
+    let legacy_addr = format!("127.0.0.1:{legacy_port}");
+    let admin_addr = format!("127.0.0.1:{admin_port}");
+    wait_for_tcp(&admin_addr);
+
+    let applied = guard.reload_until(
+        &updated,
+        || get_pipelines_json(&admin_addr, "/api/pipelines?listener=web").1,
+        |view| view["listener"]["chain_names"] == serde_json::json!(["reloaded"]),
+    );
+    assert_eq!(
+        applied["listener"]["chain_names"],
+        serde_json::json!(["reloaded"]),
+        "current-generation metadata must be published before testing retained metadata: {applied}"
+    );
+    assert_eq!(
+        http_get(&web_addr, "/", None).1,
+        "after",
+        "current listener must accept the reload"
+    );
+    let (legacy_status, legacy_body) = http_get(&legacy_addr, "/", None);
+    assert_eq!(
+        (legacy_status, legacy_body.as_str()),
+        (200, "legacy"),
+        "removed listener stays bound"
+    );
+
+    let (status, aggregate) = get_pipelines_json(&admin_addr, "/api/pipelines");
+    assert_eq!(status, 200, "aggregate pipeline view: {aggregate}");
+    let listeners = aggregate["listeners"].as_array().expect("listeners array");
+    assert!(
+        listeners.iter().any(|entry| entry["name"] == "legacy"),
+        "legacy remains visible: {aggregate}"
+    );
+    let (status, named) = get_pipelines_json(&admin_addr, "/api/pipelines?listener=legacy");
+    assert_eq!(status, 200, "named retained listener view: {named}");
+    assert_eq!(
+        named["listener"]["address"], legacy_addr,
+        "bound address is retained: {named}"
+    );
+    assert_eq!(named["listener"]["chain_names"], serde_json::json!(["old"]));
+    assert_eq!(
+        named["listener"]["tls"], false,
+        "bound listener stays plaintext: {named}"
+    );
+}
+
+#[test]
+fn reload_admin_metadata_tracks_applied_configuration() {
+    let web_port = free_port();
+    let pending_port = free_port();
+    let stable_port = free_port();
+    let admin_port = free_port();
+    let initial = format!(
+        "admin:\n  address: 127.0.0.1:{admin_port}\nlisteners:\n  - name: web\n    address: 127.0.0.1:{web_port}\n    filter_chains: [before]\n  - name: stable\n    address: 127.0.0.1:{stable_port}\n    filter_chains: [stable]\nfilter_chains:\n  - name: before\n    filters: [{{ filter: static_response, status: 200, body: before }}]\n  - name: stable\n    filters: [{{ filter: static_response, status: 200, body: stable }}]\n"
+    );
+    let updated = format!(
+        "admin:\n  address: 127.0.0.1:{admin_port}\nlisteners:\n  - name: web\n    address: 127.0.0.1:{pending_port}\n    filter_chains: [after]\n    tls:\n      certificates:\n        - cert_path: /nonexistent/restart-cert.pem\n          key_path: /nonexistent/restart-key.pem\n  - name: stable\n    address: 127.0.0.1:{stable_port}\n    filter_chains: [stable]\nfilter_chains:\n  - name: after\n    filters: [{{ filter: static_response, status: 201, body: after }}]\n  - name: stable\n    filters: [{{ filter: static_response, status: 200, body: stable }}]\n"
+    );
+    let guard = start_reloadable_proxy(&initial);
+    let web_addr = format!("127.0.0.1:{web_port}");
+    let admin_addr = format!("127.0.0.1:{admin_port}");
+    wait_for_tcp(&admin_addr);
+
+    let (status, web) = guard.reload_until(
+        &updated,
+        || get_pipelines_json(&admin_addr, "/api/pipelines?listener=web"),
+        |response| response.0 == 200 && response.1["listener"]["chain_names"] == serde_json::json!(["after"]),
+    );
+    assert_eq!(status, 200, "bound listener view: {web}");
+    assert_eq!(
+        http_get(&web_addr, "/", None),
+        (201, "after".to_owned()),
+        "new chain applies on old bound address"
+    );
+    assert_eq!(web["listener"]["address"], web_addr, "old bind remains active: {web}");
+    assert_eq!(web["listener"]["tls"], false, "TLS toggle awaits restart: {web}");
+    assert_eq!(web["listener"]["chain_names"], serde_json::json!(["after"]));
+    let (status, stable) = get_pipelines_json(&admin_addr, "/api/pipelines?listener=stable");
+    assert_eq!(status, 200, "stable listener view: {stable}");
+    assert_eq!(stable["listener"]["address"], format!("127.0.0.1:{stable_port}"));
+    assert_eq!(stable["listener"]["chain_names"], serde_json::json!(["stable"]));
 }
 
 #[test]

@@ -18,13 +18,13 @@ mod tests;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use praxis_core::grpc::{GrpcStatusCode, GrpcWebKind};
+use praxis_core::grpc::{GrpcKind, GrpcStatusCode, GrpcWebKind};
 use serde::Deserialize;
 use tracing::{debug, trace};
 
 use self::frame::{Base64Stream, decode_base64, encode_trailer_frame};
 use crate::{
-    BodyAccess, BodyMode, FilterAction, FilterError, Rejection,
+    BodyAccess, BodyMode, FilterAction, FilterError, FilterMetadata, Rejection, ResponseTrailersPending,
     filter::{HttpFilter, HttpFilterContext},
     parse_filter_config,
 };
@@ -83,7 +83,7 @@ struct GrpcWebConfig {
     /// Downstream encodings to translate.
     encodings: Encodings,
 
-    /// Maximum bytes buffered while decoding a base64 request body.
+    /// Maximum bytes buffered while decoding a base64 request body (also bounded by `body_limits.max_buffer_bytes`).
     max_buffer_bytes: usize,
 
     /// Behaviour when the upstream response carries no gRPC status.
@@ -182,6 +182,9 @@ impl GrpcWebFilter {
         if cfg.max_buffer_bytes == 0 {
             return Err("grpc_web: max_buffer_bytes must be greater than 0".into());
         }
+        if cfg.max_buffer_bytes > praxis_core::config::MAX_BUFFER_BYTES {
+            return Err("grpc_web: max_buffer_bytes exceeds the addressable buffer maximum".into());
+        }
         Ok(Box::new(Self {
             encodings: cfg.encodings,
             max_buffer_bytes: cfg.max_buffer_bytes,
@@ -205,6 +208,10 @@ impl HttpFilter for GrpcWebFilter {
         "grpc_web"
     }
 
+    fn may_end_request(&self) -> bool {
+        false
+    }
+
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         let kind = GrpcWebKind::from_headers(&ctx.request.headers);
         if !self.accepts(kind) {
@@ -220,7 +227,9 @@ impl HttpFilter for GrpcWebFilter {
         ctx.request_headers_to_set
             .push((http::header::TE, http::HeaderValue::from_static("trailers")));
 
-        ctx.set_metadata("grpc_web.encoding", kind.as_str());
+        ctx.filter_metadata
+            .insert("grpc_web.encoding", kind.as_str())
+            .unwrap_or_else(FilterMetadata::log_loss);
         ctx.filter_results
             .entry("grpc_web")
             .or_default()
@@ -239,7 +248,7 @@ impl HttpFilter for GrpcWebFilter {
         // The binary variant is byte-identical to native gRPC, so only
         // the base64 variant needs the body at all.
         if self.encodings.text {
-            BodyAccess::ReadWrite
+            BodyAccess::ReadWrite(crate::BodyRequirement::Required)
         } else {
             BodyAccess::None
         }
@@ -266,10 +275,15 @@ impl HttpFilter for GrpcWebFilter {
         if !end_of_stream {
             return Ok(FilterAction::Continue);
         }
-        let Some(state) = ctx.get_filter_state::<GrpcWebState>() else {
+        // StreamBuffer pre-read runs before `on_request` creates the state.
+        // Classify from the same request headers until that state exists.
+        let kind = ctx
+            .get_filter_state::<GrpcWebState>()
+            .map_or_else(|| GrpcWebKind::from_headers(&ctx.request.headers), |state| state.kind);
+        if !self.accepts(kind) {
             return Ok(FilterAction::Continue);
-        };
-        if !state.kind.is_text() {
+        }
+        if !kind.is_text() {
             return Ok(FilterAction::Release);
         }
 
@@ -325,7 +339,7 @@ impl HttpFilter for GrpcWebFilter {
     }
 
     fn response_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadWrite
+        BodyAccess::ReadWrite(crate::BodyRequirement::Required)
     }
 
     fn response_body_mode(&self) -> BodyMode {
@@ -340,37 +354,38 @@ impl HttpFilter for GrpcWebFilter {
         body: &mut Option<Bytes>,
         end_of_stream: bool,
     ) -> Result<FilterAction, FilterError> {
-        let on_missing = self.on_missing_trailers;
+        let trailers_pending = ctx.extensions.get::<ResponseTrailersPending>().is_some();
         let Some(state) = ctx.get_filter_state_mut::<GrpcWebState>() else {
             return Ok(FilterAction::Continue);
         };
 
-        let mut out = Vec::new();
-        if let Some(chunk) = body.as_ref() {
+        let mut out = body.take().map_or_else(Bytes::new, |chunk| {
             if state.kind.is_text() {
-                out.extend_from_slice(&state.encoder.push(chunk));
+                state.encoder.push(&chunk)
             } else {
-                out.extend_from_slice(chunk);
+                chunk
             }
-        }
+        });
 
-        if end_of_stream {
-            let needs_status = !state.status_delivered && on_missing == MissingTrailers::Synthesize;
+        if end_of_stream && !trailers_pending {
+            let mut appended = out.to_vec();
+            let needs_status = !state.status_delivered && self.on_missing_trailers == MissingTrailers::Synthesize;
             if needs_status {
                 state.status_delivered = true;
                 let frame = encode_trailer_frame(&synthesized_trailers());
                 if state.kind.is_text() {
-                    out.extend_from_slice(&state.encoder.push(&frame));
+                    appended.extend_from_slice(&state.encoder.push(&frame));
                 } else {
-                    out.extend_from_slice(&frame);
+                    appended.extend_from_slice(&frame);
                 }
             }
             if state.kind.is_text() {
-                out.extend_from_slice(&state.encoder.finish());
+                appended.extend_from_slice(&state.encoder.finish());
             }
+            out = Bytes::from(appended);
         }
 
-        *body = (!out.is_empty()).then(|| Bytes::from(out));
+        *body = (!out.is_empty()).then_some(out);
         Ok(FilterAction::Continue)
     }
 
@@ -438,7 +453,7 @@ fn synthesize_missing_status(trailers: &mut http::HeaderMap) {
 // -----------------------------------------------------------------------------
 
 /// Returns `true` if the upstream response is native gRPC
-/// (`Content-Type: application/grpc...`).
+/// (`Content-Type: application/grpc` or `application/grpc+codec`).
 ///
 /// Non-gRPC responses (such as an HTML error page from an intermediary)
 /// are passed through untranslated.
@@ -447,5 +462,5 @@ fn upstream_is_grpc(ctx: &HttpFilterContext<'_>) -> bool {
         .as_ref()
         .and_then(|response| response.headers.get(http::header::CONTENT_TYPE))
         .and_then(|value| value.to_str().ok())
-        .is_some_and(|ct| ct.to_ascii_lowercase().starts_with("application/grpc"))
+        .is_some_and(|content_type| GrpcKind::from_content_type(content_type).is_grpc())
 }

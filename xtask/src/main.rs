@@ -36,6 +36,7 @@ mod features;
 mod filter_docs;
 mod fips;
 mod lint_deps;
+mod lint_doc_links;
 mod lint_example_tests;
 mod paths;
 #[cfg(feature = "dev")]
@@ -75,6 +76,10 @@ enum Command {
     #[cfg(feature = "dev")]
     Benchmark(Box<benchmark::Args>),
 
+    /// Report the temporary suspension of KIND rollout acceptance.
+    #[cfg(feature = "dev")]
+    Rollout(Box<praxis_tests_rollout::Args>),
+
     /// List the workspace's features, qualified by package, for
     /// cargo invocations that cannot use `--all-features`.
     Features(features::Args),
@@ -86,6 +91,10 @@ enum Command {
     /// Check that workspace dependency versions use
     /// three-component semver.
     LintDeps(lint_deps::Args),
+
+    /// Check that relative Markdown links resolve to files
+    /// that exist on disk.
+    LintDocLinks(lint_doc_links::Args),
 
     /// Check that every example config has a corresponding
     /// integration test.
@@ -122,9 +131,19 @@ fn main() {
         Command::Debug(args) => debug::run(&args),
         #[cfg(feature = "dev")]
         Command::Benchmark(args) => benchmark::run(*args),
+        #[cfg(feature = "dev")]
+        Command::Rollout(_) => {
+            // Four-node rootless KIND exhausts the shared inotify instance budget.
+            // Move this suite to https://github.com/praxis-proxy/gateway-controller before re-enabling.
+            eprintln!(
+                "SKIPPED: KIND rollout tests are disabled due to shared inotify instance exhaustion; \
+                 pending migration to https://github.com/praxis-proxy/gateway-controller"
+            );
+        },
         Command::Features(args) => features::run(&args),
         Command::Fips(args) => fips::run(args),
         Command::LintDeps(args) => lint_deps::run(args),
+        Command::LintDocLinks(args) => lint_doc_links::run(args),
         Command::LintExampleTests(args) => lint_example_tests::run(args),
         Command::Publish(args) => publish::run(&args),
         Command::SyncExampleReadme(args) => sync_example_readme::run(&args),

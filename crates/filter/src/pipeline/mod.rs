@@ -72,7 +72,7 @@ use std::sync::Arc;
 
 pub use extension::PipelineExtension;
 use praxis_core::{
-    config::{ABSOLUTE_MAX_BODY_BYTES, FailureMode, InsecureOptions},
+    config::{BodyLimitsConfig, FailureMode, InsecureOptions},
     health::HealthRegistry,
     id::IdGenerator,
     kv::KvStoreRegistry,
@@ -109,6 +109,9 @@ use crate::{
 pub struct FilterPipeline {
     /// Pre-computed body processing capabilities for this pipeline.
     body_capabilities: BodyCapabilities,
+
+    /// Whether any top-level or branch HTTP filter requests terminal observation.
+    has_request_completion_observer: bool,
 
     /// Compression configuration, if a compression filter is present.
     compression: Option<CompressionConfig>,
@@ -159,6 +162,9 @@ pub struct FilterPipeline {
     /// Global response body ceiling, enforced by counting in Stream mode.
     response_body_ceiling: Option<usize>,
 
+    /// Cap on each accumulated body, separate from cumulative streaming limits.
+    buffer_cap: usize,
+
     /// Indices into `filters` of top-level filters that run the request-head
     /// phase, walked once per request by [`execute_http_request_head`] before
     /// any `StreamBuffer` request-body pre-read. Empty when no filter opts in,
@@ -166,6 +172,9 @@ pub struct FilterPipeline {
     ///
     /// [`execute_http_request_head`]: FilterPipeline::execute_http_request_head
     request_head_filter_indices: Vec<usize>,
+
+    /// Filter indices whose body denials must preserve earlier request filters' precedence.
+    shielded_admitter_indices: Vec<usize>,
 
     /// Indices into `filters` of filters declaring request-body access.
     request_body_filter_indices: Vec<usize>,
@@ -194,6 +203,27 @@ pub struct FilterPipeline {
     response_trailer_filter_indices: Vec<usize>,
 }
 
+/// Final response-hook decisions for request-completion observers.
+#[derive(Default)]
+struct CompletionResponseHooks(Vec<Option<bool>>);
+
+impl CompletionResponseHooks {
+    /// Record whether one final response hook was eligible.
+    fn mark(&mut self, filter_id: usize, eligible: bool) {
+        if self.0.len() <= filter_id {
+            self.0.resize(filter_id.saturating_add(1), None);
+        }
+        if let Some(decision) = self.0.get_mut(filter_id) {
+            *decision = Some(eligible);
+        }
+    }
+
+    /// The final response decision, or none if no final hook reached it.
+    fn decision(&self, filter_id: usize) -> Option<bool> {
+        self.0.get(filter_id).copied().flatten()
+    }
+}
+
 #[expect(
     clippy::multiple_inherent_impl,
     reason = "pipeline concerns are split across modules"
@@ -209,7 +239,8 @@ impl FilterPipeline {
     /// # Errors
     ///
     /// Returns [`FilterError`] if a [`StreamBuffer`] has no byte limit
-    /// and `allow_unbounded` is `false`.
+    /// and `allow_unbounded` is `false`, or if a buffered request's finite
+    /// `max_request` exceeds the default buffering cap.
     ///
     /// [`Stream`]: BodyMode::Stream
     /// [`SizeLimit`]: BodyMode::SizeLimit
@@ -220,8 +251,59 @@ impl FilterPipeline {
         max_response: Option<usize>,
         allow_unbounded: bool,
     ) -> Result<(), FilterError> {
-        self.apply_nested_body_limits(max_request, max_response, allow_unbounded)?;
+        self.configure_body_limits(
+            &BodyLimitsConfig {
+                max_request_bytes: max_request,
+                max_response_bytes: max_response,
+                ..BodyLimitsConfig::default()
+            },
+            allow_unbounded,
+        )
+    }
 
+    /// Apply configured transfer limits and the independent buffering cap.
+    /// Nested pipelines and filter-owned buffers receive the same cap.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unbounded buffer without the insecure opt-in,
+    /// or when a statically buffered request's finite `max_request_bytes`
+    /// exceeds `max_buffer_bytes`, including in nested pipelines.
+    pub fn configure_body_limits(
+        &mut self,
+        limits: &BodyLimitsConfig,
+        allow_unbounded: bool,
+    ) -> Result<(), FilterError> {
+        check_buffered_request_limits(self.body_capabilities.request_body_mode, limits)?;
+        self.apply_nested_body_limits(limits, allow_unbounded)?;
+        self.buffer_cap = limits.max_buffer_bytes.get();
+        apply_filter_buffer_cap(&mut self.filters, self.buffer_cap);
+        let max_request = limits.max_request_bytes;
+        let max_response = limits.max_response_bytes;
+
+        self.apply_transfer_limits(max_request, max_response);
+
+        check_unbounded_stream_buffer(
+            "request",
+            &mut self.body_capabilities.request_body_mode,
+            self.buffer_cap,
+            allow_unbounded,
+        )?;
+        check_unbounded_stream_buffer(
+            "response",
+            &mut self.body_capabilities.response_body_mode,
+            self.buffer_cap,
+            allow_unbounded,
+        )?;
+
+        self.request_body_ceiling = max_request;
+        self.response_body_ceiling = max_response;
+
+        Ok(())
+    }
+
+    /// Clamp cumulative limits without converting explicitly incremental filters.
+    fn apply_transfer_limits(&mut self, max_request: Option<usize>, max_response: Option<usize>) {
         if let Some(ceiling) = max_request {
             self.body_capabilities.request_body_mode = clamp_body_mode(
                 self.body_capabilities.request_body_mode,
@@ -239,35 +321,18 @@ impl FilterPipeline {
             );
             self.body_capabilities.needs_response_body = true;
         }
-
-        check_unbounded_stream_buffer(
-            "request",
-            &mut self.body_capabilities.request_body_mode,
-            allow_unbounded,
-        )?;
-        check_unbounded_stream_buffer(
-            "response",
-            &mut self.body_capabilities.response_body_mode,
-            allow_unbounded,
-        )?;
-
-        self.request_body_ceiling = max_request;
-        self.response_body_ceiling = max_response;
-
-        Ok(())
     }
 
     /// Apply the listener ceilings recursively to nested pipelines.
     fn apply_nested_body_limits(
         &mut self,
-        max_request: Option<usize>,
-        max_response: Option<usize>,
+        limits: &BodyLimitsConfig,
         allow_unbounded: bool,
     ) -> Result<(), FilterError> {
         let mut nested_error = None;
         self.visit_nested_pipelines(&mut |pipeline| {
             if nested_error.is_none()
-                && let Err(error) = pipeline.apply_body_limits(max_request, max_response, allow_unbounded)
+                && let Err(error) = pipeline.configure_body_limits(limits, allow_unbounded)
             {
                 nested_error = Some(error);
             }
@@ -276,6 +341,12 @@ impl FilterPipeline {
             return Err(error);
         }
         Ok(())
+    }
+
+    /// Maximum bytes retained by an accumulated body.
+    #[must_use]
+    pub fn buffer_cap(&self) -> usize {
+        self.buffer_cap
     }
 
     /// Global request body ceiling; `None` means unbounded was allowed.
@@ -292,30 +363,38 @@ impl FilterPipeline {
     /// correct whether or not `request_body_mode` is already clamped at build.
     ///
     /// ```
-    /// use praxis_core::config::ABSOLUTE_MAX_BODY_BYTES;
+    /// use praxis_core::config::DEFAULT_MAX_BUFFER_BYTES;
     /// use praxis_filter::{FilterPipeline, FilterRegistry};
     ///
     /// let registry = FilterRegistry::with_builtins();
     /// let pipeline = FilterPipeline::build(&mut [], &registry).unwrap();
     /// assert_eq!(
     ///     pipeline.selected_upstream_request_body_limit(),
-    ///     ABSOLUTE_MAX_BODY_BYTES,
+    ///     DEFAULT_MAX_BUFFER_BYTES,
     ///     "an empty pipeline uses the defensive absolute limit",
     /// );
     /// ```
     #[must_use]
     pub fn selected_upstream_request_body_limit(&self) -> usize {
         let mode_limit = match self.body_capabilities().request_body_mode {
-            BodyMode::StreamBuffer { max_bytes } => max_bytes.unwrap_or(ABSOLUTE_MAX_BODY_BYTES),
+            BodyMode::StreamBuffer { max_bytes } => max_bytes.unwrap_or(self.buffer_cap),
             // Defensive default: selected-upstream participation always merges the
             // request-body mode to StreamBuffer (see `selected_upstream_body_mode`
             // in crates/filter/src/pipeline/body.rs), so this arm is not reachable
             // for the phase; it keeps the limit well-defined if that ever changes.
             BodyMode::SizeLimit { max_bytes } => max_bytes,
-            _ => ABSOLUTE_MAX_BODY_BYTES,
+            _ => self.buffer_cap,
         };
         self.request_body_ceiling()
             .map_or(mode_limit, |ceiling| mode_limit.min(ceiling))
+            .min(self.buffer_cap)
+    }
+
+    /// Cap for buffered upstream responses, including hedged attempts.
+    #[must_use]
+    pub fn response_buffer_limit(&self) -> usize {
+        self.response_body_ceiling
+            .map_or(self.buffer_cap, |limit| limit.min(self.buffer_cap))
     }
 
     /// Global response body ceiling; `None` means unbounded was allowed.
@@ -353,6 +432,16 @@ impl FilterPipeline {
     #[must_use]
     pub fn has_request_head_phase(&self) -> bool {
         !self.request_head_filter_indices.is_empty()
+    }
+
+    /// Whether any filter requires a request-head phase to function correctly.
+    #[must_use]
+    pub fn requires_request_head_phase(&self) -> bool {
+        self.request_head_filter_indices.iter().any(|&idx| {
+            self.filters
+                .get(idx)
+                .is_some_and(|pf| matches!(&pf.filter, AnyFilter::Http(filter) if !filter.repeats_request_head()))
+        })
     }
 
     /// Number of filters in the pipeline.
@@ -499,19 +588,55 @@ impl FilterPipeline {
             .any(|pf| crate::condition::should_execute_bound_selected(&pf.conditions, ctx.request, bound, selected))
     }
 
-    /// Ask each filter to emit its end-of-request record, returning
-    /// whether any did.
+    /// Let the first eligible access-log instance claim an incomplete
+    /// request's one fallback record.
+    pub fn emit_deferred_access_record(&self, ctx: &mut crate::HttpFilterContext<'_>, status: u16) -> bool {
+        for entry in self.filters.iter().filter(|entry| entry.filter.name() == "access_log") {
+            let eligible = crate::condition::should_execute_bound_selected(
+                &entry.conditions,
+                ctx.request,
+                ctx.bound_upstream_view(),
+                http_utils::ctx_selected_upstream(ctx),
+            );
+            if !eligible {
+                continue;
+            }
+            let previous_filter_id = ctx.current_filter_id.replace(entry.filter_id);
+            let claimed = entry.filter.emit_deferred_record(ctx, status);
+            ctx.current_filter_id = previous_filter_id;
+            return claimed;
+        }
+        false
+    }
+
+    /// Notify executed HTTP filter invocations that the request has ended.
     ///
-    /// Used by the protocol layer's logging phase for requests that never
-    /// reached a filter's own completion hooks. Filters that log nothing
-    /// are no-ops, so this is cheap for pipelines without an access log.
-    pub fn emit_deferred_records(&self, ctx: &crate::HttpFilterContext<'_>, status: u16) -> bool {
-        // Short-circuits on the first filter that claims the record: one
-        // access record per request, matching the completion hooks, which
-        // mark the request logged after the first emit.
-        self.filters
-            .iter()
-            .any(|pf| pf.filter.emit_deferred_record(ctx, status))
+    /// Branch filters retain their own invocation IDs and execution bits.
+    /// A final response hook's eligible or skipped decision is retained.
+    /// If no final hook reached an observer, only status-only response scope
+    /// can be checked from the written status. Header-dependent scope and
+    /// unknown status fail closed without final response evidence.
+    pub fn emit_request_completion(&self, ctx: &mut crate::HttpFilterContext<'_>, status: u16) {
+        if !self.has_request_completion_observer {
+            return;
+        }
+        for (index, entry) in self.filters.iter().enumerate() {
+            if ctx.executed_filter_indices.get(index) == Some(&true) {
+                emit_completion_entry(entry, ctx, status);
+            }
+            for branch in &entry.branches {
+                for_each_pipeline_filter(&branch.filters, &mut |child| {
+                    if branch::branch_filter_executed(&ctx.executed_branch_filters, child.filter_id) {
+                        emit_completion_entry(child, ctx, status);
+                    }
+                });
+            }
+        }
+    }
+
+    /// Whether this pipeline needs terminal request-completion dispatch.
+    pub fn has_request_completion_observer(&self) -> bool {
+        self.has_request_completion_observer
     }
 
     /// Whether any filter in this pipeline rewrites response trailers.
@@ -590,6 +715,7 @@ impl FilterPipeline {
     /// Set the shared [`crate::SessionStoreRegistry`] for this pipeline.
     pub fn set_session_stores(&mut self, stores: Arc<crate::SessionStoreRegistry>) {
         self.visit_nested_pipelines(&mut |pipeline| pipeline.set_session_stores(Arc::clone(&stores)));
+        for_each_pipeline_filter(&self.filters, &mut |filter| filter.filter.bind_session_stores(&stores));
         self.session_stores = Some(stores);
     }
 
@@ -814,6 +940,56 @@ fn for_each_pipeline_filter(filters: &[PipelineFilter], visit: &mut dyn FnMut(&P
     }
 }
 
+/// Cache whether any resolved filter, including branch filters, needs completion.
+fn pipeline_has_request_completion_observer(filters: &[PipelineFilter]) -> bool {
+    let mut has_observer = false;
+    for_each_pipeline_filter(filters, &mut |entry| {
+        has_observer |= entry.filter.observes_request_completion();
+    });
+    has_observer
+}
+
+/// Deliver one terminal hook with the entry's invocation identity bound.
+#[expect(
+    clippy::too_many_lines,
+    reason = "final response evidence and fallback scope are checked together"
+)]
+fn emit_completion_entry(entry: &PipelineFilter, ctx: &mut crate::HttpFilterContext<'_>, status: u16) {
+    if !entry.filter.observes_request_completion() {
+        return;
+    }
+    let decision = ctx
+        .extensions
+        .get::<CompletionResponseHooks>()
+        .and_then(|hooks| hooks.decision(entry.filter_id));
+    if decision == Some(false) {
+        return;
+    }
+    if decision.is_none() && !entry.response_conditions.is_empty() {
+        let needs_unknown_headers = entry.response_conditions.iter().any(|condition| {
+            let (praxis_core::config::ResponseCondition::When(scope)
+            | praxis_core::config::ResponseCondition::Unless(scope)) = condition;
+            scope.headers.is_some() || scope.headers_present.is_some()
+        });
+        if needs_unknown_headers {
+            return;
+        }
+        let Ok(written) = ::http::StatusCode::from_u16(status) else {
+            return;
+        };
+        if !crate::condition::should_execute_response_ref(
+            &entry.response_conditions,
+            written,
+            &::http::HeaderMap::new(),
+        ) {
+            return;
+        }
+    }
+    let previous_filter_id = ctx.current_filter_id.replace(entry.filter_id);
+    entry.filter.on_request_complete(ctx, status);
+    ctx.current_filter_id = previous_filter_id;
+}
+
 /// Collect every filter's cluster application-metadata declarations,
 /// descending into branch sub-chains.
 ///
@@ -830,6 +1006,18 @@ pub(super) fn collect_cluster_declarations(filters: &[PipelineFilter]) -> Vec<ca
         }
     });
     declarations
+}
+
+/// Clamp filter-owned buffers throughout branch sub-chains.
+fn apply_filter_buffer_cap(filters: &mut [PipelineFilter], cap: usize) {
+    for entry in filters {
+        if let AnyFilter::Http(filter) = &mut entry.filter {
+            filter.apply_buffer_cap(cap);
+        }
+        for branch in &mut entry.branches {
+            apply_filter_buffer_cap(&mut branch.filters, cap);
+        }
+    }
 }
 
 /// Invoke each filter's [`visit_nested_pipelines`], descending recursively into
@@ -853,11 +1041,28 @@ fn visit_branch_nested_pipelines(filters: &mut [PipelineFilter], visitor: &mut d
 // Body Limit Utilities
 // -----------------------------------------------------------------------------
 
+/// Reject a request transfer limit that a statically buffered pipeline cannot retain.
+fn check_buffered_request_limits(mode: BodyMode, limits: &BodyLimitsConfig) -> Result<(), FilterError> {
+    if matches!(mode, BodyMode::StreamBuffer { .. })
+        && let Some(max_request) = limits.max_request_bytes
+        && max_request > limits.max_buffer_bytes.get()
+    {
+        let buffer_cap = limits.max_buffer_bytes.get();
+        return Err(format!(
+            "body_limits.max_request_bytes ({max_request}) exceeds \
+             body_limits.max_buffer_bytes ({buffer_cap}) for a buffered request pipeline; \
+             lower max_request_bytes or raise max_buffer_bytes"
+        )
+        .into());
+    }
+    Ok(())
+}
+
 /// Tighten a body mode's size limit to the given ceiling.
 /// When `filter_declared` is true a filter explicitly chose Stream
 /// mode; preserve it so streaming filters keep working. When false
 /// the mode is the default (no filter needs body); convert to
-/// `SizeLimit` so the body limit is enforced by buffering.
+/// `SizeLimit` so the body limit is enforced by counting.
 fn clamp_body_mode(mode: BodyMode, ceiling: usize, filter_declared: bool) -> BodyMode {
     match mode {
         BodyMode::StreamBuffer { max_bytes } => BodyMode::StreamBuffer {
@@ -871,10 +1076,11 @@ fn clamp_body_mode(mode: BodyMode, ceiling: usize, filter_declared: bool) -> Bod
     }
 }
 
-/// Reject or clamp unbounded [`StreamBuffer`] body modes.
+/// Enforce the configured buffering cap, including explicit finite limits.
 ///
 /// When `allow_unbounded` is `true`, the mode is clamped to
-/// [`ABSOLUTE_MAX_BODY_BYTES`] and a warning is emitted.
+/// the configured cap and a warning is emitted. Finite limits
+/// are always tightened to that cap.
 ///
 /// # Errors
 ///
@@ -882,22 +1088,25 @@ fn clamp_body_mode(mode: BodyMode, ceiling: usize, filter_declared: bool) -> Bod
 /// and `allow_unbounded` is `false`.
 ///
 /// [`StreamBuffer`]: BodyMode::StreamBuffer
-/// [`ABSOLUTE_MAX_BODY_BYTES`]: praxis_core::config::ABSOLUTE_MAX_BODY_BYTES
 fn check_unbounded_stream_buffer(
     direction: &str,
     mode: &mut BodyMode,
+    buffer_cap: usize,
     allow_unbounded: bool,
 ) -> Result<(), FilterError> {
+    if let BodyMode::StreamBuffer { max_bytes: Some(max) } = mode {
+        *max = (*max).min(buffer_cap);
+    }
     if let BodyMode::StreamBuffer { max_bytes: max @ None } = mode {
         if allow_unbounded {
             warn!(
                 direction = direction,
-                ceiling = ABSOLUTE_MAX_BODY_BYTES,
+                ceiling = buffer_cap,
                 "StreamBuffer body mode has no per-filter size limit; \
-                 clamped to absolute ceiling ({} MiB)",
-                ABSOLUTE_MAX_BODY_BYTES / 1_048_576
+                 clamped to configured buffering cap ({} MiB)",
+                buffer_cap / 1_048_576
             );
-            *max = Some(ABSOLUTE_MAX_BODY_BYTES);
+            *max = Some(buffer_cap);
         } else {
             return Err(format!(
                 "StreamBuffer {direction} body mode has no size limit; \

@@ -8,4 +8,29 @@ ignore = [
     # (quixotic-plecostomus-rustls) and rustls-native-certs 0.7. Drop once
     # the fork parses PEM with rustls-pki-types instead.
     "RUSTSEC-2025-0134",
+    # paste 1.0.15: unmaintained proc-macro (compile time only), pulled in by
+    # cel 0.12 through limitador in the Policy rate limiter. Drop once cel
+    # moves off it.
+    "RUSTSEC-2024-0436",
+    # chrono 0.4.45: unmaintained, no patched release. Used directly for
+    # timestamps and transitively by Policy, Pingora, and benchmarks. Remove
+    # after direct users and upstream dependencies migrate to maintained crates.
+    "RUSTSEC-2026-0543",
+    # chrono-tz 0.10.4: unmaintained, no patched release. Policy's CEL and OPA
+    # engines pull it in through cel and regorus. Remove after those upstream
+    # dependencies migrate off chrono-tz.
+    "RUSTSEC-2026-0555",
+    # heapless 0.7.17: unsound, pulled in only because limitador 0.14.0 keeps
+    # postcard's default `heapless-cas` feature; nothing uses heapless types.
+    # limitador main disables it. Remove after limitador 0.15 is published and
+    # a praxis-policy release picks it up.
+    "RUSTSEC-2026-0574",
+    "RUSTSEC-2026-0575",
+    "RUSTSEC-2026-0576",
+    "RUSTSEC-2026-0577",
+    "RUSTSEC-2026-0578",
+    "RUSTSEC-2026-0579",
+    "RUSTSEC-2026-0580",
+    "RUSTSEC-2026-0581",
+    "RUSTSEC-2026-0582",
 ]

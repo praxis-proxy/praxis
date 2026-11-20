@@ -1,0 +1,40 @@
+# Policy fixture for DPoP on MCP tool calls. The test fills in the
+# placeholders with the test-only keys in `policy-fips/`.
+#
+# A tool call resolves identity twice: at the header-phase gate and again for
+# its `tool:` route. Both must accept the one DPoP proof the request carries;
+# a second request reusing it is a replay.
+
+plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks: [identity.resolve]
+    mode: sequential
+    on_error: fail
+    capabilities: [read_headers]
+    config:
+      credential:
+        kind: header
+        name: Authorization
+      trusted_issuers:
+        - issuer: "https://dpop.idp.test"
+          audiences: ["praxis-fips-example"]
+          algorithms: ["ES256"]
+          decoding_key:
+            kind: pem_file
+            path: "EC_PUBLIC_KEY"
+          dpop:
+            mode: required
+            algorithms: ["ES256"]
+            external_base_url: "EXTERNAL_BASE_URL"
+      claim_mapper: standard
+
+global:
+  authentication:
+    - jwt-user
+
+routes:
+  - tool: echo
+    authorization:
+      pre_invocation:
+        - "require(authenticated)"

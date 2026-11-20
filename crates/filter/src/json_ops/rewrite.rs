@@ -89,19 +89,19 @@ impl RewriteSession {
         }
     }
 
-    /// Write scratch captures into the op store.
-    fn flush_to_store(&self, store: &mut dyn JsonOpStore) {
-        for (key, text) in &self.scratch_metadata {
-            store.set_metadata(key.clone(), text.clone());
+    /// Move scratch captures into the op store.
+    fn flush_to_store(self, store: &mut dyn JsonOpStore) {
+        for (key, text) in self.scratch_metadata {
+            store.set_metadata(key, text);
         }
         for ((namespace, key), bytes) in &self.capture_structured {
             if let Ok(value) = serde_json::from_slice(bytes) {
                 store.set_structured(namespace, key, value);
             }
         }
-        for (name, text) in &self.capture_headers {
-            if is_safe_header_promotion(text, name) {
-                store.push_request_header(name.clone(), text.clone());
+        for (name, text) in self.capture_headers {
+            if is_safe_header_promotion(&text, &name) {
+                store.push_request_header(name, text);
             }
         }
     }
@@ -138,6 +138,11 @@ pub(super) fn rewrite_document(
     op_set: &CompiledOpSet,
     store: Option<&mut dyn JsonOpStore>,
 ) -> Result<RewriteOutcome, JsonError> {
+    // Skipped string spans are not otherwise decoded, so validate their raw
+    // bytes before committing any captures or mutations.
+    if std::str::from_utf8(input).is_err() {
+        return Err(JsonError::InvalidJson);
+    }
     let mut session = RewriteSession::new(op_set);
     if let Some(store) = store.as_deref() {
         preload_context_sources(op_set, store, &mut session);
@@ -156,7 +161,7 @@ pub(super) fn rewrite_document(
         if i != input.len() {
             return Err(JsonError::InvalidJson);
         }
-        return Ok(finish_document(&session, store, emit.then(|| root.to_vec())));
+        return Ok(finish_document(session, store, emit.then(|| root.to_vec())));
     }
 
     let mut out = emit.then(|| Vec::with_capacity(rewrite_output_capacity(input.len(), op_set.growth_hint)));
@@ -167,12 +172,12 @@ pub(super) fn rewrite_document(
         return Err(JsonError::InvalidJson);
     }
 
-    Ok(finish_document(&session, store, out))
+    Ok(finish_document(session, store, out))
 }
 
 /// Flush captures and wrap the optional output buffer.
 fn finish_document(
-    session: &RewriteSession,
+    session: RewriteSession,
     store: Option<&mut dyn JsonOpStore>,
     output: Option<Vec<u8>>,
 ) -> RewriteOutcome {
@@ -472,7 +477,7 @@ fn rewrite_object(
 
     let mut emitted_any = false;
     let mut seen_input_member = false;
-    let mut satisfied_add_keys: Vec<&str> = Vec::new();
+    let mut present_add_keys: Vec<&str> = Vec::new();
 
     loop {
         skip_ws(input, i);
@@ -509,8 +514,8 @@ fn rewrite_object(
                 op_set,
                 session,
             )?;
-            if op.kind == OpKind::Add && resolve_payload(op_idx, op, session).is_some() {
-                satisfied_add_keys.push(op.tokens.last().map_or("", String::as_str));
+            if op.kind == OpKind::Add {
+                present_add_keys.push(op.tokens.last().map_or("", String::as_str));
             }
             session.path.pop();
             continue;
@@ -530,13 +535,7 @@ fn rewrite_object(
         }
     }
 
-    inject_object_adds(
-        op_set,
-        &satisfied_add_keys,
-        out.as_deref_mut(),
-        &mut emitted_any,
-        session,
-    );
+    inject_object_adds(op_set, &present_add_keys, out.as_deref_mut(), &mut emitted_any, session);
     if let Some(out) = out.as_mut() {
         out.push(b'}');
     }
@@ -579,10 +578,10 @@ fn apply_object_mutate(
     }
 }
 
-/// Emit unsatisfied object `add` ops at `session.path` in config order.
+/// Emit object `add` ops whose target was absent at `session.path`.
 fn inject_object_adds(
     op_set: &CompiledOpSet,
-    satisfied: &[&str],
+    present: &[&str],
     out: Option<&mut Vec<u8>>,
     emitted_any: &mut bool,
     session: &mut RewriteSession,
@@ -597,7 +596,7 @@ fn inject_object_adds(
         let Some(last) = op.tokens.last() else {
             continue;
         };
-        if last == "-" || satisfied.contains(&last.as_str()) {
+        if last == "-" || present.contains(&last.as_str()) {
             continue;
         }
         let Some(op_idx) = u32::try_from(idx).ok() else {

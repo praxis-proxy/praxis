@@ -1,0 +1,20 @@
+[package]
+name = "praxis-tests-rollout"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+chrono = { workspace = true }
+clap = { workspace = true }
+praxis-test-utils = { workspace = true, features = ["pingora"] }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+tempfile = { workspace = true }

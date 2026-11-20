@@ -495,6 +495,7 @@ mod tests {
             .collect();
         FilterPipeline {
             body_capabilities: BodyCapabilities::default(),
+            has_request_completion_observer: false,
             compression: None,
             filters,
             record_filter_duration_metrics: false,
@@ -509,9 +510,11 @@ mod tests {
             trace_context_filter_indices: Vec::new(),
             pipeline_extensions: Vec::new(),
             time_source: Arc::new(praxis_core::time::SystemTimeSource),
+            buffer_cap: praxis_core::config::DEFAULT_MAX_BUFFER_BYTES,
             request_body_ceiling: None,
             response_body_ceiling: None,
             request_head_filter_indices: Vec::new(),
+            shielded_admitter_indices: Vec::new(),
             request_body_filter_indices: Vec::new(),
             response_body_filter_indices: Vec::new(),
             selected_upstream_request_body_filter_indices: Vec::new(),
@@ -529,6 +532,7 @@ mod tests {
             local_addr: "0.0.0.0:8080",
             sni: None,
             upstream_addr: Some(std::borrow::Cow::Borrowed("10.0.0.1:80")),
+            lb_selection: None,
             cluster: None,
             health_registry: None,
             kv_stores: None,

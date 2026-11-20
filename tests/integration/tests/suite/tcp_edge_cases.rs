@@ -14,7 +14,8 @@ use std::{
 use praxis_core::config::Config;
 use praxis_filter::{FilterAction, FilterError, FilterFactory, FilterRegistry, Rejection, TcpFilter, TcpFilterContext};
 use praxis_test_utils::{
-    free_port, start_full_proxy, start_full_proxy_with_registry, start_tcp_tagged_backend, wait_for_tcp,
+    free_port, start_full_proxy, start_full_proxy_with_registry, start_tcp_echo_backend, start_tcp_tagged_backend,
+    wait_for_tcp,
 };
 
 // ---------------------------------------------------------------------------
@@ -137,8 +138,7 @@ fn tcp_session_omitted_timeout_gets_default_and_forwards() {
 /// Start a backend that accepts connections and holds them open
 /// without responding, so sessions only end when the proxy ends them.
 fn start_holding_backend() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind holding backend");
-    let port = listener.local_addr().expect("holding backend port").port();
+    let (listener, port) = praxis_test_utils::bind_unique_port();
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
             std::thread::spawn(move || {
@@ -283,7 +283,7 @@ fn tcp_connect_filter_error_drops_connection() {
 
 #[test]
 fn tcp_oversized_tls_record_peek_grows_buffer_and_forwards() {
-    let backend_port = start_tcp_tagged_backend("peeked");
+    let backend_port = start_tcp_echo_backend();
     let proxy_port = free_port();
     let yaml = tcp_yaml(proxy_port, backend_port, "", "");
     let config = Config::from_yaml(&yaml).unwrap();
@@ -300,39 +300,33 @@ fn tcp_oversized_tls_record_peek_grows_buffer_and_forwards() {
     let mut payload = vec![0x16, 0x03, 0x01, 0x07, 0xD0];
     payload.extend(std::iter::repeat_n(0x41, 20_000));
 
-    // One connect/write/read exchange. Returns the backend's echo, or `None`
-    // if the proxy shed the connection during setup (a clean empty close).
-    let attempt = || -> Option<String> {
-        let mut stream = TcpStream::connect(format!("127.0.0.1:{proxy_port}")).ok()?;
-        stream.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
-        stream.write_all(&payload).ok()?;
-        stream.shutdown(std::net::Shutdown::Write).ok()?;
-        let mut buf = Vec::new();
-        stream.read_to_end(&mut buf).ok()?;
-        Some(String::from_utf8_lossy(&buf).into_owned())
-    };
-
-    // Under the heavy concurrency of the full suite (many in-process proxies,
-    // plus the OTLP exporter when the `otel` feature is enabled) the proxy can
-    // shed a connection during setup, closing it cleanly with no bytes
-    // forwarded. That is valid overload behavior, so retry the exchange; the
-    // guarantee under test is only that peeked bytes reach the backend, which
-    // needs a single unshed attempt.
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let mut last = String::from("<connection shed on every attempt>");
-    loop {
-        if let Some(text) = attempt() {
-            if text.starts_with("peeked:") {
-                return;
-            }
-            last = text.chars().take(24).collect();
+    let address = format!("127.0.0.1:{proxy_port}")
+        .parse()
+        .expect("TCP listener socket address");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut stream = loop {
+        match TcpStream::connect_timeout(&address, Duration::from_millis(250)) {
+            Ok(stream) => break stream,
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(25));
+            },
+            Err(error) => panic!("TCP listener did not become ready: {error}"),
         }
-        assert!(
-            Instant::now() < deadline,
-            "the peeked bytes must be forwarded to the backend within the retry window: {last:?}"
-        );
-        std::thread::sleep(Duration::from_millis(100));
-    }
+    };
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("TCP echo read timeout");
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .expect("TCP echo write timeout");
+    stream.write_all(&payload).expect("write complete binary payload");
+    stream.shutdown(std::net::Shutdown::Write).expect("half-close upload");
+    let mut echo = Vec::new();
+    stream.read_to_end(&mut echo).expect("read complete binary echo");
+    assert_eq!(
+        echo, payload,
+        "peeked TLS record and trailing bytes must be forwarded exactly"
+    );
 }
 
 #[test]

@@ -10,5 +10,5 @@
 /// Default maximum body size for generic JSON request-body inspection (10 MiB).
 pub const DEFAULT_JSON_BODY_MAX_BYTES: usize = 10_485_760; // 10 MiB
 
-/// Hard ceiling for JSON body inspection buffers (64 MiB).
-pub const MAX_JSON_BODY_BYTES: usize = 67_108_864; // 64 MiB
+/// Largest addressable JSON buffer. The pipeline also enforces its configured cap.
+pub const MAX_JSON_BODY_BYTES: usize = praxis_core::config::MAX_BUFFER_BYTES;

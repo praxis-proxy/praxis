@@ -32,8 +32,8 @@ use super::{
         is_request_stripped, min_timeout, record_header_termination, transport_error,
     },
     types::{
-        FrameworkHeaders, StreamLimits, StreamingSubResponse, SubRequest, SubRequestError, SubResponse,
-        SubResponseBody, UrlSubRequestError,
+        FrameworkHeaders, RequestProgress, StreamLimits, StreamingSubResponse, SubRequest, SubRequestError,
+        SubResponse, SubResponseBody, UrlSubRequestError,
     },
 };
 use crate::{
@@ -80,8 +80,8 @@ const MAX_CLIENT_SELECTED_DIALS: usize = 4;
 ///
 /// - An overall deadline covering admission, connect, and I/O.
 /// - Bounded response body reads: each call supplies a per-call limit, clamped to the client-wide ceiling set at
-///   construction via [`with_max_response_bytes`]. The server derives this ceiling from
-///   `body_limits.max_response_bytes`.
+///   construction via [`with_max_response_bytes`]. The server derives this ceiling from the smaller of
+///   `body_limits.max_buffer_bytes` and `body_limits.max_response_bytes`.
 /// - Hop-by-hop header sanitization on both request and response.
 /// - Proper `Host` framing.
 ///
@@ -114,18 +114,24 @@ pub struct SubRequestClient<C: Connector = backend::Connector> {
 }
 
 impl<C: Connector> SubRequestClient<C> {
+    /// Maximum buffered response bytes accepted by this client.
+    #[must_use]
+    pub fn max_response_bytes(&self) -> usize {
+        self.max_response_bytes
+    }
+
     /// Create a client wrapping the given shared connector.
     ///
     /// Defaults the client-wide response ceiling to
-    /// [`ABSOLUTE_MAX_BODY_BYTES`] (64 MiB). Use
-    /// [`with_max_response_bytes`] for a tighter cap.
+    /// [`DEFAULT_MAX_BUFFER_BYTES`] (64 MiB). Use
+    /// [`with_max_response_bytes`] for a configured cap.
     ///
-    /// [`ABSOLUTE_MAX_BODY_BYTES`]: crate::config::ABSOLUTE_MAX_BODY_BYTES
+    /// [`DEFAULT_MAX_BUFFER_BYTES`]: crate::config::DEFAULT_MAX_BUFFER_BYTES
     /// [`with_max_response_bytes`]: Self::with_max_response_bytes
     pub fn new(connector: SubRequestConnector<C>) -> Self {
         Self {
             connector,
-            max_response_bytes: crate::config::ABSOLUTE_MAX_BODY_BYTES,
+            max_response_bytes: crate::config::DEFAULT_MAX_BUFFER_BYTES,
             upstream_ca: None,
         }
     }
@@ -133,14 +139,26 @@ impl<C: Connector> SubRequestClient<C> {
     /// Create a client with an explicit response ceiling.
     ///
     /// Every `execute()` call clamps its per-call limit to
-    /// `min(per_call, ceiling)`, preventing callers from
-    /// exceeding the global cap.
+    /// `min(per_call, ceiling)`. Server callers supply the smaller of the
+    /// configured buffering cap and response transfer limit. Construction
+    /// does not allocate the requested capacity.
     pub fn with_max_response_bytes(connector: SubRequestConnector<C>, max_response_bytes: usize) -> Self {
         Self {
             connector,
-            max_response_bytes,
+            max_response_bytes: max_response_bytes.min(crate::config::MAX_BUFFER_BYTES),
             upstream_ca: None,
         }
+    }
+
+    /// Copy this client with a new buffered response ceiling.
+    ///
+    /// Keeps the connector and trust anchors loaded at startup. Use this when
+    /// a reload changes the body limit without rebuilding startup-only state.
+    #[must_use]
+    pub fn with_response_ceiling(&self, max_response_bytes: usize) -> Self {
+        let mut client = self.clone();
+        client.max_response_bytes = max_response_bytes.min(crate::config::MAX_BUFFER_BYTES);
+        client
     }
 
     /// Trust `ca` when a cluster does not set its own CA.
@@ -303,6 +321,7 @@ impl<C: Connector> SubRequestClient<C> {
         connect_attempt_cap: Option<Duration>,
         framework_headers: Option<&FrameworkHeaders>,
         abandon_neutral: bool,
+        progress: Option<&RequestProgress>,
     ) -> Result<RawExchange<'conn, 'conn, C>, SubRequestError> {
         #[cfg(feature = "otel")]
         let client_span = subrequest_client_span(peer, request);
@@ -318,6 +337,7 @@ impl<C: Connector> SubRequestClient<C> {
                 framework_headers,
                 &client_span,
                 abandon_neutral,
+                progress,
             )
             .instrument(client_span.clone())
             .await;
@@ -343,6 +363,7 @@ impl<C: Connector> SubRequestClient<C> {
         framework_headers: Option<&FrameworkHeaders>,
         client_span: &Span,
         abandon_neutral: bool,
+        progress: Option<&RequestProgress>,
     ) -> Result<RawExchange<'conn, 'conn, C>, SubRequestError> {
         let exchange_started = tokio::time::Instant::now();
         let deadline = exchange_started
@@ -437,6 +458,9 @@ impl<C: Connector> SubRequestClient<C> {
                 )
             })?
             .map_err(|err| charge(&mut circuit_guard, transport_error(err)))?;
+        if let Some(progress) = progress {
+            progress.mark_forwarded();
+        }
 
         if !request.body.is_empty() {
             let body_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -576,7 +600,6 @@ impl<C: Connector> SubRequestClient<C> {
         clippy::too_many_arguments,
         reason = "framework_headers is the typed metadata injection point"
     )]
-    #[expect(clippy::too_many_lines, reason = "sequential HTTP exchange steps")]
     pub async fn send_streaming(
         &self,
         peer: &PeerSpec,
@@ -585,11 +608,37 @@ impl<C: Connector> SubRequestClient<C> {
         limits: StreamLimits,
         framework_headers: Option<&FrameworkHeaders>,
     ) -> Result<StreamingSubResponse<C>, SubRequestError> {
+        self.send_streaming_with_progress(peer, request, timeout, limits, framework_headers, None)
+            .await
+    }
+
+    /// Send a streaming request with an optional per-attempt forwarding witness.
+    ///
+    /// The witness remains readable when this future is cancelled or returns
+    /// an error. Use a fresh witness for each attempt.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same transport errors as [`Self::send_streaming`].
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "per-attempt observation extends the streaming options"
+    )]
+    #[expect(clippy::too_many_lines, reason = "sequential HTTP exchange steps")]
+    pub async fn send_streaming_with_progress(
+        &self,
+        peer: &PeerSpec,
+        request: &SubRequest,
+        timeout: Duration,
+        limits: StreamLimits,
+        framework_headers: Option<&FrameworkHeaders>,
+        progress: Option<&RequestProgress>,
+    ) -> Result<StreamingSubResponse<C>, SubRequestError> {
         // Streaming uses no per-attempt connect cap: its header `timeout` already
         // bounds the whole connect-plus-header phase. Cancellation still records
         // a circuit failure; only a hedged attempt is neutral on drop.
         let mut exchange = self
-            .open_exchange(peer, request, timeout, None, framework_headers, false)
+            .open_exchange(peer, request, timeout, None, framework_headers, false, progress)
             .await?;
 
         // Hold the circuit guard until the header-time outcome is known.
@@ -690,14 +739,15 @@ impl<C: Connector> SubRequestClient<C> {
     /// by `max_response_bytes`), and returns a [`SubResponse`].
     ///
     /// Transport-level headers (hop-by-hop, `Connection`-nominated)
-    /// and reserved internal headers (`x-praxis-*`, `x-ext-*`) are
-    /// stripped from both request and response.
+    /// and reserved internal headers (`x-praxis-*`,
+    /// `x-ext-protocol-*`, `x-ext-agent-*`) are stripped from both
+    /// request and response.
     ///
     /// `framework_headers` are injected **after** all sanitisation
-    /// passes. The [`FrameworkHeaders`] type validates at insertion
-    /// time that no transport-level or reserved internal header
-    /// (`x-praxis-*`, `x-ext-*`) can be added, so callers cannot
-    /// reintroduce sanitised headers.
+    /// passes. [`FrameworkHeaders::insert`] rejects transport-level
+    /// names and the reserved prefixes above. The dedicated
+    /// [`FrameworkHeaders::set_depth`] method injects the trusted
+    /// `x-praxis-iterative-depth` header.
     ///
     /// # Errors
     ///
@@ -724,6 +774,41 @@ impl<C: Connector> SubRequestClient<C> {
             None,
             framework_headers,
             false,
+            None,
+        )
+        .await
+    }
+
+    /// Execute a buffered request with a per-attempt forwarding witness.
+    ///
+    /// The witness remains readable when this future is cancelled or returns
+    /// an error. Use a fresh witness for each attempt.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same transport errors as [`Self::execute`].
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "per-attempt observation extends the buffered options"
+    )]
+    pub async fn execute_with_progress(
+        &self,
+        peer: &PeerSpec,
+        request: &SubRequest,
+        max_response_bytes: usize,
+        timeout: Duration,
+        framework_headers: Option<&FrameworkHeaders>,
+        progress: &RequestProgress,
+    ) -> Result<SubResponse, SubRequestError> {
+        self.execute_inner(
+            peer,
+            request,
+            max_response_bytes,
+            timeout,
+            None,
+            framework_headers,
+            false,
+            Some(progress),
         )
         .await
     }
@@ -758,6 +843,7 @@ impl<C: Connector> SubRequestClient<C> {
             None,
             framework_headers,
             true,
+            None,
         )
         .await
     }
@@ -789,6 +875,7 @@ impl<C: Connector> SubRequestClient<C> {
             connect_attempt_cap,
             framework_headers,
             false,
+            None,
         )
         .await
     }
@@ -809,6 +896,7 @@ impl<C: Connector> SubRequestClient<C> {
         connect_attempt_cap: Option<Duration>,
         framework_headers: Option<&FrameworkHeaders>,
         abandon_neutral: bool,
+        progress: Option<&RequestProgress>,
     ) -> Result<SubResponse, SubRequestError> {
         let exchange = self
             .open_exchange(
@@ -818,6 +906,7 @@ impl<C: Connector> SubRequestClient<C> {
                 connect_attempt_cap,
                 framework_headers,
                 abandon_neutral,
+                progress,
             )
             .await;
 
@@ -1308,8 +1397,8 @@ mod tests {
 
         assert_eq!(
             client.max_response_bytes,
-            crate::config::ABSOLUTE_MAX_BODY_BYTES,
-            "new() should default to ABSOLUTE_MAX_BODY_BYTES"
+            crate::config::DEFAULT_MAX_BUFFER_BYTES,
+            "new() should default to DEFAULT_MAX_BUFFER_BYTES"
         );
     }
 
@@ -1420,9 +1509,19 @@ mod tests {
         let large_client = SubRequestClient::with_max_response_bytes(connector, usize::MAX);
         assert_eq!(
             large_client.max_response_bytes,
-            usize::MAX,
-            "a ceiling of usize::MAX should be stored unchanged"
+            crate::config::MAX_BUFFER_BYTES,
+            "a byte buffer cannot exceed the addressable allocation maximum"
         );
+    }
+
+    #[test]
+    fn buffered_response_ceiling_can_explicitly_exceed_the_default() {
+        let hard = crate::config::DEFAULT_MAX_BUFFER_BYTES;
+        let connector = test_connector();
+        for requested in [hard - 1, hard, hard + 1, 1_073_741_824] {
+            let client = SubRequestClient::with_max_response_bytes(connector.clone(), requested);
+            assert_eq!(client.max_response_bytes, requested);
+        }
     }
 
     #[test]
@@ -1575,8 +1674,8 @@ mod tests {
         );
         assert_eq!(
             client_c.max_response_bytes,
-            crate::config::ABSOLUTE_MAX_BODY_BYTES,
-            "client_c should default to ABSOLUTE_MAX_BODY_BYTES"
+            crate::config::DEFAULT_MAX_BUFFER_BYTES,
+            "client_c should default to DEFAULT_MAX_BUFFER_BYTES"
         );
     }
 

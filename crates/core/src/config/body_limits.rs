@@ -12,11 +12,51 @@ use serde::Deserialize;
 /// Default body limit applied when the operator omits the field.
 pub const DEFAULT_MAX_BODY_BYTES: usize = 10_485_760; // 10 MiB
 
-/// Absolute hard ceiling for body buffering (64 MiB).
-///
-/// Applied to any unbounded stream-buffer mode, even when
-/// `insecure_options.allow_unbounded_body` is set.
-pub const ABSOLUTE_MAX_BODY_BYTES: usize = 67_108_864; // 64 MiB
+/// Default cap for accumulated bodies and buffered subrequest responses.
+pub const DEFAULT_MAX_BUFFER_BYTES: usize = 67_108_864; // 64 MiB
+
+/// Legacy name for the default buffering cap, no longer an absolute maximum.
+/// New code should use [`DEFAULT_MAX_BUFFER_BYTES`] and configured limits.
+pub const ABSOLUTE_MAX_BODY_BYTES: usize = DEFAULT_MAX_BUFFER_BYTES;
+
+/// Largest addressable byte allocation; operational limits should be much lower.
+pub const MAX_BUFFER_BYTES: usize = isize::MAX.unsigned_abs();
+
+/// A finite, nonzero buffering cap that fits an addressable byte allocation.
+#[derive(Clone, Copy, Debug, Deserialize, serde::Serialize)]
+#[serde(try_from = "usize", into = "usize")]
+pub struct BufferLimit(usize);
+
+impl BufferLimit {
+    /// The configured maximum number of buffered bytes.
+    #[must_use]
+    pub const fn get(self) -> usize {
+        self.0
+    }
+}
+
+impl Default for BufferLimit {
+    fn default() -> Self {
+        Self(DEFAULT_MAX_BUFFER_BYTES)
+    }
+}
+
+impl TryFrom<usize> for BufferLimit {
+    type Error = String;
+
+    fn try_from(value: usize) -> Result<Self, Self::Error> {
+        if value == 0 || value > MAX_BUFFER_BYTES {
+            return Err(format!("max_buffer_bytes must be between 1 and {MAX_BUFFER_BYTES}"));
+        }
+        Ok(Self(value))
+    }
+}
+
+impl From<BufferLimit> for usize {
+    fn from(value: BufferLimit) -> Self {
+        value.get()
+    }
+}
 
 /// Global hard ceilings on request and response body size.
 ///
@@ -48,7 +88,16 @@ pub const ABSOLUTE_MAX_BODY_BYTES: usize = 67_108_864; // 64 MiB
 /// ```
 #[derive(Clone, Debug, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
+#[expect(
+    clippy::struct_field_names,
+    reason = "public configuration keys consistently identify byte ceilings"
+)]
 pub struct BodyLimitsConfig {
+    /// Cap on each accumulated body and buffered subrequest response.
+    /// Defaults to 64 MiB. Cannot be zero or null. Incremental streams have
+    /// independent cumulative limits; raising this cap does not raise them.
+    pub max_buffer_bytes: BufferLimit,
+
     /// Maximum request body size in bytes.
     ///
     /// Defaults to 10 MiB. `None` (YAML `null`) disables the
@@ -67,6 +116,7 @@ pub struct BodyLimitsConfig {
 impl Default for BodyLimitsConfig {
     fn default() -> Self {
         Self {
+            max_buffer_bytes: BufferLimit::default(),
             max_request_bytes: default_max_body_bytes(),
             max_response_bytes: default_max_body_bytes(),
         }
@@ -95,6 +145,59 @@ fn default_max_body_bytes() -> Option<usize> {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn buffering_cap_defaults_and_round_trips() {
+        assert_eq!(
+            BodyLimitsConfig::default().max_buffer_bytes.get(),
+            DEFAULT_MAX_BUFFER_BYTES
+        );
+        assert_eq!(
+            serde_yaml::from_str::<BodyLimitsConfig>("{}")
+                .unwrap()
+                .max_buffer_bytes
+                .get(),
+            DEFAULT_MAX_BUFFER_BYTES
+        );
+        for value in [
+            1,
+            DEFAULT_MAX_BUFFER_BYTES - 1,
+            DEFAULT_MAX_BUFFER_BYTES,
+            DEFAULT_MAX_BUFFER_BYTES + 1,
+            1_073_741_824,
+            MAX_BUFFER_BYTES,
+        ] {
+            let limits: BodyLimitsConfig = serde_yaml::from_str(&format!("max_buffer_bytes: {value}")).unwrap();
+            assert_eq!(limits.max_buffer_bytes.get(), value);
+            assert_eq!(limits.max_request_bytes, Some(DEFAULT_MAX_BODY_BYTES));
+            assert_eq!(limits.max_response_bytes, Some(DEFAULT_MAX_BODY_BYTES));
+            let encoded = serde_yaml::to_string(&limits).unwrap();
+            let decoded: BodyLimitsConfig = serde_yaml::from_str(&encoded).unwrap();
+            assert_eq!(decoded.max_buffer_bytes.get(), value);
+        }
+    }
+
+    #[test]
+    fn buffering_cap_rejects_invalid_values() {
+        for value in ["0", "null", "-1", "1.5", "unlimited", "18446744073709551616"] {
+            assert!(
+                serde_yaml::from_str::<BodyLimitsConfig>(&format!("max_buffer_bytes: {value}")).is_err(),
+                "{value}"
+            );
+        }
+        assert!(BufferLimit::try_from(0).unwrap_err().contains("between"));
+        assert!(
+            BufferLimit::try_from(MAX_BUFFER_BYTES + 1)
+                .unwrap_err()
+                .contains("between")
+        );
+        assert!(
+            serde_yaml::from_str::<BodyLimitsConfig>("max_buffer_byte: 4096")
+                .unwrap_err()
+                .to_string()
+                .contains("unknown field")
+        );
+    }
 
     #[test]
     fn defaults_are_ten_mib() {

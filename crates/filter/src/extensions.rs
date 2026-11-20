@@ -37,6 +37,24 @@ use bytes::Bytes;
 #[derive(Clone, Copy, Debug)]
 pub struct ClientResponseHeadersCommitted;
 
+/// Marks a synthetic response-body EOF that is followed by upstream trailers.
+///
+/// Streaming filters use this marker to flush only bytes that are safe to
+/// emit before trailer filters append their final frame. The protocol layer
+/// removes it before the trailer phase begins.
+#[derive(Clone, Copy, Debug)]
+pub struct ResponseTrailersPending;
+
+/// Endpoint whose connected upstream exchange reached request forwarding.
+///
+/// Published by an HTTP adapter after a successful connection and request-head
+/// preparation. A failed dial or a local rejection before forwarding leaves
+/// it absent. A subsequent read failure remains ambiguous: the backend may
+/// already have processed the request. The endpoint identity prevents a later
+/// failed retry from claiming a session after an earlier attempt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpstreamForwardedEndpoint(pub Arc<str>);
+
 // -----------------------------------------------------------------------------
 // AuthenticatedIdentity
 // -----------------------------------------------------------------------------

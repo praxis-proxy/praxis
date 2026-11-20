@@ -9,6 +9,51 @@
 
 use http::HeaderMap;
 
+#[cfg(feature = "cloud-events-filter")]
+#[tokio::test]
+#[expect(
+    clippy::large_futures,
+    reason = "drives the filtered subrequest API through its placement guard"
+)]
+async fn direct_callout_rejects_request_completion_observer() {
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+
+    let registry = crate::FilterRegistry::with_builtins();
+    let mut entries: Vec<crate::FilterEntry> = serde_yaml::from_str(
+        "- filter: cloud_events\n  on: request_complete\n  destination: https://events.example.test/events\n  source: urn:praxis:test\n  type: test.event\n",
+    )
+    .unwrap();
+    let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
+    let client = praxis_core::subrequest::SubRequestClient::new(crate::test_support::connector(1, None));
+    let downstream = crate::SubrequestRuntime::new(None, false, None, Instant::now());
+    let executor =
+        crate::FilteredSubrequestExecutor::for_callout(client, downstream, 0, 1_048_576, Duration::from_secs(5));
+    let request = crate::SubRequest {
+        method: http::Method::GET,
+        uri: http::Uri::from_static("/"),
+        headers: HeaderMap::new(),
+        body: bytes::Bytes::new(),
+    };
+    let result = executor
+        .run(
+            &pipeline,
+            &request,
+            crate::RequestExtensions::default(),
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await;
+    let err = result
+        .err()
+        .expect("direct callout must reject an unsupported completion observer");
+    assert!(
+        err.to_string()
+            .contains("request-completion observers require a listener request")
+    );
+}
+
 // -----------------------------------------------------------------------------
 // Rejection Conversion
 // -----------------------------------------------------------------------------
@@ -513,6 +558,47 @@ fn request_header_mutations_remove_set_and_add() {
     assert!(
         headers.get("bad name").is_none(),
         "invalid extra header names must be dropped"
+    );
+}
+
+#[test]
+fn ordered_request_headers_replay_into_filtered_subrequest() {
+    let mut request = crate::test_utils::make_request(http::Method::GET, "/");
+    request
+        .headers
+        .append("cookie", http::HeaderValue::from_bytes(b"\x80opaque").unwrap());
+    let mut ctx = crate::test_utils::make_filter_context(&request);
+    ctx.request_header_mutations = vec![
+        crate::TrustedHeaderMutation::Add("cookie".parse().unwrap(), "a=1".to_owned()),
+        crate::TrustedHeaderMutation::Add("x-fresh".parse().unwrap(), "one".to_owned()),
+        crate::TrustedHeaderMutation::Add("x-fresh".parse().unwrap(), "two".to_owned()),
+        crate::TrustedHeaderMutation::Set("x-fresh".parse().unwrap(), "final".parse().unwrap()),
+    ];
+    let mut headers = request.headers.clone();
+    super::sanitize::apply_request_header_mutations(&mut headers, &ctx);
+    assert_eq!(
+        headers
+            .get_all("cookie")
+            .iter()
+            .map(http::HeaderValue::as_bytes)
+            .collect::<Vec<_>>(),
+        [b"\x80opaque".as_slice(), b"a=1".as_slice()]
+    );
+    assert_eq!(
+        headers
+            .get_all("x-fresh")
+            .iter()
+            .map(http::HeaderValue::as_bytes)
+            .collect::<Vec<_>>(),
+        [b"final".as_slice()]
+    );
+
+    let mut folded = request.headers.clone();
+    super::sanitize::fold_pending_into(&mut folded, &mut ctx);
+    assert_eq!(folded, headers);
+    assert!(
+        ctx.request_header_mutations.is_empty(),
+        "folding clears this request's log"
     );
 }
 
@@ -1044,7 +1130,7 @@ impl crate::HttpFilter for SelectedUpstreamRejectFilter {
     }
 
     fn selected_upstream_request_body_access(&self) -> crate::BodyAccess {
-        crate::BodyAccess::ReadOnly
+        crate::BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn request_body_mode(&self) -> crate::BodyMode {
@@ -1090,7 +1176,7 @@ impl crate::HttpFilter for SelectedUpstreamExpandFilter {
     }
 
     fn selected_upstream_request_body_access(&self) -> crate::BodyAccess {
-        crate::BodyAccess::ReadWrite
+        crate::BodyAccess::ReadWrite(crate::BodyRequirement::Optional)
     }
 
     fn request_body_mode(&self) -> crate::BodyMode {
@@ -1146,7 +1232,7 @@ impl crate::HttpFilter for SelectedProviderRecorderFilter {
     }
 
     fn selected_upstream_request_body_access(&self) -> crate::BodyAccess {
-        crate::BodyAccess::ReadOnly
+        crate::BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn request_body_mode(&self) -> crate::BodyMode {
@@ -1452,7 +1538,7 @@ fn into_parent_extensions_restores_parent_upstream_scope() {
         extensions,
         filter_state: std::collections::HashMap::new(),
         filter_results: std::collections::HashMap::new(),
-        filter_metadata: std::collections::HashMap::new(),
+        filter_metadata: crate::FilterMetadata::default(),
         structured_metadata: std::collections::HashMap::new(),
         executed_filter_indices: Vec::new(),
         body_done_indices: Vec::new(),
@@ -1507,7 +1593,7 @@ fn into_completion_restores_parent_upstream_scope() {
         extensions,
         filter_state: std::collections::HashMap::new(),
         filter_results: std::collections::HashMap::new(),
-        filter_metadata: std::collections::HashMap::new(),
+        filter_metadata: crate::FilterMetadata::default(),
         structured_metadata: std::collections::HashMap::new(),
         executed_filter_indices: Vec::new(),
         body_done_indices: Vec::new(),
@@ -1944,7 +2030,7 @@ impl crate::HttpFilter for SessionStoreRecorderFilter {
     }
 
     fn response_body_access(&self) -> crate::BodyAccess {
-        crate::BodyAccess::ReadWrite
+        crate::BodyAccess::ReadWrite(crate::BodyRequirement::Optional)
     }
 
     fn on_response_body(
@@ -2411,7 +2497,7 @@ impl crate::HttpFilter for TerminalEventFilter {
     }
 
     fn response_body_access(&self) -> crate::BodyAccess {
-        crate::BodyAccess::ReadWrite
+        crate::BodyAccess::ReadWrite(crate::BodyRequirement::Optional)
     }
 
     fn on_response_body(
@@ -2447,7 +2533,7 @@ impl crate::HttpFilter for BoundedCompletionFilter {
     }
 
     fn response_body_access(&self) -> crate::BodyAccess {
-        crate::BodyAccess::ReadWrite
+        crate::BodyAccess::ReadWrite(crate::BodyRequirement::Optional)
     }
 
     fn on_response_body(
@@ -2485,7 +2571,7 @@ impl crate::HttpFilter for SuppressionProbeFilter {
     }
 
     fn response_body_access(&self) -> crate::BodyAccess {
-        crate::BodyAccess::ReadOnly
+        crate::BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn on_response_body(
@@ -2518,7 +2604,7 @@ impl crate::HttpFilter for RejectOnCompletionFilter {
     }
 
     fn response_body_access(&self) -> crate::BodyAccess {
-        crate::BodyAccess::ReadWrite
+        crate::BodyAccess::ReadWrite(crate::BodyRequirement::Optional)
     }
 
     fn on_response_body(
@@ -2844,7 +2930,18 @@ async fn callout_separate_limits_allow_stream_larger_than_buffered_cap() {
         spawn_raw_backend("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n8\r\nabcdefgh\r\n0\r\n\r\n").await;
     let registry = callout_registry();
     let mut entries: Vec<crate::FilterEntry> = serde_yaml::from_str(&routed_chain_yaml(addr, "")).unwrap();
-    let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
+    let mut pipeline = crate::FilterPipeline::build(&mut entries, &registry).unwrap();
+    pipeline
+        .configure_body_limits(
+            &praxis_core::config::BodyLimitsConfig {
+                max_buffer_bytes: 1.try_into().unwrap(),
+                max_request_bytes: None,
+                max_response_bytes: None,
+            },
+            true,
+        )
+        .unwrap();
+    let pipeline = Arc::new(pipeline);
     let executor = dual_limit_executor(4, 8);
     let request = crate::SubRequest {
         method: http::Method::GET,
@@ -3414,7 +3511,7 @@ impl crate::HttpFilter for BodyExpandingFilter {
     }
 
     fn response_body_access(&self) -> crate::BodyAccess {
-        crate::BodyAccess::ReadWrite
+        crate::BodyAccess::ReadWrite(crate::BodyRequirement::Optional)
     }
 
     fn on_response_body(
@@ -3457,6 +3554,234 @@ fn buffered_chain_yaml(addr: std::net::SocketAddr, prefix: &str) -> String {
         - \"{addr}\"
 "
     )
+}
+
+/// A breaker that makes a cancelled transport attempt visible as an immediate
+/// 503 on the next request, without inspecting private core token counts.
+fn nested_circuit_chain_yaml() -> &'static str {
+    "- filter: router\n  routes:\n    - path_prefix: /\n      cluster: backend\n\
+     - filter: circuit_breaker\n  clusters:\n    - name: backend\n      consecutive_failures: 1\n      recovery_window_secs: 30\n\
+     - filter: load_balancer\n  clusters:\n    - name: backend\n      endpoints: ['127.0.0.1:9']\n"
+}
+
+#[tokio::test]
+#[expect(clippy::large_futures, reason = "drives the full nested executor in a test")]
+async fn outer_deadline_settles_nested_circuit() {
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+
+    let registry = crate::FilterRegistry::with_builtins();
+    let mut entries: Vec<crate::FilterEntry> = serde_yaml::from_str(nested_circuit_chain_yaml()).unwrap();
+    let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
+    let gate = super::PeerPreparationGate {
+        entered: Arc::new(tokio::sync::Notify::new()),
+        release: Arc::new(tokio::sync::Notify::new()),
+    };
+    let first_pipeline = Arc::clone(&pipeline);
+    let first_gate = gate.clone();
+    let worker = tokio::spawn(async move {
+        let request = crate::SubRequest {
+            method: http::Method::GET,
+            uri: http::Uri::from_static("/"),
+            headers: HeaderMap::new(),
+            body: bytes::Bytes::new(),
+        };
+        let mut extensions = crate::RequestExtensions::default();
+        extensions.insert(first_gate);
+        let input = super::FilteredSubrequestInput::callout(
+            &first_pipeline,
+            &request,
+            Instant::now() + Duration::from_millis(150),
+            extensions,
+        );
+        let super::OpenedSubrequest { continuation, kind } = match buffered_executor(1_048_576).execute(input).await {
+            Ok(opened) => opened,
+            Err(error) => panic!("nested circuit timeout failed: {}", error.into_parts().0),
+        };
+        let (status, failure) = match kind {
+            super::OpenedResponse::Complete(outcome) => (outcome.response.status, outcome.transport_error),
+            super::OpenedResponse::Streaming { .. } => panic!("buffered circuit step cannot stream"),
+        };
+        drop(continuation);
+        (status, failure)
+    });
+    tokio::time::timeout(Duration::from_secs(1), gate.entered.notified())
+        .await
+        .unwrap();
+    let (status, failure) = worker.await.unwrap();
+    assert_eq!(status, 504, "peer preparation must be bounded by the outer deadline");
+    assert_eq!(
+        failure,
+        Some(super::TransportFailure::DeadlineExceeded),
+        "timeout remains typed"
+    );
+
+    let request = crate::SubRequest {
+        method: http::Method::GET,
+        uri: http::Uri::from_static("/"),
+        headers: HeaderMap::new(),
+        body: bytes::Bytes::new(),
+    };
+    let second = buffered_executor(1_048_576)
+        .run(
+            &pipeline,
+            &request,
+            crate::RequestExtensions::default(),
+            Instant::now() + Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+    match second {
+        crate::CalloutResponse::Buffered(response) => assert_eq!(
+            response.status, 503,
+            "outer deadline must settle the nested token as failure"
+        ),
+        crate::CalloutResponse::Streaming { .. } => panic!("buffered circuit step cannot stream"),
+    }
+}
+
+#[tokio::test]
+#[expect(clippy::large_futures, reason = "drives nested executor cancellation in a test")]
+async fn dropped_executor_future_settles_nested_circuit() {
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+
+    let registry = crate::FilterRegistry::with_builtins();
+    let mut entries: Vec<crate::FilterEntry> = serde_yaml::from_str(nested_circuit_chain_yaml()).unwrap();
+    let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
+    let gate = super::PeerPreparationGate {
+        entered: Arc::new(tokio::sync::Notify::new()),
+        release: Arc::new(tokio::sync::Notify::new()),
+    };
+    let first_pipeline = Arc::clone(&pipeline);
+    let first_gate = gate.clone();
+    let worker = tokio::spawn(async move {
+        let executor = buffered_executor(1_048_576);
+        let request = crate::SubRequest {
+            method: http::Method::GET,
+            uri: http::Uri::from_static("/"),
+            headers: HeaderMap::new(),
+            body: bytes::Bytes::new(),
+        };
+        let mut extensions = crate::RequestExtensions::default();
+        extensions.insert(first_gate);
+        let input = super::FilteredSubrequestInput::callout(
+            &first_pipeline,
+            &request,
+            Instant::now() + Duration::from_secs(5),
+            extensions,
+        );
+        drop(executor.execute(input).await);
+    });
+    tokio::time::timeout(Duration::from_secs(1), gate.entered.notified())
+        .await
+        .unwrap();
+    worker.abort();
+    assert!(
+        worker.await.unwrap_err().is_cancelled(),
+        "the first executor future must be cancelled in transport"
+    );
+
+    let request = crate::SubRequest {
+        method: http::Method::GET,
+        uri: http::Uri::from_static("/"),
+        headers: HeaderMap::new(),
+        body: bytes::Bytes::new(),
+    };
+    let second = buffered_executor(1_048_576)
+        .run(
+            &pipeline,
+            &request,
+            crate::RequestExtensions::default(),
+            Instant::now() + Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+    match second {
+        crate::CalloutResponse::Buffered(response) => assert_eq!(
+            response.status, 503,
+            "cancelled transport must trip threshold-one breaker"
+        ),
+        crate::CalloutResponse::Streaming { .. } => panic!("buffered circuit step cannot stream"),
+    }
+}
+
+#[tokio::test]
+#[expect(
+    clippy::large_futures,
+    reason = "drives buffered subrequest paths with configured caps"
+)]
+async fn configured_buffer_cap_bounds_transport_local_and_transformed_subresponses() {
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+    for path in ["transport", "local", "transformed"] {
+        for cap in [4, 5] {
+            let raw_response = if path == "transformed" {
+                "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+            } else {
+                "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nabcde"
+            };
+            let (addr, backend) = spawn_raw_backend(raw_response).await;
+            let mut registry = crate::FilterRegistry::with_builtins();
+            registry
+                .register(
+                    "test_body_expanding",
+                    crate::FilterFactory::Http(Arc::new(|_| Ok(Box::new(BodyExpandingFilter { target: 5 })))),
+                )
+                .unwrap();
+            let yaml = match path {
+                "local" => "- filter: static_response\n  status: 200\n  body: abcde\n".to_owned(),
+                "transformed" => buffered_chain_yaml(addr, "- filter: test_body_expanding\n"),
+                "transport" => buffered_chain_yaml(addr, ""),
+                _ => unreachable!(),
+            };
+            let mut entries: Vec<crate::FilterEntry> = serde_yaml::from_str(&yaml).unwrap();
+            let mut pipeline = crate::FilterPipeline::build(&mut entries, &registry).unwrap();
+            pipeline
+                .configure_body_limits(
+                    &praxis_core::config::BodyLimitsConfig {
+                        max_buffer_bytes: cap.try_into().unwrap(),
+                        max_request_bytes: None,
+                        max_response_bytes: None,
+                    },
+                    true,
+                )
+                .unwrap();
+            let request = crate::SubRequest {
+                method: http::Method::GET,
+                uri: http::Uri::from_static("/"),
+                headers: HeaderMap::new(),
+                body: bytes::Bytes::new(),
+            };
+            let outcome = buffered_executor(128)
+                .run_classified(
+                    &Arc::new(pipeline),
+                    &request,
+                    crate::RequestExtensions::default(),
+                    Instant::now() + Duration::from_secs(5),
+                )
+                .await
+                .unwrap();
+            backend.abort();
+            match outcome {
+                crate::CalloutOutcome::ResponseTooLarge { limit, .. } => assert_eq!((cap, limit), (4, 4), "{path}"),
+                crate::CalloutOutcome::Response(crate::CalloutResponse::Buffered(response)) => {
+                    assert_eq!(cap, 5, "{path}");
+                    assert_eq!(response.body.len(), 5, "{path}");
+                    assert_eq!(response.status, 200, "{path}");
+                },
+                crate::CalloutOutcome::Response(crate::CalloutResponse::Streaming { .. }) => {
+                    panic!("{path} unexpectedly streamed")
+                },
+            }
+        }
+    }
 }
 
 #[tokio::test]
@@ -3683,6 +4008,290 @@ async fn run_classified_runs_response_filters_on_transport_overflow() {
     assert!(
         saw_on_response.load(Ordering::SeqCst),
         "the response-header phase must run even when the response overflows"
+    );
+}
+
+/// Count header and completion phases while selecting either response mode.
+struct DeadlineLifecycleFilter {
+    streaming: bool,
+    headers: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    completions: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl crate::HttpFilter for DeadlineLifecycleFilter {
+    fn name(&self) -> &'static str {
+        "deadline_lifecycle"
+    }
+
+    fn may_select_streaming_subrequest_response(&self) -> bool {
+        self.streaming
+    }
+
+    fn response_body_access(&self) -> crate::BodyAccess {
+        crate::BodyAccess::ReadWrite(crate::BodyRequirement::Optional)
+    }
+
+    async fn on_request(
+        &self,
+        ctx: &mut crate::HttpFilterContext<'_>,
+    ) -> Result<crate::FilterAction, crate::FilterError> {
+        if self.streaming {
+            ctx.set_subrequest_response_mode(crate::SubRequestResponseMode::Streaming);
+        }
+        std::sync::Arc::make_mut(&mut ctx.upstream.as_mut().unwrap().connection).read_timeout =
+            Some(std::time::Duration::from_millis(20));
+        Ok(crate::FilterAction::Continue)
+    }
+
+    async fn on_response(
+        &self,
+        _ctx: &mut crate::HttpFilterContext<'_>,
+    ) -> Result<crate::FilterAction, crate::FilterError> {
+        self.headers.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(crate::FilterAction::Continue)
+    }
+
+    fn on_response_body(
+        &self,
+        _ctx: &mut crate::HttpFilterContext<'_>,
+        _body: &mut Option<bytes::Bytes>,
+        end_of_stream: bool,
+    ) -> Result<crate::FilterAction, crate::FilterError> {
+        if end_of_stream {
+            self.completions.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        Ok(crate::FilterAction::Continue)
+    }
+}
+
+#[tokio::test]
+#[expect(
+    clippy::large_futures,
+    reason = "drives full buffered and streaming executor lifecycles"
+)]
+async fn outer_deadline_response_lifecycle_is_once() {
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::{Duration, Instant},
+    };
+
+    use tokio::io::AsyncReadExt as _;
+    for streaming in [false, true] {
+        for outer in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let receipt = Arc::new(tokio::sync::Notify::new());
+            let observed = Arc::clone(&receipt);
+            let backend = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut head = Vec::new();
+                while !head.ends_with(b"\r\n\r\n") {
+                    head.push(socket.read_u8().await.unwrap());
+                }
+                observed.notify_one();
+                std::future::pending::<()>().await;
+                drop(socket);
+            });
+            let headers = Arc::new(AtomicUsize::new(0));
+            let completions = Arc::new(AtomicUsize::new(0));
+            let mut registry = crate::FilterRegistry::with_builtins();
+            let header_count = Arc::clone(&headers);
+            let completion_count = Arc::clone(&completions);
+            registry
+                .register(
+                    "deadline_lifecycle",
+                    crate::FilterFactory::Http(Arc::new(move |_| {
+                        Ok(Box::new(DeadlineLifecycleFilter {
+                            streaming,
+                            headers: Arc::clone(&header_count),
+                            completions: Arc::clone(&completion_count),
+                        }))
+                    })),
+                )
+                .unwrap();
+            let mut yaml = nested_circuit_chain_yaml().replace("127.0.0.1:9", &addr.to_string());
+            yaml.push_str("- filter: deadline_lifecycle\n");
+            let mut entries = serde_yaml::from_str::<Vec<crate::FilterEntry>>(&yaml).unwrap();
+            let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
+            let gate = super::PeerPreparationGate {
+                entered: Arc::new(tokio::sync::Notify::new()),
+                release: Arc::new(tokio::sync::Notify::new()),
+            };
+            let mut extensions = crate::RequestExtensions::default();
+            if outer {
+                extensions.insert(gate.clone());
+            }
+            let request = crate::SubRequest {
+                method: http::Method::GET,
+                uri: http::Uri::from_static("/"),
+                headers: HeaderMap::new(),
+                body: bytes::Bytes::new(),
+            };
+            let executor = buffered_executor(1024);
+            let input = super::FilteredSubrequestInput::callout(
+                &pipeline,
+                &request,
+                Instant::now()
+                    + if outer {
+                        Duration::from_millis(100)
+                    } else {
+                        Duration::from_secs(2)
+                    },
+                extensions,
+            );
+            let super::OpenedSubrequest { continuation, kind } = match executor.execute(input).await {
+                Ok(opened) => opened,
+                Err(error) => panic!("nested timeout lifecycle failed: {}", error.into_parts().0),
+            };
+            let super::OpenedResponse::Complete(outcome) = kind else {
+                panic!("timeout must complete without a live body");
+            };
+            assert_eq!(outcome.response.status, if outer { 504 } else { 502 });
+            assert_eq!(
+                outcome.transport_error,
+                Some(if outer {
+                    super::TransportFailure::DeadlineExceeded
+                } else {
+                    super::TransportFailure::Io
+                })
+            );
+            if outer {
+                tokio::time::timeout(Duration::from_millis(20), gate.entered.notified())
+                    .await
+                    .unwrap();
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(20), receipt.notified())
+                        .await
+                        .is_err(),
+                    "peer gate must prevent all backend contact"
+                );
+            } else {
+                tokio::time::timeout(Duration::from_millis(20), receipt.notified())
+                    .await
+                    .unwrap();
+            }
+            drop(continuation);
+            assert_eq!(
+                headers.load(Ordering::SeqCst),
+                usize::from(!outer),
+                "outer expiry cannot run late hooks; inner expiry runs one header phase"
+            );
+            assert_eq!(
+                completions.load(Ordering::SeqCst),
+                usize::from(streaming || !outer),
+                "only eligible completion phases run exactly once"
+            );
+            match executor
+                .run(
+                    &pipeline,
+                    &request,
+                    crate::RequestExtensions::default(),
+                    Instant::now() + Duration::from_secs(2),
+                )
+                .await
+                .unwrap()
+            {
+                crate::CalloutResponse::Buffered(response) => assert_eq!(
+                    response.status, 503,
+                    "both timeout paths must settle the actual breaker"
+                ),
+                crate::CalloutResponse::Streaming { .. } => panic!("open circuit must reject before transport"),
+            }
+            assert_eq!(headers.load(Ordering::SeqCst), usize::from(!outer));
+            assert_eq!(completions.load(Ordering::SeqCst), usize::from(streaming || !outer));
+            backend.abort();
+        }
+    }
+}
+
+/// Response hook that never finishes, used to prove the outer deadline still
+/// bounds arbitrary async filter code after the upstream replied.
+struct PendingResponseFilter(std::sync::Arc<tokio::sync::Notify>);
+
+#[async_trait::async_trait]
+impl crate::HttpFilter for PendingResponseFilter {
+    fn name(&self) -> &'static str {
+        "pending_response"
+    }
+
+    async fn on_request(
+        &self,
+        _ctx: &mut crate::HttpFilterContext<'_>,
+    ) -> Result<crate::FilterAction, crate::FilterError> {
+        Ok(crate::FilterAction::Continue)
+    }
+
+    async fn on_response(
+        &self,
+        _ctx: &mut crate::HttpFilterContext<'_>,
+    ) -> Result<crate::FilterAction, crate::FilterError> {
+        self.0.notify_one();
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+#[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
+async fn outer_deadline_cleanup_remains_bounded() {
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let mut registry = crate::FilterRegistry::with_builtins();
+    let witness = Arc::clone(&entered);
+    registry
+        .register(
+            "pending_response",
+            crate::FilterFactory::Http(Arc::new(move |_| {
+                Ok(Box::new(PendingResponseFilter(Arc::clone(&witness))))
+            })),
+        )
+        .unwrap();
+    let (addr, backend) = spawn_raw_backend("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").await;
+    let mut entries: Vec<crate::FilterEntry> =
+        serde_yaml::from_str(&buffered_chain_yaml(addr, "- filter: pending_response\n")).unwrap();
+    let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
+    let executor = buffered_executor(1_048_576);
+    let request = crate::SubRequest {
+        method: http::Method::GET,
+        uri: http::Uri::from_static("/"),
+        headers: HeaderMap::new(),
+        body: bytes::Bytes::new(),
+    };
+    let start = Instant::now();
+    let opened = tokio::time::timeout(
+        Duration::from_secs(2),
+        executor.run_classified(
+            &pipeline,
+            &request,
+            crate::RequestExtensions::default(),
+            start + Duration::from_millis(150),
+        ),
+    )
+    .await
+    .expect("a stalled response hook must remain bounded")
+    .unwrap();
+    backend.abort();
+
+    assert!(
+        start.elapsed() < Duration::from_secs(2),
+        "stalled hook cannot extend the deadline indefinitely"
+    );
+    assert!(matches!(
+        opened,
+        crate::CalloutOutcome::Response(crate::CalloutResponse::Buffered(_))
+    ));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), entered.notified())
+            .await
+            .is_ok(),
+        "the test must exercise the stalled response hook"
     );
 }
 
@@ -3994,7 +4603,7 @@ impl crate::HttpFilter for SelectedUpstreamBodyHijackFilter {
     }
 
     fn selected_upstream_request_body_access(&self) -> crate::BodyAccess {
-        crate::BodyAccess::ReadOnly
+        crate::BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn request_body_mode(&self) -> crate::BodyMode {
@@ -4062,7 +4671,7 @@ impl crate::HttpFilter for SelectedUpstreamStateExpandFilter {
     }
 
     fn selected_upstream_request_body_access(&self) -> crate::BodyAccess {
-        crate::BodyAccess::ReadOnly
+        crate::BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn request_body_mode(&self) -> crate::BodyMode {
@@ -4539,4 +5148,363 @@ impl crate::HttpFilter for BranchCalloutFilter {
             },
         }
     }
+}
+
+mod adaptation_cancellation {
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
+
+    use bytes::Bytes;
+
+    /// Distinct owned payload or request state whose final release is observable.
+    struct Owner {
+        bytes: Vec<u8>,
+        drops: Arc<AtomicUsize>,
+    }
+    impl AsRef<[u8]> for Owner {
+        fn as_ref(&self) -> &[u8] {
+            &self.bytes
+        }
+    }
+    impl Drop for Owner {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    struct RequestState(Arc<AtomicUsize>);
+    impl Drop for RequestState {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    struct Suspension {
+        bound: bool,
+        active: Arc<AtomicBool>,
+        entered: Arc<AtomicBool>,
+        adapted_drops: Arc<AtomicUsize>,
+        state_drops: Arc<AtomicUsize>,
+    }
+    impl Suspension {
+        async fn suspend(&self, ctx: &mut crate::HttpFilterContext<'_>, body: &mut Option<Bytes>) {
+            if self.active.swap(false, Ordering::SeqCst) {
+                *body = Some(Bytes::from_owner(Owner {
+                    bytes: vec![b'a'; 65_536],
+                    drops: Arc::clone(&self.adapted_drops),
+                }));
+                ctx.extensions.insert(RequestState(Arc::clone(&self.state_drops)));
+                self.entered.store(true, Ordering::SeqCst);
+                std::future::pending::<()>().await;
+            }
+        }
+    }
+    #[async_trait::async_trait]
+    impl crate::HttpFilter for Suspension {
+        fn name(&self) -> &'static str {
+            "suspended_adaptation"
+        }
+
+        async fn on_request(
+            &self,
+            _ctx: &mut crate::HttpFilterContext<'_>,
+        ) -> Result<crate::FilterAction, crate::FilterError> {
+            Ok(crate::FilterAction::Continue)
+        }
+
+        fn request_body_mode(&self) -> crate::BodyMode {
+            crate::BodyMode::StreamBuffer {
+                max_bytes: Some(131_072),
+            }
+        }
+
+        fn selected_upstream_request_body_access(&self) -> crate::BodyAccess {
+            if self.bound {
+                crate::BodyAccess::None
+            } else {
+                crate::BodyAccess::ReadWrite(crate::BodyRequirement::Optional)
+            }
+        }
+
+        async fn on_selected_upstream_request_body(
+            &self,
+            ctx: &mut crate::HttpFilterContext<'_>,
+            body: &mut Option<Bytes>,
+        ) -> Result<crate::SelectedUpstreamBodyOutcome, crate::FilterError> {
+            self.suspend(ctx, body).await;
+            Ok(crate::SelectedUpstreamBodyOutcome::Continue)
+        }
+
+        #[cfg(feature = "bound-upstream-request-body")]
+        fn bound_upstream_request_body_access(&self) -> crate::BodyAccess {
+            if self.bound {
+                crate::BodyAccess::ReadWrite(crate::BodyRequirement::Optional)
+            } else {
+                crate::BodyAccess::None
+            }
+        }
+
+        #[cfg(feature = "bound-upstream-request-body")]
+        async fn on_bound_upstream_request_body(
+            &self,
+            ctx: &mut crate::HttpFilterContext<'_>,
+            body: &mut Option<Bytes>,
+        ) -> Result<crate::BoundUpstreamBodyOutcome, crate::FilterError> {
+            self.suspend(ctx, body).await;
+            Ok(crate::BoundUpstreamBodyOutcome::Continue)
+        }
+    }
+
+    fn pipeline(
+        bound: bool,
+        active: &Arc<AtomicBool>,
+        entered: &Arc<AtomicBool>,
+        adapted_drops: &Arc<AtomicUsize>,
+        state_drops: &Arc<AtomicUsize>,
+    ) -> crate::FilterPipeline {
+        let mut registry = crate::FilterRegistry::with_builtins();
+        let active = Arc::clone(active);
+        let entered = Arc::clone(entered);
+        let adapted_drops = Arc::clone(adapted_drops);
+        let state_drops = Arc::clone(state_drops);
+        registry
+            .register(
+                "suspended_adaptation",
+                crate::FilterFactory::Http(Arc::new(move |_| {
+                    Ok(Box::new(Suspension {
+                        bound,
+                        active: Arc::clone(&active),
+                        entered: Arc::clone(&entered),
+                        adapted_drops: Arc::clone(&adapted_drops),
+                        state_drops: Arc::clone(&state_drops),
+                    }))
+                })),
+            )
+            .unwrap();
+        let yaml = if bound {
+            "- filter: router\n  routes:\n    - path_prefix: /\n      cluster: backend\n- filter: suspended_adaptation\n- filter: load_balancer\n  cluster_source: bound_upstream\n  clusters:\n    - name: backend\n      endpoints: ['127.0.0.1:9']\n"
+        } else {
+            "- filter: suspended_adaptation\n"
+        };
+        let mut entries: Vec<crate::FilterEntry> = serde_yaml::from_str(yaml).unwrap();
+        crate::FilterPipeline::build(&mut entries, &registry).unwrap()
+    }
+
+    #[tokio::test]
+    async fn selected_adaptation_cancellation_drops_payload_and_state() {
+        let active = Arc::new(AtomicBool::new(true));
+        let entered = Arc::new(AtomicBool::new(false));
+        let original_drops = Arc::new(AtomicUsize::new(0));
+        let adapted_drops = Arc::new(AtomicUsize::new(0));
+        let state_drops = Arc::new(AtomicUsize::new(0));
+        let pipeline = pipeline(false, &active, &entered, &adapted_drops, &state_drops);
+        let request = crate::test_utils::make_request(http::Method::POST, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&request);
+        let mut body = Some(Bytes::from_owner(Owner {
+            bytes: vec![b'o'; 65_536],
+            drops: Arc::clone(&original_drops),
+        }));
+        tokio::time::timeout(
+            Duration::from_millis(20),
+            pipeline.execute_http_selected_upstream_request_body(&mut ctx, &mut body),
+        )
+        .await
+        .expect_err("selected-upstream adaptation must remain suspended until cancellation");
+        assert!(entered.load(Ordering::SeqCst));
+        drop(body);
+        drop(ctx);
+        assert_eq!(original_drops.load(Ordering::SeqCst), 1);
+        assert_eq!(adapted_drops.load(Ordering::SeqCst), 1);
+        assert_eq!(state_drops.load(Ordering::SeqCst), 1);
+        let mut clean = crate::test_utils::make_filter_context(&request);
+        assert!(clean.extensions.get::<RequestState>().is_none());
+        let mut clean_body = Some(Bytes::from_static(b"clean"));
+        let action = pipeline
+            .execute_http_selected_upstream_request_body(&mut clean, &mut clean_body)
+            .await
+            .unwrap();
+        assert!(
+            matches!(action, crate::FilterAction::Continue),
+            "fresh selected hook should continue"
+        );
+        assert_eq!(clean_body.as_deref(), Some(b"clean".as_slice()));
+    }
+
+    #[cfg(feature = "bound-upstream-request-body")]
+    #[tokio::test]
+    async fn bound_adaptation_cancellation_drops_taken_payload_and_state() {
+        let active = Arc::new(AtomicBool::new(true));
+        let entered = Arc::new(AtomicBool::new(false));
+        let original_drops = Arc::new(AtomicUsize::new(0));
+        let adapted_drops = Arc::new(AtomicUsize::new(0));
+        let state_drops = Arc::new(AtomicUsize::new(0));
+        let pipeline = pipeline(true, &active, &entered, &adapted_drops, &state_drops);
+        let request = crate::test_utils::make_request(http::Method::POST, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&request);
+        ctx.buffered_request_body = Some(Bytes::from_owner(Owner {
+            bytes: vec![b'o'; 65_536],
+            drops: Arc::clone(&original_drops),
+        }));
+        tokio::time::timeout(Duration::from_millis(20), pipeline.execute_http_request(&mut ctx))
+            .await
+            .expect_err("bound-upstream adaptation must remain suspended until cancellation");
+        assert!(entered.load(Ordering::SeqCst));
+        drop(ctx);
+        assert_eq!(original_drops.load(Ordering::SeqCst), 1);
+        assert_eq!(adapted_drops.load(Ordering::SeqCst), 1);
+        assert_eq!(state_drops.load(Ordering::SeqCst), 1);
+        let mut clean = crate::test_utils::make_filter_context(&request);
+        assert!(clean.extensions.get::<RequestState>().is_none());
+        clean.buffered_request_body = Some(Bytes::from_static(b"clean"));
+        let action = pipeline.execute_http_request(&mut clean).await.unwrap();
+        assert!(
+            matches!(action, crate::FilterAction::Continue),
+            "fresh bound request should continue"
+        );
+        assert_eq!(clean.buffered_request_body.as_deref(), Some(b"clean".as_slice()));
+    }
+}
+
+
+// -----------------------------------------------------------------------------
+// Cluster Admission Slot Release
+// -----------------------------------------------------------------------------
+
+// Rejects during the request phase, standing in for any filter ordered after a
+// `load_balancer` that ends a sub-request before its response phase.
+struct RejectAfterAdmissionFilter;
+
+#[async_trait::async_trait]
+impl crate::HttpFilter for RejectAfterAdmissionFilter {
+    fn name(&self) -> &'static str {
+        "test_reject_after_admission"
+    }
+
+    async fn on_request(
+        &self,
+        _ctx: &mut crate::HttpFilterContext<'_>,
+    ) -> Result<crate::FilterAction, crate::FilterError> {
+        Ok(crate::FilterAction::Reject(crate::Rejection::status(418)))
+    }
+}
+
+#[tokio::test]
+#[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
+async fn rejected_subrequest_returns_its_cluster_admission_slot() {
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+
+    use praxis_core::subrequest::SubRequestClient;
+
+    let mut registry = crate::FilterRegistry::with_builtins();
+    registry
+        .register(
+            "test_reject_after_admission",
+            crate::FilterFactory::Http(Arc::new(move |_| Ok(Box::new(RejectAfterAdmissionFilter)))),
+        )
+        .unwrap();
+
+    // The endpoint is never dialed: the rejection short-circuits the step
+    // before the transport runs.
+    let mut entries: Vec<crate::FilterEntry> = serde_yaml::from_str(
+        r#"
+- filter: router
+  routes:
+    - path_prefix: "/"
+      cluster: backend
+- filter: load_balancer
+  clusters:
+    - name: backend
+      endpoints: ["127.0.0.1:1"]
+      max_connections: 1
+- filter: test_reject_after_admission
+"#,
+    )
+    .unwrap();
+    let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
+
+    let client = SubRequestClient::new(crate::test_support::connector(1, None));
+    let downstream = crate::SubrequestRuntime::new(None, false, None, Instant::now());
+    let executor =
+        crate::FilteredSubrequestExecutor::for_callout(client, downstream, 0, 1_048_576, Duration::from_secs(5));
+
+    let request = crate::SubRequest {
+        method: http::Method::GET,
+        uri: http::Uri::from_static("/"),
+        headers: HeaderMap::new(),
+        body: bytes::Bytes::new(),
+    };
+
+    // Each iteration is admitted, rejected before the response phase, and must
+    // hand its slot back. Without that, iteration 2 onwards sees 503 forever —
+    // a permanent denial of service against the cluster the ceiling was meant
+    // to protect (CWE-772).
+    for attempt in 0..3_u8 {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let response = match executor
+            .run(&pipeline, &request, crate::RequestExtensions::default(), deadline)
+            .await
+            .expect("the step should produce its rejection, not an error")
+        {
+            crate::CalloutResponse::Buffered(response) => response,
+            crate::CalloutResponse::Streaming { .. } => panic!("a rejection must be buffered"),
+        };
+        assert_eq!(
+            response.status, 418,
+            "attempt {attempt} must reach the rejecting filter; 503 means the previous attempt leaked its slot"
+        );
+    }
+}
+
+#[test]
+fn dropping_a_scoped_context_releases_an_unfinished_admission() {
+    use std::sync::Arc;
+
+    use praxis_core::retry::{AdmissionLease, ClusterRetryState};
+
+    let state = Arc::new(ClusterRetryState::new(None).with_max_concurrent(Some(1)));
+    let lease = AdmissionLease::claim(&state).expect("the first request should be admitted");
+
+    let request = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&request);
+    ctx.cluster_admission = Some(lease);
+    drop(super::context::ScopedSubrequestContext::for_test(ctx));
+
+    assert_eq!(
+        state.active_requests.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "dropping without a response phase must return the slot"
+    );
+    assert!(state.try_enter(), "the returned slot must be reusable");
+}
+
+#[test]
+fn dropping_a_scoped_context_does_not_double_release() {
+    use std::sync::Arc;
+
+    use praxis_core::retry::{AdmissionLease, ClusterRetryState};
+
+    let state = Arc::new(ClusterRetryState::new(None).with_max_concurrent(Some(2)));
+    let lease = AdmissionLease::claim(&state).expect("first request admitted");
+    // The response phase already handed this request's slot back.
+    lease.release();
+    // A second request is still in flight and must keep its slot.
+    let _second = AdmissionLease::claim(&state).expect("second request admitted");
+
+    let request = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&request);
+    ctx.cluster_admission = Some(lease);
+    drop(super::context::ScopedSubrequestContext::for_test(ctx));
+
+    assert_eq!(
+        state.active_requests.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "a context whose response phase already released must not steal the other request's slot"
+    );
 }

@@ -459,6 +459,7 @@ insecure_options:
                 downstream_keepalive_timeout_ms: None,
                 downstream_read_timeout_ms: None,
                 filter_chains: vec![],
+                forward_proxy: None,
                 max_connections: None,
                 protocol: ProtocolKind::Tcp,
                 tcp_session_timeout_ms: None,
@@ -468,6 +469,7 @@ insecure_options:
             }],
             metrics: MetricsConfig::default(),
             runtime: RuntimeConfig::default(),
+            shutdown_drain_delay_secs: 0,
             shutdown_timeout_secs: 10,
             telemetry: TelemetryConfig::default(),
         }
@@ -505,6 +507,7 @@ insecure_options:
             downstream_keepalive_timeout_ms: None,
             downstream_read_timeout_ms: None,
             filter_chains: vec![],
+            forward_proxy: None,
             max_connections: None,
             protocol: ProtocolKind::Tcp,
             tcp_session_timeout_ms: None,

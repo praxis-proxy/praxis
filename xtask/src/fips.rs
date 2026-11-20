@@ -25,9 +25,11 @@ mod graph;
 mod guards;
 mod host_check;
 mod openpgp;
+mod policy_probe;
 mod report;
 mod runtime_probe;
 mod signature_store;
+mod test_graph;
 mod verify_image;
 
 use clap::{Parser, Subcommand};

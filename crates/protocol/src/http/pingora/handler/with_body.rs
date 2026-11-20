@@ -22,8 +22,8 @@ use pingora_core::{
     upstreams::peer::HttpPeer,
 };
 use pingora_proxy::{FailToProxy, ProxyHttp, Session};
-use praxis_core::retry::reused_only_replay_safe;
-use praxis_filter::{CompressionConfig, FilterPipeline};
+use praxis_core::{retry::reused_only_replay_safe, server::LifecycleHandle};
+use praxis_filter::{BodyMode, CompressionConfig, FilterPipeline};
 use tokio::sync::Semaphore;
 use tracing::{Instrument as _, debug};
 
@@ -32,7 +32,7 @@ use super::{
     connected_to_upstream, fail_to_proxy,
     health_util::{ended_by_client, record_passive_health},
     hop_by_hop::{self, RemoveHeader as _},
-    logging_util::{logging_cleanup, maybe_emit_fallback_access_log},
+    logging_util::{emit_completion_observers, logging_cleanup},
     metrics_util::emit_request_metrics,
     request_body_filter, request_filter, response_body_filter, response_filter, response_trailer_filter,
     response_trailers,
@@ -104,16 +104,24 @@ pub struct PingoraHttpHandler {
 
     /// Swappable filter pipeline.
     pipeline: Arc<ArcSwap<FilterPipeline>>,
+
+    /// Shared lifecycle state used for downstream drain headers.
+    lifecycle: LifecycleHandle,
 }
 
 impl PingoraHttpHandler {
     /// Create a handler with body filter support.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the handler carries every listener-scoped limit plus the shared lifecycle"
+    )]
     pub(super) fn new(
         pipeline: Arc<ArcSwap<FilterPipeline>>,
         downstream_read_timeout: Option<Duration>,
         downstream_keepalive_timeout_secs: Option<u64>,
         connection_semaphore: Option<Arc<Semaphore>>,
         listener_name: ::metrics::SharedString,
+        lifecycle: LifecycleHandle,
     ) -> Self {
         let compression = pipeline.load().compression_config().cloned();
         Self {
@@ -123,8 +131,32 @@ impl PingoraHttpHandler {
             downstream_read_timeout,
             listener_name,
             pipeline,
+            lifecycle,
         }
     }
+}
+
+/// Mark HTTP/1 responses so clients reconnect after readiness-first drain.
+pub(in crate::http) fn add_drain_connection_close(
+    session: &mut Session,
+    response: &mut pingora_http::ResponseHeader,
+    ctx: &PingoraRequestCtx,
+    lifecycle: &LifecycleHandle,
+) -> Result<()> {
+    let is_http1 = matches!(
+        ctx.client_http_version,
+        Some(http::Version::HTTP_10 | http::Version::HTTP_11)
+    );
+    if lifecycle.phase() == praxis_core::server::LifecyclePhase::Draining
+        && is_http1
+        && !ctx.connection_upgraded
+        && !response.status.is_informational()
+    {
+        session.set_keepalive(None);
+        response.remove_header("Connection");
+        response.insert_header("Connection", "close")?;
+    }
+    Ok(())
 }
 
 /// Resolve retry safety for a stale (`ReusedOnly`) upstream connection.
@@ -145,6 +177,21 @@ fn resolve_reused_only_retry(
     }
     e.set_retry(replay_safe);
     e
+}
+
+/// Remember a streamed writer whose output is not retained for replay.
+fn record_streaming_writer(pipeline: &FilterPipeline, body: Option<&Bytes>, end: bool, ctx: &mut PingoraRequestCtx) {
+    if !ctx.streaming_request_writer_ran
+        && ctx.pre_read_body.is_none()
+        && ctx.retained_pre_read_body.is_none()
+        && ctx.retained_adapted_request_body.is_none()
+        && !matches!(ctx.request_body_mode, BodyMode::SizeLimit { .. })
+        && (body.is_some() || end)
+        && pipeline.body_capabilities().any_request_body_writer
+        && pipeline.has_eligible_request_body_writer(&ctx.cached_executed_filter_indices, &ctx.cached_body_done_indices)
+    {
+        ctx.streaming_request_writer_ran = true;
+    }
 }
 
 #[async_trait]
@@ -174,6 +221,7 @@ impl ProxyHttp for PingoraHttpHandler {
     where
         Self::CTX: Send + Sync,
     {
+        ctx.lifecycle = Some(self.lifecycle.clone());
         // Defensively clear upstream-contact state at the first per-request hook.
         // The current Pingora fork builds a fresh context per request
         // (persist_connection_context is off), so nothing leaks across keep-alive
@@ -182,15 +230,26 @@ impl ProxyHttp for PingoraHttpHandler {
         // request_filter) should context reuse ever be enabled.
         ctx.upstream_for_retry = None;
         ctx.upstream_contacted = false;
+        // Record the client's HTTP version before the admission checks below
+        // can reject, so their 503s can run the drain Connection: close marker.
+        // request_filter assigns the same value later from the same source.
+        ctx.client_http_version = Some(session.req_header().version);
 
         if praxis_core::memory::is_exceeded() {
             metrics::record_overload_reject(metrics::OVERLOAD_REASON_MEMORY);
-            return reject_503(session, "5", "memory pressure exceeded").await;
+            return reject_503(session, "5", "memory pressure exceeded", ctx, &self.lifecycle).await;
         }
 
         let Some(fd_admission) = praxis_core::fd::try_admit() else {
             metrics::record_overload_reject(metrics::OVERLOAD_REASON_FILE_DESCRIPTORS);
-            return reject_503(session, "1", "file descriptor limit nearly exhausted").await;
+            return reject_503(
+                session,
+                "1",
+                "file descriptor limit nearly exhausted",
+                ctx,
+                &self.lifecycle,
+            )
+            .await;
         };
         ctx.fd_admission = Some(fd_admission);
 
@@ -198,7 +257,7 @@ impl ProxyHttp for PingoraHttpHandler {
         ctx._global_connection_permit = permit;
         if exceeded {
             metrics::record_overload_reject(metrics::OVERLOAD_REASON_GLOBAL_CONNECTIONS);
-            return reject_503(session, "1", "global max connections exceeded").await;
+            return reject_503(session, "1", "global max connections exceeded", ctx, &self.lifecycle).await;
         }
 
         if let Some(sem) = &self.connection_semaphore {
@@ -206,7 +265,7 @@ impl ProxyHttp for PingoraHttpHandler {
                 ctx._connection_permit = Some(permit);
             } else {
                 metrics::record_overload_reject(metrics::OVERLOAD_REASON_LISTENER_CONNECTIONS);
-                return reject_503(session, "1", "max connections exceeded").await;
+                return reject_503(session, "1", "max connections exceeded", ctx, &self.lifecycle).await;
             }
         }
 
@@ -237,13 +296,14 @@ impl ProxyHttp for PingoraHttpHandler {
     }
 
     async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
+        ctx.lifecycle = Some(self.lifecycle.clone());
         let pipeline = ctx.pin_pipeline(&self.pipeline);
         request_filter::execute(&pipeline, session, ctx).await
     }
 
     async fn request_body_filter(
         &self,
-        session: &mut Session,
+        _session: &mut Session,
         body: &mut Option<Bytes>,
         end_of_stream: bool,
         ctx: &mut Self::CTX,
@@ -256,17 +316,20 @@ impl ProxyHttp for PingoraHttpHandler {
         // and future instrumentation per chunk when no body filter can
         // run — the default configuration for proxied bodies.
         if ctx.connection_upgraded {
+            ctx.request_replay_prefix_pending = false;
             return Ok(());
         }
         if ctx.pre_read_body.is_none()
             && let Some(pinned) = &ctx.pinned_pipeline
             && !pinned.body_capabilities().needs_request_body
         {
+            ctx.request_replay_prefix_pending = false;
             return Ok(());
         }
         let pipeline = ctx.pipeline(&self.pipeline);
+        record_streaming_writer(&pipeline, body.as_ref(), end_of_stream, ctx);
         let span = ctx.request_span.clone();
-        request_body_filter::execute(&pipeline, session, body, end_of_stream, ctx)
+        request_body_filter::execute(&pipeline, body, end_of_stream, ctx)
             .instrument(span)
             .await
     }
@@ -289,7 +352,7 @@ impl ProxyHttp for PingoraHttpHandler {
 
     async fn response_trailer_filter(
         &self,
-        _session: &mut Session,
+        session: &mut Session,
         upstream_trailers: &mut http::HeaderMap,
         ctx: &mut Self::CTX,
     ) -> Result<Option<Bytes>>
@@ -297,14 +360,24 @@ impl ProxyHttp for PingoraHttpHandler {
         Self::CTX: Send + Sync,
     {
         let pipeline = ctx.pipeline(&self.pipeline);
-        if !pipeline.needs_response_trailers() {
-            return Ok(None);
-        }
         let span = ctx.request_span.clone();
         let _entered = span.enter();
-        let produced = response_trailer_filter::execute(&pipeline, upstream_trailers, ctx);
+        let produced = if pipeline.needs_response_trailers() {
+            response_trailer_filter::execute(&pipeline, upstream_trailers, ctx)
+        } else {
+            response_trailer_filter::dispatch_synthetic_eof(&pipeline, ctx)
+                .map(response_trailer_filter::TrailerOutcome::Forward)
+        };
+        let produced = match produced {
+            Ok(produced) => produced,
+            Err(error) => {
+                debug!(%error, "synthetic response EOF failed; aborting downstream");
+                abort_trailer_delivery(session, ctx).await;
+                return Ok(None);
+            },
+        };
         hop_by_hop::strip_reserved_internal_header_map(upstream_trailers);
-        Ok(produced)
+        Ok(complete_trailer_task(session, upstream_trailers, ctx, produced).await)
     }
 
     async fn response_body_filter(
@@ -365,12 +438,17 @@ impl ProxyHttp for PingoraHttpHandler {
         client_reused: bool,
     ) -> Box<pingora_core::Error> {
         connected_to_upstream::record_attempt_failure(e.as_ref(), ctx);
-        // Never retry once a final response reached the client: a second
-        // attempt cannot rewrite the response line, so its body would be
-        // spliced after whatever was already sent. A non-final 1xx (e.g.
-        // 100 Continue) does not commit the final response, so it must not
-        // block a retry; mirror fail_to_proxy's final-response predicate.
-        if session.response_written().is_some_and(fail_to_proxy::is_final_response) {
+        // Local rejections remain final even before fail_to_proxy writes them.
+        // A committed final response also cannot be replaced; informational
+        // responses do not commit it and must not block an upstream retry.
+        // Even ReusedOnly errors bypassing the policy engine must not replay
+        // an oversized original or final body. An empty retained adaptation
+        // can be just a phase marker when its output exceeded the buffer cap.
+        if ctx.pending_rejection.is_some()
+            || super::retry::streaming_writer_cannot_replay(ctx)
+            || super::retry::replay_body_size(ctx) > praxis_core::config::MAX_RETRY_BODY_LIMIT_BYTES
+            || session.response_written().is_some_and(fail_to_proxy::is_final_response)
+        {
             let mut e = e;
             e.set_retry(false);
             return e;
@@ -419,6 +497,12 @@ impl ProxyHttp for PingoraHttpHandler {
         fail_to_proxy::execute(session, e, ctx).instrument(span).await
     }
 
+    fn suppress_error_log(&self, session: &Session, ctx: &Self::CTX, error: &pingora_core::Error) -> bool {
+        ctx.rejection_cleanup_pending
+            && fail_to_proxy::expected_filter_rejection(error, ctx)
+            && session.response_written().is_some_and(fail_to_proxy::is_final_response)
+    }
+
     async fn upstream_request_filter(
         &self,
         session: &mut Session,
@@ -433,6 +517,12 @@ impl ProxyHttp for PingoraHttpHandler {
         // BodyDone applies to one attempt; retries replay downstream bytes.
         let pipeline = ctx.pipeline(&self.pipeline);
         pipeline.clear_request_body_done(&mut ctx.cached_body_done_indices);
+
+        // Praxis enables buffering before its pre-read; Pingora enables it
+        // before the streaming body reader. A non-empty, untruncated reader
+        // therefore supplies exactly one prefix callback on this attempt.
+        ctx.request_replay_prefix_pending =
+            session.downstream_session.body_bytes_read() > 0 && !session.downstream_session.retry_buffer_truncated();
 
         let is_upgrade = session.is_upgrade_req();
         upstream_request::strip_hop_by_hop(upstream_request, is_upgrade);
@@ -451,6 +541,10 @@ impl ProxyHttp for PingoraHttpHandler {
         via::append_request_via(upstream_request, client_ver);
         #[cfg(feature = "otel")]
         inject_upstream_trace_context(upstream_request, &ctx.upstream_client_span)?;
+        if let Some(upstream) = ctx.upstream_for_retry.as_ref() {
+            ctx.extensions
+                .insert(praxis_filter::UpstreamForwardedEndpoint(Arc::clone(&upstream.address)));
+        }
         Ok(())
     }
 
@@ -474,6 +568,7 @@ impl ProxyHttp for PingoraHttpHandler {
             .instrument(span)
             .await;
         if result.is_ok() {
+            add_drain_connection_close(session, upstream_response, ctx, &self.lifecycle)?;
             // RFC 9110 §7.6.3: the response Via received-protocol is the leg this
             // proxy received the response on — the upstream connection — not the
             // downstream client's version, captured before filters can rebuild
@@ -539,10 +634,14 @@ impl ProxyHttp for PingoraHttpHandler {
             release_retry_state(ctx);
             ctx.ended_by_client = ended_by_client(e, ctx.upstream_response_status);
             logging_cleanup(&pipeline, ctx).await;
-            maybe_emit_fallback_access_log(&pipeline, written_status, ctx);
+            emit_completion_observers(&pipeline, written_status, ctx);
         }
         .instrument(span)
         .await;
+        // Pingora has released the upstream; record completion before lingering.
+        if std::mem::take(&mut ctx.rejection_cleanup_pending) {
+            crate::http::pingora::rejection_cleanup::finish_rejection(session).await;
+        }
     }
 }
 
@@ -575,14 +674,264 @@ fn inject_upstream_trace_context(
 // Utilities
 // -----------------------------------------------------------------------------
 
+/// Complete the one task Pingora allows this callback to return.
+async fn complete_trailer_task(
+    session: &mut Session,
+    trailers: &http::HeaderMap,
+    ctx: &mut PingoraRequestCtx,
+    outcome: response_trailer_filter::TrailerOutcome,
+) -> Option<Bytes> {
+    match outcome {
+        response_trailer_filter::TrailerOutcome::Forward(Some(bytes)) if !bytes.is_empty() && !trailers.is_empty() => {
+            debug!("synthetic EOF bytes and trailers require separate Pingora tasks; aborting downstream");
+            abort_trailer_delivery(session, ctx).await;
+            None
+        },
+        response_trailer_filter::TrailerOutcome::Forward(Some(bytes)) if bytes.is_empty() => None,
+        response_trailer_filter::TrailerOutcome::Forward(bytes) => bytes,
+        response_trailer_filter::TrailerOutcome::Convert(bytes) => Some(bytes),
+    }
+}
+
+/// Mark trailer delivery incomplete and terminate the downstream message.
+async fn abort_trailer_delivery(session: &mut Session, ctx: &mut PingoraRequestCtx) {
+    ctx.response_delivery_complete = false;
+    ctx.stamp_error_type(metrics::ERROR_TYPE_INTERNAL);
+    session.as_downstream_mut().shutdown().await;
+}
+
 /// Write a 503 response with `Retry-After` and return the corresponding error.
-async fn reject_503(session: &mut Session, retry_after: &'static str, reason: &'static str) -> Result<()> {
+///
+/// An overload rejection runs the drain `Connection: close` marker too, so a
+/// HTTP/1 client refused while draining is still told to move off the
+/// replica; the marker is a no-op outside a drain.
+async fn reject_503(
+    session: &mut Session,
+    retry_after: &'static str,
+    reason: &'static str,
+    ctx: &PingoraRequestCtx,
+    lifecycle: &LifecycleHandle,
+) -> Result<()> {
     tracing::warn!(reason, "rejecting request");
     let mut header = pingora_http::ResponseHeader::build(503, None)?;
     header.append_header("Retry-After", retry_after)?;
+    add_drain_connection_close(session, &mut header, ctx, lifecycle)?;
     session.write_response_header(Box::new(header), true).await?;
     Err(pingora_core::Error::explain(
         pingora_core::ErrorType::HTTPStatus(503),
         reason,
     ))
+}
+
+#[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "test setup")]
+#[allow(
+    clippy::unwrap_used,
+    clippy::field_reassign_with_default,
+    clippy::too_many_lines,
+    reason = "tests"
+)]
+mod replay_tests {
+    use std::collections::VecDeque;
+
+    use praxis_filter::{
+        BodyAccess, FilterAction, FilterError, FilterFactory, FilterRegistry, HttpFilter, HttpFilterContext,
+    };
+
+    use super::*;
+
+    /// Main-path writer used to exercise replay safety decisions.
+    struct Writer;
+
+    #[async_trait]
+    impl HttpFilter for Writer {
+        fn name(&self) -> &'static str {
+            "replay_test_writer"
+        }
+
+        async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> std::result::Result<FilterAction, FilterError> {
+            Ok(FilterAction::Continue)
+        }
+
+        fn request_body_access(&self) -> BodyAccess {
+            BodyAccess::ReadWrite(praxis_filter::BodyRequirement::Optional)
+        }
+    }
+
+    /// Build the minimal main-path writer pipeline.
+    fn writer_pipeline() -> FilterPipeline {
+        let mut registry = FilterRegistry::with_builtins();
+        registry
+            .register(
+                "replay_test_writer",
+                FilterFactory::Http(Arc::new(|_| Ok(Box::new(Writer)))),
+            )
+            .unwrap();
+        let mut entries: Vec<praxis_filter::FilterEntry> =
+            serde_yaml::from_str("- filter: replay_test_writer\n").unwrap();
+        FilterPipeline::build(&mut entries, &registry).unwrap()
+    }
+
+    #[test]
+    fn records_only_eligible_streamed_writer_callbacks_without_retained_output() {
+        let pipeline = writer_pipeline();
+        let body = Some(Bytes::from_static(b"body"));
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.cached_executed_filter_indices = vec![false];
+        record_streaming_writer(&pipeline, body.as_ref(), false, &mut ctx);
+        assert!(!ctx.streaming_request_writer_ran, "a skipped writer cannot run");
+
+        ctx.cached_executed_filter_indices = vec![true];
+        record_streaming_writer(&pipeline, None, false, &mut ctx);
+        assert!(!ctx.streaming_request_writer_ran, "no body callback ran");
+
+        ctx.pre_read_body = Some(VecDeque::new());
+        record_streaming_writer(&pipeline, body.as_ref(), false, &mut ctx);
+        assert!(!ctx.streaming_request_writer_ran, "pre-read output is authoritative");
+        ctx.pre_read_body = None;
+        ctx.retained_pre_read_body = Some(VecDeque::new());
+        record_streaming_writer(&pipeline, body.as_ref(), false, &mut ctx);
+        assert!(!ctx.streaming_request_writer_ran, "the canonical body is retained");
+        ctx.retained_pre_read_body = None;
+        ctx.retained_adapted_request_body = Some(VecDeque::new());
+        record_streaming_writer(&pipeline, body.as_ref(), false, &mut ctx);
+        assert!(!ctx.streaming_request_writer_ran, "the adapted body is retained");
+        ctx.retained_adapted_request_body = None;
+        ctx.request_body_mode = BodyMode::SizeLimit { max_bytes: 100 };
+        record_streaming_writer(&pipeline, body.as_ref(), false, &mut ctx);
+        assert!(!ctx.streaming_request_writer_ran, "size-limit mode has no writer hook");
+        ctx.request_body_mode = BodyMode::Stream;
+        record_streaming_writer(&pipeline, body.as_ref(), false, &mut ctx);
+        assert!(ctx.streaming_request_writer_ran);
+        drop(ctx);
+    }
+
+    #[tokio::test]
+    async fn streamed_writer_blocks_explicit_and_reused_connection_retries() {
+        let handler = PingoraHttpHandler::new(
+            Arc::new(ArcSwap::from_pointee(writer_pipeline())),
+            None,
+            None,
+            None,
+            "test".into(),
+            LifecycleHandle::new(),
+        );
+        let (_client, stream) = tokio::io::duplex(1024);
+        let mut session = Session::new_h1(Box::new(stream));
+        let peer = HttpPeer::new("127.0.0.1:80", false, String::new());
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.streaming_request_writer_ran = true;
+        ctx.request_is_idempotent = true;
+        for retry in [
+            pingora_core::RetryType::Decided(true),
+            pingora_core::RetryType::ReusedOnly,
+        ] {
+            let mut error = pingora_core::Error::new(pingora_core::ErrorType::HTTPStatus(503));
+            error.retry = retry;
+            let error = handler.error_while_proxy(&peer, &mut session, error, &mut ctx, true);
+            assert!(!error.retry(), "a streamed writer makes the replay unsafe");
+            assert_eq!(ctx.retries, 0);
+        }
+        drop(ctx);
+    }
+
+    #[tokio::test]
+    async fn retained_body_size_guards_explicit_and_reused_connection_retries() {
+        let handler = PingoraHttpHandler::new(
+            Arc::new(ArcSwap::from_pointee(writer_pipeline())),
+            None,
+            None,
+            None,
+            "test".into(),
+            LifecycleHandle::new(),
+        );
+        let (_client, stream) = tokio::io::duplex(1024);
+        let mut session = Session::new_h1(Box::new(stream));
+        let peer = HttpPeer::new("127.0.0.1:80", false, String::new());
+        let cap = praxis_core::config::MAX_RETRY_BODY_LIMIT_BYTES;
+        let cap_usize = usize::try_from(cap).unwrap();
+        for (description, original, canonical, adapted, safe) in [
+            ("untouched", 0, None, None, true),
+            ("oversized original", cap + 1, None, None, false),
+            ("oversized canonical", 1, Some(cap_usize + 1), None, false),
+            ("oversized adapted marker", 1, None, Some(cap_usize + 1), false),
+            ("shrunk oversized original", cap + 1, None, Some(1), false),
+            ("exact retained output", 1, None, Some(cap_usize), true),
+            ("empty authoritative output", cap, None, Some(0), true),
+            ("small final adaptation", 1, Some(cap_usize + 1), Some(1), true),
+        ] {
+            let mut ctx = PingoraRequestCtx::default();
+            ctx.request_is_idempotent = true;
+            ctx.request_body_bytes = original;
+            ctx.mutated_request_body_len = canonical;
+            ctx.retained_pre_read_body = canonical.and_then(|len| (len <= cap_usize).then(|| retained(len)));
+            ctx.adapted_request_body_len = adapted;
+            ctx.retained_adapted_request_body = adapted.map(|len| {
+                if len <= cap_usize {
+                    retained(len)
+                } else {
+                    VecDeque::new()
+                }
+            });
+            for retry in [
+                pingora_core::RetryType::Decided(true),
+                pingora_core::RetryType::ReusedOnly,
+            ] {
+                let mut error = pingora_core::Error::new(pingora_core::ErrorType::HTTPStatus(503));
+                error.retry = retry;
+                let error = handler.error_while_proxy(&peer, &mut session, error, &mut ctx, true);
+                assert_eq!(error.retry(), safe, "{description}");
+            }
+            let mut fresh_error = pingora_core::Error::new(pingora_core::ErrorType::HTTPStatus(503));
+            fresh_error.retry = pingora_core::RetryType::ReusedOnly;
+            let fresh_error = handler.error_while_proxy(&peer, &mut session, fresh_error, &mut ctx, false);
+            drop(ctx);
+            assert!(
+                !fresh_error.retry(),
+                "a fresh connection is never reused-only: {description}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn retry_prefix_indicator_matches_pingora_buffer_and_truncation() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let cap = usize::try_from(praxis_core::config::MAX_RETRY_BODY_LIMIT_BYTES).unwrap();
+        for size in [0, cap, cap + 1] {
+            let (mut client, server) = tokio::io::duplex(131_072);
+            client
+                .write_all(format!("POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: {size}\r\n\r\n").as_bytes())
+                .await
+                .unwrap();
+            client.write_all(&vec![b'x'; size]).await.unwrap();
+            let mut session = Session::new_h1(Box::new(server));
+            assert!(session.read_request().await.unwrap());
+            session.downstream_session.enable_retry_buffering();
+            let mut actual = 0;
+            while let Some(chunk) = session.read_request_body().await.unwrap() {
+                actual += chunk.len();
+            }
+            assert_eq!(actual, size);
+            let truncated = session.downstream_session.retry_buffer_truncated();
+            let present = session.downstream_session.get_retry_buffer().is_some();
+            let indicator = session.downstream_session.body_bytes_read() > 0 && !truncated;
+            assert_eq!(present, size > 0 && size <= cap);
+            assert_eq!(indicator, present, "size {size}");
+            assert_eq!(truncated, size > cap);
+
+            let error = pingora_core::Error::new(pingora_core::ErrorType::HTTPStatus(503));
+            let error = resolve_reused_only_retry(&session, true, error);
+            assert_eq!(error.retry(), !truncated, "size {size}");
+        }
+    }
+
+    /// Match the retained representation produced by the body-store helpers.
+    fn retained(len: usize) -> VecDeque<Bytes> {
+        if len == 0 {
+            VecDeque::new()
+        } else {
+            VecDeque::from([Bytes::from(vec![b'x'; len])])
+        }
+    }
 }

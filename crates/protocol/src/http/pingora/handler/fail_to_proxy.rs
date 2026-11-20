@@ -63,13 +63,13 @@ pub(super) async fn execute(
     } else if pending_rejection.is_some() {
         ctx.stamp_error_type(crate::http::pingora::metrics::ERROR_TYPE_FILTER_REJECT);
     }
+    if let Some(rejection) = pending_rejection {
+        return handle_pending_rejection(session, rejection, ctx).await;
+    }
     let formatter = ctx.extensions.get::<ErrorResponseFormatterHandle>();
     let grpc = ctx.extensions.get::<praxis_filter::GrpcErrorMapping>();
 
     if let ErrorType::HTTPStatus(code) = etype {
-        if let Some(rejection) = pending_rejection {
-            return handle_pending_rejection(session, code, rejection, grpc).await;
-        }
         return handle_http_status(session, code, formatter, grpc).await;
     }
 
@@ -82,8 +82,8 @@ pub(super) async fn execute(
     // deadline firing, not a generic 504: the client asked for the call to
     // be abandoned, and it expects DEADLINE_EXCEEDED rather than a
     // transport error.
-    if let Some(rejection) = grpc_deadline_rejection(&etype, ctx)
-        && !final_response_written(session)
+    if !final_response_written(session)
+        && let Some(rejection) = deadline_timeout_rejection(&etype, ctx).await
     {
         warn!("upstream attempt cancelled by the gRPC deadline");
         crate::http::pingora::grpc_trailers::send_grpc_rejection(session, &rejection).await;
@@ -119,45 +119,80 @@ pub(super) async fn execute(
 // Error Handlers
 // -----------------------------------------------------------------------------
 
-/// Build a `DEADLINE_EXCEEDED` response when an upstream timeout is the
-/// gRPC deadline firing.
-///
-/// Only timeouts qualify: a connection refused mid-deadline is still a
-/// connection refused, and reporting it as `DEADLINE_EXCEEDED` would
-/// hide a real upstream failure.
+/// Classify a transport timeout that belongs to a gRPC deadline. Pingora's
+/// bucketed timer truncates sub-millisecond time and can fire less than one
+/// millisecond before the exact deadline. Wait only in that narrow window;
+/// a genuinely early transport timeout keeps its ordinary 504 response.
 #[cfg(feature = "pingora")]
-fn grpc_deadline_rejection(etype: &ErrorType, ctx: &PingoraRequestCtx) -> Option<Rejection> {
+async fn deadline_timeout_rejection(etype: &ErrorType, ctx: &PingoraRequestCtx) -> Option<Rejection> {
     if !matches!(
         *etype,
         ErrorType::ReadTimedout | ErrorType::WriteTimedout | ErrorType::ConnectTimedout
     ) {
         return None;
     }
-    deadline_exceeded_rejection(ctx)
+    let deadline = ctx.extensions.get::<praxis_core::grpc::GrpcDeadline>()?;
+    let Some(remaining) = deadline.remaining() else {
+        return Some(deadline_rejection());
+    };
+    if !should_wait_for_deadline_timeout(etype, ctx, remaining) {
+        return None;
+    }
+    tokio::time::sleep_until(deadline.deadline().into()).await;
+    Some(deadline_rejection())
+}
+
+/// Whether this phase's own timer can explain the early deadline timeout.
+#[cfg(feature = "pingora")]
+fn should_wait_for_deadline_timeout(
+    etype: &ErrorType,
+    ctx: &PingoraRequestCtx,
+    remaining: std::time::Duration,
+) -> bool {
+    if remaining > std::time::Duration::from_millis(1) {
+        return false;
+    }
+    let Some(budget) = ctx.extensions.get::<super::upstream_peer::GrpcDeadlineAttemptBudget>() else {
+        return false;
+    };
+    let Some(upstream) = ctx.upstream_for_retry.as_ref() else {
+        return false;
+    };
+    let opts = &upstream.connection;
+    let cap = Some(budget.0);
+    match etype {
+        ErrorType::ReadTimedout => opts.read_timeout == cap,
+        ErrorType::WriteTimedout => opts.write_timeout == cap,
+        ErrorType::ConnectTimedout => opts.connection_timeout == cap && opts.total_connection_timeout == cap,
+        _ => false,
+    }
 }
 
 /// The gRPC `DEADLINE_EXCEEDED` response for a request whose gRPC deadline
 /// has passed; `None` when it has none or it has not passed. The caller
-/// decides that the failure was a timeout. The backend-neutral core of
-/// `grpc_deadline_rejection`.
+/// decides that the failure was a timeout.
+#[cfg(feature = "hyper")]
 pub(in crate::http) fn deadline_exceeded_rejection(ctx: &PingoraRequestCtx) -> Option<Rejection> {
     let deadline = ctx.extensions.get::<praxis_core::grpc::GrpcDeadline>()?;
     if !deadline.is_expired() {
         return None;
     }
-    Some(
-        Rejection::status(200)
-            .with_header("content-type", "application/grpc")
-            // An HTTP/1.1 client would otherwise read this body-less 200
-            // until an EOF that keepalive never delivers.
-            .with_header("content-length", "0")
-            .with_header(
-                "grpc-status",
-                praxis_core::grpc::GrpcStatusCode::DeadlineExceeded.as_u32().to_string(),
-            )
-            .with_header("grpc-message", "deadline exceeded")
-            .preserving_keepalive(),
-    )
+    Some(deadline_rejection())
+}
+
+/// Construct the response after the exact deadline has passed.
+fn deadline_rejection() -> Rejection {
+    Rejection::status(200)
+        .with_header("content-type", "application/grpc")
+        // An HTTP/1.1 client would otherwise read this body-less 200
+        // until an EOF that keepalive never delivers.
+        .with_header("content-length", "0")
+        .with_header(
+            "grpc-status",
+            praxis_core::grpc::GrpcStatusCode::DeadlineExceeded.as_u32().to_string(),
+        )
+        .with_header("grpc-message", "deadline exceeded")
+        .preserving_keepalive()
 }
 
 /// Structured response for explicit HTTP status errors.
@@ -182,32 +217,34 @@ async fn handle_http_status(
     write_error_response(session, err, formatter, grpc).await
 }
 
-/// Deliver a rejection raised during the response phase with its full
+/// Deliver a rejection raised during body processing with its full
 /// configured headers and body.
 ///
-/// A response-phase `Reject` cannot write to the session directly (the
-/// upstream response is mid-flight), so the rejection crosses the error
-/// boundary via the request context and is written here.
+/// Crossing the error boundary releases the upstream session before response
+/// delivery. Lingering downstream cleanup runs after completion logging.
 #[cfg(feature = "pingora")]
 async fn handle_pending_rejection(
     session: &mut Session,
-    code: u16,
     rejection: Rejection,
-    grpc: Option<&praxis_filter::GrpcErrorMapping>,
+    ctx: &mut PingoraRequestCtx,
 ) -> FailToProxy {
+    let code = rejection.status;
     if final_response_written(session) {
         return done(code);
     }
-    if let Some(grpc) = grpc.filter(|_mapping| rejection.status >= 400) {
-        let message = rejection_message(&rejection);
-        crate::http::pingora::grpc_trailers::send_trailers_only(session, grpc, rejection.status, message).await;
-        return done(code);
-    }
-    crate::http::pingora::convert::send_rejection(session, rejection).await;
+    crate::http::pingora::convert::send_rejection_for(session, rejection, ctx).await;
     done(code)
 }
 
+/// Whether a client-error halt represents an expected filter rejection.
+#[cfg(feature = "pingora")]
+pub(super) fn expected_filter_rejection(error: &pingora_core::Error, ctx: &PingoraRequestCtx) -> bool {
+    matches!(error.etype(), ErrorType::HTTPStatus(400..=499))
+        && ctx.error_type == Some(crate::http::pingora::metrics::ERROR_TYPE_FILTER_REJECT)
+}
+
 /// The text to carry as `grpc-message` for a rejection.
+#[cfg(feature = "hyper")]
 pub(in crate::http) fn rejection_message(rejection: &Rejection) -> &str {
     rejection
         .body
@@ -420,6 +457,160 @@ fn classify_error_tuple(etype: &ErrorType, source: &pingora_core::ErrorSource) -
 #[allow(clippy::unwrap_used, reason = "tests")]
 mod tests {
     use super::*;
+
+    /// Make an attempt whose phase limits all have `phase_timeout`.
+    fn deadline_context(budget: std::time::Duration, phase_timeout: std::time::Duration) -> PingoraRequestCtx {
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.extensions.insert(praxis_core::grpc::GrpcDeadline::new(
+            std::time::Instant::now() + budget,
+            false,
+            true,
+        ));
+        ctx.extensions
+            .insert(super::super::upstream_peer::GrpcDeadlineAttemptBudget(budget));
+        let mut upstream = praxis_core::connectivity::Upstream {
+            address: std::sync::Arc::from("127.0.0.1:8080"),
+            authority: None,
+            base_path: None,
+            tls: None,
+            connection: std::sync::Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
+        };
+        let opts = std::sync::Arc::make_mut(&mut upstream.connection);
+        opts.connection_timeout = Some(phase_timeout);
+        opts.total_connection_timeout = Some(phase_timeout);
+        opts.read_timeout = Some(phase_timeout);
+        opts.write_timeout = Some(phase_timeout);
+        ctx.upstream_for_retry = Some(upstream);
+        ctx
+    }
+
+    #[tokio::test]
+    async fn deadline_capped_read_timeout_waits_for_the_exact_deadline() {
+        let budget = std::time::Duration::from_micros(800);
+        let ctx = deadline_context(budget, budget);
+        let deadline = ctx
+            .extensions
+            .get::<praxis_core::grpc::GrpcDeadline>()
+            .unwrap()
+            .deadline();
+
+        let rejection = deadline_timeout_rejection(&ErrorType::ReadTimedout, &ctx)
+            .await
+            .unwrap();
+        drop(ctx);
+
+        assert!(
+            std::time::Instant::now() >= deadline,
+            "a deadline response cannot be early"
+        );
+        assert_eq!(rejection.status, 200);
+        assert!(
+            rejection
+                .headers
+                .iter()
+                .any(|(name, value)| name == "grpc-status" && value == "4"),
+            "the rejection must report DEADLINE_EXCEEDED"
+        );
+    }
+
+    #[tokio::test]
+    async fn earlier_configured_timeout_keeps_its_transport_error() {
+        let ctx = deadline_context(std::time::Duration::from_secs(1), std::time::Duration::from_millis(10));
+        for kind in [
+            ErrorType::ConnectTimedout,
+            ErrorType::ReadTimedout,
+            ErrorType::WriteTimedout,
+        ] {
+            assert!(deadline_timeout_rejection(&kind, &ctx).await.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn early_timeout_does_not_wait_for_a_distant_grpc_deadline() {
+        let budget = std::time::Duration::from_secs(1);
+        let ctx = deadline_context(budget, budget);
+
+        assert!(
+            deadline_timeout_rejection(&ErrorType::ReadTimedout, &ctx)
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_deadline_wins_even_when_another_limit_was_shorter() {
+        let mut ctx = deadline_context(std::time::Duration::from_secs(1), std::time::Duration::from_millis(10));
+        ctx.extensions.insert(praxis_core::grpc::GrpcDeadline::new(
+            std::time::Instant::now() - std::time::Duration::from_millis(1),
+            false,
+            true,
+        ));
+        let rejection = deadline_timeout_rejection(&ErrorType::ReadTimedout, &ctx).await;
+        drop(ctx);
+        assert_eq!(
+            rejection.map(|reply| reply.status),
+            Some(200),
+            "an elapsed gRPC deadline should still be reported"
+        );
+    }
+
+    #[test]
+    fn early_wait_requires_the_deadline_to_cap_that_phase_within_one_millisecond() {
+        let budget = std::time::Duration::from_secs(1);
+        let mut ctx = deadline_context(budget, budget);
+        let near = std::time::Duration::from_micros(800);
+        assert!(should_wait_for_deadline_timeout(&ErrorType::ReadTimedout, &ctx, near));
+        assert!(should_wait_for_deadline_timeout(&ErrorType::WriteTimedout, &ctx, near));
+        assert!(should_wait_for_deadline_timeout(
+            &ErrorType::ConnectTimedout,
+            &ctx,
+            near
+        ));
+        assert!(!should_wait_for_deadline_timeout(
+            &ErrorType::ReadTimedout,
+            &ctx,
+            std::time::Duration::from_micros(1_001)
+        ));
+
+        let upstream = ctx.upstream_for_retry.as_mut().unwrap();
+        let opts = std::sync::Arc::make_mut(&mut upstream.connection);
+        opts.read_timeout = Some(std::time::Duration::from_millis(10));
+        opts.connection_timeout = Some(std::time::Duration::from_millis(10));
+        assert!(!should_wait_for_deadline_timeout(&ErrorType::ReadTimedout, &ctx, near));
+        assert!(!should_wait_for_deadline_timeout(
+            &ErrorType::ConnectTimedout,
+            &ctx,
+            near
+        ));
+        assert!(should_wait_for_deadline_timeout(&ErrorType::WriteTimedout, &ctx, near));
+        drop(ctx);
+    }
+
+    #[test]
+    fn only_expected_client_rejections_suppress_the_native_error_log() {
+        for (etype, expected) in [
+            (ErrorType::HTTPStatus(400), true),
+            (ErrorType::HTTPStatus(413), true),
+            (ErrorType::HTTPStatus(429), true),
+            (ErrorType::HTTPStatus(500), false),
+            (ErrorType::InternalError, false),
+            (ErrorType::WriteError, false),
+        ] {
+            let error = pingora_core::Error::new(etype);
+            let mut ctx = PingoraRequestCtx::default();
+            assert!(
+                !expected_filter_rejection(&error, &ctx),
+                "an unclassified error must remain visible"
+            );
+            ctx.stamp_error_type(crate::http::pingora::metrics::ERROR_TYPE_FILTER_REJECT);
+            assert_eq!(
+                expected_filter_rejection(&error, &ctx),
+                expected,
+                "only classified client-error rejections are expected"
+            );
+            drop(ctx);
+        }
+    }
 
     #[test]
     fn problem_details_body_has_rfc9457_fields() {

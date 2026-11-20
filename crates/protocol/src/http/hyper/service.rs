@@ -19,6 +19,7 @@ use std::{fmt, mem, sync::Arc};
 use arc_swap::ArcSwap;
 use http::{HeaderValue, Method, Request, Response, Version};
 use hyper::body::Incoming;
+use praxis_core::server::{LifecycleHandle, LifecyclePhase};
 use praxis_filter::FilterPipeline;
 use tracing::{Instrument as _, debug};
 
@@ -48,7 +49,12 @@ pub(super) async fn handle(
     connection: Arc<ConnectionFacts>,
     request: Request<Incoming>,
 ) -> Result<Response<ProxyBody>, ResponseAbort> {
-    let mut flight = Flight::new(&listener.pipeline, request.method().clone(), request.version());
+    let mut flight = Flight::new(
+        &listener.pipeline,
+        request.method().clone(),
+        request.version(),
+        listener.lifecycle.clone(),
+    );
     if let Some(refusal) = admission::admit(&listener, &mut flight.ctx) {
         flight.error = Some(ErrorOrigin::Other);
         return Ok(flight.reply(refusal).await);
@@ -107,6 +113,9 @@ pub(super) struct Flight {
     /// The HTTP version the client spoke.
     pub(super) version: Version,
 
+    /// Process lifecycle shared by the listener.
+    pub(super) lifecycle: LifecycleHandle,
+
     /// The status of the response handed to the client; 0 until one is.
     pub(super) written_status: u16,
 }
@@ -114,7 +123,7 @@ pub(super) struct Flight {
 impl Flight {
     /// Start a request's state, pinning the current pipeline for its whole
     /// run.
-    fn new(pipeline: &ArcSwap<FilterPipeline>, method: Method, version: Version) -> Self {
+    fn new(pipeline: &ArcSwap<FilterPipeline>, method: Method, version: Version, lifecycle: LifecycleHandle) -> Self {
         let mut ctx = Box::<PingoraRequestCtx>::default();
         let pipeline = ctx.pin_pipeline(pipeline);
         Self {
@@ -125,6 +134,7 @@ impl Flight {
             orphaned: false,
             pipeline,
             version,
+            lifecycle,
             written_status: 0,
         }
     }
@@ -142,7 +152,12 @@ impl Flight {
     /// phases that take a request's state.
     #[cfg(test)]
     pub(super) fn for_tests(pipeline: FilterPipeline) -> Self {
-        Self::new(&ArcSwap::from_pointee(pipeline), Method::GET, Version::HTTP_11)
+        Self::new(
+            &ArcSwap::from_pointee(pipeline),
+            Method::GET,
+            Version::HTTP_11,
+            LifecycleHandle::new(),
+        )
     }
 
     /// Whether the client asked for a HEAD.
@@ -153,7 +168,8 @@ impl Flight {
     /// Turn `reply` into the client's response, recording its status.
     fn local_response(&mut self, reply: LocalReply) -> Response<ProxyBody> {
         let is_head = self.is_head();
-        let closes = !reply.keepalive && self.version != Version::HTTP_2;
+        let draining = self.lifecycle.phase() == LifecyclePhase::Draining;
+        let closes = (draining || !reply.keepalive) && self.version != Version::HTTP_2;
         let mut response = reply.into_response(is_head);
         if closes {
             response
@@ -193,6 +209,7 @@ impl Drop for Flight {
             orphaned: true,
             pipeline: Arc::clone(&self.pipeline),
             version: self.version,
+            lifecycle: self.lifecycle.clone(),
             written_status: self.written_status,
         };
         self.completed = true;
@@ -245,7 +262,7 @@ mod tests {
     use bytes::Bytes;
     use http::StatusCode;
     use hyper::body::Body as _;
-    use praxis_core::retry::ClusterRetryState;
+    use praxis_core::retry::{AdmissionLease, ClusterRetryState};
     use tokio::sync::Semaphore;
 
     use super::*;
@@ -301,6 +318,29 @@ mod tests {
     }
 
     #[test]
+    /// A draining HTTP/1 reply closes the connection despite keep-alive.
+    fn draining_reply_closes_an_http1_connection_even_when_keepalive_was_requested() {
+        let lifecycle = LifecycleHandle::new();
+        assert!(lifecycle.begin_drain());
+        let pipeline = empty_pipeline();
+        let mut flight = Flight::new(
+            &ArcSwap::from_pointee(pipeline),
+            Method::GET,
+            Version::HTTP_11,
+            lifecycle,
+        );
+        let mut reply = LocalReply::status(200);
+        reply.keepalive = true;
+
+        let response = flight.local_response(reply);
+
+        assert_eq!(
+            response.headers().get(http::header::CONNECTION),
+            Some(&HeaderValue::from_static("close"))
+        );
+    }
+
+    #[test]
     fn head_reply_keeps_the_headers_and_drops_the_body() {
         let mut flight = Flight::for_tests(empty_pipeline());
         flight.method = Method::HEAD;
@@ -344,30 +384,33 @@ mod tests {
 
     #[tokio::test]
     async fn completed_flight_is_not_completed_again_when_dropped() {
-        let (mut flight, lease) = leased_flight();
+        let (mut flight, state) = leased_flight();
         flight.complete().await;
-        lease.enter();
+        // A later request takes the slot the completed one gave back.
+        let _next = AdmissionLease::claim(&state).expect("an uncapped cluster admits");
 
         drop(flight);
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         assert_eq!(
-            lease.active_requests.load(Ordering::Relaxed),
+            state.active_requests.load(Ordering::Relaxed),
             1,
             "a completed request is not completed a second time"
         );
     }
 
     #[test]
-    fn flight_dropped_outside_a_runtime_is_left_alone() {
-        let (flight, lease) = leased_flight();
+    fn flight_dropped_outside_a_runtime_still_returns_its_slot() {
+        let (flight, state) = leased_flight();
 
+        // Nothing is spawned: there is no runtime to spawn on, and reaching
+        // for one anyway would panic this drop.
         drop(flight);
 
         assert_eq!(
-            lease.active_requests.load(Ordering::Relaxed),
-            1,
-            "with no runtime to complete it on, nothing is spawned"
+            state.active_requests.load(Ordering::Relaxed),
+            0,
+            "the admission lease hands its slot back even where completion cannot run"
         );
     }
 
@@ -375,7 +418,7 @@ mod tests {
     fn pinned_pipeline_outlives_a_reload() {
         let original = Arc::new(empty_pipeline());
         let swap = ArcSwap::new(Arc::clone(&original));
-        let flight = Flight::new(&swap, Method::GET, Version::HTTP_11);
+        let flight = Flight::new(&swap, Method::GET, Version::HTTP_11, LifecycleHandle::new());
 
         swap.store(Arc::new(empty_pipeline()));
 
@@ -458,16 +501,16 @@ mod tests {
         Arc::new(ConnectionFacts {
             peer: "127.0.0.1:40000".parse().unwrap(),
             tls: false,
+            peer_identity: None,
         })
     }
 
-    /// A request's state holding a cluster retry lease, which completion
-    /// releases, and the lease.
+    /// A request's state holding a cluster admission lease, which
+    /// completion releases, and the cluster counter behind it.
     fn leased_flight() -> (Flight, Arc<ClusterRetryState>) {
-        let lease = Arc::new(ClusterRetryState::new(None));
-        lease.enter();
+        let state = Arc::new(ClusterRetryState::new(None));
         let mut flight = Flight::for_tests(empty_pipeline());
-        flight.ctx.cluster_retry_state = Some(Arc::clone(&lease));
-        (flight, lease)
+        flight.ctx.cluster_admission = AdmissionLease::claim(&state);
+        (flight, state)
     }
 }

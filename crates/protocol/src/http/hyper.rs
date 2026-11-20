@@ -79,7 +79,7 @@ use praxis_core::{
     ProxyError,
     config::{Config, ProtocolKind},
     egress::{Connector as _, hyper::HyperConnector},
-    server::HyperRuntime,
+    server::{HyperRuntime, ServerRuntime as _},
 };
 use tokio::sync::watch;
 
@@ -116,14 +116,14 @@ impl HyperHttp {
         config: &Config,
         pipelines: &ListenerPipelines,
     ) -> Result<Vec<watch::Sender<bool>>, ProxyError> {
-        let mut cert_watcher_shutdowns = Vec::new();
+        let mut cert_watcher_shutdowns = crate::cert_watcher_shutdowns::RegistrationWatchers::default();
         let listeners: Vec<_> = config
             .listeners
             .iter()
             .filter(|listener| listener.protocol == ProtocolKind::Http)
             .collect();
         if listeners.is_empty() {
-            return Ok(cert_watcher_shutdowns);
+            return Ok(cert_watcher_shutdowns.finish());
         }
 
         let connector = HyperConnector::new(runtime.keepalive_pool_size());
@@ -131,11 +131,17 @@ impl HyperHttp {
             let pipeline = pipelines.get(&listener.name).map(Arc::clone).ok_or_else(|| {
                 ProxyError::Config(format!("no pipeline for listener '{name}'", name = listener.name))
             })?;
-            let shared = ListenerShared::new(listener, pipeline, connector.clone(), runtime.trust_anchors());
-            listener::register(runtime, listener, shared, &mut cert_watcher_shutdowns)?;
+            let shared = ListenerShared::new(
+                listener,
+                pipeline,
+                connector.clone(),
+                runtime.trust_anchors(),
+                runtime.lifecycle(),
+            );
+            listener::register(runtime, listener, shared, cert_watcher_shutdowns.senders_mut())?;
         }
 
-        Ok(cert_watcher_shutdowns)
+        Ok(cert_watcher_shutdowns.finish())
     }
 }
 

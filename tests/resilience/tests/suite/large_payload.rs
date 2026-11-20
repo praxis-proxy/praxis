@@ -77,7 +77,7 @@ fn much_larger_than_limit_returns_413() {
 }
 
 #[test]
-fn no_limit_handles_large_body() {
+fn default_limit_handles_small_body() {
     let _backend = start_echo_backend();
     let backend_port = _backend.port();
     let proxy_port = free_port();
@@ -111,12 +111,8 @@ insecure_options:
     let payload = "e".repeat(64 * 1024);
     let (status, body) = http_post(proxy.addr(), "/echo", &payload);
 
-    assert_eq!(status, 200, "large body with no limit should succeed");
-    assert_eq!(
-        body.len(),
-        payload.len(),
-        "response body length should match request payload"
-    );
+    assert_eq!(status, 200, "body below the default limit should succeed");
+    assert_eq!(body, payload, "response body must match the complete request payload");
 }
 
 #[test]
@@ -138,28 +134,7 @@ fn empty_body_post_succeeds() {
 }
 
 #[test]
-fn response_body_over_limit_handled() {
-    let large_body = "r".repeat(2048);
-    let backend_port = praxis_test_utils::start_backend(&large_body);
-    let proxy_port = free_port();
-    let yaml = response_limit_yaml(proxy_port, backend_port, 1024);
-    let config = Config::from_yaml(&yaml).unwrap();
-    let proxy = start_proxy(&config);
-
-    let raw = http_send(
-        proxy.addr(),
-        "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
-    );
-    let status = parse_status(&raw);
-
-    assert!(
-        status == 500 || status == 502 || status == 200,
-        "response over limit should be handled gracefully (200, 500, or 502), got {status}"
-    );
-}
-
-#[test]
-fn sequential_large_payloads_do_not_leak() {
+fn sequential_payloads_remain_intact() {
     let _backend = start_echo_backend();
     let backend_port = _backend.port();
     let proxy_port = free_port();
@@ -194,7 +169,7 @@ insecure_options:
     for i in 0..10 {
         let (status, body) = http_post(proxy.addr(), "/echo", &payload);
         assert_eq!(status, 200, "sequential large payload {i} should succeed");
-        assert_eq!(body.len(), payload.len(), "response {i} length should match request");
+        assert_eq!(body, payload, "response {i} must match the complete request");
     }
 }
 
@@ -208,34 +183,6 @@ fn body_limit_yaml(proxy_port: u16, backend_port: u16, limit: usize) -> String {
         r#"
 body_limits:
   max_request_bytes: {limit}
-listeners:
-  - name: default
-    address: "127.0.0.1:{proxy_port}"
-    filter_chains: [main]
-filter_chains:
-  - name: main
-    filters:
-      - filter: router
-        routes:
-          - path_prefix: "/"
-            cluster: backend
-      - filter: load_balancer
-        clusters:
-          - name: backend
-            endpoints:
-              - "127.0.0.1:{backend_port}"
-insecure_options:
-  allow_private_endpoints: true
-"#
-    )
-}
-
-/// Build a YAML config with `body_limits.max_response_bytes`.
-fn response_limit_yaml(proxy_port: u16, backend_port: u16, limit: usize) -> String {
-    format!(
-        r#"
-body_limits:
-  max_response_bytes: {limit}
 listeners:
   - name: default
     address: "127.0.0.1:{proxy_port}"

@@ -5,7 +5,7 @@
 
 use std::{
     io::{Read as _, Write as _},
-    net::{TcpListener, TcpStream},
+    net::TcpStream,
     sync::mpsc,
     time::Duration,
 };
@@ -32,7 +32,7 @@ impl HttpFilter for RewriteResponse {
     }
 
     fn response_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadWrite
+        BodyAccess::ReadWrite(praxis_filter::BodyRequirement::Optional)
     }
 
     fn response_body_mode(&self) -> BodyMode {
@@ -90,7 +90,7 @@ impl HttpFilter for FailResponseBody {
     }
 
     fn response_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadWrite
+        BodyAccess::ReadWrite(praxis_filter::BodyRequirement::Optional)
     }
 
     fn response_body_mode(&self) -> BodyMode {
@@ -130,7 +130,7 @@ impl HttpFilter for FailAfterFirstChunk {
     }
 
     fn response_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadWrite
+        BodyAccess::ReadWrite(praxis_filter::BodyRequirement::Optional)
     }
 
     async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
@@ -165,8 +165,7 @@ impl HttpFilter for FailAfterFirstChunk {
 }
 
 fn split_response_backend() -> (u16, mpsc::Sender<()>, std::thread::JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind split backend");
-    let port = listener.local_addr().expect("backend address").port();
+    let (listener, port) = praxis_test_utils::bind_unique_port();
     let (send_second_chunk, first_chunk_received) = mpsc::channel();
     let handle = std::thread::spawn(move || {
         for _ in 0..4 {
@@ -197,8 +196,7 @@ fn split_response_backend() -> (u16, mpsc::Sender<()>, std::thread::JoinHandle<(
 }
 
 fn status_backend(status: u16) -> (u16, std::thread::JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind status backend");
-    let port = listener.local_addr().expect("backend address").port();
+    let (listener, port) = praxis_test_utils::bind_unique_port();
     let handle = std::thread::spawn(move || {
         for _ in 0..4 {
             let (mut stream, _) = listener.accept().expect("accept proxy connection");
@@ -226,8 +224,7 @@ fn status_backend(status: u16) -> (u16, std::thread::JoinHandle<()>) {
 }
 
 fn truncated_backend() -> (u16, std::thread::JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind truncated backend");
-    let port = listener.local_addr().expect("backend address").port();
+    let (listener, port) = praxis_test_utils::bind_unique_port();
     let handle = std::thread::spawn(move || {
         for _ in 0..4 {
             let (mut stream, _) = listener.accept().expect("accept proxy connection");

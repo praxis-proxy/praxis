@@ -31,7 +31,7 @@ const DEFAULT_MAX_STATE_BYTES: usize = 52_428_800; // 50 MiB
 
 /// Ceiling for `max_response_bytes` and `max_state_bytes`, bounding the
 /// buffered per-request memory across iterations.
-const MAX_BYTES_CEILING: usize = 1_073_741_824; // 1 GiB
+const MAX_BYTES_CEILING: usize = praxis_core::config::MAX_BUFFER_BYTES;
 
 /// Maximum iterative depth for loop prevention.
 const MAX_DEPTH: u8 = 3;
@@ -74,7 +74,7 @@ pub(crate) struct IterativeRequestRouterConfig {
     #[serde(default = "default_max_iterations")]
     pub(crate) max_iterations: u32,
 
-    /// Maximum response body bytes per sub-request (at most 1 GiB).
+    /// Maximum buffered response body bytes per sub-request (also bounded by `body_limits.max_buffer_bytes`).
     #[serde(default = "default_max_response_bytes")]
     pub(crate) max_response_bytes: usize,
 
@@ -83,7 +83,7 @@ pub(crate) struct IterativeRequestRouterConfig {
     #[serde(default)]
     pub(crate) max_stream_response_bytes: Option<usize>,
 
-    /// Maximum accumulated iteration state bytes (at most 1 GiB).
+    /// Maximum accumulated iteration state bytes (also bounded by `body_limits.max_buffer_bytes`).
     #[serde(default = "default_max_state_bytes")]
     pub(crate) max_state_bytes: usize,
 

@@ -206,6 +206,10 @@ async fn url_execution_redacts_path_from_connection_event() {
         headers: HeaderMap::new(),
         body: Bytes::new(),
     };
+    // Keep a second dispatcher alive: tracing-core's single-dispatch callsite
+    // registration fast path consults the registering thread's default, which
+    // can be NoSubscriber in a concurrent transport test.
+    let _callsite_registry = tracing::Dispatch::new(tracing_subscriber::registry());
     let capture = EventCapture::default();
     let subscriber = tracing_subscriber::registry().with(capture.clone());
     let _guard = tracing::subscriber::set_default(subscriber);
@@ -285,6 +289,10 @@ async fn prepared_streaming_url_redacts_path_from_connection_event() {
         headers: HeaderMap::new(),
         body: Bytes::new(),
     };
+    // Keep a second dispatcher alive: tracing-core's single-dispatch callsite
+    // registration fast path consults the registering thread's default, which
+    // can be NoSubscriber in a concurrent transport test.
+    let _callsite_registry = tracing::Dispatch::new(tracing_subscriber::registry());
     let capture = EventCapture::default();
     let subscriber = tracing_subscriber::registry().with(capture.clone());
     let _guard = tracing::subscriber::set_default(subscriber);
@@ -404,4 +412,224 @@ async fn check_completion(header_done: bool, end_state: EndState) {
     );
     assert_eq!(lifecycle.discarded.load(Ordering::SeqCst), 0, "no second teardown");
     assert_eq!(admission.available_permits(), 1, "admission permit returned");
+}
+
+/// A deterministic response whose transport metadata and delivered chunks can
+/// disagree, as they can with a multiplexed upstream or a faulty connector.
+#[derive(Clone, Debug)]
+struct ChunkConnector {
+    chunks: Vec<Bytes>,
+    advertised: Option<usize>,
+    lifecycle: Arc<Lifecycle>,
+}
+
+/// A response with an independently observed read position.
+struct ChunkSession {
+    connector: ChunkConnector,
+    headers: HeaderMap,
+    position: usize,
+}
+
+impl Connector for ChunkConnector {
+    type Session = ChunkSession;
+
+    fn new(_keepalive_pool_size: usize) -> Self {
+        Self {
+            chunks: Vec::new(),
+            advertised: None,
+            lifecycle: Arc::default(),
+        }
+    }
+
+    async fn connect(&self, _peer: &PeerSpec, _timeout: Duration) -> Result<ChunkSession, EgressError> {
+        let mut headers = HeaderMap::new();
+        if let Some(length) = self.advertised {
+            headers.insert(http::header::CONTENT_LENGTH, length.into());
+        }
+        Ok(ChunkSession {
+            connector: self.clone(),
+            headers,
+            position: 0,
+        })
+    }
+
+    async fn release(&self, _session: ChunkSession, keepalive: bool) {
+        let counter = if keepalive {
+            &self.lifecycle.reused
+        } else {
+            &self.lifecycle.discarded
+        };
+        counter.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+impl Session for ChunkSession {
+    fn reused(&self) -> bool {
+        false
+    }
+
+    async fn send_request_head(&mut self, _head: RequestHead) -> Result<(), EgressError> {
+        Ok(())
+    }
+
+    async fn send_request_body(&mut self, _chunk: Bytes, _end_of_stream: bool) -> Result<(), EgressError> {
+        Ok(())
+    }
+
+    async fn finish_request(&mut self) -> Result<(), EgressError> {
+        Ok(())
+    }
+
+    async fn read_response_head(&mut self) -> Result<(), EgressError> {
+        Ok(())
+    }
+
+    fn response_head(&self) -> Result<ResponseHead<'_>, EgressError> {
+        Ok(ResponseHead {
+            headers: &self.headers,
+            status: 200,
+            version: Version::HTTP_11,
+        })
+    }
+
+    fn response_done(&mut self) -> bool {
+        false
+    }
+
+    async fn read_response_body(&mut self) -> Result<Option<Bytes>, EgressError> {
+        self.connector.lifecycle.reads.fetch_add(1, Ordering::SeqCst);
+        let chunk = self.connector.chunks.get(self.position).cloned();
+        self.position = self.position.saturating_add(1);
+        Ok(chunk)
+    }
+
+    fn completion(&mut self) -> Result<Completion, EgressError> {
+        Ok(if self.position >= self.connector.chunks.len() {
+            Completion::Finished
+        } else {
+            Completion::Incomplete
+        })
+    }
+
+    fn clear_read_timeout(&mut self) {}
+
+    async fn shutdown(&mut self) {
+        self.connector.lifecycle.shutdowns.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// Execute one synthetic response with independently chosen length metadata.
+#[expect(clippy::unwrap_used, reason = "fixed test setup")]
+async fn collect_chunks(
+    advertised: Option<usize>,
+    chunks: &[&'static [u8]],
+    limit: usize,
+) -> (Result<super::SubResponse, SubRequestError>, Arc<Lifecycle>, usize) {
+    let lifecycle = Arc::new(Lifecycle::default());
+    let backend = ChunkConnector {
+        chunks: chunks.iter().copied().map(Bytes::from_static).collect(),
+        advertised,
+        lifecycle: Arc::clone(&lifecycle),
+    };
+    let connector = SubRequestConnector::with_connector(backend, Some(1), None);
+    let admission = Arc::clone(connector.admission.as_ref().unwrap());
+    let client = SubRequestClient::with_max_response_bytes(connector, limit);
+    let peer = PeerSpec::plain("127.0.0.1:8080".parse().unwrap());
+    let request = SubRequest {
+        method: http::Method::GET,
+        uri: "/".parse().unwrap(),
+        headers: HeaderMap::new(),
+        body: Bytes::new(),
+    };
+    let result =
+        Box::pin(client.execute(&peer, &request, limit.saturating_add(100), Duration::from_secs(1), None)).await;
+    (result, lifecycle, admission.available_permits())
+}
+
+#[tokio::test]
+#[expect(clippy::unwrap_used, reason = "successful fixed-size cases")]
+async fn buffered_response_limits_count_chunks_not_advertised_length() {
+    for advertised in [None, Some(1), Some(10_000)] {
+        let (exact, exact_lifecycle, exact_permits) = collect_chunks(advertised, &[b"abcd", b"efgh"], 8).await;
+        assert_eq!(exact.unwrap().body.as_ref(), b"abcdefgh", "exact body must be complete");
+        assert_eq!(exact_lifecycle.reused.load(Ordering::SeqCst), 1);
+        assert_eq!(exact_lifecycle.shutdowns.load(Ordering::SeqCst), 0);
+        assert_eq!(exact_permits, 1);
+
+        let (overflow, overflow_lifecycle, overflow_permits) =
+            collect_chunks(advertised, &[b"abcd", b"efgh", b"i", b"unread"], 8).await;
+        assert!(
+            matches!(overflow, Err(SubRequestError::ResponseTooLarge { actual: 9, limit: 8 })),
+            "overflow must never return a truncated success: {overflow:?}"
+        );
+        assert_eq!(
+            overflow_lifecycle.reads.load(Ordering::SeqCst),
+            3,
+            "the collector stops at the crossing chunk"
+        );
+        assert_eq!(overflow_lifecycle.shutdowns.load(Ordering::SeqCst), 1);
+        assert_eq!(overflow_lifecycle.reused.load(Ordering::SeqCst), 0);
+        assert_eq!(overflow_permits, 1);
+    }
+}
+
+#[tokio::test]
+#[expect(clippy::unwrap_used, reason = "fixed streaming setup")]
+async fn streaming_overflow_discards_crossing_chunk_and_releases_admission() {
+    let (lifecycle, admission, client) = chunk_stream_fixture().unwrap();
+    let peer = PeerSpec::plain("127.0.0.1:8080".parse().unwrap());
+    let request = SubRequest {
+        method: http::Method::GET,
+        uri: "/".parse().unwrap(),
+        headers: HeaderMap::new(),
+        body: Bytes::new(),
+    };
+    let limits = StreamLimits {
+        idle_timeout: Duration::from_secs(1),
+        max_stream_duration: None,
+        max_total_bytes: Some(8),
+    };
+    let mut response = Box::pin(client.send_streaming(&peer, &request, Duration::from_secs(1), limits, None))
+        .await
+        .unwrap();
+    assert_eq!(response.body.next_chunk().await.unwrap().unwrap().as_ref(), b"abcd");
+    assert_eq!(response.body.next_chunk().await.unwrap().unwrap().as_ref(), b"efgh");
+    assert!(matches!(
+        response.body.next_chunk().await,
+        Err(SubRequestError::ResponseTooLarge { actual: 9, limit: 8 })
+    ));
+    assert!(response.body.is_done());
+    assert!(response.body.next_chunk().await.unwrap().is_none());
+    assert_eq!(lifecycle.discarded.load(Ordering::SeqCst), 1);
+    assert_eq!(lifecycle.reused.load(Ordering::SeqCst), 0);
+    assert_eq!(admission.available_permits(), 1);
+}
+
+/// Live transport, admission slot and client retained by streaming-limit tests.
+type ChunkStreamFixture = (
+    Arc<Lifecycle>,
+    Arc<tokio::sync::Semaphore>,
+    SubRequestClient<ChunkConnector>,
+);
+
+/// Prepare a three-chunk transport and retain its single admission slot.
+fn chunk_stream_fixture() -> Result<ChunkStreamFixture, SubRequestError> {
+    let lifecycle = Arc::new(Lifecycle::default());
+    let backend = ChunkConnector {
+        chunks: vec![
+            Bytes::from_static(b"abcd"),
+            Bytes::from_static(b"efgh"),
+            Bytes::from_static(b"i"),
+        ],
+        advertised: Some(1),
+        lifecycle: Arc::clone(&lifecycle),
+    };
+    let connector = SubRequestConnector::with_connector(backend, Some(1), None);
+    let admission_ref = connector
+        .admission
+        .as_ref()
+        .ok_or_else(|| SubRequestError::InvalidRequest("test admission slot missing".to_owned()))?;
+    let admission = Arc::clone(admission_ref);
+    let client = SubRequestClient::new(connector);
+    Ok((lifecycle, admission, client))
 }

@@ -5,7 +5,7 @@
 //!
 //! [`DashMap`]: dashmap::DashMap
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use dashmap::DashMap;
 use regex::Regex;
@@ -19,7 +19,7 @@ use super::{KvBackend, MatchType};
 /// Maximum number of compiled regex patterns to cache.
 const MAX_REGEX_CACHE_SIZE: usize = 10_000;
 
-/// Maximum number of entries per store.
+/// New-key insertion threshold; trusted constructor preloads are unrestricted.
 const MAX_ENTRIES: usize = 100_000;
 
 // -----------------------------------------------------------------------------
@@ -46,8 +46,14 @@ pub struct InMemoryKvBackend {
     /// Sharded concurrent hash map.
     data: DashMap<Arc<str>, Arc<str>>,
 
+    /// Serializes new-key capacity checks and insertion.
+    data_admission: Mutex<()>,
+
     /// Cached compiled regexes for [`MatchType::Regex`] lookups.
     regex_cache: DashMap<String, Regex>,
+
+    /// Serializes new-pattern cache checks and insertion.
+    regex_admission: Mutex<()>,
 }
 
 impl InMemoryKvBackend {
@@ -62,11 +68,17 @@ impl InMemoryKvBackend {
     pub fn new() -> Self {
         Self {
             data: DashMap::new(),
+            data_admission: Mutex::new(()),
             regex_cache: DashMap::new(),
+            regex_admission: Mutex::new(()),
         }
     }
 
     /// Create a store pre-populated from key-value pairs.
+    ///
+    /// Trusted preload input is unrestricted. The insertion threshold
+    /// applies to later new keys; existing keys may be overwritten or
+    /// deleted even when the preload exceeds that threshold.
     ///
     /// ```
     /// use std::sync::Arc;
@@ -83,8 +95,47 @@ impl InMemoryKvBackend {
         }
         Self {
             data,
+            data_admission: Mutex::new(()),
             regex_cache: DashMap::new(),
+            regex_admission: Mutex::new(()),
         }
+    }
+
+    /// Insert with a capacity threshold and a test checkpoint after admission.
+    fn set_with_limit<F: FnOnce()>(&self, key: &str, value: Arc<str>, limit: usize, admitted: F) -> bool {
+        self.set_with_limit_after_lookup(key, value, limit, (|| {}, admitted))
+    }
+
+    /// Expose both sides of missing-key admission for controlled tests.
+    fn set_with_limit_after_lookup<F: FnOnce(), G: FnOnce()>(
+        &self,
+        key: &str,
+        value: Arc<str>,
+        limit: usize,
+        checkpoints: (F, G),
+    ) -> bool {
+        let (missing, admitted) = checkpoints;
+        if let Some(mut existing) = self.data.get_mut(key) {
+            *existing = value;
+            return true;
+        }
+
+        missing();
+        let _admission = self
+            .data_admission
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(mut existing) = self.data.get_mut(key) {
+            *existing = value;
+            return true;
+        }
+        if self.data.len() >= limit {
+            tracing::warn!(key, limit, "KV store entry limit reached; insert skipped");
+            return false;
+        }
+        admitted();
+        self.data.insert(Arc::from(key), value);
+        true
     }
 
     /// Retrieve a cached compiled regex or compile and cache it.
@@ -101,10 +152,23 @@ impl InMemoryKvBackend {
             return Ok(entry.value().clone());
         }
         let compiled = Regex::new(pattern).map_err(|err| format!("invalid regex pattern '{pattern}': {err}"))?;
-        if self.regex_cache.len() < MAX_REGEX_CACHE_SIZE {
-            self.regex_cache.entry(pattern.to_owned()).or_insert(compiled.clone());
+        Ok(self.cache_regex_with_limit(pattern, compiled, MAX_REGEX_CACHE_SIZE, || {}))
+    }
+
+    /// Cache a compiled regex if capacity remains after exclusive admission.
+    fn cache_regex_with_limit<F: FnOnce()>(&self, pattern: &str, compiled: Regex, limit: usize, admitted: F) -> Regex {
+        let _admission = self
+            .regex_admission
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(entry) = self.regex_cache.get(pattern) {
+            return entry.value().clone();
         }
-        Ok(compiled)
+        if self.regex_cache.len() < limit {
+            admitted();
+            self.regex_cache.insert(pattern.to_owned(), compiled.clone());
+        }
+        compiled
     }
 
     /// Return the matching entry with the lexicographically-smallest key.
@@ -134,19 +198,7 @@ impl KvBackend for InMemoryKvBackend {
     }
 
     fn set(&self, key: &str, value: Arc<str>) -> bool {
-        // Overwrites need neither the capacity check (the cap only gates
-        // new keys) nor a fresh key allocation; DashMap::len sums every
-        // shard, so only new-key inserts pay that sweep.
-        if let Some(mut existing) = self.data.get_mut(key) {
-            *existing = value;
-            return true;
-        }
-        if self.data.len() >= MAX_ENTRIES {
-            tracing::warn!(key, limit = MAX_ENTRIES, "KV store entry limit reached; insert skipped");
-            return false;
-        }
-        self.data.insert(Arc::from(key), value);
-        true
+        self.set_with_limit(key, value, MAX_ENTRIES, || {})
     }
 
     fn delete(&self, key: &str) -> bool {
@@ -582,5 +634,199 @@ mod tests {
                 "lookup should find at least one prefix match"
             );
         }
+    }
+
+    #[test]
+    fn concurrent_insert_never_exceeds_capacity() {
+        let store = Arc::new(InMemoryKvBackend::new());
+        assert!(store.set_with_limit("seed", Arc::from("original"), 2, || {}));
+        let first_store = Arc::clone(&store);
+        let (first, release) =
+            spawn_paused_admission(move |admitted| first_store.set_with_limit("first", Arc::from("one"), 2, admitted));
+
+        let second = spawn_after_missing_lookup(Arc::clone(&store), "second", "two", 2);
+
+        assert!(store.data_admission.try_lock().is_err(), "writer holds admission");
+        assert_eq!(store.get("seed").as_deref(), Some("original"), "reads stay independent");
+        release.send(()).unwrap();
+
+        assert!(first.join().unwrap(), "the first new key was admitted");
+        assert!(!second.join().unwrap(), "the second new key must fail at capacity");
+        assert_eq!(store.len(), 2, "overlapping admissions must preserve the cap");
+        assert_eq!(store.get("first").as_deref(), Some("one"));
+        assert!(store.get("second").is_none());
+    }
+
+    #[test]
+    fn capacity_overwrite_and_delete_preserve_admission() {
+        let store = Arc::new(InMemoryKvBackend::new());
+        let first_store = Arc::clone(&store);
+        let (first, release) = spawn_paused_admission(move |admitted| {
+            first_store.set_with_limit("shared", Arc::from("first"), 1, admitted)
+        });
+
+        let second = spawn_after_missing_lookup(Arc::clone(&store), "shared", "second", 1);
+        release.send(()).unwrap();
+
+        assert!(first.join().unwrap());
+        assert!(second.join().unwrap(), "a duplicate key must become an overwrite");
+        assert_eq!(store.len(), 1);
+        assert_eq!(store.get("shared").as_deref(), Some("second"));
+        assert!(store.set_with_limit("shared", Arc::from("third"), 1, || {}));
+        assert!(!store.set_with_limit("new", Arc::from("blocked"), 1, || {}));
+        assert!(store.delete("shared"));
+        assert!(store.set_with_limit("new", Arc::from("admitted"), 1, || {}));
+        assert_eq!(store.get("new").as_deref(), Some("admitted"));
+        assert_eq!(store.len(), 1);
+    }
+
+    #[test]
+    fn preloaded_store_above_limit_allows_overwrite_and_delete() {
+        let store = InMemoryKvBackend::from_pairs(vec![
+            ("first".to_owned(), "original".to_owned()),
+            ("second".to_owned(), "two".to_owned()),
+            ("third".to_owned(), "three".to_owned()),
+        ]);
+        assert_eq!(store.len(), 3, "trusted preload may exceed the admission limit");
+        assert!(!store.set_with_limit("new", Arc::from("blocked"), 2, || {}));
+        assert!(store.set_with_limit("first", Arc::from("updated"), 2, || {}));
+        assert_eq!(store.get("first").as_deref(), Some("updated"));
+
+        assert!(store.delete("third"));
+        assert_eq!(store.len(), 2);
+        assert!(!store.set_with_limit("new", Arc::from("still blocked"), 2, || {}));
+        assert!(store.delete("second"));
+        assert!(store.set_with_limit("new", Arc::from("admitted"), 2, || {}));
+        assert_eq!(store.get("new").as_deref(), Some("admitted"));
+        assert_eq!(store.len(), 2, "admission resumes below the limit");
+    }
+
+    #[test]
+    fn concurrent_regex_cache_never_exceeds_capacity() {
+        let store = Arc::new(InMemoryKvBackend::new());
+        let first_store = Arc::clone(&store);
+        let (first, release) = spawn_paused_admission(move |admitted| {
+            let compiled = Regex::new("^key-4[0-9]$").unwrap();
+            first_store.cache_regex_with_limit("^key-4[0-9]$", compiled, 1, admitted)
+        });
+
+        let second_store = Arc::clone(&store);
+        let second = spawn_after_compile(move |ready| {
+            let compiled = Regex::new("^key-\\d+$").unwrap();
+            ready.send(()).unwrap();
+            second_store.cache_regex_with_limit("^key-\\d+$", compiled, 1, || {})
+        });
+        assert!(
+            store.regex_admission.try_lock().is_err(),
+            "the first pattern holds admission"
+        );
+        release.send(()).unwrap();
+
+        assert!(first.join().unwrap().is_match("key-42"));
+        assert!(
+            second.join().unwrap().is_match("key-42"),
+            "uncached overflow pattern still matches"
+        );
+        assert_eq!(
+            store.regex_cache.len(),
+            1,
+            "overlapping cache admissions preserve the cap"
+        );
+        assert!(store.regex_cache.contains_key("^key-4[0-9]$"));
+        assert!(!store.regex_cache.contains_key("^key-\\d+$"));
+    }
+
+    #[test]
+    fn concurrent_same_regex_pattern_reuses_admitted_entry() {
+        let store = Arc::new(InMemoryKvBackend::new());
+        let first_store = Arc::clone(&store);
+        let (first, release) = spawn_paused_admission(move |admitted| {
+            let compiled = Regex::new("^key-4[0-9]$").unwrap();
+            first_store.cache_regex_with_limit("^key-4[0-9]$", compiled, 2, admitted)
+        });
+
+        let second_store = Arc::clone(&store);
+        let second = spawn_after_compile(move |ready| {
+            let compiled = regex::RegexBuilder::new("^key-4[0-9]$")
+                .case_insensitive(true)
+                .build()
+                .unwrap();
+            ready.send(()).unwrap();
+            second_store.cache_regex_with_limit("^key-4[0-9]$", compiled, 2, || {})
+        });
+        assert!(
+            store.regex_admission.try_lock().is_err(),
+            "first writer holds admission"
+        );
+        release.send(()).unwrap();
+
+        assert!(first.join().unwrap().is_match("key-42"));
+        let reused = second.join().unwrap();
+        assert!(reused.is_match("key-42"));
+        assert!(
+            !reused.is_match("KEY-42"),
+            "the second caller must receive the first, case-sensitive compiled regex"
+        );
+        assert_eq!(store.regex_cache.len(), 1, "the duplicate pattern must have one entry");
+        assert!(store.regex_cache.contains_key("^key-4[0-9]$"));
+    }
+
+    // -----------------------------------------------------------------------------
+    // Test Utilities
+    // -----------------------------------------------------------------------------
+
+    /// Start a writer and return once its first missing-key check is complete.
+    fn spawn_after_missing_lookup(
+        store: Arc<InMemoryKvBackend>,
+        key: &'static str,
+        value: &'static str,
+        limit: usize,
+    ) -> std::thread::JoinHandle<bool> {
+        let (missing_tx, missing_rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            store.set_with_limit_after_lookup(
+                key,
+                Arc::from(value),
+                limit,
+                (
+                    || {
+                        missing_tx.send(()).unwrap();
+                    },
+                    || {},
+                ),
+            )
+        });
+        missing_rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        handle
+    }
+
+    /// Start a worker and return once it has compiled its regex.
+    fn spawn_after_compile<T, F>(operation: F) -> std::thread::JoinHandle<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(std::sync::mpsc::Sender<()>) -> T + Send + 'static,
+    {
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || operation(ready_tx));
+        ready_rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        handle
+    }
+
+    /// Start one writer and pause it after admission until released by the test.
+    fn spawn_paused_admission<T, F>(operation: F) -> (std::thread::JoinHandle<T>, std::sync::mpsc::Sender<()>)
+    where
+        T: Send + 'static,
+        F: FnOnce(Box<dyn FnOnce() + Send>) -> T + Send + 'static,
+    {
+        let (admitted_tx, admitted_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            operation(Box::new(move || {
+                admitted_tx.send(()).unwrap();
+                release_rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+            }))
+        });
+        admitted_rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        (handle, release_tx)
     }
 }

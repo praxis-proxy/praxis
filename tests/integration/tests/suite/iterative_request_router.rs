@@ -3,9 +3,16 @@
 
 //! Integration tests for the `iterative_request_router` filter.
 
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicUsize, Ordering},
+use std::{
+    io::{BufRead as _, BufReader, Read as _, Write as _},
+    net::{TcpListener, TcpStream},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        mpsc::{self, Receiver, Sender},
+    },
+    thread::JoinHandle,
+    time::{Duration, Instant},
 };
 
 use bytes::Bytes;
@@ -1552,12 +1559,12 @@ steps:
     .unwrap();
     let proxy = start_full_proxy_with_registry(&config, &registry);
 
-    let started = std::time::Instant::now();
+    let started = Instant::now();
     let (status, _body) = http_get(proxy.addr(), "/", None);
 
     assert_eq!(status, 504, "a slow step filter must consume the overall deadline");
     assert!(
-        started.elapsed() < std::time::Duration::from_millis(500),
+        started.elapsed() < Duration::from_millis(500),
         "request outlived the configured deadline: {:?}",
         started.elapsed()
     );
@@ -1877,7 +1884,7 @@ steps:
 
 #[test]
 fn transport_timeout_triggers_transport_transition() {
-    let slow_port = start_slow_backend("slow", std::time::Duration::from_secs(2));
+    let slow_port = start_slow_backend("slow", Duration::from_secs(2));
     let fallback = start_backend_with_shutdown("fallback-ok");
     let fallback_port = fallback.port();
     let proxy_port = free_port();
@@ -2008,14 +2015,7 @@ fn http_get_raw(path: &str) -> String {
 
 #[test]
 fn streaming_sse_first_chunk_arrives_before_upstream_completion() {
-    let chunks = vec![
-        "data: chunk1\n\n".to_owned(),
-        "data: chunk2\n\n".to_owned(),
-        "data: chunk3\n\n".to_owned(),
-    ];
-    let backend = Backend::chunked(chunks)
-        .header("content-type", "text/event-stream")
-        .start_with_shutdown();
+    let mut backend = PausedSseBackend::start();
     let proxy_port = free_port();
     let registry = streaming_registry();
     let config = Config::from_yaml(&irr_yaml(
@@ -2045,16 +2045,176 @@ steps:
     .unwrap();
     let proxy = start_full_proxy_with_registry(&config, &registry);
 
-    let raw = http_send(
-        proxy.addr(),
-        "GET / HTTP/1.1\r\nHost: localhost\r\nx-stream-response: true\r\nConnection: close\r\n\r\n",
-    );
+    let mut client = connect_streaming_client(proxy.addr());
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("client read timeout");
+    client
+        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nAccept: text/event-stream\r\nx-stream-response: true\r\nConnection: close\r\n\r\n")
+        .expect("send SSE request");
+    backend
+        .first
+        .recv_timeout(Duration::from_secs(5))
+        .expect("backend must flush first event");
 
-    let status = parse_status(&raw);
-    assert_eq!(status, 200, "streaming SSE should return 200");
-    let body = parse_body(&raw);
-    assert!(body.contains("data: chunk1"), "first chunk should arrive: {body}");
-    assert!(body.contains("data: chunk3"), "last chunk should arrive: {body}");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut response = Vec::new();
+    let mut chunk = [0_u8; 4096];
+    while !response
+        .windows(b"data: chunk1\n\n".len())
+        .any(|part| part == b"data: chunk1\n\n")
+    {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(!remaining.is_zero(), "first SSE event was not forwarded before release");
+        client
+            .set_read_timeout(Some(remaining))
+            .expect("first SSE event deadline");
+        let size = client.read(&mut chunk).expect("read first SSE event");
+        assert!(size > 0, "stream ended before the first SSE event");
+        response.extend_from_slice(&chunk[..size]);
+    }
+    assert!(response.starts_with(b"HTTP/1.1 200"), "streaming SSE must return 200");
+    assert!(
+        !response
+            .windows(b"data: chunk2\n\n".len())
+            .any(|part| part == b"data: chunk2\n\n"),
+        "second event arrived before backend release"
+    );
+    backend.release();
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("completed SSE read timeout");
+    client.read_to_end(&mut response).expect("read completed SSE response");
+    assert!(
+        response
+            .windows(b"data: chunk2\n\n".len())
+            .any(|part| part == b"data: chunk2\n\n"),
+        "second event must arrive after release"
+    );
+    backend.join();
+}
+
+fn connect_streaming_client(proxy_addr: &str) -> TcpStream {
+    let address = proxy_addr.parse().expect("streaming listener socket address");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match TcpStream::connect_timeout(&address, Duration::from_millis(250)) {
+            Ok(stream) => return stream,
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(25));
+            },
+            Err(error) => panic!("streaming listener did not become ready: {error}"),
+        }
+    }
+}
+
+struct PausedSseBackend {
+    port: u16,
+    first: Receiver<()>,
+    release: Option<Sender<()>>,
+    stop: Arc<AtomicBool>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl PausedSseBackend {
+    fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind SSE backend");
+        let port = listener.local_addr().expect("SSE backend address").port();
+        listener.set_nonblocking(true).expect("nonblocking SSE listener");
+        let (first_tx, first) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        let worker = std::thread::spawn(move || {
+            while !worker_stop.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((stream, _)) => serve_paused_sse(stream, &first_tx, &release_rx),
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    },
+                    Err(error) => panic!("SSE backend accept: {error}"),
+                }
+            }
+        });
+        Self {
+            port,
+            first,
+            release: Some(release),
+            stop,
+            worker: Some(worker),
+        }
+    }
+
+    fn port(&self) -> u16 {
+        self.port
+    }
+
+    fn release(&mut self) {
+        if let Some(release) = self.release.take() {
+            release.send(()).expect("release SSE backend");
+        }
+    }
+
+    fn join(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(worker) = self.worker.take() {
+            worker.join().expect("SSE backend worker");
+        }
+    }
+}
+
+impl Drop for PausedSseBackend {
+    fn drop(&mut self) {
+        if let Some(release) = self.release.take() {
+            let _released = release.send(());
+        }
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(worker) = self.worker.take() {
+            let joined = worker.join();
+            if !std::thread::panicking() {
+                joined.expect("SSE backend worker");
+            }
+        }
+    }
+}
+
+fn serve_paused_sse(stream: TcpStream, first: &Sender<()>, release: &Receiver<()>) {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("SSE backend read timeout");
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .expect("SSE backend write timeout");
+    let mut reader = BufReader::new(stream);
+    let mut streaming = false;
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).is_err() || line.is_empty() {
+            return;
+        }
+        if line == "\r\n" {
+            break;
+        }
+        streaming |= line.eq_ignore_ascii_case("x-stream-response: true\r\n");
+    }
+    let stream = reader.get_mut();
+    if !streaming {
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+            .expect("SSE readiness response");
+        return;
+    }
+    stream
+        .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\nE\r\ndata: chunk1\n\n\r\n")
+        .expect("first SSE chunk");
+    stream.flush().expect("flush first SSE event");
+    first.send(()).expect("signal first SSE event");
+    release
+        .recv_timeout(Duration::from_secs(10))
+        .expect("SSE release before deadline");
+    stream
+        .write_all(b"E\r\ndata: chunk2\n\n\r\n0\r\n\r\n")
+        .expect("final SSE chunk");
 }
 
 #[test]
@@ -2066,7 +2226,7 @@ fn streaming_response_bounded_by_overall_timeout() {
     let chunks: Vec<String> = (0..40).map(|i| format!("data: chunk{i}\n\n")).collect();
     let backend = Backend::chunked(chunks)
         .header("content-type", "text/event-stream")
-        .chunk_delay(std::time::Duration::from_millis(150))
+        .chunk_delay(Duration::from_millis(150))
         .start_with_shutdown();
     let proxy_port = free_port();
     let registry = streaming_registry();
@@ -2098,7 +2258,7 @@ steps:
     .unwrap();
     let proxy = start_full_proxy_with_registry(&config, &registry);
 
-    let started = std::time::Instant::now();
+    let started = Instant::now();
     let _raw = http_send(
         proxy.addr(),
         "GET / HTTP/1.1\r\nHost: localhost\r\nx-stream-response: true\r\nConnection: close\r\n\r\n",
@@ -2108,7 +2268,7 @@ steps:
     // The full 40 × 150ms drip is ~6s; with the overall timeout enforced the
     // stream is cut near 500ms. Without the cap it would run the whole drip.
     assert!(
-        elapsed < std::time::Duration::from_secs(3),
+        elapsed < Duration::from_secs(3),
         "streamed response must be bounded by the overall timeout_ms, took {elapsed:?}"
     );
 }
@@ -2316,10 +2476,7 @@ steps:
 
 #[test]
 fn streaming_step_deadline_includes_header_time() {
-    let backend_port = start_split_delay_chunked_backend(
-        std::time::Duration::from_millis(450),
-        std::time::Duration::from_millis(450),
-    );
+    let backend_port = start_split_delay_chunked_backend(Duration::from_millis(450), Duration::from_millis(450));
     let proxy_port = free_port();
     let registry = streaming_registry();
     let config = Config::from_yaml(&irr_yaml(
@@ -3374,7 +3531,7 @@ impl HttpFilter for IntegrationCompletionEmissionAndBodyFilter {
     }
 
     fn response_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadWrite
+        BodyAccess::ReadWrite(praxis_filter::BodyRequirement::Optional)
     }
 
     async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
@@ -3404,7 +3561,7 @@ impl HttpFilter for IntegrationHandledTerminationOrderFilter {
     }
 
     fn response_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadWrite
+        BodyAccess::ReadWrite(praxis_filter::BodyRequirement::Optional)
     }
 
     async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
@@ -3436,7 +3593,7 @@ impl HttpFilter for IntegrationPerChunkEmissionFilter {
     }
 
     fn response_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional)
     }
 
     async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
@@ -3463,7 +3620,7 @@ impl HttpFilter for IntegrationStreamCompletionFilter {
     }
 
     fn response_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional)
     }
 
     async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
@@ -3496,7 +3653,7 @@ impl HttpFilter for IntegrationStreamTerminationFilter {
     }
 
     fn response_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional)
     }
 
     async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
@@ -3616,11 +3773,10 @@ fn nested_header_registry() -> FilterRegistry {
     clippy::disallowed_methods,
     reason = "blocking backend runs on a dedicated test thread"
 )]
-fn start_split_delay_chunked_backend(header_delay: std::time::Duration, body_delay: std::time::Duration) -> u16 {
+fn start_split_delay_chunked_backend(header_delay: Duration, body_delay: Duration) -> u16 {
     use std::io::{Read as _, Write as _};
 
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
+    let (listener, port) = praxis_test_utils::bind_unique_port();
     std::thread::spawn(move || {
         let Ok((mut stream, _)) = listener.accept() else {
             return;
@@ -3639,8 +3795,7 @@ fn start_split_delay_chunked_backend(header_delay: std::time::Duration, body_del
 fn start_incomplete_chunked_backend() -> u16 {
     use std::io::{Read as _, Write as _};
 
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
+    let (listener, port) = praxis_test_utils::bind_unique_port();
     std::thread::spawn(move || {
         let Ok((mut stream, _)) = listener.accept() else {
             return;
@@ -3684,7 +3839,7 @@ impl HttpFilter for ResponseProbeFilter {
     }
 
     fn response_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional)
     }
 
     fn response_body_mode(&self) -> BodyMode {
@@ -3783,7 +3938,7 @@ impl HttpFilter for BodyPromoterFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional)
     }
 
     fn request_body_mode(&self) -> BodyMode {
@@ -3813,7 +3968,7 @@ impl HttpFilter for SlowRequestFilter {
     }
 
     async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
         Ok(FilterAction::Continue)
     }
 }
@@ -3869,9 +4024,9 @@ impl HttpFilter for AgenticLifecycleProbe {
 
     fn request_body_access(&self) -> BodyAccess {
         if matches!(self.role, ProbeRole::FinalModelRequest) {
-            BodyAccess::ReadWrite
+            BodyAccess::ReadWrite(praxis_filter::BodyRequirement::Optional)
         } else {
-            BodyAccess::ReadOnly
+            BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional)
         }
     }
 
@@ -3959,7 +4114,7 @@ impl HttpFilter for AgenticLifecycleProbe {
     }
 
     fn response_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional)
     }
 
     fn response_body_mode(&self) -> BodyMode {

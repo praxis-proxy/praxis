@@ -72,7 +72,10 @@ fn parses_documented_extract_and_header_combo() {
         "#,
     );
     assert_eq!(filter.name(), "json_body");
-    assert_eq!(filter.request_body_access(), crate::BodyAccess::ReadWrite);
+    assert_eq!(
+        filter.request_body_access(),
+        crate::BodyAccess::ReadWrite(crate::BodyRequirement::Required)
+    );
 }
 
 #[test]
@@ -88,7 +91,10 @@ fn from_ops_constructs_without_yaml() {
     })
     .unwrap();
     assert_eq!(filter.name(), "json_body");
-    assert_eq!(filter.request_body_access(), crate::BodyAccess::ReadWrite);
+    assert_eq!(
+        filter.request_body_access(),
+        crate::BodyAccess::ReadWrite(crate::BodyRequirement::Required)
+    );
 }
 
 #[test]
@@ -270,7 +276,9 @@ async fn metadata_value_is_injected_as_json_string() {
     );
     let req = crate::test_utils::make_request(http::Method::POST, "/");
     let mut ctx = crate::test_utils::make_filter_context(&req);
-    ctx.set_metadata("json_rpc.method", "eth_blockNumber");
+    ctx.filter_metadata
+        .insert("json_rpc.method", "eth_blockNumber")
+        .expect("entry must fit in the filter's metadata");
     let mut body = Some(Bytes::from_static(br#"{"jsonrpc":"2.0"}"#));
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
     assert!(matches!(action, FilterAction::BodyDone));
@@ -438,6 +446,31 @@ fn response_shrink_is_padded() {
 }
 
 #[test]
+fn large_response_removal_is_valid_and_fits_committed_length() {
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let secret = "s".repeat(1_048_576);
+    for (input, expected) in [
+        (format!(r#"{{"keep":1,"secret":"{secret}"}}"#), json!({"keep":1})),
+        (format!(r#"{{"secret":"{secret}"}}"#), json!({})),
+        (format!(r#"{{"keep":"{secret}"}}"#), json!({"keep":secret})),
+    ] {
+        let filter = parse_filter("response_remove:\n  - /secret");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        let original_len = input.len();
+        let mut body = Some(Bytes::from(input));
+        assert!(matches!(
+            filter.on_response_body(&mut ctx, &mut body, true).unwrap(),
+            FilterAction::BodyDone
+        ));
+        let output = body.unwrap();
+        assert_eq!(output.len(), original_len);
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&output).unwrap(), expected);
+        let trimmed = output.iter().rposition(|byte| *byte != b' ').unwrap() + 1;
+        assert!(output[trimmed..].iter().all(|byte| *byte == b' '));
+    }
+}
+
+#[test]
 fn fit_response_refuses_growth() {
     assert!(
         super::fit_response(4, b"12345".to_vec()).is_none(),
@@ -454,7 +487,10 @@ fn request_body_access_none_when_only_response_ops() {
         "#,
     );
     assert_eq!(filter.request_body_access(), crate::BodyAccess::None);
-    assert_eq!(filter.response_body_access(), crate::BodyAccess::ReadWrite);
+    assert_eq!(
+        filter.response_body_access(),
+        crate::BodyAccess::ReadWrite(crate::BodyRequirement::Required)
+    );
 }
 
 #[test]
@@ -484,7 +520,10 @@ fn allows_nested_extract_pointers() {
             metadata: user.id
         "#,
     );
-    assert_eq!(filter.request_body_access(), crate::BodyAccess::ReadOnly);
+    assert_eq!(
+        filter.request_body_access(),
+        crate::BodyAccess::ReadOnly(crate::BodyRequirement::Required)
+    );
 }
 
 #[test]
@@ -507,7 +546,10 @@ fn extract_only_is_read_only() {
             metadata: original.model
         "#,
     );
-    assert_eq!(filter.request_body_access(), crate::BodyAccess::ReadOnly);
+    assert_eq!(
+        filter.request_body_access(),
+        crate::BodyAccess::ReadOnly(crate::BodyRequirement::Required)
+    );
     assert_eq!(filter.response_body_access(), crate::BodyAccess::None);
 }
 
@@ -523,7 +565,10 @@ fn extract_plus_replace_is_read_write() {
             value: forced-model
         "#,
     );
-    assert_eq!(filter.request_body_access(), crate::BodyAccess::ReadWrite);
+    assert_eq!(
+        filter.request_body_access(),
+        crate::BodyAccess::ReadWrite(crate::BodyRequirement::Required)
+    );
 }
 
 #[tokio::test]
@@ -637,7 +682,7 @@ async fn extract_only_trailing_junk_does_not_promote_metadata() {
     let mut body = Some(Bytes::from_static(br#"{"model":"old","x":1} not-json"#));
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
     assert!(matches!(action, FilterAction::Continue));
-    assert!(ctx.get_metadata("original.model").is_none());
+    assert!(ctx.filter_metadata.get("original.model").is_none());
 }
 
 #[tokio::test]
@@ -674,7 +719,7 @@ async fn extract_only_trailing_junk_on_invalid_continue() {
     let mut body = Some(Bytes::from_static(br#"{"model":"old"} garbage"#));
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
     assert!(matches!(action, FilterAction::Continue));
-    assert!(ctx.get_metadata("original.model").is_none());
+    assert!(ctx.filter_metadata.get("original.model").is_none());
 }
 
 #[tokio::test]
@@ -695,7 +740,7 @@ async fn extract_only_trailing_junk_on_invalid_reject() {
         matches!(action, FilterAction::Reject(r) if r.status == 400),
         "trailing junk with on_invalid reject"
     );
-    assert!(ctx.get_metadata("original.model").is_none());
+    assert!(ctx.filter_metadata.get("original.model").is_none());
 }
 
 #[tokio::test]
@@ -770,7 +815,7 @@ async fn extract_string_to_metadata() {
     let mut body = Some(Bytes::from_static(br#"{"model":"old","n":1}"#));
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
     assert!(matches!(action, FilterAction::BodyDone));
-    assert_eq!(ctx.get_metadata("original.model"), Some("old"));
+    assert_eq!(ctx.filter_metadata.get("original.model"), Some("old"));
     assert_eq!(body.as_ref().unwrap().as_ref(), br#"{"model":"old","n":1}"#);
 }
 
@@ -815,7 +860,7 @@ async fn nested_extract_walks_parent() {
         ctx.get_structured_metadata("ext", "user"),
         Some(&json!({"id": 1, "n": 2}))
     );
-    assert_eq!(ctx.get_metadata("user.id"), Some("1"));
+    assert_eq!(ctx.filter_metadata.get("user.id"), Some("1"));
 }
 
 #[tokio::test]
@@ -832,7 +877,7 @@ async fn extract_missing_pointer_skips() {
     let mut body = Some(Bytes::from_static(br#"{"a":1}"#));
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
     assert!(matches!(action, FilterAction::BodyDone));
-    assert!(ctx.get_metadata("gone").is_none(), "missing pointer skips");
+    assert!(ctx.filter_metadata.get("gone").is_none(), "missing pointer skips");
 }
 
 #[tokio::test]
@@ -849,7 +894,7 @@ async fn extract_only_incomplete_before_eos_continues() {
     let mut body = Some(Bytes::from_static(br#"{"model":"#));
     let action = filter.on_request_body(&mut ctx, &mut body, false).await.unwrap();
     assert!(matches!(action, FilterAction::Continue));
-    assert!(ctx.get_metadata("original.model").is_none());
+    assert!(ctx.filter_metadata.get("original.model").is_none());
 }
 
 #[tokio::test]
@@ -866,7 +911,7 @@ async fn extract_only_complete_before_eos_continues() {
     let mut body = Some(Bytes::from_static(br#"{"model":"old"}"#));
     let action = filter.on_request_body(&mut ctx, &mut body, false).await.unwrap();
     assert!(matches!(action, FilterAction::Continue));
-    assert!(ctx.get_metadata("original.model").is_none());
+    assert!(ctx.filter_metadata.get("original.model").is_none());
 }
 
 #[tokio::test]
@@ -883,7 +928,7 @@ async fn extract_only_promotes_at_eos() {
     let mut body = Some(Bytes::from_static(br#"{"model":"old"}"#));
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
     assert!(matches!(action, FilterAction::BodyDone));
-    assert_eq!(ctx.get_metadata("original.model"), Some("old"));
+    assert_eq!(ctx.filter_metadata.get("original.model"), Some("old"));
 }
 
 #[tokio::test]
@@ -926,7 +971,7 @@ async fn extract_oversized_metadata_is_skipped() {
     let mut body = Some(Bytes::from(payload));
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
     assert!(matches!(action, FilterAction::BodyDone));
-    assert!(ctx.get_metadata("big").is_none(), "256-byte metadata cap");
+    assert!(ctx.filter_metadata.get("big").is_none(), "256-byte metadata cap");
 }
 
 #[tokio::test]
@@ -946,9 +991,30 @@ async fn metadata_add_skipped_when_extract_late_in_wire_order() {
     let mut body = Some(Bytes::from_static(br#"{"meta":{},"model":"old"}"#));
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
     assert!(matches!(action, FilterAction::BodyDone));
-    assert_eq!(ctx.get_metadata("original.model"), Some("old"));
+    assert_eq!(ctx.filter_metadata.get("original.model"), Some("old"));
     let got = serde_json::from_slice::<serde_json::Value>(body.as_ref().unwrap()).unwrap();
     assert_eq!(got, json!({"meta": {}, "model": "old"}));
+}
+
+#[tokio::test]
+async fn metadata_add_existing_key_with_late_extract_does_not_duplicate() {
+    let filter = parse_filter(
+        r#"
+        request_add:
+          - pointer: /a
+            metadata: m
+        request_extract:
+          - pointer: /b
+            metadata: m
+        "#,
+    );
+    let req = crate::test_utils::make_request(http::Method::POST, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let mut body = Some(Bytes::from_static(br#"{"a":"old","b":"new"}"#));
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert!(matches!(action, FilterAction::BodyDone));
+    assert_eq!(body.as_deref(), Some(br#"{"a":"old","b":"new"}"#.as_slice()));
+    assert_eq!(ctx.filter_metadata.get("m"), Some("new"));
 }
 
 #[tokio::test]
@@ -971,7 +1037,7 @@ async fn same_key_extract_before_replace() {
     let mut body = Some(Bytes::from_static(br#"{"model":"old"}"#));
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
     assert!(matches!(action, FilterAction::BodyDone));
-    assert_eq!(ctx.get_metadata("original.model"), Some("old"));
+    assert_eq!(ctx.filter_metadata.get("original.model"), Some("old"));
     let got = serde_json::from_slice::<serde_json::Value>(body.as_ref().unwrap()).unwrap();
     assert_eq!(got, json!({"model": "forced-model", "original_model": "old"}));
 }
@@ -987,7 +1053,9 @@ async fn external_metadata_still_works() {
     );
     let req = crate::test_utils::make_request(http::Method::POST, "/");
     let mut ctx = crate::test_utils::make_filter_context(&req);
-    ctx.set_metadata("tenant.id".to_owned(), "acme".to_owned());
+    ctx.filter_metadata
+        .insert("tenant.id".to_owned(), "acme".to_owned())
+        .expect("entry must fit in the filter's metadata");
     let mut body = Some(Bytes::from_static(br#"{"n":1}"#));
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
     assert!(matches!(action, FilterAction::BodyDone));
@@ -1031,7 +1099,7 @@ async fn extract_duplicate_keys_keeps_last() {
     let mut body = Some(Bytes::from_static(br#"{"a":1,"a":2}"#));
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
     assert!(matches!(action, FilterAction::BodyDone));
-    assert_eq!(ctx.get_metadata("a"), Some("2"), "extract last duplicate");
+    assert_eq!(ctx.filter_metadata.get("a"), Some("2"), "extract last duplicate");
     assert_eq!(body.as_ref().unwrap().as_ref(), br#"{"a":1,"a":2}"#);
 }
 
@@ -1369,4 +1437,42 @@ async fn content_types_set_but_response_ops_empty_passes_through() {
         "empty response ops should not process body"
     );
     assert_eq!(body.as_ref().unwrap().as_ref(), original, "body unchanged");
+}
+
+/// Apply the same invalid-UTF-8 policy oracle to request and response hooks.
+fn assert_invalid_utf8_policy(mode: &str, action: Result<FilterAction, crate::FilterError>) {
+    match mode {
+        "continue" => assert!(matches!(action, Ok(FilterAction::Continue))),
+        "reject" => assert!(matches!(action, Ok(FilterAction::Reject(r)) if r.status == 400)),
+        "error" => {
+            action.expect_err("invalid UTF-8 must return a filter error");
+        },
+        _ => unreachable!(),
+    }
+}
+
+#[tokio::test]
+async fn invalid_utf8_obeys_request_and_response_failure_policies() {
+    let req = crate::test_utils::make_request(http::Method::POST, "/");
+    let original = Bytes::from_static(b"{\"model\":\"blue\",\"unused\":\"\xff\"}");
+    for mode in ["continue", "reject", "error"] {
+        let filter = parse_filter(&format!(
+            "on_invalid: {mode}\nrequest_remove:\n  - /model\nresponse_remove:\n  - /model\n"
+        ));
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.filter_metadata
+            .insert("trusted".to_owned(), "keep".to_owned())
+            .expect("entry must fit in the filter's metadata");
+        let mut request = Some(original.clone());
+        let action = filter.on_request_body(&mut ctx, &mut request, true).await;
+        assert_invalid_utf8_policy(mode, action);
+        assert_eq!(request.as_ref(), Some(&original));
+        assert_eq!(ctx.filter_metadata.get("trusted"), Some("keep"));
+
+        let mut response = Some(original.clone());
+        let action = filter.on_response_body(&mut ctx, &mut response, true);
+        assert_invalid_utf8_policy(mode, action);
+        assert_eq!(response.as_ref(), Some(&original));
+        assert_eq!(ctx.filter_metadata.get("trusted"), Some("keep"));
+    }
 }

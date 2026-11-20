@@ -20,7 +20,7 @@ use serde::Deserialize;
 use tracing::trace;
 
 use crate::{
-    FilterAction, FilterError, TrustedHeaderMutation,
+    FilterAction, FilterError, FilterMetadata, TrustedHeaderMutation,
     builtins::http::value_safety::is_safe_promoted_value,
     filter::{HttpFilter, HttpFilterContext},
     parse_filter_config,
@@ -159,6 +159,10 @@ impl HttpFilter for HeadClassifierFilter {
         "head_classifier"
     }
 
+    fn may_end_request(&self) -> bool {
+        false
+    }
+
     async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         Ok(FilterAction::Continue)
     }
@@ -177,7 +181,9 @@ impl HttpFilter for HeadClassifierFilter {
             HeaderName::from_static("x-praxis-head-class"),
             value,
         ));
-        ctx.set_metadata("head_classifier.class", class);
+        ctx.filter_metadata
+            .insert("head_classifier.class", class)
+            .unwrap_or_else(FilterMetadata::log_loss);
         ctx.filter_results
             .entry("head_classifier")
             .or_default()

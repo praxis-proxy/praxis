@@ -58,7 +58,8 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | [access-log-syslog.yaml](configs/observability/access-log-syslog.yaml) | Ships access log records to a syslog daemon as RFC 3164 messages, bypassing the tracing subscriber |
 | [access-log-template.yaml](configs/observability/access-log-template.yaml) | Renders a configurable text line for each request |
 | [access-logging.yaml](configs/observability/access-logging.yaml) | Structured JSON logging with sampling; logs ~10% of requests. request_id ensures each log line has a correlation ID. access_log emits method, path, status, and timing |
-| [cloud-events.yaml](configs/observability/cloud-events.yaml) | Publishes a bounded, best-effort CloudEvents 1.0 response event after the upstream response completes |
+| [cloud-events-request-complete.yaml](configs/observability/cloud-events-request-complete.yaml) | Publishes a bounded, best-effort CloudEvent when a request ends, including responses that abort after their headers are sent |
+| [cloud-events.yaml](configs/observability/cloud-events.yaml) | Publishes a bounded, best-effort CloudEvents 1.0 response event after a final bodyless response or response end-of-stream |
 | [errors-total.yaml](configs/observability/errors-total.yaml) | Prometheus counter for proxy errors classified by cause, covering filter rejections, timeouts, unreachable upstreams and internal faults |
 | [grpc-access-log.yaml](configs/observability/grpc-access-log.yaml) | Logs how each gRPC call ended |
 | [grpc-health-check.yaml](configs/observability/grpc-health-check.yaml) | Probes upstream endpoints with `grpc.health.v1.Health/Check` instead of an HTTP GET |
@@ -86,6 +87,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | [admin-interface.yaml](configs/operations/admin-interface.yaml) | Exposes separate admin API and health/metrics listeners |
 | [admin-kv-store.yaml](configs/operations/admin-kv-store.yaml) | Serves runtime key-value stores on the admin API for an application that embeds Praxis and registers the stores in code |
 | [container-default.yaml](configs/operations/container-default.yaml) | Default config for containerized deployments |
+| [drain-handoff.yaml](configs/operations/drain-handoff.yaml) | Readiness-first SIGTERM handoff: `/ready` reports draining immediately while the listener keeps accepting for `shutdown_drain_delay_secs`, then closes existing HTTP/1 connections cleanly |
 | [file-descriptor-limits.yaml](configs/operations/file-descriptor-limits.yaml) | Size and protect the proxy's open file descriptor budget: pin the process limit, shed requests with 503 before descriptors run out, and close idle keep-alive clients and pooled upstream connections so they cannot pin descriptors |
 | [hot-reload.yaml](configs/operations/hot-reload.yaml) | Filter pipelines are swapped atomically at runtime when the config file changes |
 | [log-overrides.yaml](configs/operations/log-overrides.yaml) | Use `runtime.log_overrides` to raise or lower log verbosity for specific modules without flooding output from every subsystem |
@@ -97,15 +99,15 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 
 | File | Description |
 | ------ | ------------- |
-| [body-size-limit-with-extraction.yaml](configs/payload-processing/body-size-limit-with-extraction.yaml) | Combines body_limits.max_request_bytes with json_body_field to enforce a global body ceiling while still performing body-based routing |
+| [body-size-limit-with-extraction.yaml](configs/payload-processing/body-size-limit-with-extraction.yaml) | Combines body_limits.max_buffer_bytes with json_body_field to enforce a buffering cap while still performing body-based routing |
 | [compression.yaml](configs/payload-processing/compression.yaml) | Enables transparent response compression using Pingora's built-in compression module |
 | [conditional-field-extraction.yaml](configs/payload-processing/conditional-field-extraction.yaml) | Uses the condition system to apply json_body_field only on specific request paths |
-| [field-extraction-access-control.yaml](configs/payload-processing/field-extraction-access-control.yaml) | Extracts the "tenant_id" field from the JSON request body and promotes it to an X-Tenant-Id header |
+| [field-extraction-access-control.yaml](configs/payload-processing/field-extraction-access-control.yaml) | Extracts the "tenant_id" field from the JSON request body and promotes it to a client-unspoofable X-Praxis-Tenant-Id header |
 | [grpc-web.yaml](configs/payload-processing/grpc-web.yaml) | Lets a browser call a gRPC backend |
 | [json-body.yaml](configs/payload-processing/json-body.yaml) | Rewrites a JSON request body with JSON Pointer extract, replace, add, and remove, and the response body with remove and extract |
 | [json-rpc.yaml](configs/payload-processing/json-rpc.yaml) | Extracts JSON-RPC 2.0 envelope metadata from request bodies and promotes method, id, and kind to request headers |
 | [multi-field-extraction.yaml](configs/payload-processing/multi-field-extraction.yaml) | A single json_body_field filter extracts multiple top-level JSON fields into separate request headers in one pass |
-| [multi-listener-body-pipeline.yaml](configs/payload-processing/multi-listener-body-pipeline.yaml) | Three listeners, each with a different body processing strategy |
+| [multi-listener-body-pipeline.yaml](configs/payload-processing/multi-listener-body-pipeline.yaml) | Three listeners with different field extraction and routing behavior |
 | [stream-buffer.yaml](configs/payload-processing/stream-buffer.yaml) | json_body_field inspects request body chunks as they arrive and defers upstream forwarding until the field is extracted (or end-of-stream) |
 
 ### Pipeline
@@ -169,11 +171,16 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | [guardrails.yaml](configs/security/guardrails.yaml) | Reject requests that match header or body inspection rules |
 | [ip-acl.yaml](configs/security/ip-acl.yaml) | Allow or deny requests by source IP/CIDR |
 | [peer-identity-trust.yaml](configs/security/peer-identity-trust.yaml) | Validates downstream mTLS peer identity against a set of trusted peers |
+| [policy-admission.yaml](configs/security/policy-admission.yaml) | The `policy` filter rate-limits and authenticates from the request head, before any filter reads the body, even when a body-reading filter comes first in the chain |
 | [policy-api-key.yaml](configs/security/policy-api-key.yaml) | Authenticates generic HTTP traffic with API keys using the Praxis Policy Engine |
 | [policy-assertions.yaml](configs/security/policy-assertions.yaml) | Projects policy-derived identity into request headers and removes credentials that should not reach the upstream |
 | [policy-context.yaml](configs/security/policy-context.yaml) | Demonstrates the host-supplied context surface: `context_headers` maps reserved-prefix HTTP headers to agent / framework extension fields so APL rules can reference them; `context_meta` stamps operator-defined scope, tags, and properties onto every policy evaluation |
 | [policy-http.yaml](configs/security/policy-http.yaml) | Generic-HTTP authorization for non-MCP traffic using the Praxis Policy Engine |
+| [policy-jwt-fips.yaml](configs/security/policy-jwt-fips.yaml) | Authenticates generic HTTP traffic with asymmetric JWTs, verified through the system OpenSSL FIPS provider |
+| [policy-llm-input.yaml](configs/security/policy-llm-input.yaml) | Denies inference requests by what they ask of the model, using the normalized `llm.input.*` facts the proxy derives from the request body: offered tools, tool choice, completion cap, and ordered instructions |
 | [policy-llm.yaml](configs/security/policy-llm.yaml) | Authorizes body-addressed inference requests against `llm:` policy routes |
+| [policy-query-credential.yaml](configs/security/policy-query-credential.yaml) | Authenticates requests whose API key arrives in the query string, as WebSocket and SSE clients that cannot set headers send it |
+| [policy-rate-limit.yaml](configs/security/policy-rate-limit.yaml) | Rate limits requests in two stages with the Praxis Policy Engine's in-process limiter (`ratelimit/limitador`, experimental) |
 | [policy.yaml](configs/security/policy.yaml) | Embeds the Praxis Policy Engine in-process to enforce multi-source identity, APL route policy, RFC 8693 OAuth 2.0 token exchange, field redaction, session taint, audit emission, and (under `body_access: read_write`) request / response body rewriting |
 
 ### Traffic Management
@@ -189,6 +196,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | [circuit-breaker.yaml](configs/traffic-management/circuit-breaker.yaml) | Prevents cascading failures by tracking consecutive upstream errors per cluster |
 | [cluster-application-metadata.yaml](configs/traffic-management/cluster-application-metadata.yaml) | Tags an upstream cluster with opaque application metadata that consuming filters interpret |
 | [cluster-base-path.yaml](configs/traffic-management/cluster-base-path.yaml) | Prepends a path to the upstream request for the cluster the load balancer selected, so one gateway can front several upstreams that each serve the same API under their own prefix |
+| [cluster-max-connections.yaml](configs/traffic-management/cluster-max-connections.yaml) | Caps the concurrent in-flight requests the load balancer will send to one cluster, so a single slow upstream cannot consume all available capacity |
 | [cluster-references.yaml](configs/traffic-management/cluster-references.yaml) | An inline load-balancer cluster that shares its name with a top-level declaration may omit its endpoints: validation fills them in from the declaration, so the routed addresses and the health-checked addresses cannot drift apart |
 | [endpoint-selector.yaml](configs/traffic-management/endpoint-selector.yaml) | Selects an upstream endpoint from a trusted mutation source (e.g. external processing) |
 | [grpc-detection.yaml](configs/traffic-management/grpc-detection.yaml) | Detects gRPC requests from the content-type header and promotes the variant to filter metadata and results |
@@ -209,7 +217,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | [rate-limiting-shadow.yaml](configs/traffic-management/rate-limiting-shadow.yaml) | Observe a rate limit before enforcing it |
 | [rate-limiting.yaml](configs/traffic-management/rate-limiting.yaml) | Token bucket rate limiter with per-IP or global modes |
 | [redirect.yaml](configs/traffic-management/redirect.yaml) | Returns a 3xx redirect without contacting any upstream |
-| [retry-policy.yaml](configs/traffic-management/retry-policy.yaml) | Automatically retries failed upstream requests with exponential backoff and a token-bucket budget to prevent retry storms |
+| [retry-policy.yaml](configs/traffic-management/retry-policy.yaml) | Retries connection failures and resets up to two times per request, with exponential backoff between attempts |
 | [ring-hash.yaml](configs/traffic-management/ring-hash.yaml) | Routes requests to a stable backend by hashing a configurable request header through a sorted virtual-node ring |
 | [round-robin.yaml](configs/traffic-management/round-robin.yaml) | Default strategy |
 | [session-affinity.yaml](configs/traffic-management/session-affinity.yaml) | Hashes a request header to pin a user's requests to one backend |
@@ -228,6 +236,6 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | ------ | ------------- |
 | [grpc-status-errors.yaml](configs/transformation/grpc-status-errors.yaml) | Answers proxy-generated errors in the shape gRPC clients expect. gRPC carries a call's outcome in a `grpc-status` header on an HTTP 200, not in the HTTP status, so a client that meets Praxis's own 403 or 502 sees a bare transport failure with no usable status |
 | [header-manipulation.yaml](configs/transformation/header-manipulation.yaml) | Add, overwrite, and remove headers on requests and responses |
-| [path-rewriting.yaml](configs/transformation/path-rewriting.yaml) | Rewrite request paths before forwarding to upstream |
+| [path-rewriting.yaml](configs/transformation/path-rewriting.yaml) | Rewrite selected request paths after routing and before forwarding |
 | [url-rewriting-preserve.yaml](configs/transformation/url-rewriting-preserve.yaml) | Drop every query param except the ones listed (allowlist) |
 | [url-rewriting.yaml](configs/transformation/url-rewriting.yaml) | Regex-based path transformation and query string manipulation |

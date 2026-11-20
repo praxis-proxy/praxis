@@ -28,6 +28,7 @@ mod circuit_breaker;
 #[cfg(feature = "cloud-events-filter")]
 mod cloud_events;
 mod cluster_base_path;
+mod cluster_max_connections;
 mod cluster_references;
 mod conditional_filters;
 mod credential_injection;
@@ -65,7 +66,7 @@ mod iterative_request_router_origin_failover;
 #[cfg(feature = "iterative-request-router")]
 mod iterative_request_router_sequence;
 mod json_rpc;
-#[cfg(feature = "policy-engine")]
+#[cfg(any(feature = "policy-builtins", feature = "policy-jwt-openssl-fips"))]
 mod jwt;
 mod least_connections;
 mod logging;
@@ -85,22 +86,39 @@ mod payload_processing;
 #[cfg(feature = "spiffe")]
 mod peer_identity_trust;
 mod pipeline;
-#[cfg(feature = "policy-engine")]
+#[cfg(feature = "policy-builtins")]
 mod policy;
-#[cfg(feature = "policy-engine")]
+#[cfg(feature = "policy-builtins")]
+mod policy_admission;
+#[cfg(any(
+    feature = "policy-builtins",
+    feature = "policy-api-key-fips",
+    all(feature = "policy-api-key", feature = "policy-crypto-default"),
+    all(feature = "policy-api-key", feature = "policy-crypto-fips")
+))]
 mod policy_api_key;
-#[cfg(feature = "policy-engine")]
+#[cfg(feature = "policy-builtins")]
 mod policy_assertions;
-#[cfg(feature = "policy-engine")]
+#[cfg(feature = "policy-builtins")]
 mod policy_context;
-#[cfg(feature = "policy-engine")]
+#[cfg(feature = "policy-builtins")]
+mod policy_dpop;
+#[cfg(feature = "policy-builtins")]
 mod policy_http;
-#[cfg(feature = "policy-engine")]
+#[cfg(feature = "policy-builtins")]
 mod policy_jwks;
-#[cfg(feature = "policy-engine")]
+#[cfg(feature = "policy-jwt-fips")]
+mod policy_jwt_fips;
+#[cfg(feature = "policy-builtins")]
 mod policy_llm;
-#[cfg(feature = "policy-engine")]
+#[cfg(feature = "policy-builtins")]
+mod policy_llm_input;
+#[cfg(feature = "policy-builtins")]
 mod policy_llm_request;
+#[cfg(feature = "policy-builtins")]
+mod policy_query_credential;
+#[cfg(feature = "policy-builtins")]
+mod policy_rate_limit;
 mod priority_lb;
 mod process_logging;
 mod protocol_examples;
@@ -113,6 +131,7 @@ mod ring_hash;
 mod round_robin;
 mod route_on_promoted_header;
 mod route_templates;
+mod routing_health;
 mod security_examples;
 mod selected_upstream_conditions;
 mod session_affinity;
@@ -127,6 +146,7 @@ mod tcp_byte_counters;
 mod tcp_connection_metrics;
 mod tcp_connections_total;
 mod timeout;
+mod tls_examples;
 mod trace_context;
 #[cfg(feature = "otel")]
 mod tracing_otlp;

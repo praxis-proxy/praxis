@@ -7,6 +7,11 @@
 //! Drives the `policy` filter end to end with `identity/api-key` as its only
 //! identity resolver. A known key reaches the backend, while an unknown key, a
 //! credential without the key prefix, and a missing key are rejected with HTTP 401.
+//!
+//! In a FIPS build (`policy-crypto-fips`) the key digests go through the
+//! OpenSSL FIPS provider, so these cases run only where one is active
+//! (`make test-fips-provider`, `make test-fips-host`); elsewhere the filter
+//! must refuse to build, which the last test checks.
 
 use std::collections::HashMap;
 
@@ -41,54 +46,102 @@ fn load_example(policy_dir: &tempfile::TempDir, proxy_port: u16, backend_port: u
     Config::from_yaml(&patched).unwrap_or_else(|e| panic!("parse security/policy-api-key.yaml: {e}"))
 }
 
+/// Whether this build can load the policy: always, except a FIPS build
+/// without a FIPS provider.
+fn provider_ready() -> bool {
+    !cfg!(feature = "policy-crypto-fips") || praxis_test_utils::expect_approved_mode()
+}
+
 /// Send `GET /widgets` through a proxy built from the example, with
-/// `authorization` as the `Authorization` header when present.
-fn send(authorization: Option<&str>) -> String {
+/// `authorization` as the `Authorization` header when present; `None` when
+/// the build cannot load the policy here.
+fn send(authorization: Option<&str>) -> Option<String> {
+    if !provider_ready() {
+        eprintln!("policy_api_key: skipped, FIPS build without a FIPS provider (run make test-fips-provider)");
+        return None;
+    }
     let backend = start_backend_with_shutdown("ok");
     let policy_dir = tempfile::TempDir::new().expect("create tempdir");
     let config = load_example(&policy_dir, free_port(), backend.port());
     let proxy = start_proxy(&config);
     let header = authorization.map_or_else(String::new, |value| format!("Authorization: {value}\r\n"));
-    http_send(
+    Some(http_send(
         proxy.addr(),
         &format!("GET /widgets HTTP/1.1\r\nHost: localhost\r\n{header}Connection: close\r\n\r\n"),
-    )
+    ))
 }
 
 #[test]
 fn policy_api_key_known_key_passes_through() {
-    let raw = send(Some(&format!("Bearer {KNOWN_KEY}")));
+    let Some(raw) = send(Some(&format!("Bearer {KNOWN_KEY}"))) else {
+        return;
+    };
     assert_eq!(parse_status(&raw), 200, "a known key should reach the backend");
     assert!(raw.contains("ok"), "backend body should reach the client");
 }
 
 #[test]
 fn policy_api_key_unknown_key_is_rejected() {
-    let raw = send(Some("Bearer sk-test-mallory"));
+    let Some(raw) = send(Some("Bearer sk-test-mallory")) else {
+        return;
+    };
     assert_eq!(parse_status(&raw), 401, "an unknown key should be rejected");
-    assert!(raw.contains("X-Policy-Violation: auth.key_unknown"), "got: {raw}");
+    assert!(
+        raw.to_ascii_lowercase()
+            .contains("x-policy-violation: auth.key_unknown"),
+        "got: {raw}"
+    );
 }
 
 #[test]
 fn policy_api_key_unrecognized_credential_is_rejected() {
-    let raw = send(Some("Bearer unrelated-test-credential"));
+    let Some(raw) = send(Some("Bearer unrelated-test-credential")) else {
+        return;
+    };
     assert_eq!(
         parse_status(&raw),
         401,
         "a credential without the key prefix should be rejected"
     );
     assert!(
-        raw.contains("X-Policy-Violation: auth.unrecognized_credential"),
+        raw.to_ascii_lowercase()
+            .contains("x-policy-violation: auth.unrecognized_credential"),
         "got: {raw}"
     );
 }
 
 #[test]
 fn policy_api_key_missing_key_is_rejected() {
-    let raw = send(None);
+    let Some(raw) = send(None) else { return };
     assert_eq!(parse_status(&raw), 401, "a request with no key should be rejected");
     assert!(
-        raw.contains("X-Policy-Violation: auth.missing_credential"),
+        raw.to_ascii_lowercase()
+            .contains("x-policy-violation: auth.missing_credential"),
         "got: {raw}"
+    );
+}
+
+#[cfg(feature = "policy-crypto-fips")]
+#[test]
+fn policy_api_key_fips_build_without_a_fips_provider_refuses_the_policy() {
+    if provider_ready() {
+        return;
+    }
+    let policy_dir = tempfile::TempDir::new().expect("create tempdir");
+    let config = load_example(&policy_dir, free_port(), free_port());
+    let error = praxis::resolve_pipelines(
+        &config,
+        &praxis::build_full_registry(),
+        &praxis_core::health::build_health_registry(&config.clusters),
+        &praxis_core::kv::KvStoreRegistry::new(),
+        &std::sync::Arc::new(praxis_filter::SessionStoreRegistry::new()),
+        &praxis::build_subrequest_client(&config).expect("sub-request client"),
+    )
+    .map(drop)
+    .expect_err("without the FIPS provider the API-key policy must not load")
+    .to_string();
+    assert!(
+        error.contains("policy.crypto_failed"),
+        "the refusal names the crypto failure: {error}"
     );
 }

@@ -7,8 +7,9 @@ use std::collections::HashMap;
 
 use praxis_core::config::Config;
 use praxis_test_utils::{
-    free_port, http_get, http_send, json_post, load_example_config, parse_body, parse_status, patch_yaml,
-    start_backend_with_shutdown, start_header_echo_backend, start_proxy, wait_for_tcp,
+    BackendReceipt, PayloadSpec, free_port, http_send, json_post, load_example_config, parse_body, parse_status,
+    patch_yaml, start_backend_with_shutdown, start_counting_backend, start_full_proxy, start_header_echo_backend,
+    start_proxy, wait_for_tcp,
 };
 
 // -----------------------------------------------------------------------------
@@ -269,6 +270,53 @@ fn field_extraction_access_control_unknown_tenant_to_default() {
 }
 
 #[test]
+fn field_extraction_example_body_routing_ignores_client_tenant_headers() {
+    let acme_guard = start_backend_with_shutdown("acme-backend");
+    let acme_second_guard = start_backend_with_shutdown("acme-backend");
+    let globex_guard = start_backend_with_shutdown("globex-backend");
+    let default_guard = start_backend_with_shutdown("default-backend");
+    let config = load_example_config(
+        "payload-processing/field-extraction-access-control.yaml",
+        free_port(),
+        HashMap::from([
+            ("10.0.1.1:8080", acme_guard.port()),
+            ("10.0.1.2:8080", acme_second_guard.port()),
+            ("10.0.2.1:8080", globex_guard.port()),
+            ("10.0.3.1:8080", default_guard.port()),
+        ]),
+    );
+    let proxy = start_proxy(&config);
+    let send = |body: &str, extra_headers: &str| {
+        let request = format!(
+            "POST /api/data HTTP/1.1\r\n\
+             Host: localhost\r\n\
+             Content-Type: application/json\r\n\
+             {extra_headers}Content-Length: {}\r\n\
+             Connection: close\r\n\r\n\
+             {body}",
+            body.len()
+        );
+        http_send(proxy.addr(), &request)
+    };
+
+    for (body, extra_headers, backend) in [
+        ("{}", "X-Tenant-Id: acme\r\n", "default-backend"),
+        ("{bad", "X-Tenant-Id: acme\r\n", "default-backend"),
+        (r#"{"tenant_id":"globex"}"#, "X-Tenant-Id: acme\r\n", "globex-backend"),
+        (r#"{"tenant_id":"acme"}"#, "", "acme-backend"),
+        (r#"{"tenant_id":"globex"}"#, "", "globex-backend"),
+        (r#"{"tenant_id":"unknown"}"#, "", "default-backend"),
+    ] {
+        let response = send(body, extra_headers);
+        assert_eq!(parse_status(&response), 200, "body: {body}");
+        assert_eq!(parse_body(&response), backend, "body: {body}");
+    }
+
+    let spoofed = send("{}", "X-Praxis-Tenant-Id: acme\r\n");
+    assert_eq!(parse_status(&spoofed), 400, "reserved client header must be rejected");
+}
+
+#[test]
 fn body_size_limit_allows_small_body() {
     let backend_port_guard = start_backend_with_shutdown("ok");
     let backend_port = backend_port_guard.port();
@@ -308,34 +356,103 @@ fn body_size_limit_rejects_oversized_body() {
 
 #[test]
 fn multi_listener_body_pipeline_passthrough() {
-    let default_port_guard = start_backend_with_shutdown("passthrough-ok");
-    let default_port = default_port_guard.port();
-    let alpha_port_guard = start_backend_with_shutdown("alpha-response");
-    let alpha_port = alpha_port_guard.port();
-    let proxy_passthrough = free_port();
-    let proxy_streambuf = free_port();
-    let proxy_buffered = free_port();
+    let payload = r#"{"model":"model-alpha-1","user_id":"u-1"}"#;
+    assert_multi_listener_example_request("passthrough", payload, None);
+}
 
+#[test]
+fn multi_listener_body_pipeline_buffered_listener() {
+    assert_multi_listener_example_request(
+        "buffered",
+        r#"{"model":"model-alpha-1","user_id":"u-1"}"#,
+        Some("model-alpha-1"),
+    );
+    assert_multi_listener_example_request("buffered", "{}", None);
+}
+
+/// Exercise one measured request against the shipped three-listener YAML.
+fn assert_multi_listener_example_request(listener: &str, payload: &str, expected_model: Option<&str>) {
+    use std::{sync::mpsc::TryRecvError, time::Duration};
+
+    let spec = PayloadSpec::padded(payload.len() as u64, payload.as_bytes(), b"", b'x').unwrap();
+    let default = start_counting_backend(spec.clone(), "default", spec.len());
+    let alpha = start_counting_backend(spec.clone(), "alpha", spec.len());
+    let stream_port = free_port();
+    let buffer_port = free_port();
+    let passthrough_port = free_port();
+    let config = multi_listener_example_config(stream_port, buffer_port, passthrough_port, default.port, alpha.port);
+    let _proxy = start_full_proxy(&config);
+    let listener_port = match listener {
+        "buffered" => buffer_port,
+        "passthrough" => passthrough_port,
+        _ => panic!("unsupported example listener: {listener}"),
+    };
+    let address = format!("127.0.0.1:{listener_port}");
+    wait_for_tcp(&address);
+    let request_path = format!("/v1/chat/{listener}/{}", payload.len());
+    let raw = http_send(&address, &json_post(&request_path, payload));
+    assert_eq!(parse_status(&raw), 200, "{listener}: {raw}");
+    let receipt = default.receipt.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(receipt.backend_id, "default", "{listener} must use default routing");
+    assert_eq!(
+        receipt.request_line,
+        format!("POST {request_path} HTTP/1.1"),
+        "receipt must belong to the measured POST"
+    );
+    assert_exact_example_body(&receipt, &spec);
+    assert_eq!(
+        example_header(&receipt, "x-model"),
+        expected_model,
+        "{listener} must promote only its configured model value"
+    );
+    assert_eq!(
+        example_header(&receipt, "x-user-id"),
+        None,
+        "{listener} must not promote the user_id field"
+    );
+    assert!(
+        matches!(alpha.accepted.try_recv(), Err(TryRecvError::Empty)),
+        "{listener} request must not reach the alpha backend"
+    );
+    default.join();
+    alpha.join();
+}
+
+/// Load the actual multi-listener example with local measured endpoints.
+fn multi_listener_example_config(
+    stream_port: u16,
+    buffer_port: u16,
+    passthrough_port: u16,
+    default_port: u16,
+    alpha_port: u16,
+) -> Config {
     let path = praxis_test_utils::example_config_path("payload-processing/multi-listener-body-pipeline.yaml");
-    let yaml = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
-    let patched = patch_yaml(&yaml, proxy_streambuf, &HashMap::new());
+    let yaml = std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("read {path}: {error}"));
+    let patched = patch_yaml(&yaml, stream_port, &HashMap::new());
     let patched = patched
-        .replace("0.0.0.0:8081", &format!("127.0.0.1:{proxy_buffered}"))
-        .replace("0.0.0.0:8082", &format!("127.0.0.1:{proxy_passthrough}"))
+        .replace("0.0.0.0:8081", &format!("127.0.0.1:{buffer_port}"))
+        .replace("0.0.0.0:8082", &format!("127.0.0.1:{passthrough_port}"))
         .replace("127.0.0.1:3000", &format!("127.0.0.1:{default_port}"))
         .replace("127.0.0.1:3001", &format!("127.0.0.1:{alpha_port}"));
-    let config = Config::from_yaml(&patched).unwrap();
+    Config::from_yaml(&patched).unwrap()
+}
 
-    let _proxy = start_proxy(&config);
-    let passthrough_addr = format!("127.0.0.1:{proxy_passthrough}");
-    wait_for_tcp(&passthrough_addr);
+/// Verify byte-for-byte request delivery to the selected backend.
+fn assert_exact_example_body(receipt: &BackendReceipt, spec: &PayloadSpec) {
+    assert_eq!(receipt.bytes, spec.len(), "{receipt:?}");
+    assert_eq!(receipt.verified_bytes, spec.len(), "{receipt:?}");
+    assert_eq!(receipt.mismatch, None, "{receipt:?}");
+    assert!(receipt.completion.is_some(), "{receipt:?}");
+    assert_eq!(receipt.abort, None, "{receipt:?}");
+}
 
-    let (status, body) = http_get(&passthrough_addr, "/anything", None);
-    assert_eq!(status, 200, "passthrough listener should return 200");
-    assert_eq!(
-        body, "passthrough-ok",
-        "passthrough listener should route to default backend"
-    );
+/// Return one promoted header observed by the backend.
+fn example_header<'a>(receipt: &'a BackendReceipt, name: &str) -> Option<&'a str> {
+    receipt
+        .headers
+        .iter()
+        .find(|(header, _)| header == name)
+        .map(|(_, value)| value.as_str())
 }
 
 #[test]
@@ -370,4 +487,42 @@ fn multi_listener_body_pipeline_stream_buffer_routes() {
         "alpha-response",
         "model=model-alpha-1 should route to alpha_cluster cluster on stream-buffer listener"
     );
+}
+
+#[test]
+fn body_size_example_routes_late_selector_at_limit_and_rejects_one_over() {
+    use std::{sync::mpsc::TryRecvError, time::Duration};
+
+    for size in [1024, 1025] {
+        let spec = PayloadSpec::padded(size, br#"{"prompt":""#, br#"","model":"model-alpha-1"}"#, b'x').unwrap();
+        let backend = start_counting_backend(spec.clone(), "example", size);
+        let proxy_port = free_port();
+        let config = load_example_config(
+            "payload-processing/body-size-limit-with-extraction.yaml",
+            proxy_port,
+            HashMap::from([("127.0.0.1:3000", backend.port)]),
+        );
+        let proxy = start_full_proxy(&config);
+        wait_for_tcp(proxy.addr());
+        let body = String::from_utf8(spec.chunk(0, usize::try_from(size).unwrap())).unwrap();
+        let response = http_send(proxy.addr(), &json_post("/v1/chat", &body));
+        if size == 1024 {
+            assert_eq!(parse_status(&response), 200);
+            let receipt = backend.receipt.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert_eq!(receipt.bytes, size);
+            assert_eq!(receipt.verified_bytes, size);
+            assert_eq!(receipt.mismatch, None);
+            assert!(receipt.completion.is_some());
+            assert!(
+                receipt
+                    .headers
+                    .iter()
+                    .any(|(name, value)| name == "x-model" && value == "model-alpha-1")
+            );
+        } else {
+            assert_eq!(parse_status(&response), 413);
+            assert!(matches!(backend.accepted.try_recv(), Err(TryRecvError::Empty)));
+        }
+        backend.join();
+    }
 }

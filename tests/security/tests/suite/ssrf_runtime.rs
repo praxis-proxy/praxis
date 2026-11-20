@@ -20,8 +20,8 @@ use std::{
 
 use praxis_core::config::Config;
 use praxis_test_utils::{
-    free_port, http_get, parse_body, parse_status, start_backend, start_full_proxy, start_tcp_tagged_backend,
-    wait_for_tcp,
+    bind_unique_port, free_port, http_get, parse_body, parse_status, start_backend, start_full_proxy,
+    start_tcp_tagged_backend, wait_for_tcp,
 };
 
 // ---------------------------------------------------------------------------
@@ -205,7 +205,7 @@ fn http_proxy_allows_hostname_upstream_with_override() {
 
 #[test]
 fn absolute_form_authority_cannot_override_configured_backend() {
-    let target = std::net::TcpListener::bind("127.0.0.1:0").expect("bind forbidden target");
+    let (target, _) = bind_unique_port();
     target.set_nonblocking(true).unwrap();
     let target_addr = target.local_addr().unwrap();
     let backend = praxis_test_utils::start_backend_with_shutdown("configured-backend");

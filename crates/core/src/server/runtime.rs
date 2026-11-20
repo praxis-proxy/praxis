@@ -34,9 +34,9 @@ pub struct RuntimeOptions {
     /// Allow work-stealing between threads.
     pub work_stealing: bool,
 
-    /// Global queue interval for the tokio scheduler. Currently a
-    /// no-op (Pingora manages the runtime); a set value is logged
-    /// as ineffective at startup.
+    /// Global queue interval for the Tokio scheduler. Positive values
+    /// apply with the Hyper backend; Pingora warns and ignores them.
+    /// `None` leaves the setting unset. Config validation rejects zero.
     pub global_queue_interval: Option<u32>,
 
     /// PEM CA file for all upstream TLS connections. Replaces the

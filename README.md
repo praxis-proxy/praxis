@@ -2,7 +2,7 @@
 
 [![Tests](https://github.com/praxis-proxy/praxis/actions/workflows/tests.yaml/badge.svg)](https://github.com/praxis-proxy/praxis/actions/workflows/tests.yaml)
 [![Conformance](https://github.com/praxis-proxy/praxis/actions/workflows/conformance.yaml/badge.svg)](https://github.com/praxis-proxy/praxis/actions/workflows/conformance.yaml)
-[![Coverage: ≥96%](https://img.shields.io/badge/Coverage-≥96%25-brightgreen.svg)](https://github.com/praxis-proxy/praxis/actions/workflows/coverage.yaml)
+[![Coverage: ≥97%](https://img.shields.io/badge/Coverage-≥97%25-brightgreen.svg)](https://github.com/praxis-proxy/praxis/actions/workflows/coverage.yaml)
 [![MSRV: 1.92](https://img.shields.io/badge/MSRV-1.92-brightgreen.svg)](https://blog.rust-lang.org/)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13756/badge)](https://www.bestpractices.dev/projects/13756)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
@@ -24,11 +24,18 @@ The full documentation is available [here](docs/README.md).
 The following are some good places to start:
 
 - [Configuration](docs/operating/configuration.md)
+- [Policy enforcement](docs/security/policy-enforcement.md)
 - [Features](docs/features.md)
 - [Filters](docs/filters/README.md)
 - [Extensions](docs/filters/extensions.md)
 - [TLS](docs/operating/tls.md)
 - [Security Hardening](docs/operating/security-hardening.md)
+
+Core embeds the [Praxis Policy Engine (PPE)][ppe] through its `policy`
+filter for access control, delegation, and data protection. Start with
+[policy enforcement](docs/security/policy-enforcement.md) for use cases.
+
+[ppe]: https://github.com/praxis-proxy/policy
 
 > **Note**: AI Features are developed and maintained in a separate repository.
 > If you're looking for AI-specific source, see [praxis-proxy/ai].
@@ -67,7 +74,11 @@ See [SUPPORT.md](SUPPORT.md) for the full list of channels: where to
 ask questions, propose enhancements, report bugs, and report security
 vulnerabilities.
 
+Check the [CNCF Praxis Calendar] to see our community calls and other online
+meetups.
+
 [discussion forums]:https://github.com/praxis-proxy/praxis/discussions
+[CNCF Praxis Calendar]:https://app.lfx.dev/projects/praxis/calendar
 
 ## License
 

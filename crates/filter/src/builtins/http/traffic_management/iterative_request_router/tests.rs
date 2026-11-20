@@ -334,6 +334,60 @@ steps:
 }
 
 #[test]
+fn accepts_a_head_filter_that_repeats_its_work_in_a_step() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        "
+initial_step: step1
+steps:
+  - name: step1
+    filters:
+      - filter: grpc_status
+      - filter: static_response
+        status: 200
+    on_result:
+      - default: true
+        done: true
+",
+    )
+    .unwrap();
+    assert!(
+        super::IterativeRequestRouterFilter::from_config(&yaml).is_ok(),
+        "grpc_status arms in on_request too, so a step can run it"
+    );
+}
+
+#[cfg(feature = "cloud-events-filter")]
+#[test]
+fn rejects_request_complete_cloud_events_in_step() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        "
+initial_step: step1
+steps:
+  - name: step1
+    filters:
+      - filter: cloud_events
+        on: request_complete
+        destination: https://events.example.test/events
+        source: urn:praxis:test
+        type: test.event
+      - filter: static_response
+        status: 200
+    on_result:
+      - default: true
+        done: true
+",
+    )
+    .unwrap();
+    let err = super::IterativeRequestRouterFilter::from_config(&yaml)
+        .err()
+        .expect("a request-completion observer in an iterative step must be rejected");
+    assert!(
+        err.to_string().contains("request-completion observer"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
 fn rejects_protocol_only_compression_step() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(
         "
@@ -536,30 +590,23 @@ steps:
 }
 
 #[test]
-fn rejects_max_state_bytes_over_ceiling() -> Result<(), crate::FilterError> {
-    let yaml: serde_yaml::Value = serde_yaml::from_str(
-        "
-initial_step: step1
-max_state_bytes: 1073741825
-steps:
-  - name: step1
-    filters:
-      - filter: static_response
-        status: 200
-    on_result:
-      - default: true
-        done: true
-",
-    )?;
-    let cfg: IterativeRequestRouterConfig = parse_filter_config("iterative_request_router", &yaml)?;
-    let result = config::validate(&cfg);
-    assert!(
-        result
-            .err()
-            .is_some_and(|e| e.to_string().contains("max_state_bytes must be <=")),
-        "max_state_bytes above 1 GiB should be rejected"
-    );
-    Ok(())
+fn buffered_limits_accept_addressable_overrides() {
+    let hard = praxis_core::config::MAX_BUFFER_BYTES;
+    for field in ["max_state_bytes", "max_response_bytes"] {
+        for value in [hard - 1, hard, hard + 1, 1_073_741_824] {
+            let yaml = serde_yaml::from_str(&format!(
+                "initial_step: step1\n{field}: {value}\nmax_stream_response_bytes: 1073741824\nsteps:\n  - name: step1\n    filters:\n      - filter: static_response\n        status: 200\n    on_result:\n      - default: true\n        done: true\n"
+            )).unwrap();
+            let cfg: IterativeRequestRouterConfig = parse_filter_config("iterative_request_router", &yaml).unwrap();
+            match config::validate(&cfg) {
+                Ok(()) => assert!(value <= hard, "{field}={value} bypassed the hard ceiling"),
+                Err(error) => {
+                    assert!(value > hard, "valid {field}={value} rejected: {error}");
+                    assert!(error.to_string().contains(&format!("{field} must be <= {hard}")));
+                },
+            }
+        }
+    }
 }
 
 #[test]
@@ -1102,7 +1149,7 @@ impl crate::HttpFilter for BoundBodyStepFilter {
     }
 
     fn bound_upstream_request_body_access(&self) -> crate::BodyAccess {
-        crate::BodyAccess::ReadOnly
+        crate::BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn request_body_mode(&self) -> crate::BodyMode {
@@ -1131,7 +1178,7 @@ impl crate::HttpFilter for RemoveIterationStateFilter {
     }
 
     fn response_body_access(&self) -> crate::BodyAccess {
-        crate::BodyAccess::ReadOnly
+        crate::BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn on_response_body(
@@ -1758,7 +1805,7 @@ fn request_body_access_returns_read_only() {
     let filter = build_filter();
     assert_eq!(
         filter.request_body_access(),
-        crate::body::BodyAccess::ReadOnly,
+        crate::body::BodyAccess::ReadOnly(crate::BodyRequirement::Required),
         "should return ReadOnly"
     );
 }
@@ -2681,6 +2728,21 @@ fn build_n_step_yaml(n: usize) -> serde_yaml::Value {
     serde_yaml::from_str(&yaml).unwrap()
 }
 
+#[test]
+fn configured_buffer_cap_tightens_iteration_state() {
+    let mut filter = build_filter();
+    filter.apply_buffer_cap(4);
+    assert_eq!(
+        filter.request_body_mode(),
+        crate::BodyMode::StreamBuffer { max_bytes: Some(4) }
+    );
+    filter.apply_buffer_cap(8);
+    assert_eq!(
+        filter.request_body_mode(),
+        crate::BodyMode::StreamBuffer { max_bytes: Some(4) }
+    );
+}
+
 /// Build a filter from a minimal valid config for trait method tests.
 fn build_filter() -> Box<dyn crate::HttpFilter> {
     let yaml: serde_yaml::Value = serde_yaml::from_str(
@@ -2916,7 +2978,7 @@ impl crate::HttpFilter for StreamBufferResponseFilter {
     }
 
     fn response_body_access(&self) -> crate::BodyAccess {
-        crate::BodyAccess::ReadOnly
+        crate::BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn response_body_mode(&self) -> crate::BodyMode {
@@ -2942,7 +3004,7 @@ impl crate::HttpFilter for StreamBufferRequestFilter {
     }
 
     fn request_body_access(&self) -> crate::BodyAccess {
-        crate::BodyAccess::ReadOnly
+        crate::BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn request_body_mode(&self) -> crate::BodyMode {
@@ -4934,7 +4996,7 @@ impl crate::HttpFilter for SmallBufferResponseFilter {
     }
 
     fn response_body_access(&self) -> crate::BodyAccess {
-        crate::BodyAccess::ReadOnly
+        crate::BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn response_body_mode(&self) -> crate::BodyMode {
@@ -5275,7 +5337,7 @@ impl crate::HttpFilter for ApplicationProbeFilter {
     }
 
     fn request_body_access(&self) -> crate::BodyAccess {
-        crate::BodyAccess::ReadOnly
+        crate::BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn request_body_mode(&self) -> crate::BodyMode {
@@ -5514,10 +5576,12 @@ steps:
 /// prebuilt pipeline at construction time. Nested inside an IRR step, it lets a
 /// test prove the step build gates the bound chain's inline clusters by the
 /// operator's declared posture rather than an unconditional strict default.
+#[cfg(feature = "chain-binding")]
 struct OutboundCalloutFilter {
     outbound: std::sync::Arc<crate::FilterPipeline>,
 }
 
+#[cfg(feature = "chain-binding")]
 #[async_trait::async_trait]
 impl crate::HttpFilter for OutboundCalloutFilter {
     fn name(&self) -> &'static str {
@@ -5538,6 +5602,7 @@ impl crate::HttpFilter for OutboundCalloutFilter {
 
 /// Registry with a chain-binding `test_outbound_callout` filter that resolves
 /// its inline `outbound_chain` via the binding context.
+#[cfg(feature = "chain-binding")]
 fn outbound_callout_registry() -> crate::FilterRegistry {
     let mut registry = crate::FilterRegistry::with_builtins();
     registry
@@ -5564,6 +5629,7 @@ fn outbound_callout_registry() -> crate::FilterRegistry {
 /// IRR config whose single step nests a chain-binding callout binding an
 /// outbound chain with a loopback inline cluster, plus the step's own
 /// router + `load_balancer` (loopback too, to show step clusters are not gated).
+#[cfg(feature = "chain-binding")]
 fn step_with_outbound_loopback_yaml() -> serde_yaml::Value {
     serde_yaml::from_str(
         "
@@ -5597,6 +5663,7 @@ steps:
     .unwrap()
 }
 
+#[cfg(feature = "chain-binding")]
 #[test]
 fn step_outbound_chain_ssrf_endpoint_rejected_by_default() {
     let registry = outbound_callout_registry();
@@ -5612,6 +5679,7 @@ fn step_outbound_chain_ssrf_endpoint_rejected_by_default() {
     );
 }
 
+#[cfg(feature = "chain-binding")]
 #[test]
 fn step_outbound_chain_ssrf_endpoint_allowed_with_flag() {
     let registry = outbound_callout_registry();
@@ -5644,8 +5712,10 @@ fn step_outbound_chain_ssrf_endpoint_allowed_with_flag() {
 /// A trivial application-registered HTTP filter, used to prove that
 /// application-registered filters resolve through the live registry even when
 /// they sit inside a named chain bound from within an IRR step.
+#[cfg(feature = "chain-binding")]
 struct MarkerFilter;
 
+#[cfg(feature = "chain-binding")]
 #[async_trait::async_trait]
 impl crate::HttpFilter for MarkerFilter {
     fn name(&self) -> &'static str {
@@ -5662,6 +5732,7 @@ impl crate::HttpFilter for MarkerFilter {
 
 /// Registry with the chain-binding `test_outbound_callout` (recording the length
 /// of the pipeline it binds) plus an application-registered `test_marker`.
+#[cfg(feature = "chain-binding")]
 fn recording_callout_registry(bound_len: std::sync::Arc<std::sync::Mutex<Option<usize>>>) -> crate::FilterRegistry {
     let mut registry = crate::FilterRegistry::with_builtins();
     registry
@@ -5701,6 +5772,7 @@ fn recording_callout_registry(bound_len: std::sync::Arc<std::sync::Mutex<Option<
 /// Build a top-level pipeline from YAML entries plus a named-chain table via the
 /// server's chain-aware `build_with_chains` path, so step construction runs with
 /// the real containing `ChainBindingContext`.
+#[cfg(feature = "chain-binding")]
 fn build_top_level_with_chains(
     registry: &crate::FilterRegistry,
     top_yaml: &str,
@@ -5724,6 +5796,7 @@ fn build_top_level_with_chains(
     )
 }
 
+#[cfg(feature = "chain-binding")]
 #[test]
 fn step_chain_binding_filter_resolves_top_level_named_chain() {
     let bound_len = std::sync::Arc::new(std::sync::Mutex::new(None));
@@ -5762,6 +5835,7 @@ fn step_chain_binding_filter_resolves_top_level_named_chain() {
     );
 }
 
+#[cfg(feature = "chain-binding")]
 #[test]
 fn step_chain_binding_filter_inline_chain_still_resolves() {
     let bound_len = std::sync::Arc::new(std::sync::Mutex::new(None));
@@ -5793,6 +5867,7 @@ fn step_chain_binding_filter_inline_chain_still_resolves() {
     );
 }
 
+#[cfg(feature = "chain-binding")]
 #[test]
 fn step_chain_binding_filter_unknown_named_chain_rejected() {
     let bound_len = std::sync::Arc::new(std::sync::Mutex::new(None));
@@ -5819,6 +5894,7 @@ fn step_chain_binding_filter_unknown_named_chain_rejected() {
     );
 }
 
+#[cfg(feature = "chain-binding")]
 #[test]
 fn cycle_across_irr_step_and_named_chain_rejected() {
     let bound_len = std::sync::Arc::new(std::sync::Mutex::new(None));
@@ -5860,6 +5936,7 @@ fn cycle_across_irr_step_and_named_chain_rejected() {
     );
 }
 
+#[cfg(feature = "chain-binding")]
 #[test]
 fn irr_steps_share_materialization_budget_across_named_chains() {
     let bound_len = std::sync::Arc::new(std::sync::Mutex::new(None));
@@ -5929,6 +6006,7 @@ fn irr_steps_share_materialization_budget_across_named_chains() {
 /// once, so binding it never touches the shared budget; only inline bindings
 /// accumulate into it. That accumulation is exactly what must carry across the
 /// IRR step boundary.
+#[cfg(feature = "chain-binding")]
 fn irr_step_with_inline_branches(name: &str, prefix: &str, branches: usize, on_result: &str) -> String {
     use std::fmt::Write as _;
     let mut step = String::new();
@@ -5955,6 +6033,7 @@ fn irr_step_with_inline_branches(name: &str, prefix: &str, branches: usize, on_r
     step
 }
 
+#[cfg(feature = "chain-binding")]
 #[test]
 fn irr_steps_share_total_branch_budget_across_inline_outbound_chains() {
     let bound_len = std::sync::Arc::new(std::sync::Mutex::new(None));
@@ -5992,6 +6071,7 @@ fn irr_steps_share_total_branch_budget_across_inline_outbound_chains() {
     );
 }
 
+#[cfg(feature = "chain-binding")]
 #[test]
 fn single_irr_step_inline_branches_stay_under_shared_branch_budget() {
     let bound_len = std::sync::Arc::new(std::sync::Mutex::new(None));

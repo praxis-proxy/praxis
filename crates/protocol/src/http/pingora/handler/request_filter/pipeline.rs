@@ -16,8 +16,8 @@ use pingora_proxy::Session;
 #[cfg(feature = "pingora")]
 use praxis_core::connectivity::normalize_mapped_ipv4;
 #[cfg(feature = "pingora")]
-use praxis_filter::BodyMode;
-use praxis_filter::{FilterAction, FilterError, FilterPipeline, Rejection, Request};
+use praxis_filter::{BodyMode, Rejection};
+use praxis_filter::{FilterAction, FilterError, FilterPipeline, Request, TrustedHeaderMutation};
 #[cfg(feature = "pingora")]
 use tracing::{Instrument as _, error};
 
@@ -25,7 +25,7 @@ use tracing::{Instrument as _, error};
 use super::{
     super::super::convert::{request_header_from_session, send_rejection_for},
     error_handling::handle_pre_read_io_error,
-    header_mutations::apply_pre_read_mutations,
+    header_mutations::{apply_pre_read_mutations, apply_request_mutations_to_session},
     request_utils::{create_request_span, snapshot_for_early_exit},
     stream_buffer::PreReadError,
     terminal_responses::{run_streaming_terminal_response, run_terminal_response},
@@ -36,6 +36,7 @@ use super::{
     header_mutations::apply_pending_header_mutations,
     request_utils::templated_route,
 };
+use crate::http::body_limit::{BodyLimitPhase, body_limit_rejection};
 
 // -----------------------------------------------------------------------------
 // PipelineResult
@@ -64,6 +65,9 @@ pub(in crate::http) struct PipelineResult {
 
     /// Headers to set (overwrite) on the upstream request.
     pub(in crate::http) headers_to_set: Vec<(http::header::HeaderName, http::header::HeaderValue)>,
+
+    /// Ordered headers-filter mutations applied after generic remove/set.
+    pub(in crate::http) header_mutations: Vec<TrustedHeaderMutation>,
 }
 
 // -----------------------------------------------------------------------------
@@ -113,7 +117,7 @@ pub(in crate::http) async fn execute(
         return Ok(true);
     }
 
-    if let Some(handled) = super::validation::handle_max_forwards(session).await {
+    if let Some(handled) = super::validation::handle_max_forwards(session, ctx).await {
         if handled {
             snapshot_for_early_exit(session, ctx);
         }
@@ -153,18 +157,12 @@ pub(in crate::http) async fn execute(
     ctx.request_body_mode = caps.request_body_mode;
     ctx.response_body_mode = caps.response_body_mode;
 
-    // Request-head phase: runs once before any StreamBuffer pre-read and the
-    // main request phase, so a head-only classifier's facts are visible to
-    // body filters during pre-read. Gated on opt-in, so the zero-buffering
-    // fast path is untouched when no filter participates.
-    if pipeline.has_request_head_phase() {
-        let span = ctx.request_span.clone();
-        if super::request_head::execute(pipeline, session, &mut request, ctx)
-            .instrument(span)
-            .await
-        {
-            return Ok(true);
-        }
+    let span = ctx.request_span.clone();
+    if super::request_head::prepare(pipeline, session, &mut request, ctx)
+        .instrument(span)
+        .await
+    {
+        return Ok(true);
     }
 
     if matches!(caps.request_body_mode, BodyMode::StreamBuffer { .. }) {
@@ -212,10 +210,11 @@ pub(in crate::http) async fn execute(
             extra_headers,
             headers_to_remove,
             headers_to_set,
+            header_mutations,
         }) => {
-            // Mirror of `apply_pending_header_mutations`, which applied the
-            // same three lists to `ctx.request_snapshot` in the same
-            // remove -> set -> add order. Keep the two in step.
+            // Mirror `apply_pending_header_mutations` on the request snapshot:
+            // generic removals and sets, ordered header-filter mutations,
+            // then extra headers. Keep the two in step.
             let req_headers = session.req_header_mut();
             for name in &headers_to_remove {
                 let _remove = req_headers.remove_header(name);
@@ -223,6 +222,8 @@ pub(in crate::http) async fn execute(
             for (name, value) in &headers_to_set {
                 let _insert = req_headers.insert_header(name.clone(), value.clone());
             }
+            apply_request_mutations_to_session(session, &header_mutations);
+            let req_headers = session.req_header_mut();
             for (name, value) in extra_headers {
                 // Most promoted names are `Cow::Borrowed` statics
                 // ("X-Forwarded-For", …): Pingora converts a &'static
@@ -290,6 +291,7 @@ pub(in crate::http) async fn run_pipeline(
         extra_headers,
         headers_to_remove,
         headers_to_set,
+        header_mutations,
         cluster,
         upstream,
         rewritten_path,
@@ -301,8 +303,7 @@ pub(in crate::http) async fn run_pipeline(
         retry_policy,
         route_retry_policy,
         hedge_policy,
-        cluster_retry_state,
-        cluster_retry_state_released,
+        cluster_admission,
         endpoint_reselector,
         extensions,
         filter_metadata,
@@ -382,8 +383,13 @@ pub(in crate::http) async fn run_pipeline(
                 Ok(_) => {
                     if pipeline.body_capabilities().any_selected_upstream_request_body_writer {
                         let adapted_len = working_body.as_ref().map_or(0, Bytes::len);
-                        if adapted_len > selected_upstream_body_limit(pipeline) {
-                            action = Ok(FilterAction::Reject(Rejection::status(413)));
+                        let limit = selected_upstream_body_limit(pipeline);
+                        if adapted_len > limit {
+                            action = Ok(FilterAction::Reject(body_limit_rejection(
+                                limit,
+                                u64::try_from(adapted_len).unwrap_or(u64::MAX),
+                                BodyLimitPhase::SelectedUpstream,
+                            )));
                         } else {
                             adapted_body = Some(AdaptedRequestBody(working_body));
                         }
@@ -400,6 +406,7 @@ pub(in crate::http) async fn run_pipeline(
             filter_ctx.extra_request_headers,
             filter_ctx.request_headers_to_remove,
             filter_ctx.request_headers_to_set,
+            filter_ctx.request_header_mutations,
             filter_ctx.cluster,
             filter_ctx.upstream,
             filter_ctx.rewritten_path,
@@ -411,8 +418,7 @@ pub(in crate::http) async fn run_pipeline(
             filter_ctx.retry_policy,
             filter_ctx.route_retry_policy,
             filter_ctx.hedge_policy,
-            filter_ctx.cluster_retry_state,
-            filter_ctx.cluster_retry_state_released,
+            filter_ctx.cluster_admission,
             filter_ctx.endpoint_reselector,
             filter_ctx.extensions,
             filter_ctx.filter_metadata,
@@ -436,6 +442,7 @@ pub(in crate::http) async fn run_pipeline(
         &mut request.headers,
         &headers_to_remove,
         &headers_to_set,
+        &header_mutations,
         &extra_headers,
     );
     ctx.request_snapshot = Some(request);
@@ -458,7 +465,8 @@ pub(in crate::http) async fn run_pipeline(
     // set, so the OTel `http.route` attribute read from the same field
     // later cannot disagree with the metric.
     ctx.metrics_route = templated_route(pipeline, ctx, metrics_route);
-    ctx.response_body_mode = clamp_body_mode_to_ceiling(response_body_mode, baseline_response_body_mode);
+    ctx.response_body_mode =
+        clamp_body_mode_to_ceiling(response_body_mode, baseline_response_body_mode, pipeline.buffer_cap());
 
     // Write back the request-scoped upstream and retry lifecycle on EVERY
     // outcome, not just Continue. A filter ordered after the load_balancer
@@ -469,14 +477,14 @@ pub(in crate::http) async fn run_pipeline(
     ctx.cluster = cluster;
     ctx.upstream = upstream;
     ctx.selected_endpoint_index = selected_endpoint_index;
-    ctx.cluster_retry_state = cluster_retry_state;
-    ctx.cluster_retry_state_released = cluster_retry_state_released;
+    ctx.cluster_admission = cluster_admission;
     ctx.endpoint_reselector = endpoint_reselector;
 
     match action {
         Ok(FilterAction::Continue | FilterAction::Release | FilterAction::BodyDone) => {
             ctx.rewritten_path = rewritten_path;
-            ctx.request_body_mode = clamp_body_mode_to_ceiling(request_body_mode, baseline_request_body_mode);
+            ctx.request_body_mode =
+                clamp_body_mode_to_ceiling(request_body_mode, baseline_request_body_mode, pipeline.buffer_cap());
             ctx.attempted_endpoints = attempted_endpoints;
             ctx.retry_policy = retry_policy;
             ctx.route_retry_policy = route_retry_policy;
@@ -492,6 +500,7 @@ pub(in crate::http) async fn run_pipeline(
                 extra_headers,
                 headers_to_remove,
                 headers_to_set,
+                header_mutations,
             })
         },
         Ok(FilterAction::Reject(rejection)) => Ok(PipelineResult {
@@ -499,18 +508,21 @@ pub(in crate::http) async fn run_pipeline(
             extra_headers: Vec::new(),
             headers_to_remove: Vec::new(),
             headers_to_set: Vec::new(),
+            header_mutations: Vec::new(),
         }),
         Ok(FilterAction::TerminalResponse(terminal)) => Ok(PipelineResult {
             action: FilterAction::TerminalResponse(terminal),
             extra_headers: Vec::new(),
             headers_to_remove: Vec::new(),
             headers_to_set: Vec::new(),
+            header_mutations: Vec::new(),
         }),
         Ok(FilterAction::StreamingTerminalResponse(terminal)) => Ok(PipelineResult {
             action: FilterAction::StreamingTerminalResponse(terminal),
             extra_headers: Vec::new(),
             headers_to_remove: Vec::new(),
             headers_to_set: Vec::new(),
+            header_mutations: Vec::new(),
         }),
         Err(e) => Err(e),
     }
@@ -530,17 +542,21 @@ pub(in crate::http) async fn run_pipeline(
     reason = "tests"
 )]
 mod tests {
-    use std::{collections::VecDeque, net::IpAddr};
+    use std::{collections::VecDeque, net::IpAddr, sync::atomic::Ordering as AtomicOrdering, time::Duration};
 
     use http::{HeaderMap, Method, Uri};
     use praxis_core::config::FailureMode;
     #[cfg(not(feature = "pingora"))]
     use praxis_core::connectivity::normalize_mapped_ipv4;
+    use praxis_filter::FilterRegistry;
     #[cfg(not(feature = "pingora"))]
-    use praxis_filter::BodyMode;
-    use praxis_filter::{FilterRegistry, TrustedHeaderMutation};
+    use praxis_filter::{BodyMode, Rejection};
 
     use super::*;
+    use crate::http::pingora::handler::{response_filter::run_response_filters, retry_util::release_retry_state};
+
+    /// Header mutation queued by the pre-read test.
+    type TrustedHeaderMutation = praxis_filter::TrustedHeaderMutation;
 
     #[tokio::test]
     async fn empty_pipeline_continues() {
@@ -686,6 +702,7 @@ mod tests {
         let clamped = clamp_body_mode_to_ceiling(
             BodyMode::StreamBuffer { max_bytes: Some(4096) },
             BodyMode::StreamBuffer { max_bytes: Some(1024) },
+            praxis_core::config::DEFAULT_MAX_BUFFER_BYTES,
         );
         assert_eq!(
             clamped,
@@ -699,6 +716,7 @@ mod tests {
         let clamped = clamp_body_mode_to_ceiling(
             BodyMode::StreamBuffer { max_bytes: None },
             BodyMode::SizeLimit { max_bytes: 512 },
+            praxis_core::config::DEFAULT_MAX_BUFFER_BYTES,
         );
         assert_eq!(
             clamped,
@@ -709,7 +727,11 @@ mod tests {
 
     #[test]
     fn clamp_body_mode_to_ceiling_stream_passes_through_with_ceiling() {
-        let clamped = clamp_body_mode_to_ceiling(BodyMode::Stream, BodyMode::StreamBuffer { max_bytes: Some(1024) });
+        let clamped = clamp_body_mode_to_ceiling(
+            BodyMode::Stream,
+            BodyMode::StreamBuffer { max_bytes: Some(1024) },
+            praxis_core::config::DEFAULT_MAX_BUFFER_BYTES,
+        );
         assert_eq!(
             clamped,
             BodyMode::Stream,
@@ -719,7 +741,11 @@ mod tests {
 
     #[test]
     fn clamp_body_mode_to_ceiling_stream_passes_through_without_ceiling() {
-        let clamped = clamp_body_mode_to_ceiling(BodyMode::Stream, BodyMode::Stream);
+        let clamped = clamp_body_mode_to_ceiling(
+            BodyMode::Stream,
+            BodyMode::Stream,
+            praxis_core::config::DEFAULT_MAX_BUFFER_BYTES,
+        );
         assert_eq!(
             clamped,
             BodyMode::Stream,
@@ -732,6 +758,7 @@ mod tests {
         let clamped = clamp_body_mode_to_ceiling(
             BodyMode::SizeLimit { max_bytes: 8192 },
             BodyMode::SizeLimit { max_bytes: 2048 },
+            praxis_core::config::DEFAULT_MAX_BUFFER_BYTES,
         );
         assert_eq!(
             clamped,
@@ -745,6 +772,7 @@ mod tests {
         let clamped = clamp_body_mode_to_ceiling(
             BodyMode::StreamBuffer { max_bytes: Some(4096) },
             BodyMode::StreamBuffer { max_bytes: None },
+            praxis_core::config::DEFAULT_MAX_BUFFER_BYTES,
         );
         assert_eq!(
             clamped,
@@ -758,11 +786,88 @@ mod tests {
         let clamped = clamp_body_mode_to_ceiling(
             BodyMode::StreamBuffer { max_bytes: Some(512) },
             BodyMode::StreamBuffer { max_bytes: Some(1024) },
+            praxis_core::config::DEFAULT_MAX_BUFFER_BYTES,
         );
         assert_eq!(
             clamped,
             BodyMode::StreamBuffer { max_bytes: Some(512) },
             "runtime limit within baseline ceiling should be unchanged"
+        );
+    }
+
+    #[test]
+    fn runtime_modes_obey_configured_caps_without_capping_stream_totals() {
+        for cap in [1, 65_537, 67_108_865, 1_073_741_824] {
+            for baseline in [
+                BodyMode::Stream,
+                BodyMode::SizeLimit { max_bytes: usize::MAX },
+                BodyMode::StreamBuffer { max_bytes: None },
+            ] {
+                for requested in [None, Some(1), Some(cap), Some(usize::MAX)] {
+                    assert_eq!(
+                        clamp_body_mode_to_ceiling(BodyMode::StreamBuffer { max_bytes: requested }, baseline, cap),
+                        BodyMode::StreamBuffer {
+                            max_bytes: Some(cap.min(requested.unwrap_or(cap)))
+                        }
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn configured_buffer_caps_preserve_streaming_and_zero_transfer_limits() {
+        for cap in [1, 65_537, 67_108_865, 1_073_741_824] {
+            assert_eq!(
+                clamp_body_mode_to_ceiling(BodyMode::Stream, BodyMode::Stream, cap),
+                BodyMode::Stream
+            );
+            assert_eq!(
+                clamp_body_mode_to_ceiling(BodyMode::SizeLimit { max_bytes: usize::MAX }, BodyMode::Stream, cap),
+                BodyMode::SizeLimit { max_bytes: usize::MAX }
+            );
+            assert_eq!(
+                clamp_body_mode_to_ceiling(
+                    BodyMode::StreamBuffer { max_bytes: None },
+                    BodyMode::SizeLimit { max_bytes: 0 },
+                    cap
+                ),
+                BodyMode::StreamBuffer { max_bytes: Some(0) }
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_buffer_modes_cannot_override_the_hard_ceiling() {
+        let hard = praxis_core::config::DEFAULT_MAX_BUFFER_BYTES;
+        for baseline in [
+            BodyMode::Stream,
+            BodyMode::SizeLimit { max_bytes: usize::MAX },
+            BodyMode::StreamBuffer { max_bytes: None },
+            BodyMode::StreamBuffer {
+                max_bytes: Some(usize::MAX),
+            },
+        ] {
+            for requested in [None, Some(hard), Some(hard + 1), Some(usize::MAX)] {
+                assert_eq!(
+                    clamp_body_mode_to_ceiling(
+                        BodyMode::StreamBuffer { max_bytes: requested },
+                        baseline,
+                        praxis_core::config::DEFAULT_MAX_BUFFER_BYTES
+                    ),
+                    BodyMode::StreamBuffer { max_bytes: Some(hard) },
+                    "runtime buffering remains bounded with baseline {baseline:?}"
+                );
+            }
+        }
+        assert_eq!(
+            clamp_body_mode_to_ceiling(
+                BodyMode::SizeLimit { max_bytes: usize::MAX },
+                BodyMode::Stream,
+                praxis_core::config::DEFAULT_MAX_BUFFER_BYTES
+            ),
+            BodyMode::SizeLimit { max_bytes: usize::MAX },
+            "a non-buffering cumulative limit is independent of the buffer ceiling"
         );
     }
 
@@ -947,6 +1052,66 @@ mod tests {
 
     struct SelectedUpstreamUppercaseFilter;
 
+    /// Expands or empties the selected-upstream body to test its final limit.
+    struct SelectedUpstreamResizeFilter;
+
+    /// Attempts unbounded runtime upgrades during both header phases.
+    struct WidenBodyModesFilter;
+
+    #[async_trait::async_trait]
+    impl praxis_filter::HttpFilter for WidenBodyModesFilter {
+        fn name(&self) -> &'static str {
+            "widen_body_modes"
+        }
+
+        async fn on_request(
+            &self,
+            ctx: &mut praxis_filter::HttpFilterContext<'_>,
+        ) -> Result<FilterAction, FilterError> {
+            ctx.set_request_body_mode(BodyMode::StreamBuffer { max_bytes: None });
+            ctx.set_response_body_mode(BodyMode::StreamBuffer { max_bytes: None });
+            Ok(FilterAction::Continue)
+        }
+
+        async fn on_response(
+            &self,
+            ctx: &mut praxis_filter::HttpFilterContext<'_>,
+        ) -> Result<FilterAction, FilterError> {
+            ctx.set_response_body_mode(BodyMode::StreamBuffer { max_bytes: None });
+            Ok(FilterAction::Continue)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl praxis_filter::HttpFilter for SelectedUpstreamResizeFilter {
+        fn name(&self) -> &'static str {
+            "selected_upstream_resize"
+        }
+
+        async fn on_request(&self, _: &mut praxis_filter::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+            Ok(FilterAction::Continue)
+        }
+
+        fn selected_upstream_request_body_access(&self) -> praxis_filter::BodyAccess {
+            praxis_filter::BodyAccess::ReadWrite(praxis_filter::BodyRequirement::Optional)
+        }
+
+        fn request_body_mode(&self) -> BodyMode {
+            BodyMode::StreamBuffer { max_bytes: Some(4) }
+        }
+
+        async fn on_selected_upstream_request_body(
+            &self,
+            _: &mut praxis_filter::HttpFilterContext<'_>,
+            body: &mut Option<Bytes>,
+        ) -> Result<praxis_filter::SelectedUpstreamBodyOutcome, FilterError> {
+            *body = body.as_ref().and_then(|bytes| {
+                (bytes.as_ref() != b"-").then(|| Bytes::from([bytes.as_ref(), bytes.as_ref()].concat()))
+            });
+            Ok(praxis_filter::SelectedUpstreamBodyOutcome::Continue)
+        }
+    }
+
     #[async_trait::async_trait]
     impl praxis_filter::HttpFilter for SelectedUpstreamUppercaseFilter {
         fn name(&self) -> &'static str {
@@ -961,7 +1126,7 @@ mod tests {
         }
 
         fn selected_upstream_request_body_access(&self) -> praxis_filter::BodyAccess {
-            praxis_filter::BodyAccess::ReadWrite
+            praxis_filter::BodyAccess::ReadWrite(praxis_filter::BodyRequirement::Optional)
         }
 
         fn request_body_mode(&self) -> BodyMode {
@@ -997,7 +1162,7 @@ mod tests {
         }
 
         fn selected_upstream_request_body_access(&self) -> praxis_filter::BodyAccess {
-            praxis_filter::BodyAccess::ReadOnly
+            praxis_filter::BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional)
         }
 
         fn request_body_mode(&self) -> BodyMode {
@@ -1031,7 +1196,7 @@ mod tests {
         }
 
         fn selected_upstream_request_body_access(&self) -> praxis_filter::BodyAccess {
-            praxis_filter::BodyAccess::ReadOnly
+            praxis_filter::BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional)
         }
 
         fn request_body_mode(&self) -> BodyMode {
@@ -1109,6 +1274,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn selected_upstream_final_output_respects_effective_limit() {
+        let mut pipeline = participant_pipeline("selected_upstream_resize", || Box::new(SelectedUpstreamResizeFilter));
+        pipeline.apply_body_limits(Some(4), None, false).unwrap();
+        for (original, expected) in [
+            (b"x".as_slice(), Some(b"xx".as_slice())),
+            (b"xy", Some(b"xyxy")),
+            (b"xyz", None),
+            (b"-", Some(b"")),
+        ] {
+            let mut ctx = make_ctx();
+            ctx.pre_read_body = Some(VecDeque::from([Bytes::copy_from_slice(original)]));
+            ctx.upstream = Some(make_test_upstream());
+            let result = run_pipeline(&pipeline, make_request(), &mut ctx).await.unwrap();
+            if let Some(expected) = expected {
+                assert!(matches!(result.action, FilterAction::Continue));
+                assert_eq!(ctx.adapted_request_body_len, Some(expected.len()));
+                let actual: Vec<u8> = ctx
+                    .adapted_request_body
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .flat_map(|chunk| chunk.iter().copied())
+                    .collect();
+                assert_eq!(actual, expected);
+            } else {
+                assert!(matches!(result.action, FilterAction::Reject(rejection) if rejection.status == 413));
+                assert!(ctx.adapted_request_body.is_none());
+            }
+            assert_eq!(ctx.pre_read_body.unwrap().front().unwrap().as_ref(), original);
+        }
+    }
+
+    #[tokio::test]
+    async fn header_phase_runtime_upgrades_preserve_independent_ceilings() {
+        let mut pipeline = participant_pipeline("widen_body_modes", || Box::new(WidenBodyModesFilter));
+        pipeline.apply_body_limits(Some(4), Some(7), false).unwrap();
+        let mut ctx = make_ctx();
+        ctx.request_body_mode = pipeline.body_capabilities().request_body_mode;
+        ctx.response_body_mode = pipeline.body_capabilities().response_body_mode;
+        let result = run_pipeline(&pipeline, make_request(), &mut ctx).await.unwrap();
+        assert!(matches!(result.action, FilterAction::Continue));
+        assert_eq!(ctx.request_body_mode, BodyMode::StreamBuffer { max_bytes: Some(4) });
+        assert_eq!(ctx.response_body_mode, BodyMode::StreamBuffer { max_bytes: Some(7) });
+        let mut response = praxis_filter::Response {
+            status: http::StatusCode::OK,
+            headers: HeaderMap::new(),
+        };
+        let (action, _) = run_response_filters(&pipeline, &mut ctx, &mut response).await.unwrap();
+        assert!(matches!(action.unwrap(), FilterAction::Continue));
+        assert_eq!(ctx.response_body_mode, BodyMode::StreamBuffer { max_bytes: Some(7) });
+    }
+
+    #[tokio::test]
     async fn selected_upstream_phase_reject_becomes_local_response() {
         let pipeline = participant_pipeline("selected_upstream_reject_413", || {
             Box::new(SelectedUpstreamReject413Filter)
@@ -1170,5 +1388,374 @@ mod tests {
             ctx.adapted_request_body.is_none(),
             "phase is gated on a selected upstream"
         );
+    }
+    // -------------------------------------------------------------------------
+    // Cancelled Phases and the Admission Lease
+    // -------------------------------------------------------------------------
+
+    /// A filter whose request hook never finishes, standing in for one
+    /// awaiting a slow dependency when the client goes away.
+    struct StallingRequestFilter;
+
+    #[async_trait::async_trait]
+    impl praxis_filter::HttpFilter for StallingRequestFilter {
+        fn name(&self) -> &'static str {
+            "stalling_request"
+        }
+
+        async fn on_request(
+            &self,
+            _ctx: &mut praxis_filter::HttpFilterContext<'_>,
+        ) -> Result<FilterAction, FilterError> {
+            std::future::pending::<()>().await;
+            Ok(FilterAction::Continue)
+        }
+    }
+
+    /// A filter whose response hook never finishes.
+    struct StallingResponseFilter;
+
+    #[async_trait::async_trait]
+    impl praxis_filter::HttpFilter for StallingResponseFilter {
+        fn name(&self) -> &'static str {
+            "stalling_response"
+        }
+
+        async fn on_request(
+            &self,
+            _ctx: &mut praxis_filter::HttpFilterContext<'_>,
+        ) -> Result<FilterAction, FilterError> {
+            Ok(FilterAction::Continue)
+        }
+
+        async fn on_response(
+            &self,
+            _ctx: &mut praxis_filter::HttpFilterContext<'_>,
+        ) -> Result<FilterAction, FilterError> {
+            std::future::pending::<()>().await;
+            Ok(FilterAction::Continue)
+        }
+    }
+
+    /// A `load_balancer` capped at one connection, paired with a stalling
+    /// filter.
+    ///
+    /// `stall_first` puts the stall ahead of the load balancer, which is what
+    /// makes it run *after* the load balancer on the way out, since the
+    /// response phase unwinds in reverse.
+    fn capped_lb_with_stall(
+        stall: &'static str,
+        make: fn() -> Box<dyn praxis_filter::HttpFilter>,
+        stall_first: bool,
+    ) -> FilterPipeline {
+        let mut registry = FilterRegistry::with_builtins();
+        registry
+            .register(stall, praxis_filter::FilterFactory::Http(Arc::new(move |_| Ok(make()))))
+            .unwrap();
+        let entry = |filter_type: String, config: serde_yaml::Value| praxis_filter::FilterEntry {
+            branch_chains: None,
+            filter_type,
+            config,
+            conditions: vec![],
+            name: None,
+            response_conditions: vec![],
+            failure_mode: FailureMode::default(),
+        };
+        let lb = entry(
+            "load_balancer".into(),
+            serde_yaml::from_str(
+                "clusters:\n  - name: web\n    endpoints: [\"127.0.0.1:8080\"]\n    max_connections: 1\n",
+            )
+            .unwrap(),
+        );
+        let stalling = entry(stall.into(), serde_yaml::from_str("{}").unwrap());
+        let mut entries = if stall_first {
+            vec![stalling, lb]
+        } else {
+            vec![lb, stalling]
+        };
+        FilterPipeline::build(&mut entries, &registry).unwrap()
+    }
+
+    /// A context routed to the capped cluster.
+    fn ctx_for_web() -> PingoraRequestCtx {
+        let mut ctx = make_ctx();
+        ctx.cluster = Some(Arc::from("web"));
+        ctx
+    }
+
+    /// Exercise the streaming request-body context writeback without changing the body.
+    struct AdmissionBodyObserver;
+
+    #[async_trait::async_trait]
+    impl praxis_filter::HttpFilter for AdmissionBodyObserver {
+        fn name(&self) -> &'static str {
+            "admission_body_observer"
+        }
+
+        async fn on_request(
+            &self,
+            _ctx: &mut praxis_filter::HttpFilterContext<'_>,
+        ) -> Result<FilterAction, FilterError> {
+            Ok(FilterAction::Continue)
+        }
+
+        fn request_body_access(&self) -> praxis_filter::BodyAccess {
+            praxis_filter::BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional)
+        }
+    }
+
+    /// Prefer the first endpoint on equal load so counter leaks and double releases affect selection.
+    fn admission_cleanup_pipeline() -> FilterPipeline {
+        let mut entries = serde_yaml::from_str::<Vec<praxis_filter::FilterEntry>>(
+            r#"
+- filter: load_balancer
+  response_conditions:
+    - when:
+        status: [201]
+  clusters:
+    - name: web
+      max_connections: 3
+      load_balancer_strategy: least_connections
+      endpoints:
+        - { address: "127.0.0.1:8080", weight: 2 }
+        - { address: "127.0.0.1:8081", weight: 1 }
+      retry_policy:
+        max_retries: 1
+        retriable_conditions: [status_5xx]
+        backoff: { base_interval_ms: 1, max_interval_ms: 1 }
+- filter: admission_body_observer
+"#,
+        )
+        .unwrap();
+        let mut registry = FilterRegistry::with_builtins();
+        registry
+            .register(
+                "admission_body_observer",
+                praxis_filter::FilterFactory::Http(Arc::new(|_| Ok(Box::new(AdmissionBodyObserver)))),
+            )
+            .unwrap();
+        FilterPipeline::build(&mut entries, &registry).unwrap()
+    }
+
+    /// An active attempt whose request-body hook restored a copy of the selected upstream.
+    async fn body_filtered_attempt(pipeline: &FilterPipeline) -> PingoraRequestCtx {
+        let mut ctx = ctx_for_web();
+        drop(run_pipeline(pipeline, make_request(), &mut ctx).await.unwrap());
+        ctx.request_is_idempotent = true;
+        let _target = super::super::super::upstream_peer::prepare_attempt(&mut ctx)
+            .await
+            .unwrap();
+        let mut body = Some(Bytes::from_static(b"body"));
+        assert!(
+            super::super::super::request_body_filter::run_request_body(pipeline, &mut body, true, &mut ctx)
+                .await
+                .is_ok()
+        );
+        assert_eq!(ctx.upstream.as_ref().unwrap().address.as_ref(), "127.0.0.1:8080");
+        assert_eq!(
+            ctx.upstream_for_retry.as_ref().unwrap().address,
+            ctx.upstream.as_ref().unwrap().address
+        );
+        ctx
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "keeps the fallback and repeated-cleanup scenario together"
+    )]
+    async fn fallback_cleanup_returns_the_selected_endpoint_once() {
+        for contacted in [false, true] {
+            let pipeline = admission_cleanup_pipeline();
+            let mut first = ctx_for_web();
+            drop(run_pipeline(&pipeline, make_request(), &mut first).await.unwrap());
+            assert_eq!(first.upstream.as_ref().unwrap().address.as_ref(), "127.0.0.1:8080");
+            if contacted {
+                first.upstream_for_retry = first.upstream.take();
+            }
+            let lease = Arc::clone(first.cluster_admission.as_ref().unwrap());
+            release_retry_state(&mut first);
+            assert!(lease.is_released());
+
+            let mut second = ctx_for_web();
+            drop(run_pipeline(&pipeline, make_request(), &mut second).await.unwrap());
+            assert_eq!(
+                second.upstream.as_ref().unwrap().address.as_ref(),
+                "127.0.0.1:8080",
+                "fallback must return the first endpoint's counter before response hooks run"
+            );
+            super::super::super::logging_util::logging_cleanup(&pipeline, &mut first).await;
+            release_retry_state(&mut first);
+
+            let mut third = ctx_for_web();
+            drop(run_pipeline(&pipeline, make_request(), &mut third).await.unwrap());
+            assert_eq!(
+                third.upstream.as_ref().unwrap().address.as_ref(),
+                "127.0.0.1:8081",
+                "repeated cleanup must leave the second request's endpoint counter alone"
+            );
+            assert_eq!(lease.state().active_requests.load(AtomicOrdering::Relaxed), 2);
+            release_retry_state(&mut second);
+            release_retry_state(&mut third);
+        }
+    }
+
+    #[cfg(feature = "pingora")]
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "follows admission and both endpoint counters across a retry"
+    )]
+    async fn final_header_cleanup_waits_for_the_retry_decision() {
+        let pipeline = admission_cleanup_pipeline();
+        let mut ctx = Box::pin(body_filtered_attempt(&pipeline)).await;
+        let lease = Arc::clone(ctx.cluster_admission.as_ref().unwrap());
+        let mut retryable = pingora_http::ResponseHeader::build(503, None).unwrap();
+        let error = super::super::super::response_filter::execute(&pipeline, &mut retryable, &mut ctx)
+            .await
+            .expect_err("the 503 should be retried before final-header cleanup");
+        assert!(error.retry());
+        assert!(!lease.is_released(), "admission must span all retry attempts");
+        assert_eq!(lease.state().active_requests.load(AtomicOrdering::Relaxed), 1);
+
+        let _target = super::super::super::upstream_peer::prepare_attempt(&mut ctx)
+            .await
+            .unwrap();
+        let mut final_response = pingora_http::ResponseHeader::build(200, None).unwrap();
+        super::super::super::response_filter::execute(&pipeline, &mut final_response, &mut ctx)
+            .await
+            .unwrap();
+        assert!(lease.is_released(), "the accepted final response must return admission");
+        assert_eq!(lease.state().active_requests.load(AtomicOrdering::Relaxed), 0);
+        let mut next = ctx_for_web();
+        drop(run_pipeline(&pipeline, make_request(), &mut next).await.unwrap());
+        assert_eq!(next.upstream.as_ref().unwrap().address.as_ref(), "127.0.0.1:8080");
+        let mut other = ctx_for_web();
+        drop(run_pipeline(&pipeline, make_request(), &mut other).await.unwrap());
+        assert_eq!(
+            other.upstream.as_ref().unwrap().address.as_ref(),
+            "127.0.0.1:8081",
+            "final cleanup must return the reselected endpoint, not the original attempt"
+        );
+        release_retry_state(&mut next);
+        release_retry_state(&mut other);
+    }
+
+    #[tokio::test]
+    async fn fallback_cleanup_during_retry_backoff_keeps_another_requests_endpoint() {
+        let pipeline = admission_cleanup_pipeline();
+        let mut abandoned = Box::pin(body_filtered_attempt(&pipeline)).await;
+        let lease = Arc::clone(abandoned.cluster_admission.as_ref().unwrap());
+        assert!(super::super::super::retry_util::response_status_retry(
+            &mut abandoned,
+            503
+        ));
+        assert!(
+            abandoned.upstream_for_retry.is_none(),
+            "the failed attempt is already released"
+        );
+
+        let mut active = ctx_for_web();
+        drop(run_pipeline(&pipeline, make_request(), &mut active).await.unwrap());
+        assert_eq!(active.upstream.as_ref().unwrap().address.as_ref(), "127.0.0.1:8080");
+        release_retry_state(&mut abandoned);
+        super::super::super::logging_util::logging_cleanup(&pipeline, &mut abandoned).await;
+        assert!(lease.is_released());
+        assert_eq!(lease.state().active_requests.load(AtomicOrdering::Relaxed), 1);
+
+        let mut next = ctx_for_web();
+        drop(run_pipeline(&pipeline, make_request(), &mut next).await.unwrap());
+        assert_eq!(
+            next.upstream.as_ref().unwrap().address.as_ref(),
+            "127.0.0.1:8081",
+            "cancellation before reselection must not release the old endpoint a second time"
+        );
+        release_retry_state(&mut active);
+        release_retry_state(&mut next);
+    }
+
+    /// A context as the response phase finds it: request answered by the
+    /// upstream the load balancer picked, holding `lease`.
+    fn answered_ctx(lease: Arc<praxis_core::retry::AdmissionLease>) -> PingoraRequestCtx {
+        let mut ctx = ctx_for_web();
+        ctx.request_snapshot = Some(make_request());
+        ctx.upstream = Some(make_test_upstream());
+        ctx.cluster_admission = Some(lease);
+        let _old = ctx.filter_metadata.insert("lb.selected".to_owned(), "true".to_owned());
+        ctx
+    }
+
+    /// Covers the cluster admission slot only. The per-endpoint in-flight
+    /// count `strategy.select` takes in the same `on_request` is not owned by
+    /// the lease, and a cancelled phase still strands it; that is a separate
+    /// pre-existing leak, reachable with `least_connections` and no
+    /// `max_connections` set at all.
+    #[tokio::test]
+    async fn a_cancelled_request_phase_returns_the_admission_slot() {
+        let pipeline = capped_lb_with_stall("stalling_request", || Box::new(StallingRequestFilter), false);
+
+        // The client goes away while the filter after the load balancer is
+        // still awaiting, so the phase never reaches its writeback.
+        let mut abandoned = ctx_for_web();
+        let ran = tokio::time::timeout(
+            Duration::from_millis(50),
+            run_pipeline(&pipeline, make_request(), &mut abandoned),
+        )
+        .await;
+        assert!(ran.is_err(), "the stalling filter keeps the request phase pending");
+        release_retry_state(&mut abandoned);
+
+        // The cap is one, so the next request proves whether the slot came back.
+        let mut next = ctx_for_web();
+        let ran = tokio::time::timeout(
+            Duration::from_millis(50),
+            run_pipeline(&pipeline, make_request(), &mut next),
+        )
+        .await;
+        assert!(
+            ran.is_err(),
+            "the abandoned request's slot must come back, letting the next request through to the stall"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_response_phase_keeps_another_requests_slot() {
+        use praxis_core::retry::{AdmissionLease, ClusterRetryState};
+
+        let pipeline = capped_lb_with_stall("stalling_response", || Box::new(StallingResponseFilter), true);
+        let state = Arc::new(ClusterRetryState::new(None).with_max_concurrent(Some(2)));
+        let lease = AdmissionLease::claim(&state).expect("the first request is admitted");
+        let other = AdmissionLease::claim(&state).expect("a second request is admitted");
+
+        // The first request's response phase releases its slot and is then
+        // cancelled before its state is written back.
+        let mut ctx = answered_ctx(lease);
+        let mut response = praxis_filter::Response {
+            status: http::StatusCode::OK,
+            headers: HeaderMap::new(),
+        };
+        let ran = tokio::time::timeout(
+            Duration::from_millis(50),
+            run_response_filters(&pipeline, &mut ctx, &mut response),
+        )
+        .await;
+        assert!(ran.is_err(), "the stalling filter keeps the response phase pending");
+        assert_eq!(
+            state.active_requests.load(AtomicOrdering::Relaxed),
+            1,
+            "the load balancer released the first request's slot"
+        );
+
+        // Completion runs anyway, and must not take the slot the other
+        // request is still holding.
+        release_retry_state(&mut ctx);
+
+        assert_eq!(
+            state.active_requests.load(AtomicOrdering::Relaxed),
+            1,
+            "the second request must keep its slot"
+        );
+        assert!(!other.is_released(), "and its lease is untouched");
     }
 }

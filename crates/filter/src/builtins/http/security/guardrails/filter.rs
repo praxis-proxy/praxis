@@ -298,7 +298,7 @@ impl HttpFilter for GuardrailsFilter {
 
     fn request_body_access(&self) -> BodyAccess {
         if self.needs_body {
-            BodyAccess::ReadOnly
+            BodyAccess::ReadOnly(crate::BodyRequirement::Required)
         } else {
             BodyAccess::None
         }

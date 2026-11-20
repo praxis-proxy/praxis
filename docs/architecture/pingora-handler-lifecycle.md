@@ -129,10 +129,12 @@ for later hooks.
 
 **Pre-pipeline validation** (runs before any filter):
 
-1. **Host header validation** - rejects missing Host
-   on HTTP/1.1, conflicting duplicate Host values,
-   empty/whitespace-only Host. Identical duplicates
-   are collapsed. (RFC 9112 Section 3.2, RFC 9110
+1. **Host header validation** - Pingora rejects
+   duplicate Host fields on H1 and H2 wire ingress,
+   even when values match. Praxis rejects missing
+   Host on HTTP/1.1 and empty/whitespace-only values;
+   its constructed-map fallback collapses identical
+   duplicates. (RFC 9112 Section 3.2, RFC 9110
    Section 7.2)
 2. **Header normalization** - rejects conflicting
    duplicate `Content-Length` or `Content-Type`.
@@ -161,6 +163,19 @@ The pipeline's pre-computed `BodyCapabilities` set
 `request_body_mode` and `response_body_mode` on the
 context. These baseline modes establish the byte
 ceiling for body buffering.
+
+After opted-in request-head filters run, a validated
+Content-Length above the effective input ceiling is
+rejected before reading any body data. Body-size failures
+share structured warning and JSON 413 construction across
+the pre-read, streaming, selected-upstream, and hedge paths.
+
+Streaming body rejections are carried in the request context
+across Pingora's error boundary. `fail_to_proxy` writes the
+response after Pingora has released the upstream session.
+The logging hook records request completion before bounded
+cleanup of the unread downstream upload, keeping the cleanup
+time out of access logs and request latency metrics.
 
 **StreamBuffer pre-read:**
 
@@ -261,7 +276,9 @@ Async (Pingora allows `.await` here).
   if StreamBuffer is still accumulating (not EOS).
 - `Release` - flushes the accumulated buffer and
   marks `request_body_released = true`.
-- `Reject` - sends rejection to client, returns error.
+- `Reject` - saves the rejection for `fail_to_proxy` and returns a
+  downstream-source error so Pingora stops both HTTP/1 and HTTP/2 upstream
+  attempts. The final error handler sends the rejection after upstream release.
 
 Source: `request_body_filter.rs`
 
@@ -329,18 +346,19 @@ Source: `upstream_request.rs`, `hop_by_hop.rs`,
 ### fail_to_connect
 
 Called when Pingora cannot establish an upstream
-connection. Implements retry logic:
+connection. The resolved cluster or route retry policy
+decides whether the outcome, attempt count, request
+method, replayable body size, timeout, and retry budget
+permit another attempt. The legacy default retries
+GET, HEAD, and OPTIONS up to three times after the
+initial attempt, with a 64 KiB replay cap and the
+same endpoint. A configured policy can allow other
+methods, raise `max_retries` to 15, lower the body
+limit, and reselect an endpoint. On approval, Praxis
+sets `e.set_retry(true)` for Pingora to replay.
 
-- Only retries idempotent requests (GET, HEAD,
-  OPTIONS).
-- Skips retry when the effective body size
-  (`max(request_body_bytes, mutated_request_body_len)`)
-  exceeds the 64 KiB Pingora retry buffer limit.
-- Allows up to 3 retries (`MAX_RETRIES`).
-- Sets `e.set_retry(true)` to tell Pingora to replay
-  the request.
-
-Source: `mod.rs` (`handle_connect_failure`)
+Source: `handler/retry.rs` (`should_retry`),
+`handler/retry_util.rs` (`connect_failure_retry`)
 
 ### response_filter
 
@@ -499,22 +517,30 @@ Source: `mod.rs` (`record_passive_health`,
 
 Retry is driven by `fail_to_connect` setting the
 `retry` flag on the Pingora error. On retry, Pingora
-replays the request to `upstream_peer` (which reuses
-the saved upstream) and re-runs the downstream hooks.
+replays the request through `upstream_peer` and
+re-runs the downstream hooks. The legacy policy reuses
+the saved upstream; a configured policy may reselect.
 `reseed_retry_body` reseeds only the adapted
 representation on retry when selected-upstream body
 adaptation ran; the retry-body replay guard accounts
 for `max(original downstream body, final adapted body)`.
 
-Constraints:
+The legacy default permits three retries after the
+initial attempt for GET, HEAD, and OPTIONS, with a
+64 KiB replay cap and the same endpoint. A configured
+policy may opt non-idempotent methods in with
+`allow_non_idempotent`, set `max_retries` up to 15,
+make `retry_body_limit_bytes` tighter than Pingora's
+64 KiB cap, and reselect an endpoint. Every attempt
+still needs a retriable outcome, available retry
+budget, time within the configured request timeout,
+and a replayable body whose larger original or final
+adapted length fits the limit. Unretained streaming
+writer output and a truncated Pingora replay buffer
+block retry.
 
-- **Idempotency** - only GET, HEAD, OPTIONS retry.
-- **Body size** - the effective body size (larger of
-  original and mutated lengths) must not exceed
-  Pingora's 64 KiB retry buffer.
-- **Attempt limit** - maximum 3 retries.
-
-Source: `mod.rs` (`handle_connect_failure`)
+Source: `handler/retry.rs` (`should_retry`),
+`handler/retry_util.rs` (`connect_failure_retry`)
 
 ## Pipeline Pinning and Hot Reload
 

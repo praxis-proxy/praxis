@@ -121,7 +121,10 @@ jobs:
       - name: Aggregate results and check ratchet
         run: |
           expected=32
-          found=$(ls -d all-results/mutants-shard-*/ 2>/dev/null | wc -l)
+          shopt -s nullglob
+          shards=(all-results/mutants-shard-*/)
+          shopt -u nullglob
+          found=${#shards[@]}
           if [ "$found" -lt "$expected" ]; then
             echo "::error::Only ${found}/${expected} shard results found."
             exit 1
@@ -132,7 +135,7 @@ jobs:
           timeout=0
           unviable=0
 
-          for dir in all-results/mutants-shard-*/; do
+          for dir in "${shards[@]}"; do
             if [ -f "${dir}caught.txt" ]; then
               n=$(grep -c '.' "${dir}caught.txt" 2>/dev/null || true)
               caught=$((caught + n))
@@ -180,31 +183,37 @@ jobs:
           print(v)
           ")
 
-          echo "## Mutation Testing Summary" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Metric | Count |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|--------|------:|" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Caught (killed) | $caught |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Survived (missed) | $missed |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Timed out | $timeout |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Unviable | $unviable |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| **Total** | **$total** |" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Kill ratio: ${kill_pct}%** (baseline: ${baseline}%)" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Timeouts: ${timeout}** (max: ${max_timeout})" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## Mutation Testing Summary"
+            echo ""
+            echo "| Metric | Count |"
+            echo "|--------|------:|"
+            echo "| Caught (killed) | $caught |"
+            echo "| Survived (missed) | $missed |"
+            echo "| Timed out | $timeout |"
+            echo "| Unviable | $unviable |"
+            echo "| **Total** | **$total** |"
+            echo ""
+            echo "**Kill ratio: ${kill_pct}%** (baseline: ${baseline}%)"
+            echo "**Timeouts: ${timeout}** (max: ${max_timeout})"
+          } >> "$GITHUB_STEP_SUMMARY"
 
           failed=0
 
           if [ "$kill_pct" -lt "$baseline" ]; then
-            echo "" >> "$GITHUB_STEP_SUMMARY"
-            echo "> **❌ Kill ratio ${kill_pct}% dropped below the ${baseline}% baseline.**" >> "$GITHUB_STEP_SUMMARY"
+            {
+              echo ""
+              echo "> **❌ Kill ratio ${kill_pct}% dropped below the ${baseline}% baseline.**"
+            } >> "$GITHUB_STEP_SUMMARY"
             echo "::error::Kill ratio ${kill_pct}% is below baseline ${baseline}%"
             failed=1
           fi
 
           if [ "$timeout" -gt "$max_timeout" ]; then
-            echo "" >> "$GITHUB_STEP_SUMMARY"
-            echo "> **❌ Timeout count ${timeout} exceeds the ${max_timeout} cap.**" >> "$GITHUB_STEP_SUMMARY"
+            {
+              echo ""
+              echo "> **❌ Timeout count ${timeout} exceeds the ${max_timeout} cap.**"
+            } >> "$GITHUB_STEP_SUMMARY"
             echo "::error::Timeout count ${timeout} exceeds cap ${max_timeout}"
             failed=1
           fi
@@ -213,5 +222,7 @@ jobs:
             exit 1
           fi
 
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "> **✅ PASSED** — kill ratio and timeout count within limits." >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo ""
+            echo "> **✅ PASSED**: kill ratio and timeout count within limits."
+          } >> "$GITHUB_STEP_SUMMARY"

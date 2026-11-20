@@ -8,9 +8,11 @@
 //! Runs the real binary as a subprocess because the check ends in
 //! `process::exit`. The expectation depends on the host: on a host that is not
 //! in FIPS mode the binary must refuse to start and say why; on a FIPS host it
-//! must start normally, unless it carries the policy engine, whose
-//! dependencies do their own cryptography, in which case it must refuse and
-//! name the `policy` filter. Every branch is asserted, so the test is
+//! must start normally, unless its registered `policy` filter fails the
+//! compiled FIPS assessment (a non-FIPS Policy backend or builtin, a host
+//! plugin, or an unvalidated feature combination), in which case it must
+//! refuse and name the `policy` filter. A policy-free build starts. Every
+//! branch is asserted, so the test is
 //! meaningful wherever it runs, and a control run without the variable proves
 //! the variable is what changes the outcome.
 
@@ -44,14 +46,18 @@ fn validate_with(env: &[(&str, &str)]) -> (bool, String) {
     )
 }
 
+/// Whether this build's registered `policy` filter blocks FIPS mode.
+fn policy_blocks_fips() -> bool {
+    praxis::fips_blocker(&praxis_filter::FilterRegistry::with_builtins()).is_some()
+}
+
 /// On a FIPS host both signals are present, so validate succeeds unless the
-/// binary carries the policy engine, which is not FIPS-capable and must be
-/// refused by name.
+/// policy filter's FIPS assessment refuses, which must name the filter.
 fn assert_fips_host_outcome(ok: bool, stderr: &str) {
-    if cfg!(feature = "policy-engine") {
+    if policy_blocks_fips() {
         assert!(
             !ok,
-            "on a FIPS host a binary carrying the policy engine is not FIPS-capable and must refuse to start"
+            "on a FIPS host a policy filter that fails the FIPS assessment must refuse to start"
         );
         assert!(
             stderr.contains("PRAXIS_REQUIRE_FIPS") && stderr.contains("`policy` filter"),

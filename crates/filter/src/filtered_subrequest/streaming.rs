@@ -121,6 +121,7 @@ impl FilteredStreamingBody {
                 request_body_mode: cont.pipeline.body_capabilities().request_body_mode,
                 request_headers_to_remove: Vec::new(),
                 request_headers_to_set: Vec::new(),
+                request_header_mutations: Vec::new(),
                 request_start: cont.request_start,
                 response_body_bytes: cont.response_body_bytes,
                 response_body_mode: cont.response_body_mode,
@@ -133,8 +134,7 @@ impl FilteredStreamingBody {
                 retry_policy: None,
                 route_retry_policy: None,
                 hedge_policy: None,
-                cluster_retry_state: None,
-                cluster_retry_state_released: false,
+                cluster_admission: None,
                 endpoint_reselector: None,
                 pinned_endpoint_address: None,
                 session_stores: cont.pipeline.session_stores(),
@@ -619,7 +619,7 @@ mod tests {
         }
 
         fn response_body_access(&self) -> crate::BodyAccess {
-            crate::BodyAccess::ReadOnly
+            crate::BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
         }
 
         fn on_response_body(
@@ -712,7 +712,7 @@ mod tests {
             extensions: crate::RequestExtensions::default(),
             filter_state: HashMap::new(),
             filter_results: HashMap::new(),
-            filter_metadata: HashMap::new(),
+            filter_metadata: crate::FilterMetadata::default(),
             structured_metadata: HashMap::new(),
             executed_filter_indices: vec![true],
             body_done_indices: vec![false],
@@ -791,7 +791,7 @@ mod tests {
             extensions: crate::RequestExtensions::default(),
             filter_state: HashMap::new(),
             filter_results: HashMap::new(),
-            filter_metadata: HashMap::new(),
+            filter_metadata: crate::FilterMetadata::default(),
             structured_metadata: HashMap::new(),
             executed_filter_indices: Vec::new(),
             body_done_indices: Vec::new(),

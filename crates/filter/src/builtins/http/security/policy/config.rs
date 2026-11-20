@@ -12,8 +12,8 @@ use serde::Deserialize;
 // -----------------------------------------------------------------------------
 
 /// Configuration block for the `policy` filter, which embeds the Praxis
-/// Policy Engine in-process (gated behind the `policy-engine` feature,
-/// on by default).
+/// Policy Engine in-process (gated behind the `policy-engine` feature;
+/// the default feature set also includes all supported builtins).
 ///
 /// Praxis filter configs are flat: the filter's typed fields sit
 /// directly under the `- filter:` entry alongside the structural keys
@@ -35,10 +35,12 @@ use serde::Deserialize;
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PolicyFilterConfig {
-    /// Body-access tier. `ReadOnly` (default) lets APL inspect request
-    /// and response bodies for routing / policy decisions but discards
-    /// any mutations. `ReadWrite` enables the CMF → JSON-RPC
-    /// re-serialization round-trip so APL field mutators
+    /// Body-access tier. `ReadOnly` (default) lets policy inspect request
+    /// bodies for routing and policy decisions but discards mutations.
+    /// Ordinary response-content hooks require `ReadWrite`; a trusted host
+    /// may still supply metadata-only inference response context.
+    /// `ReadWrite` enables the CMF → JSON-RPC re-serialization round-trip
+    /// so policy field mutators
     /// (e.g. `args.ssn: redact(!perm.view_ssn)`) rewrite the upstream
     /// body and response. Pay the round-trip cost only when needed.
     #[serde(default)]
@@ -62,6 +64,11 @@ pub(crate) struct PolicyFilterConfig {
 
     /// Maximum request or response body size in `ReadWrite` mode.
     /// Also used as the default inference request limit.
+    ///
+    /// Also sets the request buffer limit for a `ReadOnly` policy that defers
+    /// identity to the route; inference policies use `llm.max_request_bytes`.
+    /// Other filters can raise the limit within `body_limits.max_buffer_bytes`
+    /// and `body_limits.max_request_bytes`. Larger bodies receive HTTP 413.
     #[serde(default = "default_max_buffer_bytes")]
     pub max_buffer_bytes: usize,
 
@@ -94,6 +101,24 @@ pub(crate) struct PolicyFilterConfig {
     #[serde(default)]
     pub trusted_private_endpoints: Vec<String>,
 
+    /// CIDR ranges of proxies trusted to report the client in
+    /// `X-Forwarded-For`.
+    ///
+    /// Empty by default, so `http.client_address` is the TCP peer. When the
+    /// peer is in a listed range, the field lines are joined and walked right
+    /// to left, and the first hop outside every range is the client; when
+    /// every hop is trusted, the leftmost is. Hops left of the client are
+    /// ignored; a malformed hop reached before it leaves the request with no
+    /// client address. Ports are dropped. RFC 7239 `Forwarded` is not read. This
+    /// changes only what the policy engine sees; IP ACLs and upstream
+    /// headers still use the TCP peer.
+    ///
+    /// ```yaml
+    /// trusted_proxies: ["10.0.0.0/8", "fd00::/8"]
+    /// ```
+    #[serde(default)]
+    pub trusted_proxies: Vec<String>,
+
     /// Fail-closed policy gate for misconfigured chains. When `true`
     /// (default), `on_request_body` rejects any request that reaches
     /// it without `mcp.method` filter-metadata. The metadata is set
@@ -101,7 +126,8 @@ pub(crate) struct PolicyFilterConfig {
     /// its absence means either (a) the protocol classifier filter is missing from
     /// the chain, or (b) it is ordered AFTER `policy` instead of
     /// before. Either is a misconfiguration that would silently
-    /// bypass CMF/APL policy.
+    /// bypass CMF policy. The classifier must publish the metadata in its body
+    /// hook, before policy evaluates the body.
     ///
     /// Set to `false` only when intentionally fronting non-classified
     /// traffic through the `policy` filter for identity-only
@@ -159,7 +185,8 @@ pub(crate) struct PolicyFilterConfig {
     /// `meta.tags`, `meta.scope`, and `meta.properties` on every
     /// request processed by this filter instance.
     ///
-    /// **Important:** the PPE uses `meta.scope` for route resolution.
+    /// **Important:** [PPE](https://github.com/praxis-proxy/policy) uses
+    /// `meta.scope` for route resolution.
     /// Setting it here can change which policy route a request
     /// resolves to, not just what the audit record says.
     ///
@@ -196,14 +223,15 @@ pub(crate) struct ContextMetaConfig {
 
     /// Host-defined grouping (virtual server ID, namespace, etc.).
     ///
-    /// **Caution:** PPE scores route resolution on `meta.scope`, so
+    /// **Caution:** [PPE](https://github.com/praxis-proxy/policy) scores route
+    /// resolution on `meta.scope`, so
     /// setting it here changes which policy route a request resolves
     /// to, not just what the audit record says.
     #[serde(default)]
     pub scope: Option<String>,
 
     /// Arbitrary key-value metadata, available as
-    /// `meta.properties.<key>` in APL predicates.
+    /// `meta.properties.<key>` in policy predicates.
     #[serde(default)]
     pub properties: HashMap<String, String>,
 }
@@ -316,8 +344,9 @@ pub(crate) struct LlmOptions {
 
     /// Deny a request whose body carries no usable top-level `model`.
     ///
-    /// Enabled by default. When disabled, the request falls through to
-    /// other policy paths.
+    /// Enabled by default. When disabled, an accepted unclassified request
+    /// without a model runs HTTP authorization, delegation and assertions.
+    /// Parsing and MCP classification checks still apply.
     #[serde(default = "default_true")]
     pub require_model: bool,
 
@@ -371,7 +400,7 @@ fn default_max_buffer_bytes() -> usize {
     10_485_760 // 10 MiB
 }
 
-/// What APL field-pipeline mutators on `args.<field>` and
+/// What policy field-pipeline mutators on `args.<field>` and
 /// `result.<field>` are allowed to do to the upstream body and
 /// downstream response.
 ///
@@ -382,13 +411,13 @@ fn default_max_buffer_bytes() -> usize {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum BodyAccessMode {
     /// Body is buffered for inspection / routing; mutations are
-    /// discarded. APL `require()` predicates over body content
+    /// discarded. Policy `require()` predicates over body content
     /// (`args.amount > 1000`) work; `redact()` / `assign()` are
     /// silently dropped at the executor's write boundary.
     #[default]
     ReadOnly,
 
-    /// Body is buffered + APL mutations to `args.*` and `result.*` are
+    /// Body is buffered + policy mutations to `args.*` and `result.*` are
     /// re-serialized back into the JSON-RPC body so the upstream and
     /// the downstream client see them. Costs one JSON parse +
     /// serialize per mutated request or response.

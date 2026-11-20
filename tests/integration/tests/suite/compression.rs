@@ -350,6 +350,101 @@ fn high_shared_level_round_trips_a_chunked_upstream_body() {
     assert_gzip_response(proxy.addr(), "/upstream", &body, true);
 }
 
+#[cfg(feature = "pingora")]
+#[test]
+fn compression_example_negotiates_its_exact_minimum_size() {
+    use std::collections::HashMap;
+
+    for length in [255, 256] {
+        let body = "a".repeat(length);
+        let backend = Backend::fixed(&body)
+            .header("Content-Type", "text/plain")
+            .start_with_shutdown();
+        let config = super::examples::load_example_config(
+            "payload-processing/compression.yaml",
+            free_port(),
+            HashMap::from([("127.0.0.1:3000", backend.port())]),
+        );
+        let proxy = start_proxy(&config);
+        assert_gzip_response(proxy.addr(), "/", &body, length == 256);
+    }
+}
+
+#[cfg(feature = "pingora")]
+#[test]
+fn gzip_response_ceiling_counts_upstream_content_before_encoding() {
+    use std::{
+        io::{BufReader, Write as _},
+        net::TcpStream,
+        time::Duration,
+    };
+
+    use praxis_test_utils::{H1Completion, PayloadSpec, read_h1_response};
+
+    const LIMIT: usize = 262_144;
+    for compressible in [true, false] {
+        for length in [LIMIT, LIMIT + 1] {
+            let body: String = if compressible {
+                "a".repeat(length)
+            } else {
+                PayloadSpec::binary(u64::try_from(length).unwrap(), 77412)
+                    .chunk(0, length)
+                    .into_iter()
+                    .map(|byte| char::from(b'!' + byte % 90))
+                    .collect()
+            };
+            let backend = Backend::fixed(&body)
+                .header("Content-Type", "text/plain")
+                .start_with_shutdown();
+            let yaml = format!(
+                "body_limits:\n  max_response_bytes: {LIMIT}\n{}",
+                regression_yaml(free_port(), backend.port(), "probe", "min_size_bytes: 1")
+            );
+            let proxy = start_proxy(&Config::from_yaml(&yaml).unwrap());
+            let mut socket = TcpStream::connect(proxy.addr()).unwrap();
+            socket.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+            socket
+                .write_all(
+                    b"GET /upstream HTTP/1.1\r\nHost: localhost\r\nAccept-Encoding: gzip\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+            let mut wire = Vec::new();
+            let result = read_h1_response(&mut BufReader::new(socket), false, 1_048_576, |chunk| {
+                wire.extend_from_slice(chunk);
+                Ok(())
+            });
+            assert_eq!(result.status, Some(200));
+            assert!(
+                result
+                    .headers
+                    .iter()
+                    .any(|(name, value)| name == "content-encoding" && value == "gzip")
+            );
+            if length == LIMIT {
+                assert_eq!(result.completion, Some(H1Completion::Chunked), "{result:?}");
+                let decoded = Algorithm::Gzip.decompressor(true).unwrap().encode(&wire, true).unwrap();
+                assert_eq!(decoded.as_ref(), body.as_bytes());
+                if compressible {
+                    assert!(wire.len() < length / 10);
+                } else {
+                    assert!(
+                        wire.len() > length / 2,
+                        "the second fixture must remain relatively incompressible"
+                    );
+                }
+            } else {
+                assert!(
+                    result.completion.is_none(),
+                    "over-limit upstream content cannot complete: {result:?}"
+                );
+            }
+            let (headers, clean) = send_and_read_body(proxy.addr(), "/static", None);
+            assert_eq!(parse_status(&headers), 200);
+            assert_eq!(clean, b"probe");
+        }
+    }
+}
+
 #[test]
 fn gzip_compresses_the_final_response_after_early_hints() {
     use std::{

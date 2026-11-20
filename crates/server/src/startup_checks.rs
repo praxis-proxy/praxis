@@ -7,20 +7,6 @@
 use praxis_core::config::Config;
 
 // -----------------------------------------------------------------------------
-// Constants
-// -----------------------------------------------------------------------------
-
-/// Built-in filters whose dependencies do their own cryptography outside the
-/// system OpenSSL, so a binary that registers one cannot honor
-/// `PRAXIS_REQUIRE_FIPS`.
-///
-/// The same fact is encoded in two other places, which must agree with this
-/// list: `DENIED` in `xtask/src/fips/graph.rs` (the crates the FIPS report
-/// rejects) and the `Containerfile.fips` header (the features the FIPS
-/// build leaves out).
-const NON_FIPS_FILTERS: &[&str] = &["policy"];
-
-// -----------------------------------------------------------------------------
 // Overload gauge export
 // -----------------------------------------------------------------------------
 
@@ -413,10 +399,51 @@ fn warn_sink_path_symlink(path: &str) {
 #[cfg(not(unix))]
 pub(crate) fn warn_insecure_sink_file_permissions(_config: &Config) {}
 
-/// Logs a warning when the server includes any experimental features.
+/// Every experimental Cargo feature of this crate, paired with whether this
+/// build compiled it in. A feature that sets the `experimental` marker in
+/// `Cargo.toml` belongs here.
+#[cfg(any(test, feature = "experimental"))]
+const EXPERIMENTAL_FEATURES: &[(&str, bool)] = &[
+    ("access-log-syslog", cfg!(feature = "access-log-syslog")),
+    ("basic-auth-filter", cfg!(feature = "basic-auth-filter")),
+    (
+        "bound-upstream-request-body",
+        cfg!(feature = "bound-upstream-request-body"),
+    ),
+    ("chain-binding", cfg!(feature = "chain-binding")),
+    ("cloud-events-filter", cfg!(feature = "cloud-events-filter")),
+    ("forward-proxy", cfg!(feature = "forward-proxy")),
+    ("hedged-requests", cfg!(feature = "hedged-requests")),
+    ("hyper", cfg!(feature = "hyper")),
+    ("iterative-request-router", cfg!(feature = "iterative-request-router")),
+    (
+        "policy-experimental-ratelimit",
+        cfg!(feature = "policy-experimental-ratelimit"),
+    ),
+    ("router-json-aliases", cfg!(feature = "router-json-aliases")),
+    ("slow-start", cfg!(feature = "slow-start")),
+    ("spiffe", cfg!(feature = "spiffe")),
+    ("tls-health-check", cfg!(feature = "tls-health-check")),
+    ("upstream-binding", cfg!(feature = "upstream-binding")),
+];
+
+/// Logs a warning naming the experimental features this server includes.
 #[cfg(feature = "experimental")]
 pub(crate) fn warn_experimental_features() {
-    tracing::warn!("experimental features are enabled that should not be used in production");
+    tracing::warn!(
+        "experimental features are enabled that should not be used in production: {}",
+        compiled_experimental_features().join(", ")
+    );
+}
+
+/// The experimental features compiled into this build, in name order.
+#[cfg(feature = "experimental")]
+fn compiled_experimental_features() -> Vec<&'static str> {
+    EXPERIMENTAL_FEATURES
+        .iter()
+        .filter(|(_, compiled)| *compiled)
+        .map(|(name, _)| *name)
+        .collect()
 }
 
 /// Warn when the admin API is configured but omitted from this build.
@@ -436,41 +463,42 @@ pub(crate) fn warn_admin_configured_without_feature(config: &Config) {
 
 /// Why this binary cannot honor `PRAXIS_REQUIRE_FIPS`, if it cannot.
 ///
-/// The provider and kernel checks cover rustls only. The `policy` filter's
-/// JWT verification runs on aws-lc-rs and its OAuth and Valkey plugins use
-/// the pure-Rust `hmac` and `sha2` crates, none of which is the system
-/// OpenSSL, so a binary that registers it is not FIPS-capable whatever the
-/// provider reports. Checked against the registry rather than the config so
-/// a hot reload cannot add the filter later.
+/// The provider and kernel checks cover rustls only. When the `policy` filter
+/// is registered, the filter crate's compiled assessment decides: Policy's
+/// crypto capability report must be the FIPS profile, no host policy plugin
+/// may be registered, and no unvalidated feature combination may be compiled
+/// in. A build without Policy's own capability evidence that still registers
+/// a `policy` filter is refused. A missing provider or non-FIPS OpenSSL
+/// defaults fail filter construction instead. Checked against the registry
+/// rather than the config so a hot reload cannot add the filter later.
 ///
 /// ```
 /// let registry = praxis_filter::FilterRegistry::with_builtins();
 /// let blocked = praxis::fips_blocker(&registry).is_some();
-/// assert_eq!(blocked, registry.available_filters().contains(&"policy"));
+/// let policy = registry.available_filters().contains(&"policy");
+/// assert_eq!(
+///     blocked,
+///     policy && praxis_filter::fips_crypto_blocker().is_some()
+/// );
 /// ```
 pub fn fips_blocker(registry: &praxis_filter::FilterRegistry) -> Option<String> {
-    let available = registry.available_filters();
-    let registered: Vec<String> = NON_FIPS_FILTERS
-        .iter()
-        .copied()
-        .filter(|name| available.contains(name))
-        .map(|name| format!("`{name}` filter"))
-        .collect();
-
-    (!registered.is_empty()).then(|| {
-        format!(
-            "{} is set but this binary registers the {}, whose dependencies do their own cryptography outside the \
-             system OpenSSL; run the FIPS build",
-            praxis_tls::provider::REQUIRE_FIPS_ENV,
-            registered.join(" and ")
-        )
-    })
+    registry
+        .available_filters()
+        .contains(&"policy")
+        .then(praxis_filter::fips_crypto_blocker)
+        .flatten()
+        .map(|reason| {
+            format!(
+                "{} is set but the registered `policy` filter is not FIPS-capable: {reason}",
+                praxis_tls::provider::REQUIRE_FIPS_ENV,
+            )
+        })
 }
 
 /// Warn when a policy-free build nonetheless carries the `policy` filter.
 ///
 /// Cargo unions features across the whole dependency graph, so a crate that
-/// depends on `praxis-proxy-filter` with its defaults enables `policy-engine`
+/// depends on `praxis-proxy-filter` with its defaults enables `policy-builtins`
 /// even when this crate's own feature is off. The filter registers on the
 /// filter crate's feature, so `policy` becomes nameable in config in a build
 /// the operator believes is policy-free.
@@ -1055,7 +1083,7 @@ insecure_options:
     }
 
     #[test]
-    fn fips_is_blocked_by_a_registered_policy_filter() {
+    fn fips_uses_the_policy_filter_crypto_assessment() {
         let mut registry = praxis_filter::FilterRegistry::with_builtins();
         if !registry.available_filters().contains(&"policy") {
             let factory = praxis_filter::FilterFactory::Http(Arc::new(|_| Err("unused".into())));
@@ -1063,10 +1091,85 @@ insecure_options:
                 .register("policy", factory)
                 .expect("policy is not registered yet");
         }
-        let reason = super::fips_blocker(&registry).expect("the policy filter blocks FIPS");
+        let reason = super::fips_blocker(&registry);
+        assert_eq!(
+            reason.is_some(),
+            praxis_filter::fips_crypto_blocker().is_some(),
+            "a registered policy filter must refuse FIPS exactly when its crypto assessment does"
+        );
+        if let Some(reason) = reason {
+            assert!(
+                reason.contains("PRAXIS_REQUIRE_FIPS") && reason.contains("`policy` filter"),
+                "the refusal must name the variable and the filter: {reason}"
+            );
+        }
+    }
+
+    #[cfg(any(feature = "policy-builtins", feature = "policy-crypto-default"))]
+    #[test]
+    fn the_default_policy_backend_blocks_fips() {
+        let registry = praxis_filter::FilterRegistry::with_builtins();
+        let reason = super::fips_blocker(&registry).expect("the RustCrypto backend must block FIPS");
         assert!(
-            reason.contains("PRAXIS_REQUIRE_FIPS") && reason.contains("`policy` filter"),
-            "the refusal must name the variable and the filter: {reason}"
+            reason.contains("outside the supported FIPS profile"),
+            "the refusal must say the compiled Policy profile is not FIPS: {reason}"
+        );
+    }
+
+    #[cfg(not(feature = "policy-engine"))]
+    #[test]
+    fn a_foreign_policy_filter_blocks_fips() {
+        let reason = super::fips_blocker(&registry_with_policy_filter())
+            .expect("a policy filter without Policy capability evidence must block FIPS");
+        assert!(
+            reason.contains("`policy` filter"),
+            "the refusal must name the filter: {reason}"
+        );
+    }
+
+    #[cfg(feature = "experimental")]
+    #[test]
+    fn the_experimental_warning_names_every_compiled_experimental_feature() {
+        let warnings = capture_warnings(super::warn_experimental_features);
+        assert_eq!(
+            warnings.len(),
+            1,
+            "one experimental warning expected, got: {warnings:?}"
+        );
+        let names = super::compiled_experimental_features();
+        assert!(
+            !names.is_empty(),
+            "the `experimental` marker implies a compiled experimental feature"
+        );
+        for name in names {
+            assert!(
+                warnings[0].contains(name),
+                "the warning must name `{name}`: {:?}",
+                warnings[0]
+            );
+        }
+    }
+
+    #[cfg(feature = "policy-experimental-ratelimit")]
+    #[test]
+    fn the_experimental_warning_names_the_policy_limiter() {
+        let warnings = capture_warnings(super::warn_experimental_features);
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("policy-experimental-ratelimit")),
+            "a build with the Policy limiter must name it in the experimental warning: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn every_experimental_manifest_feature_is_listed() {
+        let listed: Vec<&str> = super::EXPERIMENTAL_FEATURES.iter().map(|(name, _)| *name).collect();
+        let marked = features_marked_experimental();
+        assert!(!marked.is_empty(), "the manifest scan found no experimental feature");
+        assert_eq!(
+            marked, listed,
+            "EXPERIMENTAL_FEATURES must list exactly the features that enable `experimental`"
         );
     }
 
@@ -1246,6 +1349,36 @@ filter_chains:
 "#,
         ))
         .expect("test config should parse")
+    }
+
+    /// The features in this crate's manifest whose declaration names the
+    /// `experimental` marker, sorted. Declarations may span several lines.
+    fn features_marked_experimental() -> Vec<String> {
+        let manifest = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"));
+        let mut declarations: Vec<(String, String)> = Vec::new();
+        for line in manifest
+            .lines()
+            .skip_while(|line| line.trim() != "[features]")
+            .skip(1)
+            .take_while(|line| !line.starts_with('['))
+            .filter(|line| !line.trim_start().starts_with('#'))
+        {
+            match line.split_once(" = ") {
+                Some((name, rhs)) if !line.starts_with(' ') => declarations.push((name.to_owned(), rhs.to_owned())),
+                _ => {
+                    if let Some((_, rhs)) = declarations.last_mut() {
+                        rhs.push_str(line);
+                    }
+                },
+            }
+        }
+        let mut marked: Vec<String> = declarations
+            .into_iter()
+            .filter(|(name, rhs)| name != "experimental" && rhs.contains("\"experimental\""))
+            .map(|(name, _)| name)
+            .collect();
+        marked.sort();
+        marked
     }
 
     fn capture_warnings<F: FnOnce()>(run: F) -> Vec<String> {

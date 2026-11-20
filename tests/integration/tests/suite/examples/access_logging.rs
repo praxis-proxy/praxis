@@ -5,19 +5,133 @@
 
 use std::{
     collections::HashMap,
-    io::{Read as _, Write as _},
+    io::{BufReader, Read as _, Write as _},
     net::TcpStream,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use praxis_test_utils::{
-    free_port, http_send, parse_body, parse_header, parse_status, start_backend_with_shutdown, start_full_proxy,
+    PraxisProcess, ProcessLogCursor, free_port, http_get, http_send, parse_body, parse_header, parse_status,
+    read_h1_response, read_http_request, spawn_raw_http_backend, start_backend_with_shutdown, start_full_proxy,
     start_proxy, start_tcp_tagged_backend, wait_for_tcp,
 };
 
 // -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
+
+#[test]
+fn access_log_early_hints_then_aborted_final_response() {
+    for abort in [false, true] {
+        let (release, received_prefix) = std::sync::mpsc::channel();
+        let (backend_port, backend_thread) = spawn_raw_http_backend(move |mut stream| {
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            read_http_request(&mut stream);
+            stream
+                .write_all(b"HTTP/1.1 103 Early Hints\r\nLink: </style.css>; rel=preload\r\n\r\n")
+                .unwrap();
+            if abort {
+                stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nshort\r\n",
+                    )
+                    .unwrap();
+                received_prefix
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("client received prefix before abort");
+            } else {
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                    .unwrap();
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("early-hints.ndjson");
+        let mut config = super::load_example_config(
+            "observability/access-logging.yaml",
+            free_port(),
+            HashMap::from([("127.0.0.1:3000", backend_port)]),
+        );
+        for chain in &mut config.filter_chains {
+            for entry in &mut chain.filters {
+                if entry.filter_type == "access_log" {
+                    entry
+                        .config
+                        .as_mapping_mut()
+                        .unwrap()
+                        .insert("sample_rate".into(), 1.0.into());
+                    entry.config.as_mapping_mut().unwrap().insert(
+                        "sink".into(),
+                        serde_yaml::from_str(&format!("type: file\npath: {}", log_path.display())).unwrap(),
+                    );
+                }
+            }
+        }
+        let proxy = start_full_proxy(&config);
+        wait_for_tcp(proxy.addr());
+        let mut socket = TcpStream::connect(proxy.addr()).unwrap();
+        socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        socket
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        let mut body = Vec::new();
+        let response = read_h1_response(&mut BufReader::new(socket), false, 64, |chunk| {
+            body.extend_from_slice(chunk);
+            if abort && body.len() == 5 {
+                release.send(()).expect("release upstream after receiving prefix");
+            }
+            Ok(())
+        });
+        #[cfg(feature = "pingora")]
+        assert_eq!(response.interim_statuses, [103], "{response:?}");
+        #[cfg(feature = "hyper")]
+        assert!(
+            response.interim_statuses.is_empty(),
+            "Hyper does not relay interim heads: {response:?}"
+        );
+        assert_eq!(response.status, Some(200), "{response:?}");
+        if abort {
+            assert!(
+                response
+                    .headers
+                    .iter()
+                    .any(|(name, value)| name == "transfer-encoding" && value == "chunked"),
+                "{response:?}"
+            );
+            assert_eq!(response.completion, None, "{response:?}");
+            assert!(
+                response.abort.as_ref().is_some_and(|(kind, _)| matches!(
+                    kind,
+                    std::io::ErrorKind::UnexpectedEof
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted
+                )),
+                "peer must abort rather than time out: {response:?}"
+            );
+            assert_eq!(body, b"short");
+        } else {
+            assert_eq!(
+                response.completion,
+                Some(praxis_test_utils::H1Completion::ContentLength)
+            );
+            assert_eq!(body, b"ok");
+        }
+        backend_thread.join().unwrap();
+        let contents = (0..50)
+            .find_map(|_| {
+                let contents = std::fs::read_to_string(&log_path).unwrap_or_default();
+                if contents.lines().count() == 1 {
+                    Some(contents)
+                } else {
+                    std::thread::sleep(Duration::from_millis(20));
+                    None
+                }
+            })
+            .expect("one final access record");
+        let record: serde_json::Value = serde_json::from_str(contents.lines().next().unwrap()).unwrap();
+        assert_eq!(record["status"], "200", "103 must not consume the record");
+    }
+}
 
 #[test]
 fn access_logging() {
@@ -50,6 +164,171 @@ fn access_logging() {
         parse_header(&raw, "x-request-id"),
         Some("trace-abc".to_owned()),
         "proxy should echo back the X-Request-Id"
+    );
+}
+
+#[test]
+#[cfg_attr(coverage, ignore = "spawns the praxis binary")]
+fn failure_logs_and_metrics_exclude_body_canaries_and_count_rejection_once() {
+    let backend = start_backend_with_shutdown("telemetry-ok");
+    let port = free_port();
+    let admin_port = free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let admin = format!("127.0.0.1:{admin_port}");
+    let yaml = format!(
+        r#"
+shutdown_timeout_secs: 1
+admin:
+  metrics_address: "{admin}"
+body_limits:
+  max_request_bytes: 65536
+listeners:
+  - name: web
+    address: "{addr}"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: request_id
+      - filter: access_log
+        sample_rate: 1.0
+        fields: [request_id, status, request_body_bytes, response_body_bytes]
+        sink: {{type: stdout}}
+      - filter: json_body_field
+        field: model
+        header: x-praxis-model
+      - filter: guardrails
+        rules:
+          - target: body
+            contains: [ssn]
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints: ["127.0.0.1:{backend_port}"]
+insecure_options:
+  allow_private_endpoints: true
+"#,
+        backend_port = backend.port()
+    );
+    let mut proxy = PraxisProcess::spawn_with_env(&yaml, &addr, &[("RUST_LOG", "debug")]);
+    wait_for_tcp(&admin);
+    let secret = "CANARY_PAYLOAD_SECRET_77412";
+    let pii = format!(
+        r#"{{"model":"ok","padding":"{}","secret":"{secret}","ssn":"123-45-6789"}}"#,
+        "x".repeat(50_000)
+    );
+    assert_telemetry_request(&addr, "w6-pii", &pii, 403, secret);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let (_, metrics) = http_get(&admin, "/metrics", None);
+        assert!(!metrics.contains(secret));
+        if metrics.contains("praxis_errors_total{type=\"filter_reject\"} 1") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "one rejection must produce exactly one filter_reject counter: {metrics}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let invalid = format!(r#"{{"model":"{secret}\ninvalid","padding":"{}"}}"#, "y".repeat(40_000));
+    assert_telemetry_request(&addr, "w6-invalid", &invalid, 200, secret);
+    let overlong = format!(
+        r#"{{"model":"{secret}{}","padding":"{}"}}"#,
+        "v".repeat(300),
+        "p".repeat(30_000)
+    );
+    assert_telemetry_request(&addr, "w6-long", &overlong, 200, secret);
+    let promoted = format!(r#"{{"model":"{secret}","padding":"{}"}}"#, "q".repeat(30_000));
+    assert_telemetry_request(&addr, "w6-promoted", &promoted, 200, secret);
+    let oversized = format!(r#"{{"padding":"{secret}{}"}}"#, "z".repeat(65_536));
+    assert_telemetry_request(&addr, "w6-over", &oversized, 413, secret);
+    assert_telemetry_request(&addr, "w6-probe", r#"{"model":"safe"}"#, 200, secret);
+    let (_, metrics) = http_get(&admin, "/metrics", None);
+    assert!(!metrics.contains(secret), "payload data must not become a metric label");
+    assert!(!metrics.contains("123-45-6789"));
+
+    let mut cursor = ProcessLogCursor::default();
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        while read_log_chunk(&proxy, &mut cursor, &mut stdout, &mut stderr) {}
+        let logs = String::from_utf8_lossy(&stdout);
+        if ["w6-pii", "w6-invalid", "w6-long", "w6-promoted", "w6-over", "w6-probe"]
+            .iter()
+            .all(|id| logs.contains(&format!("\"request_id\":\"{id}\"")))
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "every request must eventually emit an access record"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    proxy.signal("TERM");
+    let (status, forced) = proxy.wait_or_kill(Duration::from_secs(10));
+    assert!(!forced && status.success(), "proxy must flush logs and exit cleanly");
+    while read_log_chunk(&proxy, &mut cursor, &mut stdout, &mut stderr) {}
+    let logs = String::from_utf8_lossy(&stdout);
+    let diagnostic_logs = String::from_utf8_lossy(&stderr);
+    assert!(!logs.contains(secret));
+    assert!(!logs.contains("123-45-6789"));
+    assert!(!diagnostic_logs.contains(secret));
+    assert!(!diagnostic_logs.contains("123-45-6789"));
+    for (id, status) in [
+        ("w6-pii", "403"),
+        ("w6-invalid", "200"),
+        ("w6-long", "200"),
+        ("w6-promoted", "200"),
+        ("w6-over", "413"),
+        ("w6-probe", "200"),
+    ] {
+        let records: Vec<_> = logs
+            .lines()
+            .filter(|line| line.contains(&format!("\"request_id\":\"{id}\"")))
+            .collect();
+        assert_eq!(records.len(), 1, "{id} must have one access record: {logs}");
+        let record: serde_json::Value = serde_json::from_str(records[0]).unwrap();
+        assert_eq!(record["status"], status);
+    }
+}
+
+/// Drain logs incrementally while imposing a total bound on the test controller.
+fn read_log_chunk(
+    proxy: &PraxisProcess,
+    cursor: &mut ProcessLogCursor,
+    stdout: &mut Vec<u8>,
+    stderr: &mut Vec<u8>,
+) -> bool {
+    let chunk = proxy.logs_since(cursor, 4096).unwrap();
+    let read = !chunk.stdout.is_empty() || !chunk.stderr.is_empty();
+    stdout.extend(chunk.stdout);
+    stderr.extend(chunk.stderr);
+    assert!(
+        stdout.len() + stderr.len() <= 131_072,
+        "six requests must not log their bodies"
+    );
+    read
+}
+
+/// Ensure neither an error nor a successful control reflects the body canary.
+fn assert_telemetry_request(addr: &str, request_id: &str, body: &str, expected: u16, secret: &str) {
+    let request = format!(
+        "POST / HTTP/1.1\r\nHost: localhost\r\nX-Request-Id: {request_id}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let response = http_send(addr, &request);
+    assert_eq!(parse_status(&response), expected, "{request_id}: {response}");
+    assert!(!response.contains(secret), "{request_id} reflected the body canary");
+    assert!(
+        !response.contains("123-45-6789"),
+        "{request_id} reflected the PII canary"
     );
 }
 

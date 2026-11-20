@@ -2,7 +2,11 @@
 // Copyright (c) 2026 Praxis Contributors
 
 //! Dependency graph section of the report: crates on Red Hat's denylist must
-//! not be in the shipped binary's normal dependency graph.
+//! not be in the shipped binary's normal or build dependency graph, for the
+//! feature set (and so the Policy profile) under assessment. Test edges are
+//! checked separately by [`super::test_graph`].
+//!
+//! [`super::test_graph`]: super::test_graph
 
 use std::process::Command;
 
@@ -46,11 +50,11 @@ fn hint_location(crate_name: &str) -> &'static str {
         },
         "aws-lc-rs" | "aws-lc-sys" => {
             "a dependency enabling rustls' 'aws_lc_rs' feature (rustls' default, kept off in the workspace \
-             Cargo.toml); jsonwebtoken via the policy engine 'jwt' builtin"
+             Cargo.toml); jsonwebtoken via the 'policy-jwt' (not 'policy-jwt-fips') or 'policy-builtins' feature"
         },
         "sha2" => {
-            "praxis-policy-apl-runtime session_resolver.rs; policy 'oauth' and 'valkey' builtins; basic-auth filter \
-             (feature basic-auth-filter)"
+            "Policy's RustCrypto backend ('policy-crypto-default' or 'policy-builtins' instead of \
+             'policy-crypto-fips'); policy 'oauth' and 'valkey' builtins; basic-auth filter (feature basic-auth-filter)"
         },
         "hmac" => "policy 'oauth' builtin (delegator-oauth cache/key.rs)",
         "sha1" => "tokio-tungstenite WebSocket accept key (test utilities)",
@@ -69,7 +73,7 @@ fn hint_fix(crate_name: &str) -> &'static str {
         },
         "aws-lc-rs" | "aws-lc-sys" => {
             "find the edge with 'cargo tree -e features -i aws-lc-rs'; keep rustls default-features off; leave the \
-             policy 'jwt' builtin out of the FIPS build"
+             FIPS profiles on 'policy-jwt-fips', never 'policy-jwt'"
         },
         "sha1" => "keep it a dev-dependency; it must not appear in the release graph",
         "openssl-src" => "remove 'vendored', build with OPENSSL_NO_VENDOR=1, never set OPENSSL_STATIC",
@@ -85,7 +89,7 @@ fn hint_fix(crate_name: &str) -> &'static str {
 /// Append the dependency graph section.
 pub(crate) fn section(report: &mut Report, context: &Context) {
     report.section(&format!(
-        "Dependency graph (praxis-proxy, {}, normal edges)",
+        "Dependency graph (praxis-proxy, {}, normal and build edges)",
         context.feature_label()
     ));
     if Command::new("cargo").arg("--version").output().is_err() {
@@ -152,14 +156,15 @@ enum Tree {
     Present(String),
 }
 
-/// Run `cargo tree` inverted on `crate_name` over normal edges with the given
-/// feature flags, and classify the answer.
+/// Run `cargo tree` inverted on `crate_name` over normal and build edges with
+/// the given feature flags, and classify the answer. Build edges count: a
+/// build script that hashes or signs links the same crate into the build.
 fn inverted_tree(context: &Context, crate_name: &str, feature_flags: &[String]) -> Tree {
     let output = Command::new("cargo")
         .current_dir(&context.root)
         .arg("tree")
         .args(context.cargo_flags())
-        .args(["-e", "normal", "-p", "praxis-proxy"])
+        .args(["-e", "normal,build", "-p", "praxis-proxy"])
         .args(feature_flags)
         .args(["-i", crate_name, "--prefix", "indent"])
         .output();

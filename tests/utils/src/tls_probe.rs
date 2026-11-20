@@ -17,7 +17,7 @@
 
 use std::{
     io::{Read as _, Write as _},
-    net::{TcpListener, TcpStream},
+    net::TcpStream,
     sync::mpsc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -597,8 +597,7 @@ impl RogueServer {
     ///
     /// Panics when the listener cannot bind.
     pub fn start(reply: RogueReply) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind rogue server");
-        let port = listener.local_addr().expect("rogue server address").port();
+        let (listener, port) = crate::bind_unique_port();
         let (sender, observations) = mpsc::channel();
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {

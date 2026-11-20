@@ -216,6 +216,28 @@ impl CidrRange {
             (IpAddr::V6(net), IpAddr::V4(candidate)) => v6_contains_v4(*net, *candidate, self.prefix_len),
         }
     }
+
+    /// Like [`contains`](Self::contains), but only within this range's
+    /// address family, so `/0` does not widen. For trust decisions.
+    ///
+    /// ```
+    /// use praxis_core::connectivity::CidrRange;
+    ///
+    /// let all_v4 = CidrRange::parse("0.0.0.0/0").unwrap();
+    /// assert!(all_v4.contains_same_family(&"::ffff:203.0.113.7".parse().unwrap()));
+    /// assert!(!all_v4.contains_same_family(&"2001:db8::1".parse().unwrap()));
+    /// ```
+    pub fn contains_same_family(&self, ip: &IpAddr) -> bool {
+        let candidate_is_v4 = match ip {
+            IpAddr::V4(_) => true,
+            IpAddr::V6(v6) => v6.to_ipv4_mapped().is_some(),
+        };
+        let range_is_v4 = match self.addr {
+            IpAddr::V4(_) => true,
+            IpAddr::V6(v6) => v6.to_ipv4_mapped().is_some() && self.prefix_len >= 96,
+        };
+        candidate_is_v4 == range_is_v4 && self.contains(ip)
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -382,6 +404,39 @@ mod tests {
             r.contains(&"::ffff:8.8.8.8".parse().unwrap()),
             "::ffff:8.8.8.8 should match 0.0.0.0/0"
         );
+    }
+
+    #[test]
+    fn same_family_zero_prefix_keeps_to_its_family() {
+        let all_v4 = CidrRange::parse("0.0.0.0/0").unwrap();
+        let all_v6 = CidrRange::parse("::/0").unwrap();
+        let v4: IpAddr = "203.0.113.7".parse().unwrap();
+        let mapped: IpAddr = "::ffff:203.0.113.7".parse().unwrap();
+        let v6: IpAddr = "2001:db8::1".parse().unwrap();
+        assert!(all_v4.contains_same_family(&v4));
+        assert!(all_v4.contains_same_family(&mapped), "mapped IPv4 is IPv4");
+        assert!(!all_v4.contains_same_family(&v6), "an IPv4 /0 must not trust IPv6");
+        assert!(all_v6.contains_same_family(&v6));
+        assert!(!all_v6.contains_same_family(&v4), "an IPv6 /0 must not trust IPv4");
+        assert!(!all_v6.contains_same_family(&mapped), "nor mapped IPv4");
+        assert!(all_v4.contains(&v6), "contains still widens /0 for deny lists");
+    }
+
+    #[test]
+    fn same_family_matches_like_contains_within_a_family() {
+        let v4 = CidrRange::parse("10.0.0.0/8").unwrap();
+        assert!(v4.contains_same_family(&"10.1.2.3".parse().unwrap()));
+        assert!(v4.contains_same_family(&"::ffff:10.1.2.3".parse().unwrap()));
+        assert!(!v4.contains_same_family(&"11.0.0.1".parse().unwrap()));
+        let v6 = CidrRange::parse("fd00::/8").unwrap();
+        assert!(v6.contains_same_family(&"fd12::1".parse().unwrap()));
+        assert!(!v6.contains_same_family(&"10.1.2.3".parse().unwrap()));
+        let mapped = CidrRange::parse("::ffff:10.0.0.0/104").unwrap();
+        assert!(
+            mapped.contains_same_family(&"10.1.2.3".parse().unwrap()),
+            "a mapped range is IPv4"
+        );
+        assert!(!mapped.contains_same_family(&"fd12::1".parse().unwrap()));
     }
 
     #[test]

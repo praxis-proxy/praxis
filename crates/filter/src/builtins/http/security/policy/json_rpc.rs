@@ -6,7 +6,7 @@
 //! The upstream protocol classifier filter (from `praxis-ai`) parses JSON-RPC bodies
 //! and stashes `mcp.method` / `mcp.name` in `filter_metadata`, but
 //! it doesn't materialize `params.arguments` (or `result.content`)
-//! into a typed form that APL `args.*` / `result.*` predicates can
+//! into a typed form that policy `args.*` / `result.*` predicates can
 //! evaluate. This module does that second parse, builds the matching
 //! `ContentPart`, and re-serializes mutated payloads back into
 //! JSON-RPC envelopes when `body_access: read_write` is on.
@@ -26,9 +26,14 @@ use ppe::praxis_policy_core::cmf::{
 pub(super) struct ParsedEnvelope(serde_json::Value);
 
 impl ParsedEnvelope {
+    /// Parse one complete JSON value, retaining malformed-input errors.
+    pub(super) fn try_parse(body: &Bytes) -> Result<Self, serde_json::Error> {
+        serde_json::from_slice(body).map(Self)
+    }
+
     /// Parse `body`; malformed or empty input yields a `Null` envelope.
     pub(super) fn parse(body: &Bytes) -> Self {
-        Self(serde_json::from_slice(body).unwrap_or(serde_json::Value::Null))
+        Self::try_parse(body).unwrap_or(Self(serde_json::Value::Null))
     }
 
     /// The raw `id` value (`Null` when absent), preserving the original
@@ -52,6 +57,25 @@ impl ParsedEnvelope {
         self.0.get(name)
     }
 
+    /// Identify a JSON-RPC error without treating arbitrary objects as errors.
+    pub(super) fn is_json_rpc_error(&self) -> bool {
+        let Some(object) = self.0.as_object() else {
+            return false;
+        };
+        let version = object.get("jsonrpc").and_then(serde_json::Value::as_str) == Some("2.0");
+        let id = object
+            .get("id")
+            .is_some_and(|id| id.is_null() || id.is_string() || id.is_number());
+        let error = object.get("error").and_then(serde_json::Value::as_object);
+        let code = error
+            .and_then(|error| error.get("code"))
+            .and_then(serde_json::Value::as_number);
+        let message = error
+            .and_then(|error| error.get("message"))
+            .is_some_and(serde_json::Value::is_string);
+        version && id && code.is_some_and(|code| code.is_i64() || code.is_u64()) && message
+    }
+
     /// Consume the envelope, yielding the parsed DOM for rewriting.
     ///
     /// A malformed body is `Null` here, short-circuiting the rewrite.
@@ -65,7 +89,7 @@ impl ParsedEnvelope {
 // -----------------------------------------------------------------------------
 
 /// Build the typed CMF `ContentPart` list for a JSON-RPC method.
-/// Parses `params` out of the body so APL `args.*` /
+/// Parses `params` out of the body so policy `args.*` /
 /// `prompt.args.*` / `resource.*` predicates have something to
 /// evaluate against. On
 /// malformed or absent body, falls back to an empty content list — the
@@ -148,7 +172,7 @@ pub(super) fn build_content_for_method(
 // -----------------------------------------------------------------------------
 
 /// Re-serialize a JSON-RPC request body, replacing only the fields
-/// APL mutated in the typed `MessagePayload`. Returns `Some(new_bytes)`
+/// mutated by policy in the typed `MessagePayload`. Returns `Some(new_bytes)`
 /// when the body changed, `None` when nothing needed rewriting
 /// (no matching content part, malformed original, etc.).
 ///
@@ -161,7 +185,7 @@ pub(super) fn build_content_for_method(
 /// `params.name`) pass through unchanged. This minimizes the
 /// blast radius of the rewrite — operators relying on a byte-stable
 /// envelope (signature validation, content-hash matching) only see
-/// changes when APL actually mutated.
+/// changes only when policy modifies the payload.
 #[expect(
     clippy::too_many_lines,
     reason = "per-method envelope orchestration; splitting per-method obscures the JSON-RPC shape"
@@ -209,25 +233,23 @@ pub(super) fn reserialize_json_rpc_body(envelope: serde_json::Value, method: &st
 // -----------------------------------------------------------------------------
 
 /// Build the typed CMF `ContentPart` list from a JSON-RPC *response*
-/// body — the post-phase mirror of [`build_content_for_method`]. Today
-/// only `tools/call` produces a structured `ToolResult`; `prompts/get`
-/// and `resources/read` return TBD shapes the filter can extend later.
+/// body — the post-phase mirror of [`build_content_for_method`]. Only
+/// `tools/call` produces a structured `ToolResult`; other methods,
+/// including `prompts/get` and `resources/read`, produce no content parts.
 ///
 /// The actual tool data lives in `result.content[].text` (a
-/// JSON-stringified payload) and/or `result.structuredContent`
-/// (newer 2025-06-18 shape). We try
-/// `structuredContent` first; on miss, fold **every** text block (not
-/// just the first) so APL evaluates against all of the response's text
-/// content. A lone text block that parses as JSON is exposed as that
+/// JSON-stringified payload) and/or `result.structuredContent`. We prefer
+/// `structuredContent` for `result.*` projection; alongside it,
+/// expose each text block as CMF Text for whole-message scanners. Without
+/// structured content, fold **every** text block. A lone text block that
+/// parses as JSON is exposed as that
 /// object (so `result.<field>` predicates resolve); otherwise the raw
 /// text — or the concatenation of multiple blocks — is wrapped as
 /// `{ "text": "<raw>" }` so `result.text` predicates still resolve.
 ///
-/// Folding all blocks is load-bearing for policy: if APL only saw the
-/// first block, a later block could carry data the policy never vetted
-/// and [`reserialize_json_rpc_response_body`] never rewrote, leaking it
-/// downstream. The view here and the bytes emitted there are kept to
-/// the same content set.
+/// PPE's `result.*` projection still prefers the structured `ToolResult`;
+/// secondary Text parts are visible only to scanners of the whole CMF
+/// message. No-mutation allows keep the original response bytes.
 #[expect(
     clippy::too_many_lines,
     reason = "per-method envelope orchestration; splitting per-method obscures the JSON-RPC shape"
@@ -249,19 +271,21 @@ pub(super) fn build_response_content_for_method(
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
 
-    let content_value = if let Some(structured) = result.get("structuredContent") {
+    let texts: Vec<&str> = result
+        .get("content")
+        .and_then(serde_json::Value::as_array)
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter(|block| block.get("type").and_then(serde_json::Value::as_str) == Some("text"))
+                .filter_map(|block| block.get("text").and_then(serde_json::Value::as_str))
+                .collect()
+        })
+        .unwrap_or_default();
+    let structured = result.get("structuredContent");
+    let content_value = if let Some(structured) = structured {
         structured.clone()
     } else {
-        let texts: Vec<&str> = result
-            .get("content")
-            .and_then(|c| c.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
-                    .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
-                    .collect()
-            })
-            .unwrap_or_default();
         match texts.as_slice() {
             [] => serde_json::Value::Null,
             [single] => serde_json::from_str::<serde_json::Value>(single)
@@ -274,14 +298,22 @@ pub(super) fn build_response_content_for_method(
         }
     };
 
-    vec![ContentPart::ToolResult {
+    let mut parts = vec![ContentPart::ToolResult {
         content: ToolResult {
             tool_call_id: correlation_id.to_owned(),
             tool_name: entity_name.to_owned(),
             content: content_value,
             is_error,
         },
-    }]
+    }];
+    if structured.is_some() {
+        parts.extend(
+            texts
+                .into_iter()
+                .map(|text| ContentPart::Text { text: text.to_owned() }),
+        );
+    }
+    parts
 }
 
 // -----------------------------------------------------------------------------
@@ -289,18 +321,16 @@ pub(super) fn build_response_content_for_method(
 // -----------------------------------------------------------------------------
 
 /// Re-serialize a JSON-RPC response body, replacing only the fields
-/// the post-phase APL pipeline mutated. Mirror of
+/// the post-phase policy pipeline mutated. Mirror of
 /// [`reserialize_json_rpc_body`] for the response side.
 ///
 /// When the original response carried a `result.content` array, the
 /// **entire** array is replaced with a single canonical text block
 /// holding the vetted `ToolResult.content` (JSON-stringified — the
 /// legacy JSON-RPC shape every client supports). Collapsing to one block is
-/// deliberate: [`build_response_content_for_method`] folds every text
-/// block into the single value APL evaluates, so any *other* block left
-/// in place here would be content the policy never inspected and never
-/// rewrote — a redaction bypass. Dropping the extra (text and non-text)
-/// blocks guarantees the bytes we emit are exactly what APL vetted.
+/// deliberate: a mutator rewrites the selected `ToolResult`, not each parallel
+/// text or binary representation. Dropping the original blocks prevents a
+/// stale unmodified copy from surviving the mutation.
 ///
 /// `result.structuredContent` is mirrored to the same value, but
 /// only when the original response already had it (we don't invent

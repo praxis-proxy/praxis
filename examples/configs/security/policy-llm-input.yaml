@@ -1,0 +1,47 @@
+# Inference Input Policy
+#
+# Denies inference requests by what they ask of the model, using the
+# normalized `llm.input.*` facts the proxy derives from the request body:
+# offered tools, tool choice, completion cap, and ordered instructions.
+#
+# The proxy normalizes Chat Completions and Anthropic Messages bodies. A
+# request it cannot fully account for, such as an unknown tool type, leaves
+# the `llm.input.*` facts absent; pair rules with
+# `!exists(llm.input.offered_tools): deny` to refuse what policy cannot see.
+#
+# Point `config_path` at an operator-supplied policy. The integration fixture
+# at `tests/integration/fixtures/llm-input-policy.yaml` denies an offered
+# `transfer_funds` tool, a completion cap above 4096 tokens, a forced tool
+# other than `lookup_invoice`, and instructions other than the pinned prompt.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/security/policy-llm-input.yaml
+#
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: policy
+        config_path: /etc/praxis/llm-input-policy.yaml
+        llm:
+          require_model: true
+          provider: openai
+
+      - filter: router
+        routes:
+          - path_prefix: "/v1/"
+            cluster: inference
+
+      - filter: load_balancer
+        clusters:
+          - name: inference
+            endpoints:
+              - "127.0.0.1:3000"
+
+insecure_options:
+  allow_private_endpoints: true

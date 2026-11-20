@@ -7,7 +7,7 @@
 # HEALTHCHECK reaches it.
 #
 # Usage:
-#   docker run -p 8080:8080 praxis:0.1.0
+#   docker run -p 8080:8080 praxis:0.8.0
 #   curl http://localhost:8080/
 
 admin:

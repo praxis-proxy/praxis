@@ -57,7 +57,9 @@ influence downstream processing:
   upstream request.
 - `ctx.request_headers_to_remove`: remove headers from the
   upstream request.
-- `ctx.filter_metadata`: write durable per-request metadata.
+- `ctx.filter_metadata`: write durable per-request metadata
+  (`FilterMetadata`: keys up to 64 bytes, values up to 256
+  bytes, at most 128 entries).
 - `ctx.filter_results`: write key-value results for
   [branch chain](branch-chains.md) evaluation. Results
   are keyed by the filter's TYPE name (the return value
@@ -87,9 +89,29 @@ via `runs_request_head`. It only runs for **top-level** filters: a filter
 nested inside a branch chain never runs its head hook (a `head_classifier`
 placed inside a branch chain silently does nothing), and a head filter inside
 an `iterative_request_router` step is rejected at config build — the head phase
-runs once at ingress, never inside an iterative exchange. Facts it publishes
+runs once at ingress, never inside an iterative exchange — unless it declares
+`repeats_request_head`, because its `on_request` does the same work. Facts it publishes
 (extensions, metadata, filter results, trusted header mutations) are visible
 both during a later `stream_buffer` pre-read and the request phase.
+
+A filter whose head hook may reject the request, as an admission check does,
+declares `admits_at_request_head`. The pipeline skips that hook when an
+earlier top-level filter, or a filter in one of its branches, can end the
+request in its request phase (one
+that answers like `static_response` or `redirect`, or any filter that does not
+declare `may_end_request` false, as `forwarded_headers` and `headers` do), and
+the filter admits in `on_request` instead, so the earlier filter still
+runs first. A `stream_buffer` pre-read runs body hooks before any request
+phase, so there the pipeline holds that filter's body-phase rejection until
+the request phase reaches it, and runs no later body hook. A filter with
+request `conditions` skips its head hook and admits in `on_request`, where its
+conditions see the headers that head filters publish; a pre-read still runs
+its body hook first when those conditions already match. The `policy` filter uses the head
+phase this way: where it can, it rate-limits and authenticates before any
+filter reads the body. When a route replaces or extends authentication in a
+way the head can't match, the head only rate-limits and identity waits for
+the route, with the body buffered until then; see
+[`policy`](http/security/policy.md).
 
 Request `conditions` gate the request and ordinary body hooks. Response
 `response_conditions` gate only the response hooks. A filter skipped on
@@ -383,7 +405,7 @@ pub struct HttpFilterContext<'a> {
     pub downstream_tls: bool,
     pub extensions: RequestExtensions,
     pub extra_request_headers: Vec<(Cow<'static, str>, String)>,
-    pub filter_metadata: HashMap<String, String>,
+    pub filter_metadata: FilterMetadata,
     pub filter_results: HashMap<&'static str, FilterResultSet>,
     pub filter_state: HashMap<usize, Box<dyn Any + Send + Sync>>,
     pub health_registry: Option<&'a HealthRegistry>,
@@ -459,15 +481,20 @@ Filters see headers only by default. Opt in:
 
 ```rust
 fn request_body_access(&self) -> BodyAccess {
-    BodyAccess::ReadOnly // or ReadWrite
+    BodyAccess::ReadOnly(BodyRequirement::Optional) // or ReadWrite(...)
 }
 ```
 
 | Access           | Hooks? | Modify? |
 | ---------------- | ------ | ------- |
 | `None` (default) | No     | No      |
-| `ReadOnly`       | Yes    | No      |
-| `ReadWrite`      | Yes    | Yes     |
+| `ReadOnly(requirement)`  | Yes | No  |
+| `ReadWrite(requirement)` | Yes | Yes |
+
+`requirement` is `BodyRequirement::Optional` or
+`BodyRequirement::Required`. `Required` also prevents an
+admitted opaque WebSocket tunnel from bypassing that selected
+HTTP body processing. See the [filter extension guide](extensions.md#declare-body-access-accurately).
 
 ### Body Mode
 
@@ -556,7 +583,7 @@ rejected.
 | ------------------- | ----------------------------------------------- |
 | `grpc`              | Request is (`true`) or is not (`false`) gRPC    |
 | `path`              | URI exactly equals value                        |
-| `path_prefix`       | URI starts with value                           |
+| `path_prefix`       | URI path matches at a segment boundary         |
 | `methods`           | Method in list                                  |
 | `headers`           | All listed headers match                        |
 | `headers_present`   | All listed headers are present, any value       |
@@ -569,13 +596,20 @@ so it works without the `grpc_detection` filter and does not depend on
 filter ordering. `application/grpc-web` is a distinct protocol and does
 not match.
 
+For `path_prefix`, `/api` matches `/api` and `/api/v1`, but not
+`/apikeys`. One trailing slash on a configured prefix is ignored, so
+`/api/` is equivalent to `/api`.
+
 ```yaml
 # Rate limit only gRPC calls.
 - filter: rate_limit
   conditions:
     - when:
         grpc: true
-  requests_per_second: 100
+  mode: global
+  scope: local
+  rate: 100
+  burst: 200
 ```
 
 ```yaml

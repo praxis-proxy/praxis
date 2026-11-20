@@ -96,7 +96,11 @@ pub fn build_subrequest_client(config: &Config) -> Result<SubRequestClient, Box<
             }),
     });
 
-    let ceiling = config.body_limits.max_response_bytes.unwrap_or(usize::MAX);
+    let ceiling = config
+        .body_limits
+        .max_response_bytes
+        .unwrap_or(usize::MAX)
+        .min(config.body_limits.max_buffer_bytes.get());
     let mut client = SubRequestClient::with_max_response_bytes(connector, ceiling);
     if let Some(path) = config.runtime.upstream_ca_file.as_deref() {
         let cached = praxis_tls::CachedCaCerts::from_pem_file(path)?;
@@ -218,15 +222,17 @@ pub(crate) fn resolve_pipelines_with_composition(
             &config.insecure_options,
             &config.clusters,
         )?;
+        let listener_session_stores = Arc::new(session_stores.candidate());
         configure_pipeline(
             &mut pipeline,
             config,
             health_registry,
             kv_stores,
-            session_stores,
+            &listener_session_stores,
             slow_start_registry,
             subrequest_client,
-        )?;
+        )
+        .map_err(|error| format!("listener '{}': {error}", listener.name))?;
 
         // Attach a fresh downstream extension per listener pipeline. Runs at
         // startup and on every reload, so extensions survive reloads.
@@ -253,6 +259,9 @@ pub(crate) fn resolve_pipelines_with_composition(
         // validator sees the pristine flattened entries, not the husks left by
         // build_with_chains.
         composition.validate(&ValidatorContext::new(config, listener, &entry_snapshot, &pipeline))?;
+
+        listener_session_stores.prune_unused();
+        session_stores.retain_used_from(&listener_session_stores);
 
         pipelines.insert(listener.name.clone(), Arc::new(pipeline));
     }
@@ -293,11 +302,7 @@ fn configure_pipeline(
     slow_start_registry: &Arc<praxis_filter::SlowStartRegistry>,
     subrequest_client: &SubRequestClient,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    pipeline.apply_body_limits(
-        config.body_limits.max_request_bytes,
-        config.body_limits.max_response_bytes,
-        config.insecure_options.allow_unbounded_body,
-    )?;
+    pipeline.configure_body_limits(&config.body_limits, config.insecure_options.allow_unbounded_body)?;
     pipeline.set_record_filter_duration_metrics(config.metrics.filter_duration);
     pipeline.set_route_templates(Arc::new(praxis_core::config::RouteTemplates::compile(
         &config.metrics.route_templates,
@@ -316,9 +321,8 @@ fn configure_pipeline(
     // `kv_store` mode deny every request.
     pipeline.set_kv_stores(kv_stores.clone());
 
-    // Always inject the process-wide registry (even while empty): the sticky
-    // sessions filter adopts per-cluster stores into it on demand, which is
-    // what lets session bindings survive config reloads.
+    // Each listener owns only its bound stores, including nested pipelines.
+    // Identical configurations reuse Arcs from the publication candidate.
     pipeline.set_session_stores(Arc::clone(session_stores));
     pipeline.set_slow_start_registry(Arc::clone(slow_start_registry));
     pipeline.set_subrequest_client(subrequest_client.clone());
@@ -747,6 +751,71 @@ filter_chains:
                 && err.contains("no preceding filter is guaranteed to bind one"),
             "inherited bound_upstream gates must trigger the binding-order check: {err}"
         );
+    }
+
+    #[test]
+    fn subrequest_client_obeys_buffer_cap_and_stricter_response_transfer_limit() {
+        praxis_tls::provider::install();
+        let mut config = Config::from_yaml("listeners:\n  - name: web\n    address: '127.0.0.1:8080'\n    filter_chains: [main]\nfilter_chains:\n  - name: main\n    filters:\n      - filter: static_response\n        status: 200\n").unwrap();
+        for cap in [4, 67_108_865, 1_073_741_824] {
+            for transfer in [None, Some(0), Some(3), Some(usize::MAX)] {
+                config.body_limits.max_buffer_bytes = cap.try_into().unwrap();
+                config.body_limits.max_response_bytes = transfer;
+                let client = build_subrequest_client(&config).unwrap();
+                assert_eq!(client.max_response_bytes(), cap.min(transfer.unwrap_or(cap)));
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_pipelines_rejects_incompatible_buffered_request_limits() {
+        let mut config = Config::from_yaml(
+            r#"
+body_limits:
+  max_buffer_bytes: 4096
+  max_request_bytes: 8192
+listeners:
+  - name: other
+    address: "127.0.0.1:8081"
+    filter_chains: [unbuffered]
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: unbuffered
+    filters:
+      - filter: static_response
+        status: 200
+  - name: main
+    filters:
+      - filter: json_body_field
+        field: model
+        header: x-praxis-model
+      - filter: static_response
+        status: 200
+"#,
+        )
+        .unwrap();
+        let registry = FilterRegistry::with_builtins();
+        for skip_validation in [false, true] {
+            config.insecure_options.skip_pipeline_validation = skip_validation;
+            config.insecure_options.allow_unbounded_body = skip_validation;
+            let result = resolve_pipelines(
+                &config,
+                &registry,
+                &empty_health_registry(),
+                &empty_kv_stores(),
+                &empty_session_stores(),
+                &empty_subrequest_client(),
+            );
+            let message = result
+                .err()
+                .expect("conflicting request limits must fail startup")
+                .to_string();
+            assert!(message.contains("listener 'web':"), "{message}");
+            assert!(message.contains("body_limits.max_request_bytes (8192)"), "{message}");
+            assert!(message.contains("body_limits.max_buffer_bytes (4096)"), "{message}");
+        }
     }
 
     #[test]

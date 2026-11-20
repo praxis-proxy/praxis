@@ -14,7 +14,10 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use http::{HeaderMap, Response, StatusCode, Version};
-use praxis_core::egress::{Session as _, hyper::HyperSession};
+use praxis_core::{
+    egress::{Session as _, hyper::HyperSession},
+    server::LifecyclePhase,
+};
 use praxis_filter::{FilterAction, FilterError};
 use tracing::{Instrument as _, error, warn};
 
@@ -57,7 +60,7 @@ const FIRST_CHUNK_GRACE: Duration = Duration::from_millis(10); // 10 ms
 
 /// An upstream response head that passed the response phase.
 pub(super) struct Answer {
-    /// Whether the response carries no body (`HEAD`, `204`, `304`).
+    /// Whether the final response carries no body (`HEAD`, `204`, `304`).
     bodyless: bool,
 
     /// Bound on each read of the upstream body.
@@ -100,7 +103,7 @@ pub(super) async fn head(
     }
     strip_hop_by_hop_header_map(&mut head.response.headers, RESPONSE_HOP_BY_HOP);
     strip_reserved_internal_header_map(&mut head.response.headers);
-    head.bodyless = record_upstream_head(&mut flight.ctx, &head.response);
+    head.source_bodyless = record_upstream_head(&mut flight.ctx, &head.response);
     if response_status_retry(&mut flight.ctx, head.response.status.as_u16()) {
         release(&listener.connector, session, false);
         return status_retry(flight, upload, head.response.status);
@@ -153,7 +156,7 @@ async fn read_first(listener: &ListenerShared, flight: &mut Flight, mut answer: 
 
 /// The upstream's head on its way to the client.
 struct Head {
-    /// Whether the upstream's response carries no body.
+    /// Whether the final response carries no body.
     bodyless: bool,
 
     /// Bound on each read of the upstream body.
@@ -161,6 +164,9 @@ struct Head {
 
     /// The head, as the filters leave it.
     response: praxis_filter::Response,
+
+    /// Whether the upstream supplied no body, before response filters ran.
+    source_bodyless: bool,
 
     /// The HTTP version the upstream answered with.
     version: Version,
@@ -178,6 +184,7 @@ fn copy_head(session: &HyperSession, read_timeout: Option<Duration>) -> Result<H
             headers: head.headers.clone(),
             status,
         },
+        source_bodyless: false,
         version: head.version,
     })
 }
@@ -222,6 +229,25 @@ async fn run_filters(
     Some(ran.0)
 }
 
+/// Ask a draining data plane to close its non-HTTP/2 client connection.
+fn close_connection_on_drain(flight: &Flight, response: &mut praxis_filter::Response) {
+    if matches!(flight.lifecycle.phase(), LifecyclePhase::Draining)
+        && flight.version != Version::HTTP_2
+        && !successful_connect_tunnel(
+            &flight
+                .ctx
+                .request_snapshot
+                .as_ref()
+                .map_or(http::Method::GET, |request| request.method.clone()),
+            response.status,
+        )
+    {
+        response
+            .headers
+            .insert(http::header::CONNECTION, http::HeaderValue::from_static("close"));
+    }
+}
+
 /// Act on the response pipeline's result.
 fn settle(
     listener: &ListenerShared,
@@ -234,7 +260,9 @@ fn settle(
         release(&listener.connector, session, false);
         return Outcome::Failed(Failure::internal("request snapshot not set during response phase"));
     };
+    strip_inherited_bodyless_length(&flight.ctx, &session, &mut head);
     reframe(flight, &mut head, &result);
+    close_connection_on_drain(flight, &mut head.response);
     match result {
         Ok(
             FilterAction::Continue
@@ -265,12 +293,6 @@ fn reframe(flight: &mut Flight, head: &mut Head, result: &Result<FilterAction, F
         result,
         Ok(FilterAction::Continue | FilterAction::Release | FilterAction::BodyDone)
     );
-    if proceeds {
-        restore_framing(&flight.ctx, head);
-    }
-    if !flight.pipeline.is_empty() {
-        strip_reserved_internal_header_map(&mut head.response.headers);
-    }
     let continues = matches!(
         result,
         Ok(FilterAction::Continue
@@ -279,11 +301,39 @@ fn reframe(flight: &mut Flight, head: &mut Head, result: &Result<FilterAction, F
             | FilterAction::TerminalResponse(_)
             | FilterAction::StreamingTerminalResponse(_))
     );
+    if continues {
+        head.bodyless = is_bodyless(&flight.ctx, head.response.status);
+    }
+    if proceeds {
+        restore_framing(&flight.ctx, head);
+    }
+    if !flight.pipeline.is_empty() {
+        strip_reserved_internal_header_map(&mut head.response.headers);
+    }
     if flight.pipeline.body_capabilities().any_response_body_condition && continues {
         flight.ctx.response_header_snapshot = Some(praxis_filter::Response {
             headers: head.response.headers.clone(),
             status: head.response.status,
         });
+    }
+}
+
+/// A bodyless upstream's unchanged length describes a representation, not
+/// the empty source or bytes synthesized by EOF filters. When the response
+/// becomes bodyful, drop that metadata; preserve a new length set by filters.
+fn strip_inherited_bodyless_length(ctx: &PingoraRequestCtx, session: &HyperSession, head: &mut Head) {
+    if !head.source_bodyless || is_bodyless(ctx, head.response.status) {
+        return;
+    }
+    let unchanged = session.response_head().is_ok_and(|upstream| {
+        upstream.headers.get_all(http::header::CONTENT_LENGTH).iter().eq(head
+            .response
+            .headers
+            .get_all(http::header::CONTENT_LENGTH)
+            .iter())
+    });
+    if unchanged {
+        let _removed = head.response.headers.remove(http::header::CONTENT_LENGTH);
     }
 }
 
@@ -333,16 +383,20 @@ pub(super) async fn commit(
     let Answer {
         bodyless,
         read_timeout,
-        response,
+        mut response,
         mut session,
         start,
     } = answer;
+    // The head was checked when the response phase settled, but the drain can
+    // start while the first body chunk is read; recheck at the commit point.
+    close_connection_on_drain(&flight, &mut response);
     flight.written_status = response.status.as_u16();
     if bodyless {
         let keepalive = session.response_done() && upload.is_settled();
         release(&listener.connector, session, keepalive);
+        let body = bodyless_body(&mut response, flight.version, flight.is_head());
         flight.complete().await;
-        return client_response(response.status, response.headers, ProxyBody::empty());
+        return client_response(response.status, response.headers, body);
     }
 
     let (relay, body) = Relay::new();
@@ -367,6 +421,33 @@ fn spawn_relay(relaying: Relaying) {
 // -----------------------------------------------------------------------------
 // Utilities
 // -----------------------------------------------------------------------------
+
+/// Preserve valid representation length on HTTP/1 304s without sending a body.
+fn bodyless_body(response: &mut praxis_filter::Response, version: Version, is_head: bool) -> ProxyBody {
+    if response.status != StatusCode::NOT_MODIFIED || is_head || !matches!(version, Version::HTTP_10 | Version::HTTP_11)
+    {
+        return ProxyBody::empty();
+    }
+    if single_valid_length(&response.headers) {
+        return ProxyBody::metadata_only();
+    }
+    // Hyper's upstream decoder does not validate lengths on a bodyless 304.
+    // Do not let malformed or duplicate values reach its downstream encoder.
+    let _removed = response.headers.remove(http::header::CONTENT_LENGTH);
+    ProxyBody::empty()
+}
+
+/// Accept only one decimal length representable by Hyper's HTTP/1 encoder.
+fn single_valid_length(headers: &HeaderMap) -> bool {
+    let mut values = headers.get_all(http::header::CONTENT_LENGTH).iter();
+    let Some(value) = values.next() else {
+        return false;
+    };
+    values.next().is_none()
+        && value.to_str().ok().is_some_and(|value| {
+            !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) && value.parse::<u64>().is_ok()
+        })
+}
 
 /// The hyper response for a status, headers and body.
 fn client_response(status: StatusCode, headers: HeaderMap, body: ProxyBody) -> Response<ProxyBody> {
@@ -409,19 +490,34 @@ async fn read_chunk(session: &mut HyperSession, read_timeout: Option<Duration>) 
     reason = "tests"
 )]
 mod tests {
-    use std::sync::Arc;
+    use std::{
+        convert::Infallible,
+        sync::{Arc, Mutex},
+    };
 
     use http::{HeaderValue, Method};
     use http_body_util::BodyExt as _;
-    use hyper::body::Body as _;
-    use praxis_core::config::{HttpStatusCode, RetriableCondition, RetryPolicy};
-    use praxis_filter::{BodyMode, FilterPipeline, Rejection};
+    use hyper::{body::Body as _, server::conn::http1, service::service_fn};
+    use hyper_util::rt::TokioIo;
+    use praxis_core::{
+        config::{HttpStatusCode, RetriableCondition, RetryPolicy, UpstreamHttpVersion},
+        egress::{Connector as _, PeerSpec, RequestHead, Session as _, hyper::HyperConnector},
+    };
+    use praxis_filter::{
+        BodyAccess, BodyMode, BodyRequirement, FilterEntry, FilterFactory, FilterPipeline, FilterRegistry, HttpFilter,
+        HttpFilterContext, Rejection,
+    };
+    use tokio::{
+        io::{AsyncReadExt as _, AsyncWriteExt as _},
+        net::TcpListener,
+    };
 
     use super::*;
     use crate::http::hyper::{
+        downstream::DownstreamBody,
         failure::FailureKind,
         test_utils::{
-            Client, Script, Upstream, answered, conditional_pipeline, empty_pipeline, listener_shared,
+            Client, Script, Upstream, answered, client_request, conditional_pipeline, empty_pipeline, listener_shared,
             scripted_pipeline, session_to, streaming_upload, truncated_upload,
         },
     };
@@ -881,6 +977,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn drain_after_the_head_still_closes_the_committed_connection() {
+        let mut flight = get_flight(empty_pipeline());
+        flight.lifecycle.mark_serving().unwrap();
+        let listener = listener_shared();
+        let (upload, _client) = streaming_upload(&flight.ctx).await;
+        let (_upstream, _connector, session) = answered(b"HTTP/1.1 200 OK\r\ncontent-length: 5\r\n\r\nhello").await;
+        let answer =
+            answer_of(head(&listener, &mut flight, session, &upload, None).await).expect("a plain 200 is answered");
+
+        assert!(
+            flight.lifecycle.begin_drain(),
+            "the drain starts after the head settled"
+        );
+        let response = commit(&listener, flight, upload, *answer).await;
+
+        assert_eq!(
+            response
+                .headers()
+                .get(http::header::CONNECTION)
+                .map(|value| value.to_str().unwrap()),
+            Some("close"),
+            "the commit must recheck the lifecycle"
+        );
+    }
+
+    #[tokio::test]
     async fn committed_bodyless_answer_has_no_body() {
         let mut flight = get_flight(empty_pipeline());
         let listener = listener_shared();
@@ -893,6 +1015,300 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_MODIFIED, "the status is committed");
         assert_eq!(response.headers().get("etag").unwrap(), "\"v1\"", "with its headers");
         assert!(response.body().is_end_stream(), "and no body");
+    }
+
+    #[tokio::test]
+    async fn response_status_rewrites_use_final_body_semantics() {
+        for (original, rewritten, reply) in [
+            (
+                StatusCode::OK,
+                StatusCode::NO_CONTENT,
+                b"HTTP/1.1 200 OK\r\ncontent-length: 10\r\n\r\n".as_slice(),
+            ),
+            (
+                StatusCode::OK,
+                StatusCode::NO_CONTENT,
+                b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok".as_slice(),
+            ),
+            (
+                StatusCode::OK,
+                StatusCode::NOT_MODIFIED,
+                b"HTTP/1.1 200 OK\r\ncontent-length: 10\r\n\r\n".as_slice(),
+            ),
+            (
+                StatusCode::OK,
+                StatusCode::NOT_MODIFIED,
+                b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok".as_slice(),
+            ),
+        ] {
+            assert_bodyless_rewrite_case(original, rewritten, reply).await;
+        }
+
+        assert_bodyful_rewrite_with_eof().await;
+        assert_head_rewrite_bodyless().await;
+    }
+
+    /// Build and commit a rewritten bodyless response with the upstream body still owned.
+    async fn bodyless_rewrite_response(
+        original: StatusCode,
+        rewritten: StatusCode,
+        reply: &'static [u8],
+    ) -> (
+        Response<ProxyBody>,
+        Arc<Mutex<Vec<bool>>>,
+        HyperConnector,
+        Upstream,
+        Client,
+    ) {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let pipeline = rewrite_pipeline(rewritten, None, Arc::clone(&calls));
+        let mut flight = get_flight(pipeline);
+        let (request, client) = client_request(b"GET / HTTP/1.1\r\nhost: a\r\n\r\n").await;
+        let upload = Upload::new(DownstreamBody::new(request.into_body(), None), &flight.ctx);
+        assert!(
+            upload.is_settled(),
+            "a bodyless GET must not prevent safe upstream reuse"
+        );
+        let (upstream, connector, session) = answered(reply).await;
+        let mut listener = listener_shared();
+        listener.connector = connector.clone();
+        let answer = answer_of(head(&listener, &mut flight, session, &upload, None).await)
+            .expect("rewritten head must be accepted");
+        assert!(answer.bodyless, "{original} to {rewritten} must be bodyless");
+        assert!(
+            flight.ctx.response_delivery_complete,
+            "final bodyless status completes delivery"
+        );
+        let response = commit(&listener, flight, upload, *answer).await;
+        (response, calls, connector, upstream, client)
+    }
+
+    /// Check HTTP/1 framing, hook suppression and upstream pool safety for one rewrite.
+    async fn assert_bodyless_rewrite_case(original: StatusCode, rewritten: StatusCode, reply: &'static [u8]) {
+        let (response, calls, connector, upstream, _client) =
+            bodyless_rewrite_response(original, rewritten, reply).await;
+        let raw = dispatch_http11(response).await;
+        assert!(
+            raw.starts_with(format!("HTTP/1.1 {rewritten}").as_bytes()),
+            "final status must reach HTTP/1"
+        );
+        assert!(!raw.ends_with(b"ok"), "HTTP/1 must not carry the original body");
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "suppressed body must not run body hooks"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let next = connector
+            .connect(&upstream.peer(), Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert!(!next.reused(), "an unread HTTP/1 upstream body must not be pooled");
+    }
+
+    /// A rewritten 204 must permit EOF body generation and actual HTTP/1 framing.
+    async fn assert_bodyful_rewrite_with_eof() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let pipeline = rewrite_pipeline(StatusCode::OK, Some(Bytes::from_static(b"tail")), Arc::clone(&calls));
+        let mut flight = get_flight(pipeline);
+        let (upload, _client) = streaming_upload(&flight.ctx).await;
+        let (_upstream, connector, session) = answered(b"HTTP/1.1 204 No Content\r\n\r\n").await;
+        let mut listener = listener_shared();
+        listener.connector = connector;
+        let answer = answer_of(head(&listener, &mut flight, session, &upload, None).await)
+            .expect("rewritten 204 must be accepted");
+        assert!(!answer.bodyless, "204 to 200 must enter the body phase");
+        let response = commit(&listener, flight, upload, *answer).await;
+        let raw = dispatch_http11(response).await;
+        assert!(raw.starts_with(b"HTTP/1.1 200"), "rewritten status must reach HTTP/1");
+        assert!(
+            raw.ends_with(b"tail\r\n0\r\n\r\n"),
+            "EOF hook bytes must be framed and delivered: {raw:?}"
+        );
+        assert_eq!(*calls.lock().unwrap(), [true], "EOF hook runs once");
+    }
+
+    /// HEAD stays bodyless even when the final status permits a body.
+    async fn assert_head_rewrite_bodyless() {
+        let mut flight = get_flight(rewrite_pipeline(StatusCode::OK, None, Arc::new(Mutex::new(Vec::new()))));
+        flight.method = Method::HEAD;
+        *flight.ctx = http11_ctx(Method::HEAD);
+        let (upload, _client) = streaming_upload(&flight.ctx).await;
+        let (_upstream, connector, session) = answered(b"HTTP/1.1 204 No Content\r\n\r\n").await;
+        let mut listener = listener_shared();
+        listener.connector = connector;
+        let answer = answer_of(head(&listener, &mut flight, session, &upload, None).await)
+            .expect("rewritten HEAD must be accepted");
+        assert!(answer.bodyless, "HEAD remains bodyless after status rewrite");
+    }
+
+    #[tokio::test]
+    async fn response_status_rewrite_drops_inherited_304_length() {
+        for (eof, length) in [
+            (None, None),
+            (Some(Bytes::from_static(b"tail")), None),
+            (Some(Bytes::from_static(b"tail")), Some(HeaderValue::from_static("4"))),
+        ] {
+            assert_changed_304_framing(eof, length).await;
+        }
+
+        assert_unchanged_304_metadata().await;
+    }
+
+    /// Commit a 304 rewritten to 200, retaining the filter's explicit framing choice.
+    async fn changed_304_response(
+        eof: Option<Bytes>,
+        length: Option<HeaderValue>,
+    ) -> (Response<ProxyBody>, Arc<Mutex<Vec<bool>>>, Upstream, Client) {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let pipeline = rewrite_framing_pipeline(StatusCode::OK, eof, Arc::clone(&calls), length.clone());
+        let mut flight = get_flight(pipeline);
+        let (request, client) = client_request(b"GET / HTTP/1.1\r\nhost: a\r\n\r\n").await;
+        let upload = Upload::new(DownstreamBody::new(request.into_body(), None), &flight.ctx);
+        let (upstream, connector, session) = answered(b"HTTP/1.1 304 Not Modified\r\nContent-Length: 10\r\n\r\n").await;
+        let mut listener = listener_shared();
+        listener.connector = connector;
+        let answer = answer_of(head(&listener, &mut flight, session, &upload, None).await)
+            .expect("a rewritten 304 must be accepted");
+        assert!(!answer.bodyless, "the final 200 enters the body phase");
+        let response = commit(&listener, flight, upload, *answer).await;
+        assert_eq!(
+            response.headers().get(http::header::CONTENT_LENGTH),
+            length.as_ref(),
+            "only a new filter-supplied length remains framing"
+        );
+        (response, calls, upstream, client)
+    }
+
+    /// Check wire bytes for each inherited-length and explicit-length permutation.
+    async fn assert_changed_304_framing(eof: Option<Bytes>, length: Option<HeaderValue>) {
+        let (response, calls, _upstream, _client) = changed_304_response(eof.clone(), length.clone()).await;
+        let raw = dispatch_http11(response).await;
+        assert!(raw.starts_with(b"HTTP/1.1 200"));
+        let wire_body = http11_body(&raw);
+        if length.is_some() {
+            assert_eq!(wire_body, b"tail", "deliberately changed framing is honored");
+        } else if eof.is_some() {
+            assert_eq!(
+                wire_body, b"4\r\ntail\r\n0\r\n\r\n",
+                "EOF bytes use complete chunked framing"
+            );
+        } else {
+            assert_eq!(wire_body, b"0\r\n\r\n", "an empty rewritten body ends cleanly");
+        }
+        assert_eq!(*calls.lock().unwrap(), [true], "the empty source runs EOF once");
+    }
+
+    /// An unchanged 304 retains representation length metadata and suppresses hooks.
+    async fn assert_unchanged_304_metadata() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let pipeline = rewrite_pipeline(
+            StatusCode::NOT_MODIFIED,
+            Some(Bytes::from_static(b"tail")),
+            Arc::clone(&calls),
+        );
+        let mut flight = get_flight(pipeline);
+        let (request, _client) = client_request(b"GET / HTTP/1.1\r\nhost: a\r\n\r\n").await;
+        let upload = Upload::new(DownstreamBody::new(request.into_body(), None), &flight.ctx);
+        let (_upstream, connector, session) =
+            answered(b"HTTP/1.1 304 Not Modified\r\nContent-Length: 10\r\n\r\n").await;
+        let mut listener = listener_shared();
+        listener.connector = connector;
+        let answer = answer_of(head(&listener, &mut flight, session, &upload, None).await).unwrap();
+        let raw = dispatch_http11(commit(&listener, flight, upload, *answer).await).await;
+        assert!(raw.starts_with(b"HTTP/1.1 304"));
+        assert!(String::from_utf8_lossy(&raw).contains("content-length: 10\r\n"));
+        assert!(
+            http11_body(&raw).is_empty(),
+            "unchanged 304 keeps only representation metadata"
+        );
+        assert!(calls.lock().unwrap().is_empty(), "a final 304 suppresses body hooks");
+    }
+
+    #[tokio::test]
+    async fn response_status_rewrite_keeps_http2_connection_usable() {
+        let (peer, connector, server) = start_open_h2_stream_fixture().await;
+        let session = opened_h2_session(&connector, &peer).await;
+        let pipeline = rewrite_pipeline(StatusCode::NO_CONTENT, None, Arc::new(Mutex::new(Vec::new())));
+        let mut flight = get_flight(pipeline);
+        let (request, _client) = client_request(b"GET / HTTP/1.1\r\nhost: a\r\n\r\n").await;
+        let upload = Upload::new(DownstreamBody::new(request.into_body(), None), &flight.ctx);
+        let mut listener = listener_shared();
+        listener.connector = connector.clone();
+        let answer = answer_of(head(&listener, &mut flight, session, &upload, None).await)
+            .expect("HTTP/2 response rewrite must be accepted");
+        let response = commit(&listener, flight, upload, *answer).await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_reusable_h2_stream(&connector, &peer).await;
+        server.abort();
+    }
+
+    /// Keep two upstream response-body streams open until the connection test ends.
+    async fn start_open_h2_stream_fixture() -> (PeerSpec, HyperConnector, tokio::task::JoinHandle<()>) {
+        let socket = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = socket.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = socket.accept().await.unwrap();
+            let mut connection = h2::server::handshake(stream).await.unwrap();
+            let mut pending = Vec::new();
+            while let Some(Ok((_request, mut respond))) = connection.accept().await {
+                let response = Response::builder().status(200).body(()).unwrap();
+                pending.push(respond.send_response(response, false).unwrap());
+                assert!(
+                    pending.len() <= 2,
+                    "the fixture holds the two expected body streams open"
+                );
+            }
+        });
+        let mut peer = PeerSpec::new(address, false, "upstream.test");
+        Arc::make_mut(&mut peer.connection).http_version = UpstreamHttpVersion::H2;
+        let connector = HyperConnector::new(4);
+        (peer, connector, server)
+    }
+
+    /// Open a first upstream stream whose response body has no end marker.
+    async fn opened_h2_session(connector: &HyperConnector, peer: &PeerSpec) -> HyperSession {
+        let mut session = connector.connect(peer, Duration::from_secs(5)).await.unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(http::header::HOST, HeaderValue::from_static("upstream.test"));
+        session
+            .send_request_head(RequestHead {
+                headers: headers.clone(),
+                method: Method::GET,
+                target: "/".to_owned(),
+            })
+            .await
+            .unwrap();
+        session.finish_request().await.unwrap();
+        session.read_response_head().await.unwrap();
+        session
+    }
+
+    /// A second stream succeeds on the same connection after the first is reset.
+    async fn assert_reusable_h2_stream(connector: &HyperConnector, peer: &PeerSpec) {
+        let mut next = connector.connect(peer, Duration::from_secs(5)).await.unwrap();
+        assert!(
+            next.reused(),
+            "resetting one HTTP/2 stream must preserve the shared connection"
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(http::header::HOST, HeaderValue::from_static("upstream.test"));
+        next.send_request_head(RequestHead {
+            headers,
+            method: Method::GET,
+            target: "/second".to_owned(),
+        })
+        .await
+        .unwrap();
+        next.finish_request().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), next.read_response_head())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            next.response_head().unwrap().status,
+            200,
+            "another HTTP/2 stream must answer"
+        );
     }
 
     #[tokio::test]
@@ -984,7 +1400,116 @@ mod tests {
                 headers: HeaderMap::new(),
                 status,
             },
+            source_bodyless: false,
             version: Version::HTTP_11,
         }
+    }
+
+    /// A response filter that rewrites status and optionally appends EOF bytes.
+    struct RewriteStatus {
+        /// Each body-hook EOS value observed.
+        calls: Arc<Mutex<Vec<bool>>>,
+        /// Bytes produced by its EOF hook.
+        eof: Option<Bytes>,
+        /// An explicit new body length supplied by the response filter.
+        length: Option<HeaderValue>,
+        /// Final response status.
+        status: StatusCode,
+    }
+
+    #[async_trait::async_trait]
+    impl HttpFilter for RewriteStatus {
+        fn name(&self) -> &'static str {
+            "rewrite_status_test"
+        }
+
+        async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+            Ok(FilterAction::Continue)
+        }
+
+        async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+            if let Some(response) = ctx.response_header.as_deref_mut() {
+                response.status = self.status;
+                if let Some(length) = &self.length {
+                    response.headers.insert(http::header::CONTENT_LENGTH, length.clone());
+                }
+            }
+            Ok(FilterAction::Continue)
+        }
+
+        fn response_body_access(&self) -> BodyAccess {
+            BodyAccess::ReadWrite(BodyRequirement::Optional)
+        }
+
+        fn on_response_body(
+            &self,
+            _ctx: &mut HttpFilterContext<'_>,
+            body: &mut Option<Bytes>,
+            end_of_stream: bool,
+        ) -> Result<FilterAction, FilterError> {
+            self.calls.lock().unwrap().push(end_of_stream);
+            if end_of_stream {
+                *body = self.eof.clone();
+            }
+            Ok(FilterAction::Continue)
+        }
+    }
+
+    /// Build a local status-rewriting filter without changing shared helpers.
+    fn rewrite_pipeline(status: StatusCode, eof: Option<Bytes>, calls: Arc<Mutex<Vec<bool>>>) -> FilterPipeline {
+        rewrite_framing_pipeline(status, eof, calls, None)
+    }
+
+    /// Build a status rewrite with optional explicit replacement body framing.
+    fn rewrite_framing_pipeline(
+        status: StatusCode,
+        eof: Option<Bytes>,
+        calls: Arc<Mutex<Vec<bool>>>,
+        length: Option<HeaderValue>,
+    ) -> FilterPipeline {
+        let mut registry = FilterRegistry::with_builtins();
+        registry
+            .register(
+                "rewrite_status_test",
+                FilterFactory::Http(Arc::new(move |_config| {
+                    Ok(Box::new(RewriteStatus {
+                        calls: Arc::clone(&calls),
+                        eof: eof.clone(),
+                        length: length.clone(),
+                        status,
+                    }))
+                })),
+            )
+            .unwrap();
+        let mut entries: Vec<FilterEntry> = serde_yaml::from_str("- filter: rewrite_status_test").unwrap();
+        FilterPipeline::build(&mut entries, &registry).unwrap()
+    }
+
+    /// Find the body after the complete HTTP/1 response head.
+    fn http11_body(raw: &[u8]) -> &[u8] {
+        let offset = raw.windows(4).position(|window| window == b"\r\n\r\n").unwrap();
+        raw.get(offset.saturating_add(4)..).unwrap()
+    }
+
+    /// Serialize one proxy response through Hyper's actual HTTP/1 dispatcher.
+    async fn dispatch_http11(response: Response<ProxyBody>) -> Vec<u8> {
+        let (mut client, server) = tokio::io::duplex(16_384);
+        let response = Arc::new(Mutex::new(Some(response)));
+        let service = service_fn(move |_request| {
+            let response = Arc::clone(&response);
+            async move { Ok::<_, Infallible>(response.lock().unwrap().take().unwrap()) }
+        });
+        let serving = tokio::spawn(http1::Builder::new().serve_connection(TokioIo::new(server), service));
+        client
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut raw = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), client.read_to_end(&mut raw))
+            .await
+            .unwrap()
+            .unwrap();
+        serving.await.unwrap().unwrap();
+        raw
     }
 }

@@ -234,6 +234,116 @@ mod tests {
         assert_eq!(state.retained_bytes(), 42, "all retained payloads should be counted");
     }
 
+    /// A body owner that makes release of the last Bytes reference observable.
+    struct TrackedBody {
+        bytes: Vec<u8>,
+        drops: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl AsRef<[u8]> for TrackedBody {
+        fn as_ref(&self) -> &[u8] {
+            &self.bytes
+        }
+    }
+
+    impl Drop for TrackedBody {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    fn tracked_body(length: usize, drops: &std::sync::Arc<std::sync::atomic::AtomicUsize>) -> Bytes {
+        Bytes::from_owner(TrackedBody {
+            bytes: vec![7; length],
+            drops: std::sync::Arc::clone(drops),
+        })
+    }
+
+    /// Construct an iteration with duplicate request headers and a previous body.
+    fn iteration_with_history(original: Bytes, previous: Bytes) -> IterationState {
+        let mut headers = HeaderMap::new();
+        headers.append("x-key", "a".parse().unwrap());
+        headers.append("x-key", "bc".parse().unwrap());
+        IterationState {
+            original_request: SubRequest {
+                method: http::Method::POST,
+                uri: "/a?b=1".parse().unwrap(),
+                headers,
+                body: original,
+            },
+            previous_response: Some(SubResponse {
+                version: http::Version::HTTP_11,
+                status: 200,
+                headers: HeaderMap::new(),
+                body: previous,
+            }),
+            accumulator: HashMap::new(),
+            iteration: 1,
+            max_iterations: 3,
+            deadline: std::time::Instant::now() + Duration::from_secs(1),
+            max_response_bytes: 1024,
+            depth: 0,
+        }
+    }
+
+    /// Replacing the previous response releases its owner and updates accounting.
+    fn replace_history_response(state: &mut IterationState, drops: &std::sync::atomic::AtomicUsize) {
+        state.previous_response = Some(SubResponse {
+            version: http::Version::HTTP_11,
+            status: 200,
+            headers: HeaderMap::new(),
+            body: Bytes::from_static(b"new"),
+        });
+        assert_eq!(
+            drops.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "replaced response must be released"
+        );
+        assert_eq!(state.retained_bytes(), 4 + 6 + 6 + 7 + 11 + 3 + 3 + 13);
+    }
+
+    /// The original body stays live until the whole iteration is dropped.
+    fn assert_original_lifetime(state: IterationState, drops: &std::sync::atomic::AtomicUsize) {
+        assert_eq!(
+            drops.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "original remains available for later steps"
+        );
+        drop(state);
+        assert_eq!(
+            drops.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "request exit releases original body"
+        );
+    }
+
+    #[test]
+    fn replacing_history_counts_current_state_and_releases_old_bodies() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        let original = Arc::new(AtomicUsize::new(0));
+        let old_response = Arc::new(AtomicUsize::new(0));
+        let replacement = Arc::new(AtomicUsize::new(0));
+        let mut state = iteration_with_history(tracked_body(11, &original), tracked_body(7, &old_response));
+        // POST + URI + both header entries + original + previous response.
+        assert_eq!(state.retained_bytes(), 4 + 6 + 6 + 7 + 11 + 7);
+        state
+            .accumulator
+            .insert("key".to_owned(), tracked_body(13, &replacement));
+        assert_eq!(state.retained_bytes(), 4 + 6 + 6 + 7 + 11 + 7 + 3 + 13);
+        replace_history_response(&mut state, &old_response);
+        state.accumulator.remove("key");
+        assert_eq!(
+            replacement.load(Ordering::SeqCst),
+            1,
+            "removed history must be released"
+        );
+        assert_original_lifetime(state, &original);
+    }
+
     #[test]
     #[allow(clippy::too_many_lines, reason = "comprehensive clone verification")]
     fn iteration_state_clone_with_populated_fields() {

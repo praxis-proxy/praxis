@@ -46,7 +46,7 @@ The health and metrics listener exposes these endpoints:
 | Path | Purpose |
 | ----------- | ----------------------------------------- |
 | `/healthy` | Liveness probe - returns `200` once the server is accepting connections |
-| `/ready` | Readiness probe - returns cluster health status; `503` when any cluster has zero healthy endpoints |
+| `/ready` | Readiness probe - returns cluster health status; the default `readiness: serving` stays `200` through an upstream outage, while `readiness: upstreams` returns `503` when any cluster has zero healthy endpoints |
 | `/metrics` | Prometheus text exposition format |
 
 The separate `admin.address` listener exposes the management API, including
@@ -289,6 +289,24 @@ rejections close the connection.
 descriptors neared the process limit (see
 `runtime.shed_on_fd_pressure`). A steady rate means
 the limit is too small for the traffic.
+
+#### `praxis_cluster_overload_rejects_total` (counter)
+
+Requests shed by a cluster's `max_connections` ceiling,
+answered with `503` and `Retry-After: 1`. Separate from
+`praxis_overload_rejects_total`, which counts only the
+protections that run before any filter and carries no
+cluster label.
+
+| Label | Values |
+| --------- | --------------------------------- |
+| `cluster` | The cluster name that shed the request |
+
+A steady rate on one cluster means its ceiling is below
+what the upstream can actually serve, or that the upstream
+has slowed down and requests are occupying slots longer.
+Requests pinned by session affinity bypass the ceiling and
+so are never counted here.
 
 #### `praxis_overload_pressure` (gauge)
 

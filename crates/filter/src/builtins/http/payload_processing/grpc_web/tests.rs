@@ -8,7 +8,7 @@ use bytes::Bytes;
 
 use super::{GrpcWebFilter, frame::encode_trailer_frame};
 use crate::{
-    FilterAction,
+    FilterAction, ResponseTrailersPending,
     filter::{HttpFilter, HttpFilterContext},
     test_utils::{make_filter_context, make_request},
 };
@@ -50,6 +50,28 @@ fn from_config_rejects_a_zero_buffer() {
     );
 }
 
+#[test]
+fn from_config_accepts_addressable_buffer_overrides() {
+    let hard = praxis_core::config::MAX_BUFFER_BYTES;
+    for size in [67_108_865, hard - 1, hard, hard + 1, usize::MAX] {
+        let value = serde_yaml::from_str(&format!("max_buffer_bytes: {size}")).unwrap();
+        match GrpcWebFilter::from_config(&value) {
+            Ok(filter) => assert_eq!(
+                filter.request_body_mode(),
+                crate::BodyMode::StreamBuffer {
+                    max_bytes: Some(size.min(hard)),
+                }
+            ),
+            Err(error) => {
+                assert!(size > hard, "valid buffer limit rejected: {error}");
+                assert!(error.to_string().contains("addressable buffer maximum"));
+                continue;
+            },
+        }
+        assert!(size <= hard, "an oversized buffer configuration was accepted");
+    }
+}
+
 #[tokio::test]
 async fn a_grpc_web_request_is_rewritten_to_native_grpc() {
     let req = grpc_web_request("application/grpc-web+proto");
@@ -68,7 +90,7 @@ async fn a_grpc_web_request_is_rewritten_to_native_grpc() {
         "gRPC requires te: trailers, and Praxis is the upstream hop's client"
     );
     assert_eq!(
-        ctx.get_metadata("grpc_web.encoding"),
+        ctx.filter_metadata.get("grpc_web.encoding"),
         Some("grpc-web+proto"),
         "the variant should be promoted to metadata"
     );
@@ -85,7 +107,7 @@ async fn a_non_grpc_web_request_is_untouched() {
         "a JSON request should not be rewritten"
     );
     assert!(
-        ctx.get_metadata("grpc_web.encoding").is_none(),
+        ctx.filter_metadata.get("grpc_web.encoding").is_none(),
         "and should leave no metadata behind"
     );
 }
@@ -134,6 +156,42 @@ async fn a_text_request_body_is_base64_decoded() {
         Some(raw),
         "the upstream must receive raw gRPC frames, not base64"
     );
+}
+
+#[tokio::test]
+async fn preread_decodes_before_request_phase_creates_filter_state() {
+    let req = grpc_web_request("application/grpc-web-text");
+    let mut ctx = pipeline_context(&req);
+    let filter = filter("");
+    let mut body = Some(Bytes::from_static(b"AAABAgM="));
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert!(matches!(action, FilterAction::Release));
+    assert_eq!(body.as_deref(), Some(b"\0\0\x01\x02\x03".as_slice()));
+    let mut invalid = Some(Bytes::from_static(b"AAABAgM"));
+    let action = filter.on_request_body(&mut ctx, &mut invalid, true).await.unwrap();
+    assert!(matches!(action, FilterAction::Reject(rejection) if rejection.status == 400));
+}
+
+#[tokio::test]
+async fn preread_leaves_disabled_or_unrelated_encodings_untouched() {
+    let req = grpc_web_request("application/grpc-web-text");
+    let mut ctx = pipeline_context(&req);
+    let binary_only = filter("encodings:\n  binary: true\n  text: false");
+    let mut body = Some(Bytes::from_static(b"not-base64!"));
+    assert!(matches!(
+        binary_only.on_request_body(&mut ctx, &mut body, true).await.unwrap(),
+        FilterAction::Continue
+    ));
+    assert_eq!(body.as_deref(), Some(b"not-base64!".as_slice()));
+
+    let req = grpc_web_request("application/json");
+    let mut ctx = pipeline_context(&req);
+    let filter = filter("");
+    assert!(matches!(
+        filter.on_request_body(&mut ctx, &mut body, true).await.unwrap(),
+        FilterAction::Continue
+    ));
+    assert_eq!(body.as_deref(), Some(b"not-base64!".as_slice()));
 }
 
 #[tokio::test]
@@ -245,6 +303,31 @@ async fn text_trailers_are_base64_encoded() {
         encode_trailer_frame(&trailers).to_vec(),
         "decoding should recover the frame"
     );
+}
+
+#[tokio::test]
+async fn text_stream_carries_partial_groups_into_the_final_trailer_frame() {
+    let req = grpc_web_request("application/grpc-web-text");
+    let mut ctx = pipeline_context(&req);
+    let filter = filter("");
+    drop(filter.on_request(&mut ctx).await.unwrap());
+    let input: Vec<u8> = (0..1_048_579_usize)
+        .map(|offset| u8::try_from(offset % 251).unwrap())
+        .collect();
+    let mut wire = Vec::new();
+    for chunk in input.chunks(4093) {
+        let mut body = Some(Bytes::copy_from_slice(chunk));
+        drop(filter.on_response_body(&mut ctx, &mut body, false).unwrap());
+        wire.extend_from_slice(body.as_deref().unwrap_or_default());
+    }
+    let mut trailers = http::HeaderMap::new();
+    let _previous = trailers.insert("grpc-status", http::HeaderValue::from_static("0"));
+    let frame = encode_trailer_frame(&trailers);
+    wire.extend_from_slice(&filter.on_response_trailers(&mut ctx, &mut trailers).unwrap().unwrap());
+    let decoded = base64::engine::general_purpose::STANDARD.decode(&wire).unwrap();
+    assert_eq!(&decoded[..input.len()], input);
+    assert_eq!(&decoded[input.len()..], frame.as_ref());
+    assert_eq!(wire.len(), decoded.len().div_ceil(3) * 4);
 }
 
 #[tokio::test]
@@ -363,6 +446,157 @@ async fn a_non_grpc_response_is_not_translated() -> Result<(), Box<dyn std::erro
         "non-gRPC content type should be unchanged"
     );
     Ok(())
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "media-type matrix includes native and trailers-only controls"
+)]
+async fn grpc_web_non_native_grpc_prefix_responses_pass_through() {
+    for request_type in ["application/grpc-web", "application/grpc-web-text"] {
+        let translated_type = if request_type.ends_with("-text") {
+            "application/grpc-web-text+proto"
+        } else {
+            "application/grpc-web+proto"
+        };
+        for upstream_type in ["application/grpc-web", "application/grpc-web-text", "application/grpcx"] {
+            let req = grpc_web_request(request_type);
+            let mut ctx = pipeline_context(&req);
+            let filter = filter("");
+            drop(filter.on_request(&mut ctx).await.unwrap());
+            let mut response = crate::test_utils::make_response();
+            let _previous = response
+                .headers
+                .insert(http::header::CONTENT_TYPE, upstream_type.parse().unwrap());
+            let _previous = response
+                .headers
+                .insert(http::header::CONTENT_LENGTH, http::HeaderValue::from_static("3"));
+            ctx.response_header = Some(&mut response);
+            drop(filter.on_response(&mut ctx).await.unwrap());
+            ctx.response_header = None;
+            let mut body = Some(Bytes::from_static(b"raw"));
+            drop(filter.on_response_body(&mut ctx, &mut body, true).unwrap());
+            assert_eq!(
+                body.as_deref(),
+                Some(b"raw".as_slice()),
+                "{request_type} / {upstream_type}"
+            );
+            drop(ctx);
+            assert_eq!(response.headers.get(http::header::CONTENT_TYPE).unwrap(), upstream_type);
+            assert_eq!(response.headers.get(http::header::CONTENT_LENGTH).unwrap(), "3");
+        }
+
+        for upstream_type in [
+            "application/grpc",
+            "application/grpc+proto; charset=utf-8",
+            "ApPlIcAtIoN/GrPc",
+        ] {
+            let req = grpc_web_request(request_type);
+            let mut ctx = pipeline_context(&req);
+            let filter = filter("");
+            drop(filter.on_request(&mut ctx).await.unwrap());
+            let mut response = crate::test_utils::make_response();
+            let _previous = response
+                .headers
+                .insert(http::header::CONTENT_TYPE, upstream_type.parse().unwrap());
+            let _previous = response
+                .headers
+                .insert(http::header::CONTENT_LENGTH, http::HeaderValue::from_static("5"));
+            ctx.response_header = Some(&mut response);
+            drop(filter.on_response(&mut ctx).await.unwrap());
+            ctx.response_header = None;
+            let mut body = Some(Bytes::from_static(b"\0\0\0\0\0"));
+            drop(filter.on_response_body(&mut ctx, &mut body, true).unwrap());
+            let wire = body.unwrap();
+            let decoded = if request_type.ends_with("-text") {
+                base64::engine::general_purpose::STANDARD.decode(wire).unwrap()
+            } else {
+                wire.to_vec()
+            };
+            assert!(decoded.starts_with(b"\0\0\0\0\0"), "{request_type} / {upstream_type}");
+            assert!(String::from_utf8_lossy(&decoded).contains("grpc-status: 2"));
+            drop(ctx);
+            assert_eq!(
+                response.headers.get(http::header::CONTENT_TYPE).unwrap(),
+                translated_type
+            );
+            assert!(!response.headers.contains_key(http::header::CONTENT_LENGTH));
+        }
+    }
+
+    let req = grpc_web_request("application/grpc-web-text");
+    let mut ctx = pipeline_context(&req);
+    let filter = filter("");
+    drop(filter.on_request(&mut ctx).await.unwrap());
+    let mut response = crate::test_utils::make_response();
+    let _previous = response.headers.insert(
+        http::header::CONTENT_TYPE,
+        http::HeaderValue::from_static("application/grpcx"),
+    );
+    let _previous = response
+        .headers
+        .insert("grpc-status", http::HeaderValue::from_static("0"));
+    ctx.response_header = Some(&mut response);
+    drop(filter.on_response(&mut ctx).await.unwrap());
+    ctx.response_header = None;
+    let mut body = Some(Bytes::from_static(b"abc"));
+    drop(filter.on_response_body(&mut ctx, &mut body, true).unwrap());
+    assert_eq!(body.as_deref(), Some(b"YWJj".as_slice()));
+    drop(ctx);
+    assert_eq!(
+        response.headers.get(http::header::CONTENT_TYPE).unwrap(),
+        "application/grpc-web-text+proto"
+    );
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "chunk boundary matrix checks both finalization paths"
+)]
+async fn grpc_web_nonfinal_body_preserves_encoding_and_finalization() {
+    for request_type in ["application/grpc-web", "application/grpc-web-text"] {
+        for chunk_len in 0..=5 {
+            for real_trailers in [false, true] {
+                let req = grpc_web_request(request_type);
+                let mut ctx = pipeline_context(&req);
+                let filter = filter("");
+                drop(filter.on_request(&mut ctx).await.unwrap());
+                if real_trailers {
+                    ctx.extensions.insert(ResponseTrailersPending);
+                }
+                let chunk = b"hello".get(..chunk_len).unwrap();
+                let mut body = Some(Bytes::copy_from_slice(chunk));
+                drop(filter.on_response_body(&mut ctx, &mut body, false).unwrap());
+                if chunk_len == 0 || request_type.ends_with("-text") && chunk_len < 3 {
+                    assert!(body.is_none(), "empty nonfinal output should be None");
+                }
+                let mut wire = body.unwrap_or_default().to_vec();
+                let mut final_body = None;
+                drop(filter.on_response_body(&mut ctx, &mut final_body, true).unwrap());
+                wire.extend_from_slice(final_body.as_deref().unwrap_or_default());
+                let mut trailers = http::HeaderMap::new();
+                if real_trailers {
+                    let _previous = trailers.insert("grpc-status", http::HeaderValue::from_static("0"));
+                    wire.extend_from_slice(&filter.on_response_trailers(&mut ctx, &mut trailers).unwrap().unwrap());
+                }
+                let decoded = if request_type.ends_with("-text") {
+                    base64::engine::general_purpose::STANDARD.decode(&wire).unwrap()
+                } else {
+                    wire
+                };
+                let expected_frame = if real_trailers {
+                    encode_trailer_frame(&trailers)
+                } else {
+                    encode_trailer_frame(&super::synthesized_trailers())
+                };
+                let mut expected = chunk.to_vec();
+                expected.extend_from_slice(&expected_frame);
+                assert_eq!(decoded, expected, "{request_type}, {chunk_len}, real={real_trailers}");
+            }
+        }
+    }
 }
 
 // -----------------------------------------------------------------------------

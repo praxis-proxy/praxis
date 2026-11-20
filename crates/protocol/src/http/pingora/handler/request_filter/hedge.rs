@@ -19,16 +19,17 @@ use http::HeaderMap;
 use pingora_core::Result;
 use pingora_proxy::Session;
 use praxis_core::{
-    config::ABSOLUTE_MAX_BODY_BYTES,
+    config::DEFAULT_MAX_BUFFER_BYTES,
     connectivity::Upstream,
     egress::PeerSpec,
     health::{ClusterHealthState, HealthRegistry},
     hedge::{HedgeAttempt, HedgeDelivery, drive},
     subrequest::{SubRequest, SubRequestClient, SubRequestError, SubResponse},
 };
-use praxis_filter::{EndpointReselector, FilterPipeline, Rejection, TerminalResponse};
+use praxis_filter::{EndpointReselector, FilterPipeline, TerminalResponse};
 
 use super::super::super::context::PingoraRequestCtx;
+use crate::http::body_limit::{BodyLimitPhase, body_limit_rejection};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -49,7 +50,12 @@ enum PreparedBody {
     /// Bytes to replay. Empty for a request that has no body.
     Ready(Bytes),
     /// The body is larger than the selected-upstream limit.
-    TooLarge,
+    TooLarge {
+        /// Size the body would reach after adding the rejected chunk.
+        attempted: usize,
+        /// Selected-upstream buffering limit.
+        limit: usize,
+    },
 }
 
 /// Shared inputs for one attempt.
@@ -120,12 +126,14 @@ pub(super) async fn dispatch(
     };
     let body = match prepare_body(pipeline, session, ctx).await {
         Ok(PreparedBody::Ready(body)) => body,
-        Ok(PreparedBody::TooLarge) => return Ok(reject_oversized(session, ctx).await),
-        Err(error) => return answered_or_err(ctx, error),
+        Ok(PreparedBody::TooLarge { attempted, limit }) => {
+            return Ok(reject_oversized(session, ctx, limit, attempted).await);
+        },
+        Err(error) => return preparation_failed(ctx, error),
     };
     let plan = match AttemptPlan::from_request(client, ctx, session, body) {
         Ok(plan) => plan,
-        Err(error) => return answered_or_err(ctx, error),
+        Err(error) => return preparation_failed(ctx, error),
     };
     let raced = tokio::select! {
         biased;
@@ -144,9 +152,7 @@ pub(super) async fn dispatch(
         end_lease(ctx);
         return Err(upstream_failure(miss));
     }
-    if let HedgeDelivery::Ready { address, .. } = &delivery {
-        note_winner(ctx, address);
-    }
+    note_delivery_winner(ctx, &delivery);
     end_lease(ctx);
     let terminal = terminal_for(session, pipeline, delivery);
     Box::pin(super::terminal_responses::run_terminal_response(
@@ -207,7 +213,11 @@ fn is_grpc(session: &Session) -> bool {
 
 /// An event stream has to stay on the streaming path.
 fn is_event_stream(session: &Session) -> bool {
-    contains_header_ascii(session, http::header::ACCEPT, b"text/event-stream")
+    contains_header_ascii(
+        &session.req_header().headers,
+        http::header::ACCEPT,
+        b"text/event-stream",
+    )
 }
 
 /// `header`'s value starts with `prefix`, ignoring ASCII case.
@@ -221,8 +231,8 @@ fn has_header_prefix(session: &Session, header: http::HeaderName, prefix: &[u8])
 }
 
 /// `header`'s value contains `needle`, ignoring ASCII case.
-fn contains_header_ascii(session: &Session, header: http::HeaderName, needle: &[u8]) -> bool {
-    session.req_header().headers.get(header).is_some_and(|value| {
+fn contains_header_ascii(headers: &HeaderMap, header: http::HeaderName, needle: &[u8]) -> bool {
+    headers.get_all(header).iter().any(|value| {
         value
             .as_bytes()
             .windows(needle.len())
@@ -230,22 +240,24 @@ fn contains_header_ascii(session: &Session, header: http::HeaderName, needle: &[
     })
 }
 
-/// The body filter already wrote the client response.
-fn answered_or_err(ctx: &mut PingoraRequestCtx, error: Box<pingora_core::Error>) -> Result<bool> {
+/// Release preparation resources and let the final error handler respond.
+fn preparation_failed(ctx: &mut PingoraRequestCtx, error: Box<pingora_core::Error>) -> Result<bool> {
     release_selected(ctx);
     end_lease(ctx);
-    if matches!(error.etype(), pingora_core::ErrorType::HTTPStatus(_)) {
-        return Ok(true);
-    }
     Err(error)
 }
 
 /// Reject a body the hedge cannot replay, and drop the primary's load slot.
-async fn reject_oversized(session: &mut Session, ctx: &mut PingoraRequestCtx) -> bool {
+async fn reject_oversized(session: &mut Session, ctx: &mut PingoraRequestCtx, limit: usize, attempted: usize) -> bool {
     release_selected(ctx);
     end_lease(ctx);
     ctx.stamp_error_type(crate::http::pingora::metrics::ERROR_TYPE_FILTER_REJECT);
-    super::super::super::convert::send_rejection_for(session, Rejection::status(413), ctx).await;
+    let rejection = body_limit_rejection(
+        limit,
+        u64::try_from(attempted).unwrap_or(u64::MAX),
+        BodyLimitPhase::Hedge,
+    );
+    super::super::super::convert::send_rejection_for(session, rejection, ctx).await;
     true
 }
 
@@ -273,8 +285,9 @@ async fn prepare_body(
 fn concat(chunks: VecDeque<Bytes>, limit: usize) -> PreparedBody {
     let mut buf = BytesMut::new();
     for chunk in chunks {
-        if buf.len().saturating_add(chunk.len()) > limit {
-            return PreparedBody::TooLarge;
+        let attempted = buf.len().saturating_add(chunk.len());
+        if attempted > limit {
+            return PreparedBody::TooLarge { attempted, limit };
         }
         buf.extend_from_slice(&chunk);
     }
@@ -302,15 +315,16 @@ async fn read_downstream(
             .await
             .map_err(pingora_core::Error::into_down)?;
         let end_of_stream = piece.is_none();
-        super::super::request_body_filter::execute(pipeline, session, &mut piece, end_of_stream, ctx).await?;
+        super::super::request_body_filter::execute(pipeline, &mut piece, end_of_stream, ctx).await?;
         let Some(chunk) = piece else {
             if end_of_stream {
                 return Ok(PreparedBody::Ready(buf.freeze()));
             }
             continue;
         };
-        if buf.len().saturating_add(chunk.len()) > limit {
-            return Ok(PreparedBody::TooLarge);
+        let attempted = buf.len().saturating_add(chunk.len());
+        if attempted > limit {
+            return Ok(PreparedBody::TooLarge { attempted, limit });
         }
         buf.extend_from_slice(&chunk);
         if end_of_stream {
@@ -631,9 +645,7 @@ impl AttemptPlan {
             headers: req.headers.clone(),
             body,
             allow_private: pinned.is_some_and(|pipeline| pipeline.allow_private_upstreams()),
-            limit: pinned
-                .and_then(|pipeline| pipeline.response_body_ceiling())
-                .unwrap_or(ABSOLUTE_MAX_BODY_BYTES),
+            limit: pinned.map_or(DEFAULT_MAX_BUFFER_BYTES, |pipeline| pipeline.response_buffer_limit()),
             per_try_ms: ctx.retry_policy.as_ref().and_then(|policy| policy.per_try_timeout_ms),
             sni: primary_sni(ctx),
             cluster: ctx.cluster.clone(),
@@ -729,9 +741,18 @@ fn prefix_base_path(uri: http::Uri, base: &str) -> Result<http::Uri> {
 // Response
 // -----------------------------------------------------------------------------
 
+/// Record only a ready hedge winner as a forwarded endpoint.
+fn note_delivery_winner<T>(ctx: &mut PingoraRequestCtx, delivery: &HedgeDelivery<T>) {
+    if let HedgeDelivery::Ready { address, .. } = delivery {
+        note_winner(ctx, address);
+    }
+}
+
 /// Point passive health at the endpoint that won.
 fn note_winner(ctx: &mut PingoraRequestCtx, address: &Arc<str>) {
     ctx.upstream_contacted = true;
+    ctx.extensions
+        .insert(praxis_filter::UpstreamForwardedEndpoint(Arc::clone(address)));
     ctx.selected_endpoint_index = Some(endpoint_index(ctx, address.as_ref()));
     if let Some(reselector) = &ctx.endpoint_reselector {
         ctx.upstream = Some(reselector.build_upstream(Arc::clone(address)));
@@ -754,14 +775,11 @@ fn release_selected(ctx: &PingoraRequestCtx) {
     }
 }
 
-/// Return the cluster retry lease and stop the load balancer from releasing it again.
+/// Return the cluster admission slot now, before the response phase would.
 fn end_lease(ctx: &mut PingoraRequestCtx) {
     ctx.filter_metadata.remove("lb.selected");
-    if let Some(state) = &ctx.cluster_retry_state
-        && !ctx.cluster_retry_state_released
-    {
-        state.leave();
-        ctx.cluster_retry_state_released = true;
+    if let Some(lease) = &ctx.cluster_admission {
+        lease.release();
     }
 }
 
@@ -857,6 +875,95 @@ mod tests {
     use super::*;
 
     #[test]
+    fn accept_sse_in_later_field_stays_streaming() {
+        for values in [
+            vec!["text/event-stream", "application/json"],
+            vec!["application/json", "text/event-stream"],
+            vec!["application/json, text/event-stream"],
+            vec!["application/json", "TEXT/EVENT-STREAM"],
+        ] {
+            let mut headers = HeaderMap::new();
+            for value in values {
+                headers.append(http::header::ACCEPT, value.parse().unwrap());
+            }
+            assert!(
+                contains_header_ascii(&headers, http::header::ACCEPT, b"text/event-stream"),
+                "every Accept field must participate in the SSE gate"
+            );
+        }
+        let mut headers = HeaderMap::new();
+        headers.append(http::header::ACCEPT, "application/json".parse().unwrap());
+        headers.append(http::header::ACCEPT, "text/plain".parse().unwrap());
+        assert!(!contains_header_ascii(
+            &headers,
+            http::header::ACCEPT,
+            b"text/event-stream"
+        ));
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "compare authentic winner and failed race affinity evidence"
+    )]
+    fn successful_hedge_marks_only_winning_endpoint_for_stickiness() {
+        let mut ctx = PingoraRequestCtx::default();
+        let winner: Arc<str> = Arc::from("10.0.0.2:80");
+        note_delivery_winner(
+            &mut ctx,
+            &HedgeDelivery::Ready {
+                address: Arc::clone(&winner),
+                response: (),
+            },
+        );
+        assert_eq!(
+            ctx.extensions
+                .get::<praxis_filter::UpstreamForwardedEndpoint>()
+                .map(|marker| &marker.0),
+            Some(&winner),
+            "a real hedge winner must be eligible for header affinity"
+        );
+        drop(ctx);
+
+        let mut failed = PingoraRequestCtx::default();
+        note_delivery_winner(
+            &mut failed,
+            &HedgeDelivery::<()>::Failed {
+                status: Some(502),
+                response: None,
+            },
+        );
+        assert!(
+            failed
+                .extensions
+                .get::<praxis_filter::UpstreamForwardedEndpoint>()
+                .is_none(),
+            "a failed race cannot establish a header binding"
+        );
+        drop(failed);
+    }
+
+    #[test]
+    fn preparation_rejection_reaches_the_final_error_handler() {
+        let mut ctx = PingoraRequestCtx {
+            pending_rejection: Some(praxis_filter::Rejection::status(413)),
+            ..PingoraRequestCtx::default()
+        };
+        let error = preparation_failed(
+            &mut ctx,
+            pingora_core::Error::new(pingora_core::ErrorType::HTTPStatus(413)),
+        )
+        .expect_err("a pending rejection must not be mistaken for a delivered response");
+
+        assert_eq!(error.etype(), &pingora_core::ErrorType::HTTPStatus(413));
+        assert_eq!(
+            ctx.pending_rejection.as_ref().map(|rejection| rejection.status),
+            Some(413)
+        );
+        drop(ctx);
+    }
+
+    #[test]
     fn client_status_keeps_final_http_statuses() {
         assert_eq!(client_status(Some(200)), 200);
         assert_eq!(client_status(Some(404)), 404);
@@ -894,7 +1001,10 @@ mod tests {
     #[test]
     fn concat_stops_at_the_limit() {
         let chunks = VecDeque::from([Bytes::from_static(b"hello"), Bytes::from_static(b"!")]);
-        assert!(matches!(concat(chunks, 5), PreparedBody::TooLarge));
+        assert!(matches!(
+            concat(chunks, 5),
+            PreparedBody::TooLarge { attempted: 6, limit: 5 }
+        ));
         let chunks = VecDeque::from([Bytes::from_static(b"hi")]);
         let PreparedBody::Ready(body) = concat(chunks, 5) else {
             panic!("a short body is replayable");

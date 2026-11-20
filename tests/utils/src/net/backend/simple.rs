@@ -446,6 +446,10 @@ fn build_static_response_filter(entry: &RoutedEntry) -> FilterEntry {
 }
 
 /// Assemble a [`Config`] from parts.
+#[expect(
+    clippy::too_many_lines,
+    reason = "a struct literal with every config section stays readable together"
+)]
 fn build_config(address: &str, clusters: Vec<Cluster>, filters: Vec<FilterEntry>) -> Config {
     Config {
         admin: AdminConfig::default(),
@@ -463,6 +467,7 @@ fn build_config(address: &str, clusters: Vec<Cluster>, filters: Vec<FilterEntry>
             downstream_keepalive_timeout_ms: None,
             downstream_read_timeout_ms: None,
             filter_chains: vec!["backend".to_owned()],
+            forward_proxy: None,
             max_connections: None,
             name: "backend".to_owned(),
             protocol: ProtocolKind::default(),
@@ -473,6 +478,7 @@ fn build_config(address: &str, clusters: Vec<Cluster>, filters: Vec<FilterEntry>
         }],
         metrics: MetricsConfig::default(),
         runtime: RuntimeConfig::default(),
+        shutdown_drain_delay_secs: 0,
         shutdown_timeout_secs: 5,
         telemetry: TelemetryConfig::default(),
     }
@@ -497,10 +503,61 @@ fn start_server(mut config: Config) -> u16 {
         }
     }
 
-    std::thread::spawn(move || {
-        praxis::run_server(config, None, None);
-    });
-
-    crate::net::wait::wait_for_http(&addr);
+    crate::proxy::spawn_process_lifetime_server(config, None, None, &addr);
     port
+}
+
+#[cfg(test)]
+mod tests {
+    use std::process::Command;
+
+    use super::*;
+
+    #[test]
+    #[expect(clippy::too_many_lines, reason = "child process and routed startup-error assertions")]
+    fn routed_backend_startup_failure_does_not_exit_parent() {
+        const CHILD: &str = "PRAXIS_ROUTED_STARTUP_FAILURE_CHILD";
+        if let Some(sentinel) = std::env::var_os(CHILD) {
+            let backend = RoutedBackend::new().route("/", 200, "ok");
+            let mut config = build_routed_config("127.0.0.1:0", &backend.routes);
+            config.insecure_options.allow_root = true;
+            config.listeners[0].tls = Some(
+                serde_yaml::from_str(
+                    "certificates:\n  - cert_path: /nonexistent/praxis-test-cert.pem\n    key_path: /nonexistent/praxis-test-key.pem",
+                )
+                .expect("parse valid TLS config"),
+            );
+            let Err(failure) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| start_server(config))) else {
+                panic!("startup must fail");
+            };
+            let message = failure
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| failure.downcast_ref::<&str>().copied())
+                .expect("panic text");
+            assert!(
+                message.contains("server failed before readiness"),
+                "the routed fixture must return its startup error: {message}"
+            );
+            std::fs::write(sentinel, b"returned").expect("completion sentinel");
+            return;
+        }
+
+        let directory = tempfile::tempdir().expect("sentinel directory");
+        let sentinel = directory.path().join("completed");
+        let output = Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "net::backend::simple::tests::routed_backend_startup_failure_does_not_exit_parent",
+            ])
+            .env(CHILD, &sentinel)
+            .output()
+            .expect("run child test executable");
+        assert!(
+            output.status.success(),
+            "child failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(std::fs::read(sentinel).expect("child completion sentinel"), b"returned");
+    }
 }

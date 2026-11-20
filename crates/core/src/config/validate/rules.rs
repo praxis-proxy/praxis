@@ -15,13 +15,12 @@ use super::{
     branch_chain::validate_branch_chains,
     cluster::validate_clusters,
     filter_chain::{validate_filter_chains, validate_selected_upstream_matchers},
+    forward_proxy::validate_forward_proxy_listeners,
     inline_clusters::{resolve_inline_cluster_references, validate_inline_clusters, validate_tcp_listener_clusters},
     listener::{addresses_overlap, validate_listener_names, validate_listeners},
 };
 use crate::{
-    config::{
-        ABSOLUTE_MAX_BODY_BYTES, BodyLimitsConfig, Config, InsecureOptions, LogOutput, ProtocolKind, SkipPipelineChecks,
-    },
+    config::{BodyLimitsConfig, Config, InsecureOptions, LogOutput, ProtocolKind, SkipPipelineChecks},
     connectivity::normalize_mapped_ipv4,
     errors::ProxyError,
     logging::validate_log_override_entries,
@@ -119,6 +118,7 @@ impl Config {
                 )));
             }
         }
+        validate_forward_proxy_listeners(self)?;
 
         validate_body_limits(&self.body_limits, self.insecure_options.allow_unbounded_body)?;
         validate_cluster_names(&self.clusters)?;
@@ -128,6 +128,7 @@ impl Config {
         validate_tcp_listener_clusters(&self.listeners, &self.filter_chains)?;
         validate_selected_upstream_matchers(&self.filter_chains, &self.clusters)?;
         self.validate_runtime()?;
+        validate_shutdown_drain_delay(self.shutdown_drain_delay_secs, self.shutdown_timeout_secs)?;
         validate_shutdown_timeout(self.shutdown_timeout_secs)?;
         validate_telemetry(&self.telemetry)?;
 
@@ -200,9 +201,6 @@ fn warn_active_pipeline_checks(checks: &SkipPipelineChecks) {
 
 /// Require both body limits unless the operator opts out.
 fn validate_body_limits(limits: &BodyLimitsConfig, allow_unbounded: bool) -> Result<(), ProxyError> {
-    validate_body_limit_ceiling("max_request_bytes", limits.max_request_bytes)?;
-    validate_body_limit_ceiling("max_response_bytes", limits.max_response_bytes)?;
-
     let missing_request = limits.max_request_bytes.is_none();
     let missing_response = limits.max_response_bytes.is_none();
 
@@ -229,18 +227,6 @@ fn validate_body_limits(limits: &BodyLimitsConfig, allow_unbounded: bool) -> Res
             .max_response_bytes
             .map_or_else(|| "none".to_owned(), |bytes| bytes.to_string()),
     )))
-}
-
-/// Reject a body limit that exceeds the absolute ceiling.
-fn validate_body_limit_ceiling(field: &str, value: Option<usize>) -> Result<(), ProxyError> {
-    if let Some(bytes) = value
-        && bytes > ABSOLUTE_MAX_BODY_BYTES
-    {
-        return Err(ProxyError::Config(format!(
-            "body_limits.{field} ({bytes} bytes) exceeds maximum ({ABSOLUTE_MAX_BODY_BYTES} bytes / 64 MiB)"
-        )));
-    }
-    Ok(())
 }
 
 // -----------------------------------------------------------------------------
@@ -535,6 +521,22 @@ fn validate_logging(logging: &crate::config::LoggingConfig) -> Result<(), ProxyE
         && let Some(path) = logging.file_path.as_deref()
     {
         warn_if_symlink(path);
+    }
+    Ok(())
+}
+
+/// Reject a drain delay above the one-hour safety ceiling or above the
+/// shutdown timeout it consumes.
+fn validate_shutdown_drain_delay(secs: u64, timeout_secs: u64) -> Result<(), ProxyError> {
+    if secs > MAX_SHUTDOWN_TIMEOUT_SECS {
+        return Err(ProxyError::Config(format!(
+            "shutdown_drain_delay_secs ({secs}) exceeds maximum ({MAX_SHUTDOWN_TIMEOUT_SECS}s / 1 hour)"
+        )));
+    }
+    if secs > timeout_secs {
+        return Err(ProxyError::Config(format!(
+            "shutdown_drain_delay_secs ({secs}) must not exceed shutdown_timeout_secs ({timeout_secs})"
+        )));
     }
     Ok(())
 }
@@ -1238,7 +1240,53 @@ filter_chains:
     }
 
     #[test]
-    fn reject_body_limits_exceeding_ceiling() {
+    fn body_limits_validate_each_direction_independently() {
+        for field in ["max_request_bytes", "max_response_bytes"] {
+            for (value, override_flag, accepted) in [
+                ("0", false, true),
+                ("67108864", false, true),
+                ("67108865", false, true),
+                ("null", false, false),
+                ("null", true, true),
+                ("-1", false, false),
+                ("18446744073709551616", false, false),
+            ] {
+                let yaml = format!(
+                    "listeners:\n  - name: web\n    address: '127.0.0.1:8080'\n    filter_chains: [main]\n\
+                     filter_chains:\n  - name: main\n    filters:\n      - filter: static_response\n        status: 200\n\
+                     body_limits:\n  {field}: {value}\n\
+                     insecure_options:\n  allow_unbounded_body: {override_flag}\n"
+                );
+                let result = Config::from_yaml(&yaml);
+                if accepted {
+                    let config = result.expect("valid independent body limit");
+                    let (specified, other) = if field == "max_request_bytes" {
+                        (
+                            config.body_limits.max_request_bytes,
+                            config.body_limits.max_response_bytes,
+                        )
+                    } else {
+                        (
+                            config.body_limits.max_response_bytes,
+                            config.body_limits.max_request_bytes,
+                        )
+                    };
+                    assert_eq!(other, Some(DEFAULT_MAX_BODY_BYTES));
+                    assert_eq!(specified, value.parse::<usize>().ok());
+                } else {
+                    let error = result.unwrap_err().to_string();
+                    let expected = match value {
+                        "null" => "allow_unbounded_body".to_owned(),
+                        _ => "invalid YAML".to_owned(),
+                    };
+                    assert!(error.contains(&expected), "{field}={value}: {error}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn streaming_transfer_limit_can_exceed_the_buffering_cap() {
         let yaml = r#"
 listeners:
   - name: web
@@ -1252,11 +1300,9 @@ filter_chains:
       - filter: static_response
         status: 200
 "#;
-        let err = Config::from_yaml(yaml).unwrap_err();
-        assert!(
-            err.to_string().contains("exceeds maximum"),
-            "body limit above 64 MiB should be rejected: {err}"
-        );
+        let config = Config::from_yaml(yaml).unwrap();
+        assert_eq!(config.body_limits.max_request_bytes, Some(100_000_000));
+        assert_eq!(config.body_limits.max_buffer_bytes.get(), 67_108_864);
     }
 
     #[test]
@@ -1823,6 +1869,70 @@ filter_chains:
         status: 200
 "#;
         Config::from_yaml(yaml).unwrap();
+    }
+
+    #[test]
+    /// Reject a drain delay above the one-hour ceiling.
+    fn reject_shutdown_drain_delay_exceeding_maximum() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+shutdown_drain_delay_secs: 7200
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("shutdown_drain_delay_secs") && err.to_string().contains("exceeds maximum"),
+            "should reject drain delay > 1 hour: {err}"
+        );
+    }
+
+    #[test]
+    /// Accept a drain delay exactly at the one-hour ceiling.
+    fn accept_shutdown_drain_delay_at_maximum() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+shutdown_drain_delay_secs: 3600
+shutdown_timeout_secs: 3600
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        Config::from_yaml(yaml).unwrap();
+    }
+
+    #[test]
+    /// Reject a drain delay above the shutdown timeout.
+    fn reject_shutdown_drain_delay_exceeding_timeout() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+shutdown_timeout_secs: 1
+shutdown_drain_delay_secs: 2
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("must not exceed shutdown_timeout_secs"),
+            "delay must fit within the shutdown budget: {err}"
+        );
     }
 
     // -------------------------------------------------------------------------

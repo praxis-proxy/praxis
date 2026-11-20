@@ -73,6 +73,7 @@ fn build_config(args: &Args) -> Config {
         listeners: vec![echo_listener(&args.address)],
         metrics: MetricsConfig::default(),
         runtime: RuntimeConfig::default(),
+        shutdown_drain_delay_secs: 0,
         shutdown_timeout_secs: 30,
         telemetry: TelemetryConfig::default(),
     }
@@ -86,6 +87,7 @@ fn echo_listener(address: &str) -> Listener {
         downstream_keepalive_timeout_ms: None,
         downstream_read_timeout_ms: None,
         filter_chains: vec!["echo".into()],
+        forward_proxy: None,
         max_connections: None,
         name: "echo".into(),
         protocol: ProtocolKind::default(),

@@ -751,6 +751,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn streaming_writer_cannot_shrink_away_input_limit() {
+        for grow in [false, true] {
+            let mut flight = request_flight(mutating_stream_pipeline(grow));
+            flight.ctx.request_body_mode = BodyMode::Stream;
+            let (mut upload, _client) = streaming_upload(&flight.ctx).await;
+            accept_data(&mut upload, &mut flight, &["ab", "cd"]).await;
+            assert_eq!(flight.ctx.request_body_bytes, 4, "count input before mutations");
+            let expected: Vec<String> = if grow {
+                vec!["chunk:WXYZ".into(), "chunk:WXYZ".into()]
+            } else {
+                vec![]
+            };
+            assert_eq!(queued(&upload), expected);
+            let result = upload
+                .accept(&mut flight, Ok(DownstreamFrame::Data(Bytes::from_static(b"e"))), false)
+                .await;
+            assert!(matches!(result, Err(UploadEnd::Halted(halt)) if halt.status == Some(413)));
+            assert_eq!(queued(&upload), expected, "crossing input is never queued");
+        }
+    }
+
+    /// A stream filter that grows or drops each chunk under a four-byte input limit.
+    fn mutating_stream_pipeline(grow: bool) -> FilterPipeline {
+        let mut pipeline = scripted_pipeline(Script {
+            request_body: Some((
+                BodyMode::Stream,
+                Arc::new(move |body, _end| {
+                    if body.is_some() {
+                        *body = grow.then(|| Bytes::from_static(b"WXYZ"));
+                    }
+                    Ok(FilterAction::Continue)
+                }),
+            )),
+            ..Script::default()
+        });
+        pipeline.apply_body_limits(Some(4), None, false).unwrap();
+        pipeline
+    }
+
+    #[tokio::test]
     async fn stream_mode_queues_what_the_filters_leave() {
         let mut flight = request_flight(scripted_pipeline(Script {
             request_body: Some((
@@ -775,18 +815,7 @@ mod tests {
 
     #[tokio::test]
     async fn stream_buffer_holds_chunks_until_a_filter_releases_them() {
-        let mut flight = request_flight(scripted_pipeline(Script {
-            request_body: Some((
-                BodyMode::StreamBuffer { max_bytes: Some(1024) },
-                Arc::new(|body, _end| {
-                    if body.as_deref().is_some_and(|chunk| chunk.ends_with(b"go")) {
-                        return Ok(FilterAction::Release);
-                    }
-                    Ok(FilterAction::Continue)
-                }),
-            )),
-            ..Script::default()
-        }));
+        let mut flight = request_flight(release_on_go_pipeline());
         flight.ctx.request_body_mode = flight.pipeline.body_capabilities().request_body_mode;
         let (mut upload, _client) = streaming_upload(&flight.ctx).await;
 
@@ -803,6 +832,33 @@ mod tests {
             ["chunk:abgo", "chunk:cd"],
             "after the release, chunks stream through"
         );
+        assert_eq!(
+            flight.ctx.request_body_bytes, 6,
+            "release does not reset the input counter"
+        );
+        let crossing = upload
+            .accept(&mut flight, Ok(DownstreamFrame::Data(Bytes::from_static(b"e"))), false)
+            .await;
+        assert!(matches!(crossing, Err(UploadEnd::Halted(halt)) if halt.status == Some(413)));
+        assert_eq!(queued(&upload), ["chunk:abgo", "chunk:cd"], "crossing tail is refused");
+    }
+
+    /// Buffer until the bytes end in `go`, with a six-byte input limit.
+    fn release_on_go_pipeline() -> FilterPipeline {
+        let mut pipeline = scripted_pipeline(Script {
+            request_body: Some((
+                BodyMode::StreamBuffer { max_bytes: Some(1024) },
+                Arc::new(|body, _end| {
+                    if body.as_deref().is_some_and(|chunk| chunk.ends_with(b"go")) {
+                        return Ok(FilterAction::Release);
+                    }
+                    Ok(FilterAction::Continue)
+                }),
+            )),
+            ..Script::default()
+        });
+        pipeline.apply_body_limits(Some(6), None, false).unwrap();
+        pipeline
     }
 
     #[tokio::test]

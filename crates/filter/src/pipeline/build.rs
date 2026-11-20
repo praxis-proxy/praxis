@@ -139,6 +139,7 @@ impl FilterPipeline {
             enable_upstream_binding(&mut filters, &catalog);
         }
         let body_capabilities = compute_body_capabilities(&filters);
+        let has_request_completion_observer = super::pipeline_has_request_completion_observer(&filters);
         let compression = extract_compression_config(&filters);
         let may_select_streaming_subrequest_response = filters_may_select_streaming_subrequest_response(&filters);
         let trace_context_filter_indices = filters
@@ -147,6 +148,7 @@ impl FilterPipeline {
             .filter_map(|(idx, pf)| (pf.filter.name() == "trace_context").then_some(idx))
             .collect();
         let request_head_filter_indices = request_head_filter_indices(&filters);
+        let shielded_admitter_indices = super::body::shielded_admitter_indices(&filters);
         let (request_body_filter_indices, response_body_filter_indices) = body_filter_indices(&filters);
         let selected_upstream_request_body_filter_indices = selected_upstream_request_body_indices(&filters);
         #[cfg(feature = "bound-upstream-request-body")]
@@ -156,9 +158,11 @@ impl FilterPipeline {
         let time_source: Arc<dyn praxis_core::time::TimeSource> = Arc::new(SystemTimeSource);
         let mut pipeline = Self {
             body_capabilities,
+            has_request_completion_observer,
             compression,
             filters,
             request_head_filter_indices,
+            shielded_admitter_indices,
             request_body_filter_indices,
             response_body_filter_indices,
             selected_upstream_request_body_filter_indices,
@@ -178,6 +182,7 @@ impl FilterPipeline {
             may_select_streaming_subrequest_response,
             trace_context_filter_indices,
             time_source: Arc::clone(&time_source),
+            buffer_cap: praxis_core::config::DEFAULT_MAX_BUFFER_BYTES,
             request_body_ceiling: None,
             response_body_ceiling: None,
         };
@@ -395,6 +400,7 @@ impl FilterPipeline {
         super::checks::check_router_without_lb(&self.filters, &names, &mut warnings);
         super::checks::check_all_routers_conditional(&names, &self.filters, &mut warnings);
         super::checks::check_security_filter_in_conditional_branch(&self.filters, &mut warnings);
+        super::checks::check_head_admission_ordering(&self.filters, &mut warnings);
 
         warnings
     }

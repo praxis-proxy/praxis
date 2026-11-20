@@ -12,8 +12,8 @@ use super::super::tls_health_check::Backend;
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tls_health_check_example_exercises_handshake_and_https_modes() {
     let certs = TestCertificates::generate();
-    let handshake = Backend::new(&certs, false).await;
-    let https = Backend::new(&certs, false).await;
+    let handshake = Backend::new(&certs, false);
+    let https = Backend::new(&certs, false);
     https.status.store(503, Ordering::Relaxed);
     let admin_port = free_port();
     let admin_addr = format!("127.0.0.1:{admin_port}");

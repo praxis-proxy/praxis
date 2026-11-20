@@ -56,6 +56,17 @@ impl ProxyBody {
         }
     }
 
+    /// An empty HTTP/1 304 body whose representation length remains metadata.
+    ///
+    /// Hyper drops a 304's explicit Content-Length when the body already
+    /// reports end-of-stream. A conservative hint makes it retain the field;
+    /// polling still returns no frames, and Hyper writes no body for a 304.
+    pub(super) fn metadata_only() -> Self {
+        Self {
+            source: Source::MetadataOnly { ended: false },
+        }
+    }
+
     /// A whole body written at once; an empty one is no body.
     pub(super) fn full(bytes: Bytes) -> Self {
         Self {
@@ -71,6 +82,10 @@ impl Body for ProxyBody {
     fn poll_frame(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Result<Frame<Bytes>, BodyAborted>>> {
         match &mut self.get_mut().source {
             Source::Full(bytes) => Poll::Ready(bytes.take().map(|bytes| Ok(Frame::data(bytes)))),
+            Source::MetadataOnly { ended } => {
+                *ended = true;
+                Poll::Ready(None)
+            },
             Source::Relay { ended, frames } => poll_relay(frames, ended, cx),
         }
     }
@@ -78,7 +93,7 @@ impl Body for ProxyBody {
     fn is_end_stream(&self) -> bool {
         match &self.source {
             Source::Full(bytes) => bytes.is_none(),
-            Source::Relay { ended, .. } => *ended,
+            Source::MetadataOnly { ended } | Source::Relay { ended, .. } => *ended,
         }
     }
 
@@ -89,7 +104,8 @@ impl Body for ProxyBody {
                     .as_ref()
                     .map_or(0, |bytes| u64::try_from(bytes.len()).unwrap_or(u64::MAX)),
             ),
-            Source::Relay { .. } => SizeHint::default(),
+            Source::MetadataOnly { ended: true } => SizeHint::with_exact(0),
+            Source::MetadataOnly { ended: false } | Source::Relay { .. } => SizeHint::default(),
         }
     }
 }
@@ -99,6 +115,12 @@ impl Body for ProxyBody {
 enum Source {
     /// A whole body, or none, written once.
     Full(Option<Bytes>),
+
+    /// An empty body that does not declare EOS until it is polled.
+    MetadataOnly {
+        /// Whether the empty body has been polled.
+        ended: bool,
+    },
 
     /// Frames from a [`Relay`].
     Relay {
@@ -297,6 +319,25 @@ mod tests {
             ProxyBody::full(Bytes::new()).is_end_stream(),
             "an empty whole body is no body"
         );
+    }
+
+    #[tokio::test]
+    async fn metadata_only_body_never_yields_a_frame() {
+        let mut body = ProxyBody::metadata_only();
+        assert!(!body.is_end_stream(), "EOS remains conservative before polling");
+        assert_eq!(body.size_hint().lower(), 0, "the lower bound remains accurate");
+        assert_eq!(body.size_hint().upper(), None, "the initial upper bound is unknown");
+        assert!(
+            body.frame().await.is_none(),
+            "the first poll yields no data or trailers"
+        );
+        assert!(body.is_end_stream(), "the empty body ends when polled");
+        assert_eq!(
+            body.size_hint().exact(),
+            Some(0),
+            "the completed body has no bytes left"
+        );
+        assert!(body.frame().await.is_none(), "subsequent polls stay ended");
     }
 
     #[tokio::test]

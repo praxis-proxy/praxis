@@ -18,11 +18,21 @@
 /// feature declaration rather than a `cfg` derived from it.
 const MANIFEST: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"));
 
+/// The filter crate's manifest, which defines the Policy features.
+const FILTER_MANIFEST: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../filter/Cargo.toml"));
+
+/// The protocol crate's manifest, which forwards them.
+const PROTOCOL_MANIFEST: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../protocol/Cargo.toml"));
+
+/// Filter features that only combine other `policy-*` features, so each layer
+/// re-declares them from its own forwards instead of forwarding them.
+const FILTER_ALIASES: &[&str] = &["policy-api-key-fips", "policy-jwt-fips"];
+
 /// Config whose sub-request client admits one exchange at a time, with a
 /// `policy` filter that gives up on initializing after two seconds, well
 /// inside the five the JWKS fetch itself waits. `{policy}` stands for the path
 /// of the policy document.
-#[cfg(feature = "policy-engine")]
+#[cfg(feature = "policy-builtins")]
 const CONFIG: &str = r#"
 runtime:
   subrequest_max_connections: 1
@@ -51,7 +61,7 @@ filter_chains:
 /// constructed, from a loopback port nothing listens on. The fetch fails at
 /// once unless it has to wait for admission, and a failed fetch at boot is
 /// recoverable, so the filter still builds.
-#[cfg(feature = "policy-engine")]
+#[cfg(feature = "policy-builtins")]
 const POLICY: &str = r#"
 plugins:
   - name: jwt-user
@@ -87,7 +97,7 @@ global:
     clippy::tests_outside_test_module,
     reason = "integration tests are in tests/ directory, not in src"
 )]
-#[cfg(feature = "policy-engine")]
+#[cfg(feature = "policy-builtins")]
 #[test]
 fn resolved_policy_filters_call_out_through_the_runtime_connector() {
     // Calls resolve_pipelines directly, so it misses main()'s provider install.
@@ -117,16 +127,129 @@ fn resolved_policy_filters_call_out_through_the_runtime_connector() {
     reason = "integration tests are in tests/ directory, not in src"
 )]
 #[test]
-fn the_default_feature_set_includes_the_policy_engine() {
+fn the_default_feature_set_includes_the_policy_builtins() {
     let declaration = default_feature_declaration().expect("[features] must declare a `default` array");
 
     assert!(
-        declaration.contains("\"policy-engine\""),
-        "`policy-engine` must stay in this crate's default features: the binary's own feature set \
+        declaration.contains("\"policy-builtins\""),
+        "`policy-builtins` must stay in this crate's default features: the binary's own feature set \
          is what decides whether the `policy` filter is nameable in config, and no cfg-based test \
-         can catch its removal — tests/integration turns praxis-filter/policy-engine on through \
+         can catch its removal — tests/integration turns the policy filter on through \
          its own default, so every suite would stay green while the shipped binary lost the \
          filter. Got: {declaration}"
+    );
+}
+
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "integration tests are in tests/ directory, not in src"
+)]
+#[test]
+fn every_filter_policy_feature_is_forwarded_by_protocol_and_server() {
+    let filter_features = feature_names(FILTER_MANIFEST, "policy-");
+    assert!(
+        filter_features.len() > 10,
+        "the filter manifest scan found too few Policy features: {filter_features:?}"
+    );
+    for feature in filter_features
+        .iter()
+        .filter(|name| !FILTER_ALIASES.contains(&name.as_str()))
+    {
+        let forward = format!("\"praxis-filter/{feature}\"");
+        let protocol = declaration_in(PROTOCOL_MANIFEST, feature).unwrap_or_default();
+        assert!(
+            protocol.contains(&forward),
+            "praxis-proxy-protocol's `{feature}` must forward {forward}: {protocol:?}"
+        );
+        let server = feature_declaration(feature).unwrap_or_default();
+        assert!(
+            server.contains(&forward) && server.contains(&format!("\"praxis-protocol/{feature}\"")),
+            "praxis-proxy's `{feature}` must forward to the filter and protocol crates: {server:?}"
+        );
+    }
+}
+
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "integration tests are in tests/ directory, not in src"
+)]
+#[test]
+fn protocol_and_server_expose_exactly_the_filter_policy_features() {
+    let filter_features = feature_names(FILTER_MANIFEST, "policy-");
+    assert_eq!(
+        feature_names(PROTOCOL_MANIFEST, "policy-"),
+        filter_features,
+        "praxis-proxy-protocol must expose exactly the filter's Policy features"
+    );
+    assert_eq!(
+        feature_names(MANIFEST, "policy-"),
+        filter_features,
+        "praxis-proxy must expose exactly the filter's Policy features"
+    );
+}
+
+#[expect(
+    clippy::expect_used,
+    clippy::tests_outside_test_module,
+    reason = "integration tests are in tests/ directory, not in src"
+)]
+#[test]
+fn the_default_bundle_carries_the_experimental_limiter() {
+    let builtins = feature_declaration("policy-builtins").expect("the bundle");
+    assert!(
+        builtins.contains("\"policy-experimental-ratelimit\""),
+        "the default bundle must carry the limiter selector, so its experimental marker follows: {builtins}"
+    );
+    let limiter = feature_declaration("policy-experimental-ratelimit").expect("the limiter selector");
+    assert!(
+        limiter.contains("\"experimental\""),
+        "the limiter is experimental and must set the marker: {limiter}"
+    );
+}
+
+#[expect(
+    clippy::expect_used,
+    clippy::tests_outside_test_module,
+    reason = "integration tests are in tests/ directory, not in src"
+)]
+#[test]
+fn policy_plugin_features_select_no_crypto_backend() {
+    for plugin in [
+        "policy-api-key",
+        "policy-jwt",
+        "policy-jwt-openssl-fips",
+        "policy-experimental-ratelimit",
+        "policy-engine",
+    ] {
+        let declaration = declaration_in(FILTER_MANIFEST, plugin).expect("plugin feature");
+        assert!(
+            !declaration.contains("policy-crypto-")
+                && !declaration.contains("ppe/crypto-")
+                && !declaration.contains("ppe/fips")
+                && !declaration.contains("ppe/builtins"),
+            "`{plugin}` must select neither a crypto backend nor the bundle: {declaration}"
+        );
+    }
+}
+
+#[expect(
+    clippy::expect_used,
+    clippy::tests_outside_test_module,
+    reason = "integration tests are in tests/ directory, not in src"
+)]
+#[test]
+fn the_fips_aliases_combine_one_plugin_with_the_fips_backend() {
+    let jwt_fips = declaration_in(FILTER_MANIFEST, "policy-jwt-fips").expect("FIPS JWT alias");
+    assert!(
+        jwt_fips.contains("\"policy-jwt-openssl-fips\"")
+            && jwt_fips.contains("\"policy-crypto-fips\"")
+            && !jwt_fips.contains("policy-api-key"),
+        "`policy-jwt-fips` is the OpenSSL JWT plugin plus the FIPS backend, without API-key: {jwt_fips}"
+    );
+    let alias_features = declaration_in(FILTER_MANIFEST, "policy-api-key-fips").expect("FIPS API-key alias");
+    assert!(
+        alias_features.contains("\"policy-api-key\"") && alias_features.contains("\"policy-crypto-fips\""),
+        "`policy-api-key-fips` must select the API-key plugin and the FIPS backend"
     );
 }
 
@@ -138,19 +261,61 @@ fn the_default_feature_set_includes_the_policy_engine() {
 ///
 /// A line scan rather than a TOML parse: the workspace carries no TOML parser,
 /// and adding one for a single-line assertion is not worth the dependency.
-fn default_feature_declaration() -> Option<&'static str> {
-    MANIFEST
+fn default_feature_declaration() -> Option<String> {
+    feature_declaration("default")
+}
+
+/// Find a feature's right-hand side in this crate's `[features]` table.
+fn feature_declaration(name: &str) -> Option<String> {
+    declaration_in(MANIFEST, name)
+}
+
+/// The `[features]` table of `manifest` as `(name, right-hand side)` pairs,
+/// joining a declaration that spans several lines.
+fn feature_table(manifest: &str) -> Vec<(String, String)> {
+    let mut table: Vec<(String, String)> = Vec::new();
+    for line in manifest
         .lines()
         .skip_while(|line| line.trim() != "[features]")
         .skip(1)
-        .take_while(|line| !line.trim_start().starts_with('['))
-        .find_map(|line| line.trim().strip_prefix("default"))
-        .and_then(|rest| rest.trim_start().strip_prefix('='))
+        .take_while(|line| !line.starts_with('['))
+        .filter(|line| !line.trim_start().starts_with('#'))
+    {
+        match line.split_once('=') {
+            Some((name, rest)) if !line.starts_with(' ') => {
+                table.push((name.trim().to_owned(), rest.trim().to_owned()));
+            },
+            _ => {
+                if let Some((_, rest)) = table.last_mut() {
+                    rest.push_str(line.trim());
+                }
+            },
+        }
+    }
+    table
+}
+
+/// The right-hand side of feature `name` in `manifest`.
+fn declaration_in(manifest: &str, name: &str) -> Option<String> {
+    feature_table(manifest)
+        .into_iter()
+        .find_map(|(feature, rest)| (feature == name).then_some(rest))
+}
+
+/// The sorted names of `manifest`'s features starting with `prefix`.
+fn feature_names(manifest: &str, prefix: &str) -> Vec<String> {
+    let mut names: Vec<String> = feature_table(manifest)
+        .into_iter()
+        .map(|(name, _)| name)
+        .filter(|name| name.starts_with(prefix))
+        .collect();
+    names.sort();
+    names
 }
 
 /// Parse [`CONFIG`] with its `policy` filter pointed at [`POLICY`], written
 /// into `dir`.
-#[cfg(feature = "policy-engine")]
+#[cfg(feature = "policy-builtins")]
 #[expect(clippy::expect_used, reason = "test utility")]
 fn runtime_config(dir: &tempfile::TempDir) -> praxis_core::config::Config {
     let policy = dir.path().join("policy.yaml");
@@ -160,7 +325,7 @@ fn runtime_config(dir: &tempfile::TempDir) -> praxis_core::config::Config {
 }
 
 /// Take the one admission permit `client`'s connector hands out.
-#[cfg(feature = "policy-engine")]
+#[cfg(feature = "policy-builtins")]
 #[expect(clippy::expect_used, reason = "test utility")]
 fn hold_the_only_admission_permit(
     client: &praxis_core::subrequest::SubRequestClient,
@@ -174,7 +339,7 @@ fn hold_the_only_admission_permit(
 
 /// Resolve `config`'s pipelines over `client` the way server startup does,
 /// keeping only the error text.
-#[cfg(feature = "policy-engine")]
+#[cfg(feature = "policy-builtins")]
 fn resolve(
     config: &praxis_core::config::Config,
     client: &praxis_core::subrequest::SubRequestClient,

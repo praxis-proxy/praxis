@@ -9,10 +9,15 @@ publish = false
 
 [features]
 # Matches the binary's default; see tests/integration/Cargo.toml.
-default = ["pingora", "policy-engine"]
+default = ["pingora", "policy-builtins"]
 pingora = ["praxis-test-utils/pingora", "praxis/pingora"]
 hyper = ["praxis-test-utils/hyper", "praxis/hyper"]
-policy-engine = ["praxis/policy-engine", "praxis-filter/policy-engine"]
+policy-engine = ["praxis/policy-engine", "praxis-filter/policy-engine", "praxis-test-utils/policy-engine"]
+policy-builtins = ["policy-engine", "policy-experimental-ratelimit", "praxis/policy-builtins", "praxis-test-utils/policy-builtins"]
+policy-crypto-default = ["policy-engine", "praxis/policy-crypto-default", "praxis-test-utils/policy-crypto-default"]
+policy-experimental-ratelimit = ["policy-engine", "praxis/policy-experimental-ratelimit", "praxis-test-utils/policy-experimental-ratelimit"]
+hedged-requests = ["praxis/hedged-requests"]
+iterative-request-router = ["praxis/iterative-request-router"]
 
 [lints]
 workspace = true
