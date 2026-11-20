@@ -313,9 +313,9 @@ fn effect_unavailable_in_metadata_view(effect: &Effect, metadata_plugins: &HashS
         },
         Effect::Plugin { name } => !metadata_plugins.contains(name),
         Effect::Allow | Effect::Deny { .. } | Effect::Taint { .. } | Effect::Restrict { .. } => false,
-        // Delegation and elicitation need their token/approval handlers, which
-        // are intentionally absent from the metadata-only response document.
-        Effect::Delegate(_) | Effect::Elicit(_) => true,
+        // Fetch, delegation, and elicitation need handlers that are absent
+        // from the metadata-only response document.
+        Effect::Fetch(_) | Effect::Delegate(_) | Effect::Elicit(_) => true,
     }
 }
 
@@ -416,7 +416,11 @@ plugins:
     #[test]
     fn keeps_only_capable_plugins_and_content_independent_rules() {
         let yaml = format!(
-            r#"{PLUGINS}
+            r#"{PLUGINS}  - name: inventory
+    kind: test/inventory
+    hooks: [metadata.fetch]
+    mode: sequential
+    on_error: fail
 routes:
   - llm: "*"
     result:
@@ -424,6 +428,7 @@ routes:
     authorization:
       pre_invocation:
         - "require(authenticated)"
+        - "fetch(inventory)"
       post_invocation:
         - "require(completion.tokens.total > 100)"
         - "run(scanner)"
@@ -436,6 +441,7 @@ routes:
         assert!(filtered.contains("run(metadata)"));
         assert!(!filtered.contains("run(scanner)"));
         assert!(!filtered.contains("name: scanner"));
+        assert!(!filtered.contains("name: inventory"));
         assert!(!filtered.contains("completion.tokens"));
         assert!(!filtered.contains("result:"));
         assert!(!filtered.contains("pre_invocation:"));
