@@ -45,6 +45,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- Update the policy engine from PPE 0.6.0 to 0.7.0, including Limitador
+  0.14.1. This removes `heapless` and its nine temporary RustSec advisory
+  exceptions from the audit and deny configurations.
+
 - The `policy` filter admits at the request head: it runs
   `ratelimit.pre_identity` and the baseline identity check before any filter
   reads the body, even one listed before it, so over-limit and
