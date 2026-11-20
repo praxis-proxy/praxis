@@ -43,8 +43,8 @@ use super::{
     common_message_format::{entity_for_protocol_method, entity_for_protocol_method_post},
     config::{BodyAccessMode, PolicyFilterConfig},
     construction::{
-        engine_error, parse_trusted_proxies, refuse_fips_blockers, refuse_query_credentials_with_delegation,
-        require_dpop_external_base_url,
+        engine_error, head_identity_blocker, parse_trusted_proxies, refuse_fips_blockers,
+        refuse_query_credentials_with_delegation, require_dpop_external_base_url,
     },
     context::{PolicyResponseContext, PolicyResponseOutput},
     dispatch::{block_on_bounded, ensure_dispatch_runtime, response_dispatch_timeout},
@@ -59,7 +59,7 @@ use super::{
     llm::{ParsedLlmRequest, ParsedLlmResponse, request_message, response_message},
     request_facts::{RequestFacts, RequestView},
     request_headers,
-    request_state::{InferenceResponseKind, MetadataResponseDispatch, state, state_mut},
+    request_state::{InferenceResponseKind, MetadataResponseDispatch, RequestState, state, state_mut},
     response_rules::{ensure_supported_entity_results, metadata_only_policy},
     transport::PolicyHttpTransport,
 };
@@ -428,6 +428,10 @@ pub struct PolicyFilter {
     limit_pre: bool,
     /// Whether a limiter runs at `ratelimit.post_identity`.
     limit_post: bool,
+    /// Request-head admission mode.
+    head: HeadAdmission,
+    /// Whether identity resolution requires the matched route.
+    route_judges_identity: bool,
     /// Whether `http.request` has work: a handler or request assertions.
     /// Without entity routes, the filter is a pure L7 policy authorized at
     /// `on_request`; unclassified inference fallbacks use the same rules in
@@ -454,6 +458,50 @@ pub struct PolicyFilter {
     /// connector policy calls go through.
     #[cfg(all(test, feature = "policy-builtins"))]
     transport: Arc<PolicyHttpTransport>,
+}
+
+/// Request-head admission supported by the policy configuration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HeadAdmission {
+    /// No head admission when `context_headers` require later header values.
+    Off,
+    /// Pre-identity rate limiting with identity resolution deferred to the route.
+    Defer,
+    /// The pre-identity limiter and the identity gate.
+    Gate,
+}
+
+impl HeadAdmission {
+    /// Select head admission for `cfg` and an optional identity-resolution blocker.
+    fn for_policy(cfg: &PolicyFilterConfig, blocker: Option<&str>) -> Self {
+        if !cfg.context_headers.is_empty() {
+            Self::Off
+        } else if blocker.is_some() {
+            Self::Defer
+        } else {
+            Self::Gate
+        }
+    }
+
+    /// Warn when route-specific authentication prevents early identity rejection.
+    fn warn_on_defer(cfg: &PolicyFilterConfig, blocker: &str, llm_routes: bool) {
+        let buffering = if cfg.body_access == BodyAccessMode::ReadOnly && !llm_routes {
+            format!(
+                "; request bodies are buffered, up to max_buffer_bytes ({}) or more if another \
+                 filter asks for more, within body_limits.max_buffer_bytes and max_request_bytes, \
+                 and a larger body gets 413",
+                cfg.max_buffer_bytes
+            )
+        } else {
+            String::new()
+        };
+        tracing::warn!(
+            target: "policy.filter",
+            "policy: {}: {blocker}, so only the route judges identity and unauthenticated \
+             requests are rejected once it does, after the body is read{buffering}",
+            cfg.config_path,
+        );
+    }
 }
 
 impl PolicyFilter {
@@ -727,8 +775,13 @@ impl PolicyFilter {
         let response_hook =
             (mgr.has_hooks_for(HOOK_HTTP_RESPONSE) || !response_assertions.is_empty()).then_some(HOOK_HTTP_RESPONSE);
 
-        let llm_route_table = llm_routes.then(|| Arc::new(policy_config));
         let limit_pre = mgr.has_hooks_for(HOOK_RATELIMIT_PRE_IDENTITY);
+        let blocker = entity_routes.then(|| head_identity_blocker(&policy_config)).flatten();
+        let head = HeadAdmission::for_policy(&cfg, blocker.as_deref());
+        if let Some(blocker) = blocker.as_deref() {
+            HeadAdmission::warn_on_defer(&cfg, blocker, llm_routes);
+        }
+        let llm_route_table = llm_routes.then(|| Arc::new(policy_config));
         let limit_post = mgr.has_hooks_for(HOOK_RATELIMIT_POST_IDENTITY);
 
         Ok(Self {
@@ -742,6 +795,8 @@ impl PolicyFilter {
             llm_post,
             limit_pre,
             limit_post,
+            head,
+            route_judges_identity: blocker.is_some(),
             http_request_policy,
             request_assertions,
             response_assertions,
@@ -1250,13 +1305,13 @@ impl PolicyFilter {
     async fn post_identity_limit_http(
         &self,
         ctx: &mut HttpFilterContext<'_>,
+        view: &RequestView,
         identity: &IdentityPayload,
     ) -> Result<Option<Rejection>, FilterError> {
         if !self.post_identity_limit_pending(ctx) {
             return Ok(None);
         }
-        let view = Self::request_view(ctx, &self.cfg.context_headers, &self.trusted_proxies);
-        let ext = Self::extensions_from_identity(&view, identity, ENTITY_HTTP, ENTITY_NAME_GLOBAL, &self.cfg);
+        let ext = Self::extensions_from_identity(view, identity, ENTITY_HTTP, ENTITY_NAME_GLOBAL, &self.cfg);
         Ok(self.post_identity_limit(ctx, &ext).await?.map(|denied| denied.http()))
     }
 
@@ -1546,18 +1601,18 @@ impl PolicyFilter {
     /// Whether this policy instance already completed admission in an earlier
     /// lifecycle phase.
     fn admission_complete(ctx: &HttpFilterContext<'_>) -> bool {
-        state(ctx).is_some_and(|state| state.admitted)
+        state(ctx).is_some_and(RequestState::is_admitted)
     }
 
     /// Record that this instance admitted the request.
     fn mark_admission_complete(ctx: &mut HttpFilterContext<'_>) {
-        state_mut(ctx).admitted = true;
+        state_mut(ctx).admit();
     }
 
     /// Keep the full identity this instance admitted, for its later hooks.
     fn store_identity(ctx: &mut HttpFilterContext<'_>, identity: IdentityPayload) {
         let state = state_mut(ctx);
-        state.gated = None;
+        drop(state.take_held_identity());
         state.identity = Some(identity);
     }
 
@@ -1574,13 +1629,13 @@ impl PolicyFilter {
     async fn resolve_gated_identity(
         &self,
         ctx: &mut HttpFilterContext<'_>,
+        view: &RequestView,
     ) -> Result<Result<IdentityPayload, Rejection>, FilterError> {
-        let view = Self::request_view(ctx, &self.cfg.context_headers, &self.trusted_proxies);
-        if let Some(rejection) = self.pre_identity_limit(ctx, &view).await? {
+        if let Some(rejection) = self.pre_identity_limit(ctx, view).await? {
             return Ok(Err(rejection));
         }
         let gate_ext = Self::identity_extensions(
-            &view,
+            view,
             ENTITY_HTTP,
             ENTITY_NAME_GLOBAL,
             self.cfg.context_meta.scope.as_deref(),
@@ -1602,10 +1657,11 @@ impl PolicyFilter {
         &self,
         ctx: &mut HttpFilterContext<'_>,
     ) -> Result<Result<IdentityPayload, Rejection>, FilterError> {
-        match state_mut(ctx).gated.take() {
-            Some(identity) => Ok(Ok(identity)),
-            None => self.resolve_gated_identity(ctx).await,
+        if let Some(identity) = state_mut(ctx).take_held_identity() {
+            return Ok(Ok(identity));
         }
+        let view = Self::request_view(ctx, &self.cfg.context_headers, &self.trusted_proxies);
+        self.resolve_gated_identity(ctx, &view).await
     }
 
     /// Finish an identity-only admission after classification establishes that
@@ -1619,7 +1675,8 @@ impl PolicyFilter {
             Ok(identity) => identity,
             Err(rejection) => return Ok(FilterAction::Reject(rejection)),
         };
-        if let Some(rejection) = self.post_identity_limit_http(ctx, &identity).await? {
+        let view = Self::request_view(ctx, &self.cfg.context_headers, &self.trusted_proxies);
+        if let Some(rejection) = self.post_identity_limit_http(ctx, &view, &identity).await? {
             return Ok(FilterAction::Reject(rejection));
         }
         Self::publish_authenticated_identity(ctx, &identity);
@@ -1628,49 +1685,60 @@ impl PolicyFilter {
         Ok(FilterAction::BodyDone)
     }
 
-    /// Early identity gate: resolve identity in `on_request` so
-    /// un-authenticated traffic is rejected before the body-buffer cost is
-    /// paid. For entity-aware policies, authorization runs later, in
-    /// `on_request_body`, once the request is classified.
+    /// Enforce baseline identity unless admission already ran or requires a route.
     #[expect(
         clippy::large_stack_frames,
         reason = "PPE identity resolution carries large async payloads"
     )]
-    async fn identity_gate(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        // When a downstream body-buffering filter (e.g. the protocol
-        // classifier) forces a pre-read, praxis runs `on_request_body` BEFORE
-        // this header phase. That body phase already resolved and enforced
-        // identity (keeping it in this instance's state) and may have stripped the
-        // inbound identity headers (`X-User-Token`, `Authorization`) for the
-        // upstream. Re-resolving here would fail on the now-stripped headers
-        // and spuriously reject an already-authorized request. The body phase
-        // is authoritative — skip the early gate when it already ran.
-        if Self::admitted_identity(ctx).is_some() {
-            tracing::trace!(target: "policy.filter", "identity already resolved in body phase; skipping early gate");
+    async fn identity_gate(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+        view: &RequestView,
+    ) -> Result<FilterAction, FilterError> {
+        // An earlier phase ran the gate, or admitted and possibly stripped the
+        // credentials it read; resolving again would judge stripped headers. A
+        // route-judged policy never runs it: the global resolver may reject a
+        // credential only the route accepts.
+        if self.route_judges_identity
+            || Self::admitted_identity(ctx).is_some()
+            || state(ctx).is_some_and(RequestState::gate_done)
+        {
+            tracing::trace!(target: "policy.filter", "identity gate already ran");
             return Ok(FilterAction::Continue);
         }
 
-        let identity = match self.resolve_gated_identity(ctx).await? {
+        let identity = match self.resolve_gated_identity(ctx, view).await? {
             Ok(identity) => identity,
             Err(rejection) => {
-                tracing::debug!(target: "policy.filter", "identity deny (on_request)");
+                tracing::debug!(target: "policy.filter", "identity deny (gate)");
                 return Ok(FilterAction::Reject(rejection));
             },
         };
-        // Entity-routed policies resolve again once classifier metadata gives
-        // PPE the authoritative route coordinates. Publishing this unscoped
-        // gate result could expose a principal from the wrong route resolver.
-        if self.entity_routes {
-            state_mut(ctx).gated = Some(identity);
+        // Publishing this unscoped result could expose a principal from the
+        // wrong route resolver, so a later authorization consumes it instead.
+        if self.holds_gate_identity() {
+            state_mut(ctx).hold_identity(identity);
         } else {
-            if let Some(rejection) = self.post_identity_limit_http(ctx, &identity).await? {
+            if let Some(rejection) = self.post_identity_limit_http(ctx, view, &identity).await? {
                 return Ok(FilterAction::Reject(rejection));
             }
             Self::publish_authenticated_identity(ctx, &identity);
             Self::store_identity(ctx, identity);
         }
-        tracing::trace!(target: "policy.filter", "identity allow (on_request)");
+        tracing::trace!(target: "policy.filter", "identity allow (gate)");
         Ok(FilterAction::Continue)
+    }
+
+    /// Whether the gate identity requires later authorization.
+    fn holds_gate_identity(&self) -> bool {
+        self.entity_routes || self.http_request_policy
+    }
+
+    /// Request view including trusted header mutations from earlier head filters.
+    fn head_view(&self, ctx: &HttpFilterContext<'_>) -> RequestView {
+        let facts = RequestFacts::capture_head(ctx, &self.trusted_proxies);
+        let headers = facts.headers();
+        RequestView::new(Arc::new(facts), headers, SecretHeaderProvenance::default())
     }
 
     /// Authorize an inference request through `cmf.llm_input`.
@@ -2170,12 +2238,17 @@ impl PolicyFilter {
     #[expect(clippy::large_stack_frames, reason = "async handler over large CMF/pipeline types")]
     async fn on_request_http_authz(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         let view = Self::request_view(ctx, &self.cfg.context_headers, &self.trusted_proxies);
-        let identity = match self
-            .resolve_identity(ctx, &view, ENTITY_HTTP, ENTITY_NAME_GLOBAL)
-            .await?
-        {
-            Ok(id) => id,
-            Err(rej) => return Ok(FilterAction::Reject(rej)),
+        // The head gate resolved on these same coordinates.
+        let held = state_mut(ctx).take_held_identity();
+        let identity = match held {
+            Some(identity) => identity,
+            None => match self
+                .resolve_identity(ctx, &view, ENTITY_HTTP, ENTITY_NAME_GLOBAL)
+                .await?
+            {
+                Ok(id) => id,
+                Err(rej) => return Ok(FilterAction::Reject(rej)),
+            },
         };
         Box::pin(self.authorize_http(ctx, &view, identity)).await
     }
@@ -2337,10 +2410,6 @@ impl PolicyFilter {
     }
 
     /// Dispatch against the independent metadata-only policy engine.
-    #[expect(
-        clippy::large_stack_frames,
-        reason = "PPE response dispatch carries its typed hook inputs into the bounded future"
-    )]
     fn dispatch_metadata_response_cmf(
         &self,
         ctx: &mut HttpFilterContext<'_>,
@@ -2357,9 +2426,9 @@ impl PolicyFilter {
         }
         let response_manager = Arc::clone(manager);
         let invoke = async move {
-            let (result, _background) = response_manager
-                .invoke_named::<CmfHook>(HOOK_CMF_LLM_OUTPUT, payload, extensions, table)
-                .await;
+            let (result, _background) =
+                Box::pin(response_manager.invoke_named::<CmfHook>(HOOK_CMF_LLM_OUTPUT, payload, extensions, table))
+                    .await;
             result
         };
         let mut result = block_on_bounded(invoke, self.response_dispatch_timeout).map_err(|error| -> FilterError {
@@ -2700,12 +2769,17 @@ impl HttpFilter for PolicyFilter {
         // once at EOS with the full body, and forwards whatever we put
         // back into `body`. `ReadOnly` inherits the default `Stream`.
         //
-        // Inference needs its own buffer because it has no classifier.
+        // Inference needs its own buffer because it has no classifier. A
+        // deferred identity is decided by the route at end of stream, so no
+        // byte may reach the upstream before then.
         match self.cfg.body_access {
-            BodyAccessMode::ReadOnly if !self.llm_routes => BodyMode::Stream,
-            BodyAccessMode::ReadOnly => BodyMode::StreamBuffer {
+            BodyAccessMode::ReadOnly if self.llm_routes => BodyMode::StreamBuffer {
                 max_bytes: Some(self.cfg.llm.max_request_bytes),
             },
+            BodyAccessMode::ReadOnly if self.route_judges_identity => BodyMode::StreamBuffer {
+                max_bytes: Some(self.cfg.max_buffer_bytes),
+            },
+            BodyAccessMode::ReadOnly => BodyMode::Stream,
             // Both halves apply, so take whichever ceiling is lower.
             BodyAccessMode::ReadWrite if self.llm_routes => BodyMode::StreamBuffer {
                 max_bytes: Some(self.cfg.max_buffer_bytes.min(self.cfg.llm.max_request_bytes)),
@@ -2732,6 +2806,37 @@ impl HttpFilter for PolicyFilter {
         }
     }
 
+    fn runs_request_head(&self) -> bool {
+        self.head != HeadAdmission::Off
+    }
+
+    fn admits_at_request_head(&self) -> bool {
+        true
+    }
+
+    async fn on_request_head(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        // No facts are captured here: the head phase applies earlier head
+        // filters' mutations only after it ends, and later phases must see them.
+        let view = self.head_view(ctx);
+        match self.head {
+            HeadAdmission::Off => Ok(FilterAction::Continue),
+            HeadAdmission::Defer => {
+                if let Some(rejection) = self.pre_identity_limit(ctx, &view).await? {
+                    return Ok(FilterAction::Reject(rejection));
+                }
+                state_mut(ctx).defer_identity();
+                Ok(FilterAction::Continue)
+            },
+            HeadAdmission::Gate => {
+                let action = Box::pin(self.identity_gate(ctx, &view)).await?;
+                if !self.holds_gate_identity() && matches!(action, FilterAction::Continue) {
+                    Self::mark_admission_complete(ctx);
+                }
+                Ok(action)
+            },
+        }
+    }
+
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         self.capture_request_facts(ctx);
         // A StreamBuffer filter can force the body phase to run before this
@@ -2740,6 +2845,13 @@ impl HttpFilter for PolicyFilter {
         if Self::admission_complete(ctx) {
             tracing::trace!(target: "policy.filter", "admission already completed in body phase; skipping header phase");
             return Ok(FilterAction::Continue);
+        }
+        // Only the route judges a deferred identity, and its buffered body
+        // hook runs first. Getting here unadmitted means that hook was skipped
+        // or failed open, so nothing has authenticated the request.
+        if self.route_judges_identity {
+            tracing::warn!(target: "policy.filter", "deferred identity was never judged by the route; rejecting");
+            return Ok(FilterAction::Reject(undecided_identity_rejection()));
         }
 
         // Pure L7 policy (`global` HTTP rules or assertions, no entity routes): authorize
@@ -2756,12 +2868,11 @@ impl HttpFilter for PolicyFilter {
             return Ok(action);
         }
 
-        // Otherwise (entity-aware policy, or identity-only): early identity
-        // gate. Saves the per-request body-buffer cost on un-auth'd traffic —
-        // if there's no valid token, we never reach `on_request_body` and the
-        // body never gets buffered.
-        // Boxing keeps the identity payload out of this method's stack frame.
-        let action = Box::pin(self.identity_gate(ctx)).await?;
+        // Otherwise (entity-aware policy, or identity-only) the early gate, a
+        // no-op when the head phase already ran it. Boxing keeps the identity
+        // payload out of this method's stack frame.
+        let view = Self::request_view(ctx, &self.cfg.context_headers, &self.trusted_proxies);
+        let action = Box::pin(self.identity_gate(ctx, &view)).await?;
         if !self.entity_routes && matches!(action, FilterAction::Continue) {
             Self::mark_admission_complete(ctx);
         }
@@ -2792,7 +2903,8 @@ impl HttpFilter for PolicyFilter {
             let action = if self.http_request_policy {
                 Box::pin(self.on_request_http_authz(ctx)).await?
             } else {
-                self.identity_gate(ctx).await?
+                let view = Self::request_view(ctx, &self.cfg.context_headers, &self.trusted_proxies);
+                self.identity_gate(ctx, &view).await?
             };
             if matches!(action, FilterAction::Continue) {
                 Self::mark_admission_complete(ctx);
@@ -3305,6 +3417,18 @@ pub(super) fn fit_to_original_length(new_bytes: Bytes, original_len: usize, meth
             new_bytes.slice(0..original_len)
         },
     }
+}
+
+/// HTTP 500 rejection when deferred identity resolution never completed.
+fn undecided_identity_rejection() -> Rejection {
+    Rejection::status(500)
+        .with_header("Content-Type", "text/plain")
+        .with_header(VIOLATION_HEADER, "config.identity_not_judged")
+        .with_body(Bytes::from_static(
+            b"policy: the route never judged this request's identity because the \
+              policy's body hook did not run. A request condition that changes \
+              after the body is read, or `failure_mode: open`, skips it.",
+        ))
 }
 
 /// Rejection emitted when `require_protocol_metadata` is on (default) and

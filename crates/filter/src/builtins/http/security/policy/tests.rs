@@ -807,14 +807,14 @@ async fn route_scoped_identity_is_published_only_after_authoritative_resolution(
     );
     let mut ctx = make_filter_context(&req);
 
-    let gate = filter.on_request(&mut ctx).await.expect("identity gate ran");
+    let head = filter.on_request_head(&mut ctx).await.expect("head ran");
     assert!(
-        matches!(&gate, FilterAction::Continue),
-        "identity gate should continue before route resolution; got {gate:?}",
+        matches!(&head, FilterAction::Continue),
+        "the head should continue before route resolution; got {head:?}",
     );
     assert!(
         ctx.extensions.get::<AuthenticatedIdentity>().is_none(),
-        "unscoped header gate must not publish a route-dependent principal",
+        "the head must not publish a route-dependent principal",
     );
 
     ctx.filter_metadata
@@ -841,6 +841,11 @@ async fn route_scoped_identity_is_published_only_after_authoritative_resolution(
             .map(AuthenticatedIdentity::subject_id),
         Some("alice"),
         "open-tool inherits the global resolver; the route-only Bob token must not win",
+    );
+    let request = filter.on_request(&mut ctx).await.expect("request phase ran");
+    assert!(
+        matches!(&request, FilterAction::Continue),
+        "the request phase finds the route's admission; got {request:?}",
     );
 }
 
@@ -4266,7 +4271,7 @@ async fn an_http_route_authentication_list_governs_its_own_path() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[expect(clippy::too_many_lines, reason = "test fixture: the YAML literal is the bulk")]
-async fn the_early_identity_gate_honors_an_http_route_authentication_list() {
+async fn an_http_route_authentication_list_defers_identity_to_the_route() {
     let dir = TempDir::new().expect("create tempdir");
     let cfg_path = dir.path().join("cpex.yaml");
     let yaml = format!(
@@ -4296,17 +4301,26 @@ routes:
         "the fixture is entity-routed, which takes the early-gate path",
     );
 
+    assert!(
+        matches!(filter.request_body_mode(), BodyMode::StreamBuffer { .. }),
+        "the route judges identity once the body is read",
+    );
+
     let mut req = make_request(Method::POST, "/mcp/rpc");
     req.headers.insert(
         "Authorization",
         HeaderValue::from_str(&format!("Bearer {}", mint_route_jwt("alice"))).expect("header value"),
     );
     let mut ctx = make_filter_context(&req);
-    let action = filter.on_request(&mut ctx).await.expect("header phase ran");
+    let head = filter.on_request_head(&mut ctx).await.expect("head ran");
     assert!(
-        matches!(action, FilterAction::Continue),
-        "the gate must dispatch the route's list for a path it covers; got {action:?}",
+        matches!(head, FilterAction::Continue),
+        "the global gate must not judge a credential only the route accepts; got {head:?}",
     );
+    let FilterAction::Reject(rejection) = filter.on_request(&mut ctx).await.expect("header phase ran") else {
+        panic!("a request phase the route never judged must fail closed");
+    };
+    assert_eq!(rejection.status, 500);
 }
 
 /// Write an assertion fixture with caller-selected header casing.

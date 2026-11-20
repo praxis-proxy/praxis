@@ -64,6 +64,11 @@ pub(crate) struct PolicyFilterConfig {
 
     /// Maximum request or response body size in `ReadWrite` mode.
     /// Also used as the default inference request limit.
+    ///
+    /// Also sets the request buffer limit for a `ReadOnly` policy that defers
+    /// identity to the route; inference policies use `llm.max_request_bytes`.
+    /// Other filters can raise the limit within `body_limits.max_buffer_bytes`
+    /// and `body_limits.max_request_bytes`. Larger bodies receive HTTP 413.
     #[serde(default = "default_max_buffer_bytes")]
     pub max_buffer_bytes: usize,
 
@@ -121,7 +126,8 @@ pub(crate) struct PolicyFilterConfig {
     /// its absence means either (a) the protocol classifier filter is missing from
     /// the chain, or (b) it is ordered AFTER `policy` instead of
     /// before. Either is a misconfiguration that would silently
-    /// bypass CMF policy.
+    /// bypass CMF policy. The classifier must publish the metadata in its body
+    /// hook, before policy evaluates the body.
     ///
     /// Set to `false` only when intentionally fronting non-classified
     /// traffic through the `policy` filter for identity-only

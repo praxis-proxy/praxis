@@ -162,6 +162,10 @@ impl HttpFilter for CredentialInjectionFilter {
         "credential_injection"
     }
 
+    fn may_end_request(&self) -> bool {
+        false
+    }
+
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         let Some(cluster) = &ctx.cluster else {
             tracing::debug!("no cluster selected, skipping credential injection");
