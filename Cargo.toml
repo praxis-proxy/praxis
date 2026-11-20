@@ -47,8 +47,6 @@ dhat = "0.3.3"
 governor = "0.10.4"
 dashmap = "6.2.1"
 futures = "0.3.34"
-# Same backend pingora already builds (zlib-ng), so xtask adds no crate to the lockfile.
-flate2 = { version = "1.1.11", default-features = false, features = ["zlib-ng"] }
 h2 = "0.4.20"
 http = "1.5.0"
 # The hyper network backend (the `hyper` feature of praxis-proxy-core and
@@ -62,7 +60,6 @@ metrics = "0.24.6"
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 nix = { version = "0.31.4", default-features = false, features = ["process", "resource", "signal", "user"] }
 notify = "8.2.2"
-object = { version = "0.41.0", default-features = false, features = ["read_core", "elf", "std"] }
 opentelemetry = { version = "0.33.1", default-features = false, features = ["trace"] }
 opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["trace", "rt-tokio"] }
 opentelemetry-otlp = { version = "0.33.1", default-features = false, features = ["grpc-tonic", "http-proto", "reqwest-client", "tls-provider-agnostic", "tls-roots", "trace"] }

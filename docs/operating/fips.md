@@ -229,8 +229,8 @@ Three things the checks cannot supply belong in any claim:
   `3.0.7-cda111b5812c30d4`. NIST's Modules In Process list shows a Red Hat
   submission for this module under review; until it is on a certificate, the
   image carries a module in validation, not the validated one. `fips-host-check`
-  says so on every run (`xtask/assets/fips/certified-modules.json` is the
-  list it consults), and the release gate can be made to fail on it with
+  says so on every run (the list it consults is compiled into
+  `cargo fips-check`), and the release gate can be made to fail on it with
   `--require-certified` once that is the policy.
 - **The operating environment.** The certificate's tested environments are
   RHEL 9 on specific physical Intel, POWER and z machines. A virtual machine
