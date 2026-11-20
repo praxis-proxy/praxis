@@ -97,6 +97,7 @@ mod pipelines_admin;
 mod policy_boundary;
 mod process_logging;
 mod prometheus_metrics;
+mod query;
 mod rate_limit;
 #[cfg(feature = "pingora")]
 mod rejection_lifecycle;

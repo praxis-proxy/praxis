@@ -101,6 +101,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `grpc-status`. `HttpFilter::repeats_request_head` declares a head hook whose
   work `on_request` repeats; such a filter may sit in an
   `iterative_request_router` step.
+- The FIPS compliance checks (`report`, `verify-image`, `signature-store`,
+  `host-check`) moved out of `cargo xtask fips` into the shared
+  [`cargo fips-check`](https://github.com/praxis-proxy/cargo-fips-check) tool,
+  configured by `fips-check.toml`. The Makefile's FIPS targets install it at a
+  pinned commit and are otherwise unchanged; `cargo xtask fips` keeps only
+  `runtime-probe`. A full report now fails, instead of warning, when the
+  binary is missing, unreadable, not ELF, or cannot be inspected with `ldd`.
 - Temporarily disable KIND rollout acceptance in CI and local commands
   because the cluster exhausts the shared inotify instance budget, pending
   migration to [gateway-controller](https://github.com/praxis-proxy/gateway-controller).
@@ -159,6 +166,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Behavior change:** `/ready` defaults to `admin.readiness: serving`, so a
   serving replica stays ready when a checked cluster has no healthy endpoints.
   Set `admin.readiness: upstreams` to preserve upstream-dependent readiness.
+
+- Treat HTTP QUERY as eligible for automatic retries on both network backends
+  and for configured hedged requests. Existing attempt, body replay, and
+  transport safety limits still apply. Existing retry configurations now apply
+  to QUERY automatically, as do existing Pingora hedge configurations. Origins
+  must honor QUERY's safe, idempotent semantics. Add forwarding, replay, and
+  resource discovery coverage and an HTTP QUERY example with explicit
+  CORS/CSRF settings.
 
 ### Fixed
 
