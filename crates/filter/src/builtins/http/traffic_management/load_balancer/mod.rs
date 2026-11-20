@@ -20,10 +20,7 @@ mod strategy;
 )]
 mod tests;
 
-use std::{
-    collections::HashMap,
-    sync::{Arc, atomic::Ordering},
-};
+use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use metrics::SharedString;
@@ -32,7 +29,7 @@ use praxis_core::{
     health::{ClusterHealthState, HealthRegistry},
     retry::AdmissionLease,
 };
-use tracing::{debug, warn};
+use tracing::debug;
 
 use self::entry::{ClusterEntry, build_cluster_entry};
 pub use self::reselector::EndpointReselector;
@@ -509,32 +506,13 @@ impl HttpFilter for LoadBalancerFilter {
             return Ok(FilterAction::Reject(cluster_overloaded()));
         };
 
-        if let Some(h) = health {
-            if h.endpoints().iter().all(|ep| !ep.is_healthy()) {
-                if !entry.panic_mode_logged.swap(true, Ordering::Relaxed) {
-                    warn!(cluster = %cluster_name, "all endpoints unhealthy, routing to all (panic mode)");
-                }
-                crate::metrics::record_lb_panic_mode(SharedString::from(Arc::clone(cluster)));
-            } else if entry.panic_mode_logged.load(Ordering::Relaxed) {
-                entry.panic_mode_logged.store(false, Ordering::Relaxed);
-            }
-        }
-
         let weights = self.slow_start_weights(cluster_name, health);
         let scaling = crate::load_balancing::slow_start::scaling_weights(weights.as_ref()).is_some();
-        let selected = if scaling {
-            entry.strategy.select_weighted(ctx, health, &[], weights.as_ref())
-        } else {
-            entry.strategy.select(ctx, health, &[])
-        };
-        let Some(addr) = selected else {
-            // Dropping the lease hands the slot back: a cluster with no
-            // selectable endpoint must not spend its own ceiling on requests
-            // it never sends, which would wedge it closed once
-            // `max_connections` failures accumulated.
-            drop(lease);
-            return Err(format!("load_balancer filter: cluster '{cluster_name}' has no available endpoints").into());
-        };
+        // On error the lease drops here and hands the slot back: a cluster
+        // with no selectable endpoint must not spend its own ceiling on
+        // requests it never sends, which would wedge it closed once
+        // `max_connections` failures accumulated.
+        let addr = entry.pick(ctx, health, weights.as_ref(), &[])?;
         debug!(cluster = %cluster_name, upstream = %addr, "upstream selected");
 
         ctx.selected_endpoint_index = health.and_then(|h| h.endpoint_index(&addr)).or(Some(usize::MAX));
