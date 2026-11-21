@@ -417,6 +417,12 @@ pub struct PingoraRequestCtx {
     /// request that never reached the cluster. Reset per request.
     pub upstream_contacted: bool,
 
+    /// Whether `upstream` is a client-chosen forward-proxy destination rather
+    /// than an endpoint from configuration. Metrics then label it with a
+    /// fixed endpoint, so each destination a client names does not add a
+    /// series that is never removed.
+    pub(crate) upstream_is_forward_destination: bool,
+
     /// Set in the logging phase when the client went away before the
     /// upstream answered, so the cleanup response pass does not report the
     /// upstream as reached and a circuit breaker releases instead of
@@ -699,6 +705,7 @@ impl Default for PingoraRequestCtx {
             upstream: None,
             upstream_for_retry: None,
             upstream_contacted: false,
+            upstream_is_forward_destination: false,
             ended_by_client: false,
         }
     }

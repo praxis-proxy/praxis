@@ -13,6 +13,14 @@
 //! The access-record tests check how a tunnel's end is recorded: every
 //! record says how its tunnel closed, and one a peer broke off is written
 //! whatever the sampling, as for any response cut off midway.
+//!
+//! A forward-proxy listener also forwards absolute-form plain requests
+//! (`GET http://host/path`) to their origin. Those tests check that a
+//! client-chosen destination is resolved and bounded the way a CONNECT
+//! destination is. On a listener that also routes, the destination rules
+//! still decide every absolute-form request before any upstream is
+//! contacted, and a target the proxy cannot forward to is refused rather
+//! than taking the catch-all route.
 
 use std::{
     io::{Read as _, Write as _},
@@ -23,8 +31,8 @@ use std::{
 
 use praxis_core::config::Config;
 use praxis_test_utils::{
-    BackendGuard, ProxyGuard, free_port, http_get, start_full_proxy, start_stateful_backend, start_tcp_echo_backend,
-    wait_for_tcp,
+    BackendGuard, ProxyGuard, RequestLog, free_port, http_get, start_full_proxy, start_recording_backend,
+    start_stateful_backend, start_tcp_echo_backend, wait_for_tcp,
 };
 
 // -----------------------------------------------------------------------------
@@ -125,6 +133,139 @@ fn a_tunnel_the_destination_breaks_off_is_recorded_whatever_the_sampling() {
     let records = read_records(&log).unwrap_or(records);
     assert_eq!(records.len(), 1, "only the broken-off tunnel's record: {records:?}");
     assert_eq!(records[0]["metadata.tunnel.close_reason"], "destination_error");
+}
+
+// -----------------------------------------------------------------------------
+// Tests: absolute-form forwarding to a client-chosen destination
+// -----------------------------------------------------------------------------
+
+#[test]
+fn absolute_form_request_reaches_a_named_destination() {
+    // The name resolves through the bounded per-call resolver, and the
+    // checked address is dialed.
+    let origin = praxis_test_utils::start_backend_with_shutdown("from-origin");
+    let proxy = start_forward_listener(origin.port(), 120_000, true);
+
+    let (status, body) = forward_get(proxy.addr(), &format!("http://localhost:{}/", origin.port()));
+    assert_eq!(status, 200, "the request should be forwarded to its origin");
+    assert!(
+        body.ends_with("from-origin"),
+        "the origin's body should come back: {body:?}"
+    );
+}
+
+#[test]
+fn name_answering_with_a_private_address_is_refused() {
+    // `localhost` answers with loopback, which the private-address guard
+    // refuses without allow_private_upstreams, as it refuses a CONNECT to it.
+    let origin = praxis_test_utils::start_backend_with_shutdown("from-origin");
+    let proxy = start_forward_listener(origin.port(), 120_000, false);
+
+    let (status, _body) = forward_get(proxy.addr(), &format!("http://localhost:{}/", origin.port()));
+    assert_eq!(status, 502, "a private answer must not be dialed");
+}
+
+#[test]
+fn destination_that_stops_answering_is_cut_off_at_the_idle_timeout() {
+    // The origin accepts and never answers. Without a read timeout the
+    // request, and the connections it holds, would wait indefinitely.
+    let (silent, port) = praxis_test_utils::bind_unique_port();
+    let holder = std::thread::spawn(move || silent.accept().map(|(stream, _peer)| stream));
+    let proxy = start_forward_listener(port, 500, true);
+
+    let started = Instant::now();
+    let (status, _body) = forward_get(proxy.addr(), &format!("http://localhost:{port}/"));
+    let elapsed = started.elapsed();
+    assert_eq!(status, 504, "a read that times out answers 504");
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "the 500 ms idle timeout must bound the wait, took {elapsed:?}"
+    );
+    drop(holder.join());
+}
+
+#[test]
+fn server_wide_options_is_forwarded_with_the_asterisk_target() {
+    // RFC 9112 Section 3.2.4: the last proxy sends `*` for an OPTIONS whose
+    // target has an empty path and no query; `/` asks about a resource.
+    let (origin, log) = start_recording_backend(|_request| ok_response());
+    let port = origin.port();
+    let proxy = start_forward_listener(port, 120_000, true);
+
+    for (target, forwarded) in [
+        (format!("http://localhost:{port}"), "OPTIONS * HTTP/1.1"),
+        (format!("http://localhost:{port}/"), "OPTIONS / HTTP/1.1"),
+    ] {
+        let (status, response) = send_raw(
+            proxy.addr(),
+            &format!("OPTIONS {target} HTTP/1.1\r\nHost: localhost:{port}\r\nConnection: close\r\n\r\n"),
+        );
+        assert_eq!(status, 200, "OPTIONS {target} should reach the origin: {response:?}");
+        let requests = recorded(&log);
+        let seen = requests.last().map(|request| request.request_line.as_str());
+        assert_eq!(seen, Some(forwarded), "OPTIONS {target}");
+    }
+}
+
+#[test]
+fn port_out_of_range_is_refused_rather_than_defaulted() {
+    // HTTP/1.0 lets the request omit `Host`, so only the target names the
+    // port. Read as absent, port 65536 would be checked and dialed as 80.
+    let proxy = start_forward_listener(free_port(), 120_000, true);
+
+    let (status, response) = send_raw(proxy.addr(), "GET http://localhost:65536/ HTTP/1.0\r\n\r\n");
+    assert_eq!(status, 400, "an out-of-range port must be refused: {response:?}");
+}
+
+// -----------------------------------------------------------------------------
+// Tests: absolute-form requests on a listener with a catch-all route
+// -----------------------------------------------------------------------------
+
+#[test]
+fn invalid_absolute_form_target_is_refused_instead_of_taking_the_route() {
+    // Each target is absolute-form but names no destination the proxy can
+    // forward to. Treated as origin-form, it would skip the destination rules
+    // and reach the routed cluster.
+    let (backend, log) = start_recording_backend(|_request| ok_response());
+    let proxy = start_routed_forward_listener(&[backend.port()], "");
+
+    for target in ["http://origin.example:0/", "http://ORIGIN.example/"] {
+        let (status, response) = forward_get(proxy.addr(), target);
+        assert_eq!(status, 400, "{target} must be refused: {response:?}");
+    }
+    assert!(recorded(&log).is_empty(), "no refused target may reach the cluster");
+
+    let (status, _body) = http_get(proxy.addr(), "/", None);
+    assert_eq!(status, 200, "an origin-form request still takes the route");
+    assert_eq!(
+        recorded(&log).len(),
+        1,
+        "only the origin-form request reached the cluster"
+    );
+}
+
+#[cfg(feature = "hedged-requests")]
+#[test]
+fn denied_destination_on_a_hedged_route_is_refused_before_any_attempt() {
+    let (primary, primary_log) = start_recording_backend(|_request| ok_response());
+    let (copy, copy_log) = start_recording_backend(|_request| ok_response());
+    let hedge = "\n            hedge_policy:\n              initial_requests: 2\n              max_attempts: 2\n              budget_percent: 100";
+    let proxy = start_routed_forward_listener(&[primary.port(), copy.port()], hedge);
+
+    let (status, response) = forward_get(proxy.addr(), "http://denied.example/");
+    assert_eq!(status, 403, "the destination rules must refuse it: {response:?}");
+    assert!(
+        recorded(&primary_log).is_empty() && recorded(&copy_log).is_empty(),
+        "a denied destination must not start a hedged attempt"
+    );
+
+    let (status, response) = forward_get(proxy.addr(), &format!("http://localhost:{}/", primary.port()));
+    assert_eq!(
+        status, 200,
+        "an allowed destination keeps the hedged route: {response:?}"
+    );
+    let attempts = recorded(&primary_log).len() + recorded(&copy_log).len();
+    assert!(attempts >= 1, "the allowed request must reach the cluster");
 }
 
 // -----------------------------------------------------------------------------
@@ -331,4 +472,132 @@ fn send_connect(proxy: &str, target: &str) -> (TcpStream, u16) {
         .and_then(|code| code.parse().ok())
         .unwrap_or_else(|| panic!("malformed CONNECT response head: {head:?}"));
     (stream, status)
+}
+
+/// Start a forward-proxy listener that allows `localhost:port`, with the
+/// given idle timeout, optionally allowing private destinations.
+fn start_forward_listener(port: u16, idle_timeout_ms: u64, allow_private: bool) -> ProxyGuard {
+    let yaml = format!(
+        r#"
+listeners:
+  - name: egress
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains: [egress]
+    forward_proxy:
+      enabled: true
+      idle_timeout_ms: {idle_timeout_ms}
+      allow_destinations:
+        - host: localhost
+          port: {port}
+
+filter_chains:
+  - name: egress
+    filters:
+      - filter: request_id
+
+insecure_options:
+  allow_private_upstreams: {allow_private}
+"#,
+        proxy_port = free_port(),
+    );
+    let config = Config::from_yaml(&yaml).unwrap_or_else(|e| panic!("forward listener config should parse: {e}"));
+    let proxy = start_full_proxy(&config);
+    wait_for_tcp(proxy.addr());
+    proxy
+}
+
+/// Send `GET target` in absolute form, as an `HTTP_PROXY` client does, and
+/// return the response status and body.
+fn forward_get(proxy: &str, target: &str) -> (u16, String) {
+    let authority = target
+        .split_once("://")
+        .and_then(|(_scheme, rest)| rest.split('/').next())
+        .expect("target must be absolute-form");
+    let mut stream = TcpStream::connect(proxy).expect("connect to proxy");
+    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    write!(
+        stream,
+        "GET {target} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    let mut response = String::new();
+    drop(stream.read_to_string(&mut response));
+    let status = response
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or_else(|| panic!("malformed response: {response:?}"));
+    (status, response)
+}
+
+/// Start a forward-proxy listener that allows only `localhost` destinations
+/// and routes every request to the `app` cluster on `endpoints`.
+///
+/// `route_extra` is appended to the catch-all route (a `hedge_policy`, say).
+fn start_routed_forward_listener(endpoints: &[u16], route_extra: &str) -> ProxyGuard {
+    let endpoints = endpoints
+        .iter()
+        .map(|port| format!("\"127.0.0.1:{port}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let yaml = format!(
+        r#"
+listeners:
+  - name: routed
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains: [main]
+    forward_proxy:
+      enabled: true
+      allow_destinations:
+        - host: localhost
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: app{route_extra}
+      - filter: load_balancer
+        clusters:
+          - name: app
+            load_balancer_strategy: round_robin
+            endpoints: [{endpoints}]
+            retry_policy:
+              max_retries: 0
+
+insecure_options:
+  allow_private_endpoints: true
+"#,
+        proxy_port = free_port(),
+    );
+    let config = Config::from_yaml(&yaml).unwrap_or_else(|e| panic!("routed listener config should parse: {e}"));
+    let proxy = start_full_proxy(&config);
+    wait_for_tcp(proxy.addr());
+    proxy
+}
+
+/// A complete `200 OK` from a recording backend.
+fn ok_response() -> Vec<u8> {
+    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok".to_vec()
+}
+
+/// The complete requests a recording backend has received so far.
+fn recorded(log: &RequestLog) -> Vec<praxis_test_utils::RecordedRequest> {
+    log.lock().unwrap().clone()
+}
+
+/// Send a raw request and return the response status and the full response.
+fn send_raw(proxy: &str, request: &str) -> (u16, String) {
+    let mut stream = TcpStream::connect(proxy).expect("connect to proxy");
+    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    stream.write_all(request.as_bytes()).unwrap();
+    let mut response = String::new();
+    drop(stream.read_to_string(&mut response));
+    let status = response
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or_else(|| panic!("malformed response: {response:?}"));
+    (status, response)
 }

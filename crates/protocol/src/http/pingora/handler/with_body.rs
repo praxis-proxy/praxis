@@ -320,7 +320,24 @@ impl ProxyHttp for PingoraHttpHandler {
         {
             return connect::handle(forward_proxy, &pipeline, session, ctx).await;
         }
-        request_filter::execute(&pipeline, session, ctx).await
+        if request_filter::execute(&pipeline, session, ctx).await? {
+            return Ok(true);
+        }
+        // Forward-proxy egress for absolute-form plain requests; every other
+        // shape continues through the reverse-proxy path. The destination
+        // rules decide before any upstream is contacted, a hedged one
+        // included.
+        #[cfg(feature = "forward-proxy")]
+        if let Some(forward_proxy) = &self.forward_proxy
+            && connect::forward_egress(forward_proxy, session, ctx).await?
+        {
+            return Ok(true);
+        }
+        #[cfg(feature = "hedged-requests")]
+        if Box::pin(request_filter::dispatch_hedged(&pipeline, session, ctx)).await? {
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     async fn request_body_filter(
