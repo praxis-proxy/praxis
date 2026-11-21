@@ -113,7 +113,7 @@ impl Drop for Release {
     reason = "body capture, the race, and the client response stay on one path"
 )]
 #[expect(clippy::large_stack_frames, reason = "Pingora session types are large")]
-pub(super) async fn dispatch(
+pub(in crate::http) async fn dispatch(
     pipeline: &FilterPipeline,
     session: &mut Session,
     ctx: &mut PingoraRequestCtx,

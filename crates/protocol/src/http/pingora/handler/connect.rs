@@ -1046,11 +1046,15 @@ fn build_destination_upstream(
 /// answered with 403. A pipeline-selected upstream (`router`,
 /// `load_balancer`) keeps control; otherwise the URI's destination becomes
 /// the upstream and the request is rewritten to origin-form for the
-/// upstream leg. Requests that are not HTTP/1 absolute-form — including
-/// everything on HTTP/2 listeners — keep reverse-proxy behavior when the
-/// pipeline selected an upstream, and are answered with 400 when it did not:
-/// such a request names no destination for the forward proxy and has no
-/// reverse-proxy route either.
+/// upstream leg. An absolute-form target that names no destination the
+/// proxy can forward to (a port of 0, a scheme other than `http`/`https`, a
+/// host in a non-canonical spelling) is answered with 400, whatever the
+/// pipeline selected, so it never takes a reverse-proxy route instead.
+/// Requests that are not HTTP/1 absolute-form, including everything on
+/// HTTP/2 listeners, keep reverse-proxy behavior when the pipeline selected
+/// an upstream, and are answered with 400 when it did not: such a request
+/// names no destination for the forward proxy and has no reverse-proxy
+/// route either.
 ///
 /// Returns `Ok(true)` when the request was answered with a rejection.
 pub(super) async fn forward_egress(
@@ -1058,8 +1062,10 @@ pub(super) async fn forward_egress(
     session: &mut Session,
     ctx: &mut PingoraRequestCtx,
 ) -> pingora_core::Result<bool> {
-    let Some(parsed) = absolute_form_destination(session) else {
-        return reject_unrouted(session, ctx).await;
+    let parsed = match forward_target(session) {
+        ForwardTarget::NotAbsolute => return reject_unrouted(session, ctx).await,
+        ForwardTarget::Invalid => return reject_invalid_target(session, ctx).await,
+        ForwardTarget::Destination(parsed) => parsed,
     };
     if let Some(answered) = gate_and_select(forward_proxy, &parsed, session, ctx).await? {
         return Ok(answered);
@@ -1068,15 +1074,55 @@ pub(super) async fn forward_egress(
     Ok(false)
 }
 
-/// The forward destination of an HTTP/1 absolute-form request, if this is
-/// one.
-fn absolute_form_destination(session: &Session) -> Option<ForwardDestination> {
+/// What a request's target asks of the forward proxy.
+enum ForwardTarget {
+    /// Origin-form or asterisk-form, or any HTTP/2 request: no destination
+    /// for the forward proxy.
+    NotAbsolute,
+
+    /// Absolute-form, but not a destination the proxy can forward to.
+    Invalid,
+
+    /// Absolute-form, naming a destination to gate and forward to.
+    Destination(ForwardDestination),
+}
+
+/// Classify the request's target for the forward proxy.
+///
+/// HTTP/2 requests always carry scheme and authority as pseudo-headers, so
+/// only an HTTP/1 request target can be absolute-form.
+fn forward_target(session: &Session) -> ForwardTarget {
     if session.as_downstream().is_http2() {
-        return None;
+        return ForwardTarget::NotAbsolute;
     }
-    std::str::from_utf8(session.req_header().raw_path())
+    classify_target(session.req_header().raw_path())
+}
+
+/// Classify an HTTP/1 request target read verbatim from the wire.
+///
+/// Origin-form starts with `/` and asterisk-form is `*` (RFC 9112 Section
+/// 3.2); authority-form is CONNECT's and never reaches here. Any other
+/// target is absolute-form, and is [`ForwardTarget::Invalid`] when
+/// [`forward_destination`] cannot read a destination from it.
+fn classify_target(target: &[u8]) -> ForwardTarget {
+    if target.starts_with(b"/") || target == b"*" {
+        return ForwardTarget::NotAbsolute;
+    }
+    std::str::from_utf8(target)
         .ok()
         .and_then(forward_destination)
+        .map_or(ForwardTarget::Invalid, ForwardTarget::Destination)
+}
+
+/// Answer an absolute-form request whose target names no destination the
+/// proxy can forward to with 400.
+///
+/// Returns `Ok(true)`: the request was answered.
+async fn reject_invalid_target(session: &mut Session, ctx: &mut PingoraRequestCtx) -> pingora_core::Result<bool> {
+    debug!("absolute-form request names no destination the forward proxy can forward to");
+    ctx.stamp_error_type(ERROR_TYPE_FILTER_REJECT);
+    send_rejection_for(session, Rejection::status(400), ctx).await;
+    Ok(true)
 }
 
 /// Answer a request that is not a forward request with 400 when the
@@ -2434,6 +2480,48 @@ allow_destinations:
         assert_eq!(forwarded("http://[::1]:8080/").destination.host, "::1");
         assert_eq!(forwarded("http://[2001:db8::1]/").destination.host, "2001:db8::1");
         assert_eq!(forwarded("http://93.184.216.34/").destination.host, "93.184.216.34");
+    }
+
+    #[test]
+    fn origin_and_asterisk_form_targets_are_not_absolute_form() {
+        for target in ["/", "/status/418?q=1", "*"] {
+            assert!(
+                matches!(classify_target(target.as_bytes()), ForwardTarget::NotAbsolute),
+                "{target} names no forward destination"
+            );
+        }
+    }
+
+    #[test]
+    fn absolute_form_targets_without_a_forward_destination_are_invalid() {
+        // Each is absolute-form, so it must not fall back to a reverse-proxy
+        // route the pipeline selected.
+        for target in [
+            "http://origin.example:0/",
+            "ftp://origin.example/file",
+            "http://ORIGIN.example/",
+            "http://origin.example./",
+            "http:///no-authority",
+            "not a target",
+        ] {
+            assert!(
+                matches!(classify_target(target.as_bytes()), ForwardTarget::Invalid),
+                "{target} must be refused as an invalid absolute-form target"
+            );
+        }
+        assert!(matches!(classify_target(b"http://\xff/"), ForwardTarget::Invalid));
+    }
+
+    #[test]
+    fn absolute_form_targets_name_their_destination() {
+        assert!(
+            matches!(
+                classify_target(b"https://origin.example:8443/path"),
+                ForwardTarget::Destination(parsed)
+                    if parsed.destination.host == "origin.example" && parsed.destination.port == 8443 && parsed.tls
+            ),
+            "an https target names its host, port, and TLS"
+        );
     }
 
     /// A dial address for upstream-building tests.

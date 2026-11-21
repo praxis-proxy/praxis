@@ -97,6 +97,10 @@ struct CanonicalRequestBody(Bytes);
 ///
 /// Host header validation runs first (before the pipeline) to reject
 /// ambiguous requests early.
+///
+/// `Ok(false)` means the filters let the request through and nothing has
+/// contacted an upstream yet: the caller still gates forward-proxy egress
+/// and starts any hedged attempts.
 #[cfg(feature = "pingora")]
 #[expect(clippy::too_many_lines, reason = "orchestration function")]
 #[expect(
@@ -230,10 +234,6 @@ pub(in crate::http) async fn execute(
                     Cow::Borrowed(name) => req_headers.insert_header(name, value),
                     Cow::Owned(name) => req_headers.insert_header(name, value),
                 };
-            }
-            #[cfg(feature = "hedged-requests")]
-            if super::hedge::dispatch(pipeline, session, ctx).await? {
-                return Ok(true);
             }
             Ok(false)
         },
