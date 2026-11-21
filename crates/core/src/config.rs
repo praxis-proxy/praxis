@@ -22,6 +22,7 @@ mod branch_chain;
 mod chain_ref;
 mod cluster;
 mod condition;
+mod deprecation;
 mod expanded_chains;
 mod filters;
 mod forward_proxy;
@@ -193,6 +194,8 @@ impl Config {
             .map_err(|err| crate::errors::ProxyError::Config(format!("invalid YAML: {err}")))?;
 
         config.validate()?;
+
+        deprecation::check_for_deprecated_config(yaml);
 
         Ok(config)
     }
