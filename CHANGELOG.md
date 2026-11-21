@@ -341,7 +341,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   resolves under the same bounded per-call DNS limits as a CONNECT's and
   never enters the shared DNS cache; the connect is bounded to 10 s and
   each read and write by `idle_timeout_ms`, and every destination shares
-  the `endpoint="forward_proxy"` metrics label. Origin-form requests
+  the `endpoint="forward_proxy"` metrics label. The destination rules
+  decide before any upstream is contacted, a hedged route's included, and
+  an absolute-form target the proxy cannot forward to (port 0, a scheme
+  other than `http`/`https`, a host in a non-canonical spelling) is
+  answered with 400 rather than taking a route. Origin-form requests
   keep using the reverse-proxy pipeline when it selects an upstream, and are
   answered with 400 when it does not. Tunneled payloads are opaque to
   body-inspecting filters. On a listener that also reverse-proxies, a

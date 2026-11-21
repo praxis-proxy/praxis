@@ -17,7 +17,10 @@
 //! A forward-proxy listener also forwards absolute-form plain requests
 //! (`GET http://host/path`) to their origin. Those tests check that a
 //! client-chosen destination is resolved and bounded the way a CONNECT
-//! destination is.
+//! destination is. On a listener that also routes, the destination rules
+//! still decide every absolute-form request before any upstream is
+//! contacted, and a target the proxy cannot forward to is refused rather
+//! than taking the catch-all route.
 
 use std::{
     io::{Read as _, Write as _},
@@ -28,8 +31,8 @@ use std::{
 
 use praxis_core::config::Config;
 use praxis_test_utils::{
-    BackendGuard, ProxyGuard, free_port, http_get, start_full_proxy, start_stateful_backend, start_tcp_echo_backend,
-    wait_for_tcp,
+    BackendGuard, ProxyGuard, RequestLog, free_port, http_get, start_full_proxy, start_recording_backend,
+    start_stateful_backend, start_tcp_echo_backend, wait_for_tcp,
 };
 
 // -----------------------------------------------------------------------------
@@ -179,6 +182,57 @@ fn destination_that_stops_answering_is_cut_off_at_the_idle_timeout() {
         "the 500 ms idle timeout must bound the wait, took {elapsed:?}"
     );
     drop(holder.join());
+}
+
+// -----------------------------------------------------------------------------
+// Tests: absolute-form requests on a listener with a catch-all route
+// -----------------------------------------------------------------------------
+
+#[test]
+fn invalid_absolute_form_target_is_refused_instead_of_taking_the_route() {
+    // Each target is absolute-form but names no destination the proxy can
+    // forward to. Treated as origin-form, it would skip the destination rules
+    // and reach the routed cluster.
+    let (backend, log) = start_recording_backend(|_request| ok_response());
+    let proxy = start_routed_forward_listener(&[backend.port()], "");
+
+    for target in ["http://origin.example:0/", "http://ORIGIN.example/"] {
+        let (status, response) = forward_get(proxy.addr(), target);
+        assert_eq!(status, 400, "{target} must be refused: {response:?}");
+    }
+    assert!(recorded(&log).is_empty(), "no refused target may reach the cluster");
+
+    let (status, _body) = http_get(proxy.addr(), "/", None);
+    assert_eq!(status, 200, "an origin-form request still takes the route");
+    assert_eq!(
+        recorded(&log).len(),
+        1,
+        "only the origin-form request reached the cluster"
+    );
+}
+
+#[cfg(feature = "hedged-requests")]
+#[test]
+fn denied_destination_on_a_hedged_route_is_refused_before_any_attempt() {
+    let (primary, primary_log) = start_recording_backend(|_request| ok_response());
+    let (copy, copy_log) = start_recording_backend(|_request| ok_response());
+    let hedge = "\n            hedge_policy:\n              initial_requests: 2\n              max_attempts: 2\n              budget_percent: 100";
+    let proxy = start_routed_forward_listener(&[primary.port(), copy.port()], hedge);
+
+    let (status, response) = forward_get(proxy.addr(), "http://denied.example/");
+    assert_eq!(status, 403, "the destination rules must refuse it: {response:?}");
+    assert!(
+        recorded(&primary_log).is_empty() && recorded(&copy_log).is_empty(),
+        "a denied destination must not start a hedged attempt"
+    );
+
+    let (status, response) = forward_get(proxy.addr(), &format!("http://localhost:{}/", primary.port()));
+    assert_eq!(
+        status, 200,
+        "an allowed destination keeps the hedged route: {response:?}"
+    );
+    let attempts = recorded(&primary_log).len() + recorded(&copy_log).len();
+    assert!(attempts >= 1, "the allowed request must reach the cluster");
 }
 
 // -----------------------------------------------------------------------------
@@ -441,4 +495,61 @@ fn forward_get(proxy: &str, target: &str) -> (u16, String) {
         .and_then(|code| code.parse().ok())
         .unwrap_or_else(|| panic!("malformed response: {response:?}"));
     (status, response)
+}
+
+/// Start a forward-proxy listener that allows only `localhost` destinations
+/// and routes every request to the `app` cluster on `endpoints`.
+///
+/// `route_extra` is appended to the catch-all route (a `hedge_policy`, say).
+fn start_routed_forward_listener(endpoints: &[u16], route_extra: &str) -> ProxyGuard {
+    let endpoints = endpoints
+        .iter()
+        .map(|port| format!("\"127.0.0.1:{port}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let yaml = format!(
+        r#"
+listeners:
+  - name: routed
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains: [main]
+    forward_proxy:
+      enabled: true
+      allow_destinations:
+        - host: localhost
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: app{route_extra}
+      - filter: load_balancer
+        clusters:
+          - name: app
+            load_balancer_strategy: round_robin
+            endpoints: [{endpoints}]
+            retry_policy:
+              max_retries: 0
+
+insecure_options:
+  allow_private_endpoints: true
+"#,
+        proxy_port = free_port(),
+    );
+    let config = Config::from_yaml(&yaml).unwrap_or_else(|e| panic!("routed listener config should parse: {e}"));
+    let proxy = start_full_proxy(&config);
+    wait_for_tcp(proxy.addr());
+    proxy
+}
+
+/// A complete `200 OK` from a recording backend.
+fn ok_response() -> Vec<u8> {
+    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok".to_vec()
+}
+
+/// The complete requests a recording backend has received so far.
+fn recorded(log: &RequestLog) -> Vec<praxis_test_utils::RecordedRequest> {
+    log.lock().unwrap().clone()
 }
