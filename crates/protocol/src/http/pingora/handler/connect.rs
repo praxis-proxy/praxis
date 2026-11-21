@@ -92,7 +92,8 @@ pub(super) struct ForwardProxyRuntime {
     matcher: SniMatcher<Vec<u16>>,
 
     /// How long the tunnel may stay idle before closing, and the read and
-    /// write timeout toward a forwarded request's destination.
+    /// write timeout toward the destination an absolute-form request is
+    /// forwarded to when no pipeline-selected upstream takes it.
     idle_timeout: Duration,
 
     /// Hard cap on total tunnel duration.
@@ -929,7 +930,7 @@ fn forward_destination(target: &str) -> Option<ForwardDestination> {
         },
         None => wire_host,
     };
-    let destination = destination(host, authority.port_u16().unwrap_or(default_port))?;
+    let destination = destination(host, authority_port(authority, default_port)?)?;
     // Filters judge this request by its `Host`, which the fork holds equal
     // to the target's authority byte for byte. Only a host already in the
     // canonical form the destination rules check is accepted, so no
@@ -947,6 +948,25 @@ fn forward_destination(target: &str) -> Option<ForwardDestination> {
         tls,
         host_header: http::HeaderValue::try_from(host_header).ok()?,
     })
+}
+
+/// The port an absolute-form authority names, or `default_port` when it
+/// names none.
+///
+/// An empty port (`host:`) means the scheme's default, as RFC 3986 Section
+/// 3.2.3 allows. `None` for a port that is present but not a number from 0
+/// to 65535: `Authority` accepts any digits there, and reading such a port
+/// as absent would check and dial the default port instead of refusing the
+/// target.
+fn authority_port(authority: &http::uri::Authority, default_port: u16) -> Option<u16> {
+    let host_port = authority
+        .as_str()
+        .rsplit_once('@')
+        .map_or(authority.as_str(), |(_userinfo, host_port)| host_port);
+    match host_port.strip_prefix(authority.host())? {
+        "" | ":" => Some(default_port),
+        rest => rest.strip_prefix(':')?.parse().ok(),
+    }
 }
 
 /// Resolve a forward destination to the one address to dial, under the
@@ -1228,22 +1248,42 @@ async fn select_destination_upstream(
 ///
 /// Origin servers must accept absolute-form request targets, but every
 /// reverse-proxied request already arrives in origin-form; forwarding the
-/// same shape keeps the upstream leg conventional. A target that cannot
-/// be rebuilt (an empty path, say) is forwarded as received.
+/// same shape keeps the upstream leg conventional. An `OPTIONS` request for
+/// the server as a whole (`OPTIONS http://host`, with an empty path and no
+/// query) is forwarded with the `*` target, as RFC 9112 Section 3.2.4
+/// requires of the last proxy; any other empty path becomes `/`. A target
+/// that cannot be rebuilt is forwarded as received.
 fn rewrite_origin_form(session: &mut Session) {
+    let whole_server =
+        session.req_header().method == http::Method::OPTIONS && names_whole_server(session.req_header().raw_path());
     let header = session.req_header_mut();
     let mut parts = http::uri::Parts::default();
-    parts.path_and_query = Some(
+    parts.path_and_query = Some(if whole_server {
+        http::uri::PathAndQuery::from_static("*")
+    } else {
         header
             .uri
             .path_and_query()
             .cloned()
-            .unwrap_or_else(|| http::uri::PathAndQuery::from_static("/")),
-    );
+            .unwrap_or_else(|| http::uri::PathAndQuery::from_static("/"))
+    });
     if let Ok(origin) = http::Uri::from_parts(parts) {
-        debug!(path = %origin.path(), "rewriting absolute-form target to origin-form");
+        debug!(target = %origin, "rewriting absolute-form target to origin-form");
         header.set_uri(origin);
     }
+}
+
+/// Whether an absolute-form target has an empty path and no query
+/// (`http://host`, `http://host:8080`).
+///
+/// Read from the wire target: `Uri::path` reports `/` for an empty path once
+/// a scheme is present. An authority holds neither `/` nor `?`, so a target
+/// with neither after its `://` names the authority alone.
+fn names_whole_server(target: &[u8]) -> bool {
+    std::str::from_utf8(target)
+        .ok()
+        .and_then(|target| target.split_once("://"))
+        .is_some_and(|(_scheme, rest)| !rest.contains(['/', '?']))
 }
 
 // -----------------------------------------------------------------------------
@@ -2480,6 +2520,51 @@ allow_destinations:
         assert_eq!(forwarded("http://[::1]:8080/").destination.host, "::1");
         assert_eq!(forwarded("http://[2001:db8::1]/").destination.host, "2001:db8::1");
         assert_eq!(forwarded("http://93.184.216.34/").destination.host, "93.184.216.34");
+    }
+
+    #[test]
+    fn forward_destination_refuses_a_port_out_of_range() {
+        // `Authority` accepts any digits as a port; reading this one as
+        // absent would check and dial port 80 instead.
+        for target in [
+            "http://origin.example:65536/",
+            "http://origin.example:99999999999/",
+            "http://user@origin.example:65536/",
+        ] {
+            assert!(forward_destination(target).is_none(), "{target} must be refused");
+        }
+    }
+
+    #[test]
+    fn forward_destination_reads_an_empty_port_as_the_default() {
+        // RFC 3986 Section 3.2.3: an empty port means the scheme's default.
+        assert_eq!(forwarded("http://origin.example:/").destination.port, 80);
+        assert_eq!(forwarded("https://origin.example:/").destination.port, 443);
+        assert_eq!(forwarded("http://user@origin.example:8080/").destination.port, 8080);
+        assert_eq!(forwarded("http://[::1]:8080/").destination.port, 8080);
+    }
+
+    #[test]
+    fn only_a_target_with_an_empty_path_and_no_query_names_the_whole_server() {
+        for target in [
+            "http://origin.example",
+            "http://origin.example:8080",
+            "https://user@[::1]:443",
+        ] {
+            assert!(
+                names_whole_server(target.as_bytes()),
+                "{target} names the server as a whole"
+            );
+        }
+        for target in [
+            "http://origin.example/",
+            "http://origin.example?q=1",
+            "http://origin.example/path",
+            "/",
+            "*",
+        ] {
+            assert!(!names_whole_server(target.as_bytes()), "{target} names a resource");
+        }
     }
 
     #[test]
