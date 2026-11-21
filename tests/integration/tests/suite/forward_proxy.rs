@@ -184,6 +184,39 @@ fn destination_that_stops_answering_is_cut_off_at_the_idle_timeout() {
     drop(holder.join());
 }
 
+#[test]
+fn server_wide_options_is_forwarded_with_the_asterisk_target() {
+    // RFC 9112 Section 3.2.4: the last proxy sends `*` for an OPTIONS whose
+    // target has an empty path and no query; `/` asks about a resource.
+    let (origin, log) = start_recording_backend(|_request| ok_response());
+    let port = origin.port();
+    let proxy = start_forward_listener(port, 120_000, true);
+
+    for (target, forwarded) in [
+        (format!("http://localhost:{port}"), "OPTIONS * HTTP/1.1"),
+        (format!("http://localhost:{port}/"), "OPTIONS / HTTP/1.1"),
+    ] {
+        let (status, response) = send_raw(
+            proxy.addr(),
+            &format!("OPTIONS {target} HTTP/1.1\r\nHost: localhost:{port}\r\nConnection: close\r\n\r\n"),
+        );
+        assert_eq!(status, 200, "OPTIONS {target} should reach the origin: {response:?}");
+        let requests = recorded(&log);
+        let seen = requests.last().map(|request| request.request_line.as_str());
+        assert_eq!(seen, Some(forwarded), "OPTIONS {target}");
+    }
+}
+
+#[test]
+fn port_out_of_range_is_refused_rather_than_defaulted() {
+    // HTTP/1.0 lets the request omit `Host`, so only the target names the
+    // port. Read as absent, port 65536 would be checked and dialed as 80.
+    let proxy = start_forward_listener(free_port(), 120_000, true);
+
+    let (status, response) = send_raw(proxy.addr(), "GET http://localhost:65536/ HTTP/1.0\r\n\r\n");
+    assert_eq!(status, 400, "an out-of-range port must be refused: {response:?}");
+}
+
 // -----------------------------------------------------------------------------
 // Tests: absolute-form requests on a listener with a catch-all route
 // -----------------------------------------------------------------------------
@@ -552,4 +585,19 @@ fn ok_response() -> Vec<u8> {
 /// The complete requests a recording backend has received so far.
 fn recorded(log: &RequestLog) -> Vec<praxis_test_utils::RecordedRequest> {
     log.lock().unwrap().clone()
+}
+
+/// Send a raw request and return the response status and the full response.
+fn send_raw(proxy: &str, request: &str) -> (u16, String) {
+    let mut stream = TcpStream::connect(proxy).expect("connect to proxy");
+    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    stream.write_all(request.as_bytes()).unwrap();
+    let mut response = String::new();
+    drop(stream.read_to_string(&mut response));
+    let status = response
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or_else(|| panic!("malformed response: {response:?}"));
+    (status, response)
 }

@@ -343,9 +343,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   each read and write by `idle_timeout_ms`, and every destination shares
   the `endpoint="forward_proxy"` metrics label. The destination rules
   decide before any upstream is contacted, a hedged route's included, and
-  an absolute-form target the proxy cannot forward to (port 0, a scheme
-  other than `http`/`https`, a host in a non-canonical spelling) is
-  answered with 400 rather than taking a route. Origin-form requests
+  an absolute-form target the proxy cannot forward to (port 0 or out of
+  range, a scheme other than `http`/`https`, a host in a non-canonical
+  spelling) is answered with 400 rather than taking a route. A server-wide
+  `OPTIONS http://host` is forwarded as `OPTIONS *` (RFC 9112 Section
+  3.2.4). Origin-form requests
   keep using the reverse-proxy pipeline when it selects an upstream, and are
   answered with 400 when it does not. Tunneled payloads are opaque to
   body-inspecting filters. On a listener that also reverse-proxies, a
