@@ -32,5 +32,7 @@ pub(in crate::http) mod terminal_responses;
 /// Max-Forwards handling for TRACE and OPTIONS.
 pub(in crate::http) mod validation;
 
+#[cfg(all(feature = "pingora", feature = "hedged-requests"))]
+pub(in crate::http) use hedge::dispatch as dispatch_hedged;
 #[cfg(feature = "pingora")]
 pub(in crate::http) use pipeline::execute;
