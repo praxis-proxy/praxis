@@ -61,8 +61,8 @@ fn allowlist_example_rejects_connect_outside_the_allowlist() {
         ),
         ("other.example.org:443".to_owned(), "a host no rule matches"),
         (
-            "example.com:443".to_owned(),
-            "the apex of an allowlisted wildcard domain",
+            "internal.example.com:443".to_owned(),
+            "the apex of the allowlisted wildcard domain",
         ),
         (
             format!("127.0.0.1:{echo_port}"),
@@ -71,6 +71,45 @@ fn allowlist_example_rejects_connect_outside_the_allowlist() {
     ] {
         let tunnel = connect_tunnel(proxy.addr(), &target);
         assert_eq!(tunnel.status, 403, "CONNECT to {why} ({target}) must be denied");
+    }
+}
+
+#[test]
+fn allowlist_example_portless_rule_tunnels_on_any_port() {
+    // Only the portless rule (`docs.example.com`, here `localhost`) admits
+    // the echo port: the exact-port rule stays on `api.example.com:443`.
+    let echo_port = start_tcp_echo_backend();
+    let proxy = start_example(&allowlist_rule_forms_yaml());
+
+    let mut tunnel = connect_tunnel(proxy.addr(), &format!("localhost:{echo_port}"));
+    assert_eq!(tunnel.status, 200, "the portless rule should admit any port");
+    tunnel.stream.write_all(b"through the portless rule").unwrap();
+    assert_eq!(
+        read_exact_len(&mut tunnel.stream, 25),
+        b"through the portless rule",
+        "the tunnel should relay bytes to the destination and back"
+    );
+}
+
+#[test]
+fn allowlist_example_wildcard_rule_admits_subdomains_on_its_port_only() {
+    // The wildcard keeps its form, under `.invalid` (RFC 6761) so no name
+    // resolves: an admitted CONNECT gets past the destination rules and fails
+    // at the dial with 502, and a refused one is answered with 403 before it.
+    let proxy = start_example(&allowlist_rule_forms_yaml());
+
+    for (target, status, why) in [
+        ("svc.internal.invalid:443", 502, "a subdomain on the rule's port"),
+        (
+            "a.svc.internal.invalid:443",
+            502,
+            "a deeper subdomain on the rule's port",
+        ),
+        ("internal.invalid:443", 403, "the wildcard's apex"),
+        ("svc.internal.invalid:8443", 403, "a subdomain on another port"),
+    ] {
+        let tunnel = connect_tunnel(proxy.addr(), target);
+        assert_eq!(tunnel.status, status, "CONNECT to {why} ({target})");
     }
 }
 
@@ -469,7 +508,10 @@ fn response_hook_rejection_refuses_the_tunnel() {
     let (mut dialed, _peer) = destination.accept().unwrap();
     dialed.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     let mut byte = [0_u8; 1];
-    assert_eq!(dialed.read(&mut byte).unwrap_or(0), 0, "the refused dial is closed");
+    let read = dialed
+        .read(&mut byte)
+        .expect("the refused dial must end in EOF, not a read timeout on a socket the proxy kept");
+    assert_eq!(read, 0, "the refused dial is closed");
 }
 
 #[test]
@@ -718,6 +760,27 @@ fn allowlist_example_yaml(echo_port: u16, extra_filters: &str) -> String {
     assert!(
         !yaml.contains("- host: api.example.com"),
         "example destinations should be patched to the test backends"
+    );
+    with_private_upstreams(&yaml)
+}
+
+/// `security/forward-proxy.yaml` with its portless and wildcard rules kept in
+/// their forms: `docs.example.com` (any port) becomes `localhost`, and
+/// `*.internal.example.com` (port 443) becomes `*.internal.invalid`. The
+/// exact-port rule is left on `api.example.com:443`.
+fn allowlist_rule_forms_yaml() -> String {
+    let example = read_example("security/forward-proxy.yaml", free_port());
+    let yaml = example
+        .replacen("- host: docs.example.com\n", "- host: localhost\n", 1)
+        .replacen(
+            "- host: \"*.internal.example.com\"\n          port: 443\n",
+            "- host: \"*.internal.invalid\"\n          port: 443\n",
+            1,
+        );
+    assert!(
+        yaml.contains("- host: localhost\n        # Any subdomain")
+            && yaml.contains("- host: \"*.internal.invalid\"\n          port: 443\n"),
+        "the portless and wildcard rules should be patched in place"
     );
     with_private_upstreams(&yaml)
 }

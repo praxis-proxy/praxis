@@ -43,7 +43,7 @@ listeners:
           port: 443
         # Exact host, any port.
         - host: docs.example.com
-        # Any subdomain of internal.example.com (not the apex), HTTPS only.
+        # Any subdomain of internal.example.com (not the apex), port 443 only.
         - host: "*.internal.example.com"
           port: 443
 
