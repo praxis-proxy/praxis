@@ -3,22 +3,31 @@
 
 //! Resolved cluster entry: strategy, connection options, and TLS config.
 
-use std::sync::Arc;
+use std::sync::{Arc, atomic::Ordering};
 
 use arc_swap::ArcSwap;
+use metrics::SharedString;
 use praxis_core::{
     config::{CachedClusterTls, Cluster, RetryPolicy},
     connectivity::{ConnectionOptions, Upstream},
+    health::ClusterHealthState,
     retry::ClusterRetryState,
 };
-use tracing::debug;
+use tracing::{debug, warn};
 
 use super::{
     authority::AuthorityResolver,
     reselector::EndpointReselector,
     strategy::{Strategy, build_strategy},
 };
-use crate::{FilterError, filter::HttpFilterContext, load_balancing::endpoint::build_weighted_endpoints};
+use crate::{
+    FilterError,
+    filter::HttpFilterContext,
+    load_balancing::{
+        endpoint::build_weighted_endpoints,
+        slow_start::{EffectiveWeights, scaling_weights},
+    },
+};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -40,6 +49,9 @@ type RetryMemo = Vec<(Arc<RetryPolicy>, Arc<RetryPolicy>)>;
 
 /// Resolved state for a single cluster.
 pub(super) struct ClusterEntry {
+    /// The cluster's name, for logs, metrics, and errors.
+    name: Arc<str>,
+
     /// Upstream `Host` for each attempt; forwards the downstream `Host`
     /// when the cluster sets no authority.
     pub(super) authority: AuthorityResolver,
@@ -127,6 +139,54 @@ impl ClusterEntry {
             base_path: self.base_path.clone(),
             connection: Arc::clone(&self.opts),
             tls,
+        }
+    }
+
+    /// Pick an endpoint with this cluster's strategy, skipping
+    /// `exclude`d addresses.
+    ///
+    /// When every endpoint is unhealthy the strategy still picks one (panic
+    /// mode); the warning is logged once per all-unhealthy episode and the
+    /// panic-mode counter increments on every such pick. Slow-start
+    /// `weights` are applied only while they are scaling.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilterError`] when the strategy has no endpoint to offer.
+    pub(super) fn pick(
+        &self,
+        ctx: &HttpFilterContext<'_>,
+        health: Option<&ClusterHealthState>,
+        weights: Option<&EffectiveWeights>,
+        exclude: &[Arc<str>],
+    ) -> Result<Arc<str>, FilterError> {
+        self.note_panic_mode(health);
+        if scaling_weights(weights).is_some() {
+            self.strategy.select_weighted(ctx, health, exclude, weights)
+        } else {
+            self.strategy.select(ctx, health, exclude)
+        }
+        .ok_or_else(|| -> FilterError {
+            format!(
+                "load_balancer filter: cluster '{}' has no available endpoints",
+                self.name
+            )
+            .into()
+        })
+    }
+
+    /// Log and count panic mode when every endpoint of the cluster is down.
+    fn note_panic_mode(&self, health: Option<&ClusterHealthState>) {
+        let Some(health) = health else {
+            return;
+        };
+        if health.endpoints().iter().all(|ep| !ep.is_healthy()) {
+            if !self.panic_mode_logged.swap(true, Ordering::Relaxed) {
+                warn!(cluster = %self.name, "all endpoints unhealthy, routing to all (panic mode)");
+            }
+            crate::metrics::record_lb_panic_mode(SharedString::from(Arc::clone(&self.name)));
+        } else if self.panic_mode_logged.load(Ordering::Relaxed) {
+            self.panic_mode_logged.store(false, Ordering::Relaxed);
         }
     }
 
@@ -224,6 +284,7 @@ pub(super) fn build_cluster_entry(cluster: &Cluster) -> Result<ClusterEntry, Fil
         ClusterRetryState::new(retry_policy.retry_budget.as_ref()).with_max_concurrent(cluster.max_connections),
     );
     Ok(ClusterEntry {
+        name: Arc::clone(&cluster.name),
         authority,
         opts: Arc::new(ConnectionOptions::from(cluster)),
         strategy,
