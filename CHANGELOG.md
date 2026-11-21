@@ -31,6 +31,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `shutdown_timeout_secs` (which already includes this delay), any `preStop`
   hook, and final cleanup.
 
+- An opt-in `status_code` label on `praxis_http_requests_total`, enabled
+  with `metrics.labels.status_code: true`. It separates an auth
+  rejection from a rate limit, which `status_class` reports as one `4xx`
+  series. Codes outside the allowlist the proxy's own filters return
+  collapse to their class, so the dimension stays at about seventeen
+  values, and `status_class` is unchanged. Off by default, so no existing
+  series move.
+
 - Add configurable `/ready` policy: `admin.readiness: serving` (the default)
   keeps a serving replica ready during upstream degradation, while
   `admin.readiness: upstreams` preserves upstream-dependent readiness.
@@ -119,6 +127,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   retains each acquired endpoint claim through timeout and cancellation
   cleanup.
 - Update the Pingora fork dependencies to v0.11.4.
+- **Breaking:** `metrics.labels` takes one `true`/`false` setting per
+  dimension instead of the `disabled` list. The list could only remove a
+  dimension, so the new off-by-default `status_code` would have needed a
+  second, opposite list; one setting per dimension adds it without adding
+  a config surface. Omitted dimensions keep their defaults. A config using
+  `disabled` is rejected at startup with a message naming its replacement;
+  configs that never set `metrics.labels` are unaffected. Migrate
+  `disabled: [route, endpoint]` to `route: false` and `endpoint: false`.
+  A dimension set more than once is rejected rather than resolved to the
+  last value, matching how every other config struct treats a repeated
+  field.
 - **Breaking:** `HttpFilterContext::filter_metadata` is now a
   `FilterMetadata` instead of a `HashMap<String, String>`. Its `insert`
   enforces the key, value and entry limits and returns

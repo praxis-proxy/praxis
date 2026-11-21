@@ -608,6 +608,58 @@ Requires `admin.metrics_address` to scrape via `/metrics`.
 Enabling `filter_duration` without a metrics listener logs a startup
 warning; metrics are recorded but not exposed.
 
+### Label Dimensions
+
+`metrics.labels` selects which label dimensions metrics
+carry, bounding total time-series cardinality. Each
+dimension takes its own `true`/`false` setting.
+
+```yaml
+metrics:
+  labels:
+    route: false        # drop a dimension that defaults on
+    endpoint: false
+    status_code: true   # add a dimension that defaults off
+```
+
+A dimension you leave out keeps its default. Six default
+to on (`cluster`, `endpoint`, `listener`, `method`,
+`route`, `status_class`) and one defaults to off
+(`status_code`), so an empty `labels` block emits exactly
+the series Praxis emitted before this setting existed.
+
+Setting a dimension to `false` drops it from every metric
+that carries it. The metric stays available, with the
+series that differed only by that dimension collapsed
+into one. Setting one to the value it already has changes
+nothing.
+
+Each dimension may appear at most once. YAML keeps the
+last value for a repeated key, so a second
+`status_code:` line further down would silently override
+the first; Praxis rejects the config instead, naming the
+repeated dimension.
+
+The exception is `cluster` on the two per-cluster health
+gauges (`praxis_upstream_healthy_endpoints` and
+`praxis_upstream_total_endpoints`), which keep the label
+either way: those gauges are set rather than summed, so
+dropping it would collapse every cluster onto one
+last-writer series instead of lowering cardinality.
+
+Label selection installs once at startup and is not
+hot-reloadable. A reload that changes it is ignored and
+logs a warning; the new set takes effect on restart. For
+the per-dimension table and what enabling `status_code`
+costs, see
+[Metric Label Sets](observability.md#metric-label-sets).
+
+> **Changed:** this setting used to take a `disabled`
+> list, which could only remove a dimension. It was
+> replaced by the per-dimension form above. A config
+> still using `disabled` is rejected at startup with a
+> message naming the replacement.
+
 ## Header and Request Limits
 
 Praxis inherits header and request limits from Pingora's
