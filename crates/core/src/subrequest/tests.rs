@@ -3370,3 +3370,112 @@ async fn forwarding_progress_stays_false_before_contact() {
         }
     }
 }
+
+/// Admit at most one byte before parking at a known upload admission boundary.
+#[derive(Debug)]
+struct ForwardingAdmission {
+    /// Whether the first prefix may dispatch before admission blocks.
+    first: std::sync::atomic::AtomicBool,
+    /// Signals that the exchange is waiting for its next prefix.
+    waiting: tokio::sync::Notify,
+}
+
+impl super::UploadControl for ForwardingAdmission {
+    fn prepare(&self, _available: usize) -> std::pin::Pin<Box<dyn Future<Output = Result<usize, String>> + Send + '_>> {
+        Box::pin(async move {
+            if self.first.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                return Ok(1);
+            }
+            self.waiting.notify_one();
+            std::future::pending().await
+        })
+    }
+
+    fn sent(&self, _bytes: usize) {}
+}
+
+#[tokio::test]
+async fn forwarding_progress_follows_dispatch_across_upload_admission() {
+    use tokio::io::AsyncReadExt as _;
+
+    for streaming in [false, true] {
+        for first in [false, true] {
+            for cancel in [false, true] {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let peer = peer_for(listener.local_addr().unwrap());
+                let backend = tokio::spawn(async move {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let mut buffer = [0; 1024];
+                    while socket.read(&mut buffer).await.unwrap_or(0) != 0 {}
+                });
+                let control = Arc::new(ForwardingAdmission {
+                    first: std::sync::atomic::AtomicBool::new(first),
+                    waiting: tokio::sync::Notify::new(),
+                });
+                let upload: Arc<dyn super::UploadControl> = Arc::<ForwardingAdmission>::clone(&control);
+                let client = super::SubRequestClient::new(test_connector(4, None)).with_upload_control(upload);
+                let progress = RequestProgress::default();
+                let observed = progress.clone();
+                let worker = tokio::spawn(async move {
+                    let mut request = get_request("/");
+                    request.method = http::Method::POST;
+                    request
+                        .headers
+                        .insert(http::header::CONTENT_LENGTH, HeaderValue::from_static("2"));
+                    request.body = Bytes::from_static(b"ab");
+                    if streaming {
+                        Box::pin(client.send_streaming_with_progress(
+                            &peer,
+                            &request,
+                            Duration::from_secs(60),
+                            StreamLimits {
+                                idle_timeout: Duration::from_secs(60),
+                                max_stream_duration: None,
+                                max_total_bytes: Some(1024),
+                            },
+                            None,
+                            Some(&observed),
+                        ))
+                        .await
+                        .map(|_| ())
+                    } else {
+                        Box::pin(client.execute_with_progress(
+                            &peer,
+                            &request,
+                            1024,
+                            Duration::from_secs(60),
+                            None,
+                            &observed,
+                        ))
+                        .await
+                        .map(|_| ())
+                    }
+                });
+                tokio::time::timeout(Duration::from_secs(10), control.waiting.notified())
+                    .await
+                    .unwrap();
+                let dispatched = cfg!(feature = "pingora") || first;
+                assert_eq!(
+                    progress.forwarded(),
+                    dispatched,
+                    "staged Hyper headers are not dispatched"
+                );
+                if cancel {
+                    worker.abort();
+                    assert!(worker.await.unwrap_err().is_cancelled());
+                } else {
+                    tokio::time::pause();
+                    tokio::time::advance(Duration::from_secs(61)).await;
+                    assert!(matches!(worker.await.unwrap(), Err(SubRequestError::DeadlineExceeded)));
+                    tokio::time::resume();
+                }
+                assert_eq!(
+                    progress.forwarded(),
+                    dispatched,
+                    "terminal paths preserve dispatch evidence"
+                );
+                backend.abort();
+            }
+        }
+    }
+}

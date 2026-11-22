@@ -6,7 +6,10 @@
 use std::{
     fmt, mem,
     net::SocketAddr,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     task::{Context, Poll},
     time::Duration,
 };
@@ -143,6 +146,9 @@ pub struct HyperSession {
     /// Accepted payload from completed controlled prefixes.
     body_sent: u64,
 
+    /// Caller-owned evidence published only when the staged request dispatches.
+    dispatch_observer: Option<Arc<AtomicBool>>,
+
     /// Declared payload length, when HTTP/1 completes without polling another frame.
     expected_body: Option<u64>,
 
@@ -175,6 +181,7 @@ impl HyperSession {
             key,
             outbound: Outbound::Unsent,
             body_sent: 0,
+            dispatch_observer: None,
             expected_body: None,
             pending_body: None,
             read_timeout: peer.connection.read_timeout,
@@ -281,6 +288,9 @@ impl HyperSession {
             self.interim = Some(watch_interim(&mut request));
         }
         self.inbound = Inbound::Awaiting(self.connection.send(request));
+        if let Some(observer) = self.dispatch_observer.take() {
+            observer.store(true, Ordering::Release);
+        }
         Ok(())
     }
 
@@ -493,6 +503,10 @@ impl HyperSession {
 }
 
 impl Session for HyperSession {
+    fn track_request_dispatch(&mut self, dispatched: Arc<AtomicBool>) {
+        self.dispatch_observer = Some(dispatched);
+    }
+
     fn reused(&self) -> bool {
         self.exchange.reused()
     }

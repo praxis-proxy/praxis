@@ -26,25 +26,26 @@ use tokio::sync::OwnedSemaphorePermit;
 use super::internals::SubRequestConnector;
 use crate::{backend, egress::Connector};
 
-/// Per-exchange evidence that a connected transport accepted the request head.
+/// Per-exchange evidence that the transport dispatched the request.
 ///
 /// Create a fresh witness for each attempt. Clones observe the same attempt,
 /// including after its future is cancelled. A true value does not prove that
 /// the backend processed the request; it preserves that possibility after a
-/// response read fails. Admission, validation and failed dials leave it false.
+/// response read fails. Validation, connection admission and failed dials leave
+/// it false. Upload admission retains any head already dispatched.
 #[derive(Clone, Debug, Default)]
 pub struct RequestProgress(Arc<AtomicBool>);
 
 impl RequestProgress {
-    /// Whether this attempt successfully sent its request head.
+    /// Whether this attempt reached the backend's request dispatch boundary.
     #[must_use]
     pub fn forwarded(&self) -> bool {
         self.0.load(Ordering::Acquire)
     }
 
-    /// Publish forwarding only after the transport's head write succeeds.
-    pub(super) fn mark_forwarded(&self) {
-        self.0.store(true, Ordering::Release);
+    /// Share the witness with the backend that owns the dispatch boundary.
+    pub(super) fn dispatch_witness(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.0)
     }
 }
 

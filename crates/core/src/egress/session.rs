@@ -3,7 +3,13 @@
 
 //! The connection contract a backend implements: open, send, receive, release.
 
-use std::time::Duration;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use bytes::Bytes;
 use http::{HeaderMap, Method, Version};
@@ -149,6 +155,14 @@ pub trait Session: Send + 'static {
 
     /// Send the request line and headers.
     fn send_request_head(&mut self, head: RequestHead) -> impl Future<Output = Result<(), EgressError>> + Send;
+
+    /// Track dispatch after a successful head operation, before sending a body.
+    ///
+    /// Direct writers have already sent the head. Backends that stage it must
+    /// override this method and notify only when they dispatch the request.
+    fn track_request_dispatch(&mut self, dispatched: Arc<AtomicBool>) {
+        dispatched.store(true, Ordering::Release);
+    }
 
     /// Send one body chunk; `end_of_stream` marks it as the last.
     fn send_request_body(
