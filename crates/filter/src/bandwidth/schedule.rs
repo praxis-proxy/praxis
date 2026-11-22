@@ -88,16 +88,18 @@ impl Schedule {
     /// Create an independent upload or download budget.
     pub(crate) fn new(rate: u64, burst_bytes: u64) -> Arc<Self> {
         let (changed, _receiver) = watch::channel(());
+        // Amortize timer ticks with up to 10 ms of zero-burst traffic, while
+        // bounding each pending write to one MiB and charging its full cost.
         let quantum = if burst_bytes == 0 {
-            rate.div_ceil(100).max(1)
+            rate.div_ceil(100).clamp(1, 1_048_576)
         } else {
-            burst_bytes
+            burst_bytes.min(16_384)
         };
         Arc::new(Self {
             epoch: Instant::now(),
             rate,
             burst_ns: bytes_to_ns(burst_bytes, rate),
-            quantum: quantum.min(16_384),
+            quantum,
             inner: Mutex::new(ScheduleInner {
                 tat: 0,
                 initialized: false,
@@ -583,6 +585,19 @@ mod tests {
         let schedule = Schedule::new(1_000, 0);
         let grant = schedule.reserve_at(1_000, 0);
         assert_eq!(grant.delay(), Duration::from_secs(1), "the first byte waits its cost");
+    }
+
+    #[test]
+    fn zero_burst_prefixes_amortize_timer_ticks_without_free_allowance() {
+        let rate = 104_857_600;
+        let schedule = Schedule::new(rate, 0);
+        assert_eq!(schedule.quantum, 1_048_576);
+        let prefix = schedule.reserve_at(schedule.quantum, 0);
+        assert_eq!(prefix.delay(), Duration::from_millis(10));
+        assert!(!Schedule::new(rate, 0).reserve_at(1, 0).delay().is_zero());
+        assert_eq!(Schedule::new(u64::MAX, 0).quantum, 1_048_576);
+        assert_eq!(Schedule::new(1, 0).quantum, 1);
+        assert_eq!(Schedule::new(rate, u64::MAX).quantum, 16_384);
     }
 
     #[test]

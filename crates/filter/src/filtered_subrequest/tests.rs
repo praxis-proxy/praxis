@@ -5689,3 +5689,35 @@ fn paced_extensions() -> crate::RequestExtensions {
     extensions.insert(socket);
     extensions
 }
+
+#[cfg(feature = "bandwidth")]
+#[tokio::test]
+async fn high_rate_zero_burst_callout_meets_its_deadline() {
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+    let download = vec![b'd'; 16 * 1_048_576];
+    let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (addr, backend) = spawn_recording_backend(http_ok(&download), Arc::clone(&captured)).await;
+    let registry = crate::FilterRegistry::with_builtins();
+    let mut entries: Vec<crate::FilterEntry> = serde_yaml::from_str(&paced_chain(addr, 104_857_600, false)).unwrap();
+    let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
+    let executor = buffered_executor(download.len());
+    let request = crate::SubRequest {
+        method: http::Method::GET,
+        uri: http::Uri::from_static("/"),
+        headers: HeaderMap::new(),
+        body: bytes::Bytes::new(),
+    };
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let response = Box::pin(executor.run(&pipeline, &request, paced_extensions(), deadline))
+        .await
+        .expect("100 MiB/s must not be limited to one 16 KiB prefix per timer tick");
+    backend.await.unwrap();
+    let crate::CalloutResponse::Buffered(response) = response else {
+        panic!("buffered response expected");
+    };
+    assert_eq!(response.status, 200);
+    assert_eq!(response.body.as_ref(), download.as_slice());
+}

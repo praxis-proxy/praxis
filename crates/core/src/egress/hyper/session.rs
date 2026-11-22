@@ -608,6 +608,22 @@ impl Session for HyperSession {
         within(self.read_timeout, Phase::Read, self.next_head()).await?
     }
 
+    async fn try_read_final_response_head(&mut self) -> bool {
+        let Inbound::Awaiting(pending) = &mut self.inbound else {
+            return false;
+        };
+        let available = std::future::poll_fn(|cx| Poll::Ready(pending.as_mut().poll(cx))).await;
+        let Poll::Ready(Ok(response)) = available else {
+            return false;
+        };
+        // The response future yields only a final head. Queued informational
+        // heads must not obscure an already completed rejection on this path.
+        self.interim = None;
+        self.accept_final(response);
+        self.outbound = Outbound::Done;
+        true
+    }
+
     fn response_head(&self) -> Result<ResponseHead<'_>, EgressError> {
         let head = self
             .head

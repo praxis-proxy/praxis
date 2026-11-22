@@ -478,8 +478,12 @@ impl<C: Connector> SubRequestClient<C> {
             session.track_request_dispatch(progress.dispatch_witness());
         }
 
+        let mut ready_response = false;
         if let Some(control) = &self.upload_control {
-            super::upload::send_controlled(&mut session, request.body.clone(), control, deadline, write_timeout)
+            let written =
+                super::upload::send_controlled(&mut session, request.body.clone(), control, deadline, write_timeout)
+                    .await;
+            ready_response = super::upload::prefer_final_response(&mut session, written)
                 .await
                 .map_err(|err| charge(&mut circuit_guard, err))?;
         } else if !request.body.is_empty() {
@@ -503,21 +507,21 @@ impl<C: Connector> SubRequestClient<C> {
             .map_err(|err| charge(&mut circuit_guard, transport_error(err)))?;
         }
 
-        let finish_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if finish_budget.is_zero() {
-            session.shutdown().await;
-            return Err(charge(&mut circuit_guard, SubRequestError::DeadlineExceeded));
+        if !ready_response {
+            let finish_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if finish_budget.is_zero() {
+                session.shutdown().await;
+                return Err(charge(&mut circuit_guard, SubRequestError::DeadlineExceeded));
+            }
+            let finish_write_timeout = min_timeout(write_timeout, finish_budget);
+            let finished = tokio::time::timeout(finish_write_timeout, session.finish_request())
+                .await
+                .map_err(|_elapsed| classify_timeout(finish_budget, write_timeout, "write"))
+                .and_then(|result| result.map_err(transport_error));
+            ready_response = super::upload::prefer_final_response(&mut session, finished)
+                .await
+                .map_err(|err| charge(&mut circuit_guard, err))?;
         }
-        let finish_write_timeout = min_timeout(write_timeout, finish_budget);
-        tokio::time::timeout(finish_write_timeout, session.finish_request())
-            .await
-            .map_err(|_elapsed| {
-                charge(
-                    &mut circuit_guard,
-                    classify_timeout(finish_budget, write_timeout, "write"),
-                )
-            })?
-            .map_err(|err| charge(&mut circuit_guard, transport_error(err)))?;
 
         // ---------------------------------------------------------------------
         // 6. Read the response header, skipping 1xx interim responses
@@ -539,10 +543,14 @@ impl<C: Connector> SubRequestClient<C> {
             }
             let read_wait = min_timeout(read_timeout, read_budget);
 
-            tokio::time::timeout(read_wait, session.read_response_head())
-                .await
-                .map_err(|_elapsed| charge(&mut circuit_guard, classify_timeout(read_budget, read_timeout, "read")))?
-                .map_err(|err| charge(&mut circuit_guard, transport_error(err)))?;
+            if !std::mem::take(&mut ready_response) {
+                tokio::time::timeout(read_wait, session.read_response_head())
+                    .await
+                    .map_err(|_elapsed| {
+                        charge(&mut circuit_guard, classify_timeout(read_budget, read_timeout, "read"))
+                    })?
+                    .map_err(|err| charge(&mut circuit_guard, transport_error(err)))?;
+            }
 
             let candidate = session
                 .response_head()

@@ -100,6 +100,23 @@ pub(super) async fn send_controlled<S: Session>(
     Ok(())
 }
 
+/// Prefer a final upstream response already available when a body write fails.
+pub(super) async fn prefer_final_response<S: Session>(
+    session: &mut S,
+    result: Result<(), SubRequestError>,
+) -> Result<bool, SubRequestError> {
+    match result {
+        Ok(()) => Ok(false),
+        Err(error) => {
+            if session.try_read_final_response_head().await {
+                Ok(true)
+            } else {
+                Err(error)
+            }
+        },
+    }
+}
+
 /// Enforce the exchange deadline without interpreting pacing as a write timeout.
 async fn prepare(control: &dyn UploadControl, available: usize, deadline: Instant) -> Result<usize, SubRequestError> {
     let result = tokio::time::timeout_at(deadline, control.prepare(available)).await;

@@ -21,13 +21,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - Core policy-enforcement guide with PPE use cases, integration conditions,
   and links from onboarding, architecture, and security documentation.
-- Expose compact JSON sizing and capped serialization utilities in
-  `praxis_filter::json_size` for built-in and external filters.
-
 - Experimental `bandwidth` filter-library support for independent upload
   and download budgets, per downstream connection or source IP, with burst
   allowances, bounded tracking, and cancellable prefix reservations. Optional
   `ipv6_prefix_len` groups IPv6 clients by a configured network prefix.
+
+- Expose compact JSON sizing and capped serialization utilities in
+  `praxis_filter::json_size` for built-in and external filters.
+
 - Add `shutdown_drain_delay_secs` for readiness-first SIGTERM handoff. The
   process becomes unready, waits for the configured delay, then begins
   graceful connection shutdown; HTTP/1 responses during the drain advertise
@@ -99,10 +100,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Strip reserved and hop-by-hop headers from preformatted gRPC rejections while retaining safe gRPC fields, and frame empty HTTP/1 responses with one correct zero length even when filters supply stale or conflicting lengths.
+- Preserve final body-filter bytes with forwarded trailers on Hyper; abort Pingora delivery when both outputs cannot be represented or EOF filtering fails, while retaining ordinary trailers and deliberate conversion.
+
 - Record Hyper subrequest forwarding at dispatch rather than header staging,
   while preserving Pingora's header-write evidence during upload admission.
 
 - Return gRPC `DEADLINE_EXCEEDED` when Pingora's rounded upstream timeout fires just before the call's exact deadline, while preserving earlier transport timeouts.
+- Scale bounded zero-burst callout prefixes with the byte rate to amortize
+  timer resolution, and preserve available upstream rejections after paced upload failures.
 - Check every logical subrequest output against its size limit before pacing,
   including output following empty emissions or consuming callbacks.
 
@@ -128,8 +134,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   library hosts must supply a stable identity and a live `ConnectionAlive` watch.
 - Resolve the pinned Pingora upload APIs for external source consumers without
   requiring their workspaces to inherit dependency patches.
-- Strip reserved and hop-by-hop headers from preformatted gRPC rejections while retaining safe gRPC fields, and frame empty HTTP/1 responses with one correct zero length even when filters supply stale or conflicting lengths.
-- Preserve final body-filter bytes with forwarded trailers on Hyper; abort Pingora delivery when both outputs cannot be represented or EOF filtering fails, while retaining ordinary trailers and deliberate conversion.
 - Keep requests streaming when any repeated Accept field contains text/event-stream.
 - Correct the multi-listener body example description to match its field extraction and routing behavior.
 - Clarify request ID handling, rewrite scope, and routing order in the logging and transformation examples.
