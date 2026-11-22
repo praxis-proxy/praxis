@@ -829,6 +829,41 @@ mod continuous_tests {
         );
     }
 
+    /// Stop the load worker even when its test peer exits through unwinding.
+    struct StopWorkerOnExit(Arc<AtomicBool>);
+
+    impl Drop for StopWorkerOnExit {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn http2_worker_stops_when_goaway_peer_panics() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listen");
+        let endpoint = listener.local_addr().expect("address").to_string();
+        let stop = Arc::new(AtomicBool::new(false));
+        let server_stop = Arc::clone(&stop);
+        let server = std::thread::spawn(move || {
+            let _stop_on_exit = StopWorkerOnExit(server_stop);
+            let (_stream, _) = listener.accept().expect("accept");
+            panic!("GOAWAY peer failed before completing the exchange");
+        });
+        let worker_stop = Arc::clone(&stop);
+        let (finished, completion) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            http2_worker(&worker_stop, &ContinuousLoadReport::default(), &endpoint);
+            finished.send(()).expect("worker completion");
+        });
+        let result = completion.recv_timeout(IO_TIMEOUT + Duration::from_secs(1));
+        let stopped = stop.load(Ordering::SeqCst);
+        stop.store(true, Ordering::SeqCst);
+        worker.join().expect("worker");
+        assert!(server.join().is_err(), "the peer failure must remain observable");
+        result.expect("the failed peer must stop the retrying worker");
+        assert!(stopped, "the peer must stop its worker before fallback cleanup");
+    }
+
     /// Unprocessed streams may be replayed per [RFC 9113 Section 6.8].
     ///
     /// [RFC 9113 Section 6.8]: https://datatracker.ietf.org/doc/html/rfc9113#section-6.8
@@ -844,6 +879,7 @@ mod continuous_tests {
             let stop = Arc::new(AtomicBool::new(false));
             let server_stop = Arc::clone(&stop);
             let server = std::thread::spawn(move || {
+                let _stop_on_exit = StopWorkerOnExit(Arc::clone(&server_stop));
                 worker_runtime().block_on(async {
                     for index in 1..=rejections {
                         let (stream, _) = listener.accept().expect("accept GOAWAY connection");
