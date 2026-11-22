@@ -475,7 +475,7 @@ impl<C: Connector> SubRequestClient<C> {
             })?
             .map_err(|err| charge(&mut circuit_guard, transport_error(err)))?;
         if let Some(progress) = progress {
-            progress.mark_forwarded();
+            session.track_request_dispatch(progress.dispatch_witness());
         }
 
         if let Some(control) = &self.upload_control {

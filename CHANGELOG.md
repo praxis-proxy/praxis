@@ -99,6 +99,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Record Hyper subrequest forwarding at dispatch rather than header staging,
+  while preserving Pingora's header-write evidence during upload admission.
+
 - Return gRPC `DEADLINE_EXCEEDED` when Pingora's rounded upstream timeout fires just before the call's exact deadline, while preserving earlier transport timeouts.
 - Check every logical subrequest output against its size limit before pacing,
   including output following empty emissions or consuming callbacks.
