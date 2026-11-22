@@ -176,6 +176,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Return gRPC `DEADLINE_EXCEEDED` when Pingora's rounded upstream timeout fires just before the call's exact deadline, while preserving earlier transport timeouts.
 - Scale bounded zero-burst callout prefixes with the byte rate to amortize
   timer resolution, and preserve available upstream rejections after paced upload failures.
+- Upgrade `url` to 2.5.9 to prevent stack overflow when deriving origins from
+  nested `blob:` URLs (RUSTSEC-2026-0592).
 - Check every logical subrequest output against its size limit before pacing,
   including output following empty emissions or consuming callbacks.
 

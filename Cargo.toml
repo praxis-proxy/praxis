@@ -163,7 +163,7 @@ tracing-appender = "0.2.5"
 tracing-opentelemetry = "0.34.0"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json", "registry"] }
 unicase = "2.10.0"
-url = "2.5.8"
+url = "2.5.9"
 zeroize = "1.9.2"
 
 [profile.release]
