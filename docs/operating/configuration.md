@@ -136,13 +136,11 @@ rather than silently adopted as the baseline.
   has one, or a change to
   `insecure_options.allow_private_upstreams` while a
   bound listener has an enabled block. The CONNECT
-  runtime (not yet in this release; the block is parsed
-  and validated but accepts no CONNECT) captures the
-  CONNECT gate, destination rules, tunnel timeouts, and
-  the private-address setting when the handler starts.
-  These reloads are refused now so that applying only
-  the new pipeline can never leave CONNECT open with
-  the egress filters removed once it lands.
+  runtime captures the CONNECT gate, destination rules,
+  tunnel timeouts, and the private-address setting when
+  the handler starts, so these reloads are refused:
+  applying only the new pipeline could leave CONNECT open
+  with the egress filters removed.
 
 Stateful filters (rate limiter, circuit breaker) reset
 their state on reload. Operators should expect a brief
@@ -996,7 +994,8 @@ the ramp. See
 
 A route may set `hedge_policy` to race one idempotent client request across
 healthy endpoints in its cluster. The proxy must be built with the
-`hedged-requests` feature. `initial_requests` start at once. Each later copy
+`hedged-requests` feature. GET, HEAD, OPTIONS, and QUERY are eligible.
+`initial_requests` start at once. Each later copy
 waits `per_try_timeout_ms`, unless nothing is left in flight, in which case
 the next copy starts immediately while `max_attempts` and the budget allow
 it. A 2xx, 3xx, or 4xx response is terminal: it is returned and the other

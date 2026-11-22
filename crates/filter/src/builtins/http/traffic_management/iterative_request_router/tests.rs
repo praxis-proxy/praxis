@@ -336,6 +336,29 @@ steps:
     );
 }
 
+#[test]
+fn accepts_a_head_filter_that_repeats_its_work_in_a_step() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        "
+initial_step: step1
+steps:
+  - name: step1
+    filters:
+      - filter: grpc_status
+      - filter: static_response
+        status: 200
+    on_result:
+      - default: true
+        done: true
+",
+    )
+    .unwrap();
+    assert!(
+        super::IterativeRequestRouterFilter::from_config(&yaml).is_ok(),
+        "grpc_status arms in on_request too, so a step can run it"
+    );
+}
+
 #[cfg(feature = "cloud-events-filter")]
 #[test]
 fn rejects_request_complete_cloud_events_in_step() {

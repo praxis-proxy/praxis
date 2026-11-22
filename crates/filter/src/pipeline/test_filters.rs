@@ -40,6 +40,34 @@ pub(in crate::pipeline) fn noop_filter(name: &'static str) -> PipelineFilter {
     })
 }
 
+/// A filter named `name` whose request phase can end the request.
+pub(in crate::pipeline) fn ending_filter(name: &'static str) -> PipelineFilter {
+    capability_filter(CapabilityFilter {
+        name,
+        ends_request: true,
+        ..CapabilityFilter::default()
+    })
+}
+
+/// A filter named `name` that runs in the request-head phase.
+pub(in crate::pipeline) fn head_filter(name: &'static str) -> PipelineFilter {
+    capability_filter(CapabilityFilter {
+        name,
+        runs_request_head: true,
+        ..CapabilityFilter::default()
+    })
+}
+
+/// A filter named `name` whose request-head hook admits, as `policy` does.
+pub(in crate::pipeline) fn admitting_head_filter(name: &'static str) -> PipelineFilter {
+    capability_filter(CapabilityFilter {
+        name,
+        runs_request_head: true,
+        admits_at_request_head: true,
+        ..CapabilityFilter::default()
+    })
+}
+
 #[cfg(feature = "upstream-binding")]
 pub(in crate::pipeline) fn terminal_filter(name: &'static str) -> PipelineFilter {
     capability_filter(CapabilityFilter {
@@ -158,12 +186,9 @@ fn capability_filter(filter: CapabilityFilter) -> PipelineFilter {
 }
 
 #[derive(Default)]
-#[cfg_attr(
-    feature = "upstream-binding",
-    expect(
-        clippy::struct_excessive_bools,
-        reason = "test-only capability record; each flag toggles one independent HttpFilter capability"
-    )
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "test-only capability record; each flag toggles one independent HttpFilter capability"
 )]
 struct CapabilityFilter {
     name: &'static str,
@@ -183,6 +208,9 @@ struct CapabilityFilter {
     #[cfg(feature = "upstream-binding")]
     declared_metadata: Vec<ClusterMetadataDeclaration>,
     produces_terminal_response: bool,
+    runs_request_head: bool,
+    admits_at_request_head: bool,
+    ends_request: bool,
 }
 
 #[async_trait]
@@ -233,6 +261,18 @@ impl HttpFilter for CapabilityFilter {
 
     fn produces_terminal_response(&self) -> bool {
         self.produces_terminal_response
+    }
+
+    fn runs_request_head(&self) -> bool {
+        self.runs_request_head
+    }
+
+    fn admits_at_request_head(&self) -> bool {
+        self.admits_at_request_head
+    }
+
+    fn may_end_request(&self) -> bool {
+        self.ends_request
     }
 
     #[cfg(feature = "upstream-binding")]

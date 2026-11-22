@@ -47,8 +47,6 @@ dhat = "0.3.3"
 governor = "0.10.4"
 dashmap = "6.2.1"
 futures = "0.3.34"
-# Same backend pingora already builds (zlib-ng), so xtask adds no crate to the lockfile.
-flate2 = { version = "1.1.11", default-features = false, features = ["zlib-ng"] }
 h2 = "0.4.20"
 http = "1.5.0"
 # The hyper network backend (the `hyper` feature of praxis-proxy-core and
@@ -62,7 +60,6 @@ metrics = "0.24.6"
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 nix = { version = "0.31.4", default-features = false, features = ["process", "resource", "signal", "user"] }
 notify = "8.2.2"
-object = { version = "0.41.0", default-features = false, features = ["read_core", "elf", "std"] }
 opentelemetry = { version = "0.33.1", default-features = false, features = ["trace"] }
 opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["trace", "rt-tokio"] }
 opentelemetry-otlp = { version = "0.33.1", default-features = false, features = ["grpc-tonic", "http-proto", "reqwest-client", "tls-provider-agnostic", "tls-roots", "trace"] }
@@ -168,11 +165,6 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json", "re
 unicase = "2.10.0"
 url = "2.5.8"
 zeroize = "1.9.2"
-
-[patch.crates-io]
-# Limitador only needs postcard's standard collections. Disable its unused
-# heapless defaults until an upstream release includes the manifest fix.
-limitador = { git = "https://github.com/rkaplan-hub/limitador.git", rev = "27ac93a0504481cde7bfe5e97cc22c165ed8e806" }
 
 [profile.release]
 codegen-units = 1

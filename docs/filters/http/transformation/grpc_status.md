@@ -7,9 +7,11 @@ Answers proxy-generated errors in the shape gRPC clients expect.
 
 ## Configuration Notes
 
-gRPC carries a call's outcome in a `grpc-status` header on an HTTP `200`, not in the HTTP status. When Praxis rejects a call itself — an ACL denial, a missing route, an unreachable upstream — it writes an ordinary HTTP error, which a gRPC client reports as a transport failure with no usable status. This filter marks the request so those errors are emitted as Trailers-Only responses instead: a single header block, no body, with `grpc-status` mapped from the HTTP status Praxis chose.
+gRPC carries a call's outcome in a `grpc-status` header on an HTTP `200`, not in the HTTP status. When Praxis rejects a call itself — an ACL denial, a missing route, an unreachable upstream — it writes an ordinary HTTP error, which a gRPC client reports as a transport failure with no usable status. This filter marks the request so those errors are emitted as Trailers-Only responses instead: a single header block, no body, with `grpc-status` mapped from the HTTP status Praxis chose. Applies to rejections from later request-head filters too, including `policy` admission.
 
 Successful short-circuits (a CORS preflight, a `static_response`) are left as real HTTP responses: only error statuses become gRPC statuses.
+
+A forward-proxy `CONNECT` is always refused in plain HTTP: it is never a gRPC call, and gRPC's HTTP `200` would tell the client its tunnel is open.
 
 Non-gRPC requests are untouched, so a listener can carry mixed traffic.
 

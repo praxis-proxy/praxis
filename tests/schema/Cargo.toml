@@ -17,6 +17,7 @@ tls-health-check = ["praxis-test-utils/tls-health-check"]
 spiffe = ["praxis-core/spiffe"]
 upstream-binding = ["praxis-core/upstream-binding"]
 slow-start = ["praxis-core/slow-start"]
+forward-proxy = ["praxis-core/forward-proxy"]
 cloud-events-filter = ["praxis-filter/cloud-events-filter"]
 
 [lints]

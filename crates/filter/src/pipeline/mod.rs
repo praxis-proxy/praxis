@@ -173,6 +173,9 @@ pub struct FilterPipeline {
     /// [`execute_http_request_head`]: FilterPipeline::execute_http_request_head
     request_head_filter_indices: Vec<usize>,
 
+    /// Filter indices whose body denials must preserve earlier request filters' precedence.
+    shielded_admitter_indices: Vec<usize>,
+
     /// Indices into `filters` of filters declaring request-body access.
     request_body_filter_indices: Vec<usize>,
 
@@ -429,6 +432,16 @@ impl FilterPipeline {
     #[must_use]
     pub fn has_request_head_phase(&self) -> bool {
         !self.request_head_filter_indices.is_empty()
+    }
+
+    /// Whether any filter requires a request-head phase to function correctly.
+    #[must_use]
+    pub fn requires_request_head_phase(&self) -> bool {
+        self.request_head_filter_indices.iter().any(|&idx| {
+            self.filters
+                .get(idx)
+                .is_some_and(|pf| matches!(&pf.filter, AnyFilter::Http(filter) if !filter.repeats_request_head()))
+        })
     }
 
     /// Number of filters in the pipeline.

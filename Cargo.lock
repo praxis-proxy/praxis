@@ -2323,8 +2323,9 @@ dependencies = [
 
 [[package]]
 name = "limitador"
-version = "0.14.0"
-source = "git+https://github.com/rkaplan-hub/limitador.git?rev=27ac93a0504481cde7bfe5e97cc22c165ed8e806#27ac93a0504481cde7bfe5e97cc22c165ed8e806"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "371eda62d2fe9465c815c7fae2103343c89a365a28cd03b3a731424300b9c832"
 dependencies = [
  "async-trait",
  "cel 0.12.0",
@@ -2791,15 +2792,6 @@ name = "object"
 version = "0.40.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dd229a0361b9d0d4396176e02d65897f487eebeab7caa6d443855ee152ca0b9c"
-dependencies = [
- "memchr",
-]
-
-[[package]]
-name = "object"
-version = "0.41.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11dbdb66876026054e4ffc8d757d862bdf5df5aebd5c0b95a41f17832a94f7d2"
 dependencies = [
  "memchr",
 ]
@@ -6166,9 +6158,7 @@ dependencies = [
  "cargo_metadata",
  "chrono",
  "clap",
- "flate2",
  "nix",
- "object 0.41.0",
  "openssl",
  "plotters",
  "praxis-proxy",
@@ -6176,7 +6166,6 @@ dependencies = [
  "praxis-proxy-core",
  "praxis-tests-rollout",
  "quote",
- "regex",
  "serde",
  "serde_json",
  "syn 3.0.10",
