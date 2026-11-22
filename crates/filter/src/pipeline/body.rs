@@ -105,29 +105,52 @@ pub(super) fn body_filter_indices(filters: &[PipelineFilter]) -> (Vec<usize>, Ve
     (request, response)
 }
 
-/// Precompute the pipeline indices of top-level filters that run the
-/// request-head phase.
+/// Indices of top-level filters eligible to run their request-head hooks.
 ///
-/// The head loop runs each of these filters' [`on_request_head`] hook before
-/// any `StreamBuffer` request-body pre-read; walking only these indices skips
-/// non-participating filters without a per-request predicate check. A filter
-/// opts in by overriding [`runs_request_head`].
+/// Excludes admitting filters that must [admit in the request phase].
 ///
-/// Top-level only: branch filters never run the head hook, matching the
-/// body-phase precompute helpers.
-///
-/// [`on_request_head`]: crate::HttpFilter::on_request_head
-/// [`runs_request_head`]: crate::HttpFilter::runs_request_head
+/// [admit in the request phase]: admits_in_request_phase
 pub(super) fn request_head_filter_indices(filters: &[PipelineFilter]) -> Vec<usize> {
     let mut indices = Vec::new();
     for (idx, pf) in filters.iter().enumerate() {
         if let AnyFilter::Http(f) = &pf.filter
             && f.runs_request_head()
+            && !(f.admits_at_request_head() && admits_in_request_phase(filters, idx))
         {
             indices.push(idx);
         }
     }
     indices
+}
+
+/// Whether the admitting filter at `position` must wait for the request phase.
+pub(super) fn admits_in_request_phase(filters: &[PipelineFilter], position: usize) -> bool {
+    filters.get(position).is_some_and(|pf| !pf.conditions.is_empty())
+        || first_request_ender(filters, position).is_some()
+}
+
+/// Indices of top-level admitting filters whose body denials must preserve
+/// earlier request filters' precedence.
+pub(super) fn shielded_admitter_indices(filters: &[PipelineFilter]) -> Vec<usize> {
+    filters
+        .iter()
+        .enumerate()
+        .filter(|(idx, pf)| {
+            matches!(&pf.filter, AnyFilter::Http(f) if f.admits_at_request_head())
+                && first_request_ender(filters, *idx).is_some()
+        })
+        .map(|(idx, _)| idx)
+        .collect()
+}
+
+/// The first filter before `position` that can end the request in its request
+/// phase.
+pub(super) fn first_request_ender(filters: &[PipelineFilter], position: usize) -> Option<&PipelineFilter> {
+    filters
+        .get(..position)
+        .unwrap_or_default()
+        .iter()
+        .find(|pf| pf.can_end_request())
 }
 
 /// Precompute the pipeline indices of filters that declared
@@ -1227,6 +1250,94 @@ mod tests {
         assert!(
             caps.any_request_body_writer,
             "the bound phase declares ReadWrite, so capability calc must mark the body as written"
+        );
+    }
+
+    #[test]
+    fn an_admitting_head_filter_is_left_out_behind_a_filter_that_can_end_the_request() {
+        use crate::pipeline::test_filters::{admitting_head_filter, ending_filter, head_filter, noop_filter};
+
+        let indices = request_head_filter_indices(&[
+            ending_filter("ip_acl"),
+            admitting_head_filter("policy"),
+            head_filter("classifier"),
+        ]);
+        assert_eq!(
+            indices,
+            vec![2],
+            "the policy admits in the request phase; the classifier still runs"
+        );
+
+        let indices = request_head_filter_indices(&[noop_filter("static_response"), admitting_head_filter("policy")]);
+        assert!(indices.is_empty(), "an answering filter shields the policy too");
+
+        let indices = request_head_filter_indices(&[head_filter("classifier"), admitting_head_filter("policy")]);
+        assert_eq!(indices, vec![0, 1], "a fact-publishing filter ends nothing");
+
+        let mut forwarded_headers = noop_filter("forwarded_headers");
+        forwarded_headers.is_security = true;
+        let indices = request_head_filter_indices(&[forwarded_headers, admitting_head_filter("policy")]);
+        assert_eq!(
+            indices,
+            vec![1],
+            "a security filter whose request phase only continues ends nothing"
+        );
+
+        let mut gated = noop_filter("gate");
+        gated.branches.push(crate::pipeline::branch::ResolvedBranch {
+            condition: None,
+            filters: vec![noop_filter("static_response")],
+            max_iterations: None,
+            name: std::sync::Arc::from("health"),
+            rejoin: crate::pipeline::branch::RejoinTarget::Next,
+        });
+        let indices = request_head_filter_indices(&[gated, admitting_head_filter("policy")]);
+        assert!(
+            indices.is_empty(),
+            "an answering filter in a branch can end the request too"
+        );
+    }
+
+    #[test]
+    fn only_admitting_filters_behind_a_request_ender_are_shielded() {
+        use crate::pipeline::test_filters::{admitting_head_filter, ending_filter, head_filter};
+
+        let filters = [
+            admitting_head_filter("first"),
+            ending_filter("cors"),
+            head_filter("classifier"),
+            admitting_head_filter("policy"),
+        ];
+        assert_eq!(shielded_admitter_indices(&filters), vec![3]);
+    }
+
+    #[test]
+    fn a_conditional_admitting_head_filter_is_left_out() {
+        use crate::pipeline::test_filters::{admitting_head_filter, head_filter};
+
+        let conditional = |mut pf: PipelineFilter| {
+            pf.conditions = vec![praxis_core::config::Condition::When(
+                praxis_core::config::ConditionMatch {
+                    grpc: None,
+                    path: None,
+                    path_prefix: Some("/api".to_owned()),
+                    methods: None,
+                    headers: None,
+                    headers_present: None,
+                    bound_upstream: None,
+                    selected_upstream: None,
+                },
+            )];
+            pf
+        };
+        let filters = [
+            conditional(admitting_head_filter("policy")),
+            conditional(head_filter("classifier")),
+        ];
+        assert_eq!(
+            request_head_filter_indices(&filters),
+            vec![1],
+            "the conditional policy admits in the request phase"
         );
     }
 

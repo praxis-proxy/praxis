@@ -58,6 +58,8 @@ access-log-syslog = ["praxis/access-log-syslog"]
 hedged-requests = ["praxis/hedged-requests"]
 # Off by default; paces `bandwidth_limit` on HTTP, TCP, and sub-requests.
 bandwidth = ["praxis/bandwidth"]
+# Off by default; drives the forward-proxy example configs end to end.
+forward-proxy = ["praxis/forward-proxy"]
 no-mac-cert-rotation-tests = []
 otel = ["praxis/otel"]
 

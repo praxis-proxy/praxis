@@ -36,6 +36,9 @@ use super::metrics;
 /// Safe per-request compression configuration.
 #[cfg(feature = "pingora")]
 mod compression;
+/// Forward-proxy (CONNECT) request handling.
+#[cfg(feature = "forward-proxy")]
+pub(in crate::http) mod connect;
 /// Upstream connection established hook.
 pub(in crate::http) mod connected_to_upstream;
 /// Structured error responses for fatal proxy errors.
@@ -146,6 +149,10 @@ pub use with_body::PingoraHttpHandler;
 /// load_http_handler(&mut server, &listener, pipeline, &mut shutdowns).unwrap();
 /// ```
 ///
+/// Uses the default [`HttpHandlerOptions`]; see
+/// [`load_http_handler_with_options`] for the settings that come from the
+/// rest of the configuration.
+///
 /// # Errors
 ///
 /// Returns [`ProxyError`] if the listener fails to bind.
@@ -173,6 +180,8 @@ pub fn load_http_handler(
 
 /// Load an HTTP handler with the process lifecycle shared by readiness and responses.
 ///
+/// Uses the default [`HttpHandlerOptions`]; see [`load_http_handler_with_options`].
+///
 /// # Errors
 ///
 /// Returns the listener wiring error when the handler cannot be registered.
@@ -184,6 +193,65 @@ pub fn load_http_handler_with_lifecycle(
     cert_watcher_shutdowns: &mut Vec<tokio::sync::watch::Sender<bool>>,
     lifecycle: LifecycleHandle,
 ) -> Result<(), praxis_core::ProxyError> {
+    load_http_handler_with_options(
+        server,
+        listener,
+        pipeline,
+        cert_watcher_shutdowns,
+        lifecycle,
+        &HttpHandlerOptions::default(),
+    )
+}
+
+/// Settings for [`load_http_handler_with_options`] that come from the
+/// configuration outside the listener.
+///
+/// The defaults are the safe ones. New settings are added as fields with a
+/// default, so build the options from [`HttpHandlerOptions::default`] and
+/// its `with_*` methods.
+#[derive(Clone, Debug, Default)]
+#[non_exhaustive]
+pub struct HttpHandlerOptions {
+    /// Whether a forward-proxy listener may dial private and reserved
+    /// addresses (`insecure_options.allow_private_upstreams`). Off by
+    /// default; unused without the `forward-proxy` feature.
+    pub allow_private_upstreams: bool,
+}
+
+impl HttpHandlerOptions {
+    /// Set [`allow_private_upstreams`](Self::allow_private_upstreams).
+    #[must_use]
+    pub fn with_allow_private_upstreams(mut self, allow: bool) -> Self {
+        self.allow_private_upstreams = allow;
+        self
+    }
+}
+
+/// Load an HTTP handler for a single listener with settings from the rest
+/// of the configuration.
+///
+/// Behaves as [`load_http_handler`], which calls this with the default
+/// [`HttpHandlerOptions`].
+///
+/// # Errors
+///
+/// Returns [`ProxyError`] if the listener fails to bind, or if its
+/// `forward_proxy` destination rules cannot be built.
+///
+/// [`ProxyError`]: praxis_core::ProxyError
+#[cfg(feature = "pingora")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the listener, its pipeline and shutdown list, the shared lifecycle, and the options"
+)]
+pub fn load_http_handler_with_options(
+    server: &mut Server,
+    listener: &praxis_core::config::Listener,
+    pipeline: Arc<ArcSwap<FilterPipeline>>,
+    cert_watcher_shutdowns: &mut Vec<tokio::sync::watch::Sender<bool>>,
+    lifecycle: LifecycleHandle,
+    options: &HttpHandlerOptions,
+) -> Result<(), praxis_core::ProxyError> {
     let downstream_read_timeout = listener.downstream_read_timeout_ms.map(Duration::from_millis);
     let downstream_keepalive_timeout_secs = listener
         .downstream_keepalive_timeout_ms
@@ -191,6 +259,21 @@ pub fn load_http_handler_with_lifecycle(
     let connection_semaphore = listener
         .max_connections
         .map(|max| Arc::new(Semaphore::new(max as usize)));
+
+    // The forward-proxy runtime is built once from validated config; a
+    // matcher that fails to rebuild here fails the listener rather than
+    // silently allowing every destination.
+    #[cfg(feature = "forward-proxy")]
+    let forward_proxy = listener
+        .forward_proxy
+        .as_ref()
+        .filter(|config| config.enabled)
+        .map(|config| connect::ForwardProxyRuntime::try_from_config(config, options.allow_private_upstreams))
+        .transpose()?;
+    // Without the feature `listener.forward_proxy` is always `None` (the key
+    // does not parse), so CONNECT stays gated off and the options go unused.
+    #[cfg(not(feature = "forward-proxy"))]
+    let _ = options;
 
     // Always use the body-capable handler: a reload may add body
     // filters, and compression init is one-shot in Pingora.
@@ -204,6 +287,8 @@ pub fn load_http_handler_with_lifecycle(
         // handler clones it per connection, and an owned `String` label
         // would deep-copy on every clone.
         ::metrics::SharedString::from_shared(Arc::from(listener.name.as_str())),
+        #[cfg(feature = "forward-proxy")]
+        forward_proxy,
         lifecycle,
     );
     wire_service(server, listener, handler, cert_watcher_shutdowns)?;
@@ -224,7 +309,14 @@ where
 {
     let service_name = format!("http-proxy:{name}", name = listener.name);
     let mut proxy = http_proxy(&server.configuration, handler);
-    proxy.server_options = Some(server_options::h2c_server_options());
+    // The proxy layer 405s CONNECT before any handler hook unless the
+    // listener's forward_proxy block enables it. The block can parse
+    // without this crate's runtime (the core feature alone), so the
+    // runtime must be compiled in too: otherwise CONNECT would reach the
+    // reverse-proxy pipeline with no destination rules applied.
+    let allow_connect =
+        cfg!(feature = "forward-proxy") && listener.forward_proxy.as_ref().is_some_and(|config| config.enabled);
+    proxy.server_options = Some(server_options::h2c_server_options(allow_connect));
     proxy.h2_options = Some(server_options::h2_server_options());
     let mut service = Service::new(service_name, proxy);
     if let Some(tx) = super::listener::add_listener(&mut service, listener)? {
@@ -281,6 +373,8 @@ mod tests {
             None,
             None,
             "test".into(),
+            #[cfg(feature = "forward-proxy")]
+            None,
             LifecycleHandle::new(),
         );
         let (_client, stream) = tokio::io::duplex(1024);

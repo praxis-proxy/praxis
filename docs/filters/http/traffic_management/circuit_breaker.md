@@ -11,6 +11,8 @@ Each configured cluster has an independent circuit breaker state machine. Cluste
 
 When consecutive upstream failures reach the threshold, the circuit opens and subsequent requests receive 503 immediately. After the recovery window, a single probe request is forwarded; if it succeeds the circuit closes.
 
+A forward-proxy `CONNECT` passes uncounted: its tunnel dials its own destination, never the cluster a route selects for it, so it neither takes the half-open probe nor records an outcome.
+
 ## Configuration
 
 | Field | Type | Required | Description |

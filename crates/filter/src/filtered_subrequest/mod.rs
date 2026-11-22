@@ -1025,6 +1025,9 @@ impl FilteredSubrequestExecutor {
                 .as_ref()
                 .and_then(|value| value.to_str().ok())
                 .map(Arc::from);
+            // Cloned out with the two above so the borrow of `filter_ctx` ends
+            // before the credential phase below needs it mutably.
+            let upstream_base_path: Option<Arc<str>> = upstream.base_path.clone();
             // Fall back to the transport only when no override is set.
             #[cfg(feature = "chain-binding")]
             let logical_authority: Arc<str> = authority_override
@@ -1032,7 +1035,6 @@ impl FilteredSubrequestExecutor {
                 .unwrap_or_else(|| Arc::clone(&destination_authority));
             in_transport_inner.store(true, Ordering::Release);
             transport_outcome_inner.start();
-            filter_ctx.upstream_reached = true;
             #[cfg(test)]
             if let Some(gate) = filter_ctx.extensions.get::<PeerPreparationGate>() {
                 gate.entered.notify_one();
@@ -1057,6 +1059,7 @@ impl FilteredSubrequestExecutor {
             } else {
                 vec![(Arc::clone(&upstream.address), build_peer(upstream, pipeline.allow_private_upstreams()).await)]
             };
+            filter_ctx.upstream_reached = true;
             apply_request_header_mutations(&mut sub_headers, &filter_ctx);
             // Mirror the normal proxy path (`apply_authority_override`): a
             // configured authority override becomes the upstream Host,
@@ -1103,7 +1106,7 @@ impl FilteredSubrequestExecutor {
                 uri: subrequest_uri(
                     filter_ctx.rewritten_path.as_ref(),
                     &current_request.uri,
-                    upstream.base_path.as_deref(),
+                    upstream_base_path.as_deref(),
                 )?,
                 headers: sub_headers,
                 body: request_body.unwrap_or_default(),

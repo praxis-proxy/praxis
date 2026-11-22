@@ -200,6 +200,14 @@ pub trait Session: Send + 'static {
     /// reading again: callers skip interim `1xx` statuses, except final `101`.
     fn read_response_head(&mut self) -> impl Future<Output = Result<(), EgressError>> + Send;
 
+    /// Recover an already available final response after an upload write fails.
+    ///
+    /// Staging transports may override this nonblocking probe. A true result
+    /// leaves the final head and body available through the response accessors.
+    fn try_read_final_response_head(&mut self) -> impl Future<Output = bool> + Send {
+        async { false }
+    }
+
     /// Borrow the most recently read response head without copying its headers.
     /// The transport retains the original headers for body framing and reuse;
     /// callers sanitize this view into their own map before advancing the

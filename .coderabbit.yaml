@@ -235,7 +235,7 @@ reviews:
         Makefile (FIPS_UBI9_DIGEST and FIPS_UBI9_MINIMAL_DIGEST), and
         make fips-verify-image fails while the two disagree. A digest change
         updates both, and the PR should show that
-        `cargo xtask fips verify-image` passed against the new digest, per
+        `cargo fips-check verify-image` passed against the new digest, per
         "Updating the pinned base images" in docs/developing/fips.md. The
         application never enables the FIPS provider itself; the image and the
         binary must not do so either.
@@ -248,12 +248,13 @@ reviews:
         a change that relaxes one or grows an allowlist needs the same
         justification as disabling a lint.
 
-        The FIPS data under xtask/assets/fips/ carries provenance: the Red Hat
-        signing key's fingerprint is recomputed on every run, and
-        certified-modules.json records each provider build's NIST standing
-        with the source that was checked. A change to either must say where
-        the new value was verified, per "Data compiled into xtask" in
-        docs/developing/fips.md.
+        The FIPS compliance checks are not here: they are cargo-fips-check
+        (https://github.com/praxis-proxy/cargo-fips-check), pinned by commit
+        as FIPS_CHECK_REV in the Makefile and CARGO_FIPS_CHECK_REV in
+        Containerfile.fips, and configured by fips-check.toml. A change that
+        moves the pin should say what changed in the tool; a change that
+        grows an allowlist in fips-check.toml needs the same justification
+        as disabling a lint.
 
     - path: "**/*.sh"
       instructions: |
