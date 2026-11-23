@@ -111,7 +111,6 @@ pingora-proxy = { workspace = true, optional = true }
 praxis-core = { workspace = true }
 praxis-filter = { workspace = true }
 praxis-tls = { workspace = true }
-rand = { workspace = true }
 # Names the listener `ServerConfig` the backend-neutral TLS builder returns.
 rustls = { workspace = true }
 serde = { workspace = true }
