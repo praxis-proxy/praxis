@@ -60,8 +60,11 @@ request-limit denials take this same response path. The configured
 headers to local outcomes.
 
 Before response policies run, the coordinator checks the handler's response
-status. A status outside `200..=599` cancels a streamed source and replaces
-the response with an empty 500; finalization reports `Failed`.
+status. A status outside `200..=599` attempts streamed-source cleanup for at
+most one second, returns source-owned extensions to the request context, and
+replaces the response with an empty 500. Cleanup timeout does not delay
+managed completion; finalization reports `Failed` unless cancellation takes
+precedence during delivery.
 
 External `Policy` filters use
 `praxis_filter::local_http::record_response_header_effects` from
@@ -161,11 +164,11 @@ Neither logging nor metrics may be repeated by a transport fallback.
 execution and delivery observe cancellation. Managed exits signal it,
 terminate the response source as appropriate, and explicitly await the
 constructed handler's `finalize` once with its terminal outcome.
-For responses discarded after request faults, source cleanup is attempted
-for at most one second and can be interrupted by cancellation. A factory
-failure has no handler to finalize. Drop only signals cancellation: forced
-task/runtime termination cannot promise async cleanup. Services must
-recover their durable incomplete operations independently.
+For responses discarded after request faults or invalid statuses, source
+cleanup is attempted for at most one second and can be interrupted by
+cancellation. A factory failure has no handler to finalize. Drop only signals
+cancellation: forced task/runtime termination cannot promise async cleanup.
+Services must recover their durable incomplete operations independently.
 
 ## Issue #854 transport obligations
 

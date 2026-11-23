@@ -153,8 +153,11 @@ impl LocalExchange {
         let response_slot = ctx.response_header.take();
         let mut response = self.prepare(ctx, transport, completion).await;
         ctx.response_header = response_slot;
-        let invalid_status = response.replace_invalid_status(&mut ctx.extensions).await;
+        let invalid_status = response.has_invalid_status();
         if invalid_status {
+            Self::cancel_discarded_response(&mut response, &self.cancellation).await;
+            response.swap_extensions(&mut ctx.extensions);
+            response = LocalResponse::internal_error();
             completion.outcome = LocalOutcome::Failed;
         }
         delivery::strip_response_hop_by_hop(match &mut response {

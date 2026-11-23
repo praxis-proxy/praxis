@@ -60,20 +60,13 @@ impl LocalResponse {
         *self = replacement;
     }
 
-    /// Replace an invalid local status with an empty 500 before response policies.
-    ///
-    /// Returns whether replacement occurred. Stream-owned extensions are
-    /// returned to the request context after the source is cancelled.
-    pub async fn replace_invalid_status(&mut self, extensions: &mut RequestExtensions) -> bool {
+    /// Whether the pending status cannot be sent as a final local response.
+    pub fn has_invalid_status(&self) -> bool {
         let status = match self {
             Self::Buffered(response) => response.status,
             Self::Streamed(response) => response.status,
         };
-        if (200..=599).contains(&status) {
-            return false;
-        }
-        self.replace_with_extensions(Self::internal_error(), extensions).await;
-        true
+        !(200..=599).contains(&status)
     }
 
     /// Recover source state for the remaining policies and managed completion.

@@ -1302,6 +1302,87 @@ async fn discarded_response_cleanup_is_attempted_after_cancellation() {
     assert_eq!(state.inner.lock().unwrap().source_cancel_completions, 0);
 }
 
+#[tokio::test(start_paused = true)]
+async fn invalid_streamed_status_cleanup_is_bounded_and_recovers_extensions() {
+    for status in [199, 600] {
+        for disconnect in [false, true] {
+            let state = State::default();
+            let mut owner = Fixture::owner(state.clone());
+            owner.response_status = status;
+            owner.source_extensions = true;
+            owner.behavior = Behavior::Extensions;
+            state.inner.lock().unwrap().block_source_cancel = true;
+            let pipeline = pipeline(vec![owner]);
+            let request = praxis_filter::Request {
+                method: http::Method::POST,
+                uri: "/files".parse().unwrap(),
+                headers: http::HeaderMap::new(),
+            };
+            let mut head = Response {
+                status: http::StatusCode::OK,
+                headers: http::HeaderMap::new(),
+            };
+            let mut ctx = context::context(&request, &pipeline);
+            ctx.response_header = Some(&mut head);
+            let exchange = LocalExchange::claim(&pipeline, &mut ctx).unwrap();
+            let cancellation = exchange.cancellation();
+            let mut transport = Transport {
+                state: state.clone(),
+                input: Input::bytes(1),
+            };
+            let cancel = async {
+                if disconnect {
+                    while state.inner.lock().unwrap().source_cancels == 0 {
+                        tokio::task::yield_now().await;
+                    }
+                    cancellation.cancel();
+                }
+            };
+            let started = tokio::time::Instant::now();
+            let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                tokio::join!(exchange.run(&mut ctx, &mut transport), cancel)
+            })
+            .await
+            .unwrap();
+            assert_eq!(result.status, 500, "invalid status {status}");
+            assert_eq!(
+                result.outcome,
+                if disconnect {
+                    LocalOutcome::Cancelled
+                } else {
+                    LocalOutcome::Failed
+                }
+            );
+            assert_eq!(result.committed, !disconnect);
+            assert_eq!(result.response_bytes, 0);
+            assert_eq!(
+                started.elapsed(),
+                if disconnect {
+                    std::time::Duration::ZERO
+                } else {
+                    DISCARDED_RESPONSE_CLEANUP_TIMEOUT
+                }
+            );
+            let recovered = &ctx.extensions.get::<ExtensionState>().unwrap().0;
+            assert!(recovered.starts_with(&["source", "cancel"]));
+            assert!(!recovered.contains(&"stale"));
+            assert_eq!(recovered.contains(&"head"), !disconnect);
+            let inner = state.inner.lock().unwrap();
+            assert_eq!(inner.completion_extensions, *recovered);
+            assert_eq!(inner.source_cancels, 1);
+            assert_eq!(inner.source_cancel_completions, 0);
+            assert_eq!(
+                inner.head.as_ref().map(|(status, _)| *status),
+                (!disconnect).then_some(500)
+            );
+            drop(inner);
+            assert!(!state.events().contains(&"source".into()));
+            assert!(!state.events().contains(&"write".into()));
+            assert_complete(&state, 1);
+        }
+    }
+}
+
 #[tokio::test]
 async fn repeated_claims_deliver_and_complete_only_one_exchange() {
     for second_first in [false, true] {

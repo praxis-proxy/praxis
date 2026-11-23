@@ -389,7 +389,7 @@ impl LocalHttpHandler for Handler {
             extensions
         });
         let mut response = StreamingTerminalResponse::new(
-            self.response_status,
+            200,
             Box::new(Source {
                 state: self.state.clone(),
                 kind: self.kind,
@@ -398,6 +398,7 @@ impl LocalHttpHandler for Handler {
                 extensions,
             }),
         );
+        response.status = self.response_status;
         response.headers = self.response_headers.clone();
         Ok(LocalResponse::Streamed(response))
     }
