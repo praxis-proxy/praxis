@@ -22,7 +22,7 @@ material. Extension and contributor material is last.
 To proxy model APIs or agent protocols, use the
 [Praxis AI quickstart][ai-quickstart].
 
-[ai-quickstart]: https://github.com/praxis-proxy/ai/blob/main/docs/quickstart.md
+[ai-quickstart]: https://github.com/praxis-proxy/ai/blob/main/docs/getting-started/quickstart.md
 
 ## Operating Praxis
 
