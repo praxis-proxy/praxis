@@ -50,6 +50,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- Update the policy engine from PPE 0.6.0 to 0.7.0, including Limitador
+  0.14.1. This removes `heapless` and its nine temporary RustSec advisory
+  exceptions from the audit and deny configurations.
+
 - The `policy` filter admits at the request head: it runs
   `ratelimit.pre_identity` and the baseline identity check before any filter
   reads the body, even one listed before it, so over-limit and
@@ -295,6 +299,66 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Policy credential stripping, delegation and asserted headers now survive
   preceding ordered body-filter mutations, including stripped headers
   introduced during earlier pre-read passes.
+
+### Added
+
+- The HTTP CONNECT runtime for the experimental `forward_proxy` listener
+  block (the `forward-proxy` cargo feature, off by default), which turns
+  the block from inert config into an egress gateway: `CONNECT host:port`
+  requests pass the same inbound admission as other requests (reserved
+  `x-praxis-*` headers are refused with 400), run the request-head and
+  request filter phases (`head_classifier`, `ip_acl`, `policy`,
+  conditions), give the body filters the end of the CONNECT's empty body
+  as on any bodyless request (an entity-aware `policy` authorizes there),
+  then the destination rules and the private-IP guard decide
+  the dial. The response filters then run on the tunnel's 200 before it is
+  sent: a rejection, a closed-failure filter error, or a non-2xx status
+  answers the CONNECT instead, and their header edits reach the 200. A
+  filter error under `failure_mode: open` is logged and the tunnel opens.
+  The tunnel relays raw bytes in both directions at once with the
+  configured idle timeout and optional max duration, both enforced even
+  while a peer has stopped reading, and passes each peer's half-close on to
+  the other, so a client's upload keeps flowing after the destination
+  finishes its answer, even while a TLS listener's `close_notify` waits on
+  a client that is not reading. How each tunnel closed (`completed`,
+  `idle_timeout`, `max_duration`, `client_error`, `destination_error`) is
+  the filter metadata `tunnel.close_reason`, which an access record reads
+  as `metadata.tunnel.close_reason` and a CloudEvent through
+  `metadata_fields`.
+  A tunnel a peer breaks off after its 200 counts as a failed request, as
+  a response cut off midway does: `praxis_errors_total` counts a
+  destination failure as `upstream_protocol`, which also marks the request
+  span as an error, and a client failure as `downstream`, and the tunnel's
+  access record is written whatever the sampling. The destination host is
+  read in one canonical form that filters (through the URI and `Host`),
+  the destination rules, and the dialer all share: a name lowercased
+  without a trailing dot, an IP literal in its standard text form
+  (`[2001:DB8:0::1]` reads as `2001:db8::1`, and IPv4-mapped
+  `[::ffff:93.184.216.34]` as
+  `93.184.216.34`); a target whose host is not an IP literal or DNS name,
+  such as `[blocked.example]:443`, is answered with 400. Destination names
+  resolve under the bounded per-call DNS limits, so slow DNS fails a
+  CONNECT with 502 instead of pinning a thread per request. A target
+  without a port is answered with 400. A CONNECT the proxy refuses itself
+  is answered in plain HTTP, never in `grpc_status`'s 200-based gRPC
+  shape, and a 2xx refusal from any filter phase is sent as 502, since a
+  2xx would claim a tunnel that was never opened. HTTP/2 CONNECT is answered
+  with 501. Tunneled payloads are opaque to body-inspecting filters. On a
+  listener that also reverse-proxies, a CONNECT that matches a route
+  leaves that cluster's `circuit_breaker` alone: it neither takes the
+  half-open probe nor counts as a success or failure.
+  Example configs: `security/forward-proxy.yaml` (destination allowlist)
+  and `security/forward-proxy-ip-acl.yaml` (client ACL).
+- `praxis_filter::ClusterNotContacted`, a request extension an HTTP
+  adapter publishes for a request that will not reach the cluster a
+  router selects for it, such as a forward-proxy CONNECT;
+  `circuit_breaker` takes no token for such a request.
+- `praxis_protocol::http::load_http_handler_with_options` and
+  `HttpHandlerOptions`, for library callers that load HTTP listeners
+  themselves and need settings from outside the listener, such as
+  `insecure_options.allow_private_upstreams` for a forward-proxy
+  listener. `load_http_handler` keeps its signature and uses the
+  defaults.
 
 ## [0.8.0] - 2026-11-06
 

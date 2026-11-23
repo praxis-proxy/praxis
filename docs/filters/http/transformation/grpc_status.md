@@ -11,6 +11,8 @@ gRPC carries a call's outcome in a `grpc-status` header on an HTTP `200`, not in
 
 Successful short-circuits (a CORS preflight, a `static_response`) are left as real HTTP responses: only error statuses become gRPC statuses.
 
+A forward-proxy `CONNECT` is always refused in plain HTTP: it is never a gRPC call, and gRPC's HTTP `200` would tell the client its tunnel is open.
+
 Non-gRPC requests are untouched, so a listener can carry mixed traffic.
 
 ## Configuration

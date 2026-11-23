@@ -299,15 +299,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "atomic-polyfill"
-version = "1.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8cf2bce30dfe09ef0bfaef228b9d414faaf7e563035494d7fe092dba54b300f4"
-dependencies = [
- "critical-section",
-]
-
-[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1030,12 +1021,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "critical-section"
-version = "1.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "790eea4361631c5e7d22598ecd5723ff611904e3344ce8720784c93e3d83d40b"
-
-[[package]]
 name = "crossbeam-channel"
 version = "0.5.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1713,15 +1698,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hash32"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b0c35f58762feb77d74ebe43bdbc3210f09be9fe6742234d573bacc26ed92b67"
-dependencies = [
- "byteorder",
-]
-
-[[package]]
 name = "hashbag"
 version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1759,20 +1735,6 @@ dependencies = [
  "allocator-api2",
  "equivalent",
  "foldhash",
-]
-
-[[package]]
-name = "heapless"
-version = "0.7.17"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cdc6457c0eb62c71aac4bc17216026d8410337c4126773b9c5daba343f17964f"
-dependencies = [
- "atomic-polyfill",
- "hash32",
- "rustc_version",
- "serde",
- "spin 0.9.9",
- "stable_deref_trait",
 ]
 
 [[package]]
@@ -2347,9 +2309,9 @@ dependencies = [
 
 [[package]]
 name = "limitador"
-version = "0.14.0"
+version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77e33de992fdc347850a81f1ed242cc702900a9651a2b5d044d153a2db5e2d1a"
+checksum = "371eda62d2fe9465c815c7fae2103343c89a365a28cd03b3a731424300b9c832"
 dependencies = [
  "async-trait",
  "cel 0.12.0",
@@ -3201,7 +3163,6 @@ dependencies = [
  "cobs",
  "embedded-io 0.4.0",
  "embedded-io 0.6.1",
- "heapless",
  "serde",
 ]
 
@@ -3231,9 +3192,9 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "662b03ab6155d6789464d7e9e0b4d2065900cd9d04b370d532f1b18bb1e7006b"
+checksum = "ba9565c9143abbb0fcb315f968713c3e8d7fda05f3cf8f66c19c0aa1f1d31f31"
 dependencies = [
  "praxis-policy-apl-cmf",
  "praxis-policy-apl-core",
@@ -3245,9 +3206,9 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-apl-cmf"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "200333ebf208821f40f17070a27936d32867284605c103657fedaed6c12f504b"
+checksum = "becb5da1b6d2308ed1fadd7708499059535b0ff1bf4733b346910c02585b33fd"
 dependencies = [
  "chrono",
  "praxis-policy-apl-core",
@@ -3257,9 +3218,9 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-apl-core"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "abade295a61836accbfb9c860b3196e5491a34a378ca4769566674779511d1fa"
+checksum = "9493f8caa280055034b071f36cb5162e9ae6ae6d93d7bf6c8b740998189b9977"
 dependencies = [
  "async-trait",
  "futures",
@@ -3274,9 +3235,9 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-apl-runtime"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ce569d880efacc2c4893bdda5c1751095a90b2e9707ee92ff12366a61c91f5d"
+checksum = "430342f3ca72c828db96465a2d6353661e23eed25009218b988a5af7ba0c21b4"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3292,9 +3253,9 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-builtins"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9629f9ab2cd663fb095a3e75feffe90497250af1dda841f70fac3b4ed80f1ed7"
+checksum = "b5a97788156632556d251b980925b9630840d4a67fa2f3d9fec3b415c9f95e55"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -3332,9 +3293,9 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-core"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "55950103a82d4f7d02945998bd9c42ff722b395e97e60dc4f721297467a0a711"
+checksum = "cc2a7e63a7402b7dd96e16f9d22858e0b3ced8f8e82bfefd3554cfa71d151ebf"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -3362,9 +3323,9 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-orchestration"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3b5057ca0a8c242d91f5dd5dc4fdfb779dd7deaebcafb6bff49520cad5ec08c2"
+checksum = "d938a2ce09d90761befd75dbaf02e492a8a923d8a941f7d26f02d136eb82324a"
 dependencies = [
  "futures",
  "tokio",
@@ -4391,7 +4352,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
- "spin 0.12.3",
+ "spin",
  "thiserror 2.0.21",
  "url",
  "uuid",
@@ -4488,15 +4449,6 @@ name = "rustc-literal-escaper"
 version = "0.0.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bfe6f213fb658c8fb95baabd5420393438cf5a98d707f5dd701d9197c705f71e"
-
-[[package]]
-name = "rustc_version"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cfcb3a22ef46e85b45de6ee7e79d063319ebb6594faafcf1c225ea92ab6e9b92"
-dependencies = [
- "semver",
-]
 
 [[package]]
 name = "rusticata-macros"
@@ -4952,15 +4904,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bb3330f98f1b0c56c42e8d25f4793b242ffd2df57cb21d0cfdd8dfc24cc444b8"
 dependencies = [
  "thiserror 2.0.21",
-]
-
-[[package]]
-name = "spin"
-version = "0.9.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e"
-dependencies = [
- "lock_api",
 ]
 
 [[package]]

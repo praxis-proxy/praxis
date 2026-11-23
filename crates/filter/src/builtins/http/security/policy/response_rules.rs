@@ -313,9 +313,9 @@ fn effect_unavailable_in_metadata_view(effect: &Effect, metadata_plugins: &HashS
         },
         Effect::Plugin { name } => !metadata_plugins.contains(name),
         Effect::Allow | Effect::Deny { .. } | Effect::Taint { .. } | Effect::Restrict { .. } => false,
-        // Delegation and elicitation need their token/approval handlers, which
-        // are intentionally absent from the metadata-only response document.
-        Effect::Delegate(_) | Effect::Elicit(_) => true,
+        // Fetch, delegation, and elicitation need handlers that are absent
+        // from the metadata-only response document.
+        Effect::Fetch(_) | Effect::Delegate(_) | Effect::Elicit(_) => true,
     }
 }
 
@@ -416,7 +416,11 @@ plugins:
     #[test]
     fn keeps_only_capable_plugins_and_content_independent_rules() {
         let yaml = format!(
-            r#"{PLUGINS}
+            r#"{PLUGINS}  - name: inventory
+    kind: test/inventory
+    hooks: [metadata.fetch]
+    mode: sequential
+    on_error: fail
 routes:
   - llm: "*"
     result:
@@ -424,6 +428,7 @@ routes:
     authorization:
       pre_invocation:
         - "require(authenticated)"
+        - "fetch(inventory)"
       post_invocation:
         - "require(completion.tokens.total > 100)"
         - "run(scanner)"
@@ -436,9 +441,52 @@ routes:
         assert!(filtered.contains("run(metadata)"));
         assert!(!filtered.contains("run(scanner)"));
         assert!(!filtered.contains("name: scanner"));
+        assert!(!filtered.contains("name: inventory"));
         assert!(!filtered.contains("completion.tokens"));
         assert!(!filtered.contains("result:"));
         assert!(!filtered.contains("pre_invocation:"));
+    }
+
+    #[test]
+    fn fetch_is_unavailable_even_for_a_capable_response_plugin() -> Result<(), Box<dyn std::error::Error>> {
+        let block: Value = serde_yaml::from_str(
+            r#"
+authorization:
+  pre_invocation:
+    - "fetch(metadata)"
+"#,
+        )?;
+        let compiled = compile_policy_block_value("test", &block)?;
+        let effect = compiled.pre_invocation.first().expect("compiled fetch effect");
+        let metadata_plugins = HashSet::from(["metadata".to_owned()]);
+        assert!(matches!(effect, Effect::Fetch(_)), "the test must reach the Fetch arm");
+        assert!(
+            effect_unavailable_in_metadata_view(effect, &metadata_plugins),
+            "response capability does not make a fetch source available"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn post_invocation_fetch_is_rejected_before_effect_classification() -> Result<(), FilterError> {
+        let steps = [
+            Value::String("fetch(metadata)".to_owned()),
+            Value::String("run(metadata)".to_owned()),
+        ];
+        let metadata_plugins = HashSet::from(["metadata".to_owned()]);
+        let error = filter_post_steps(&steps, "test", &metadata_plugins).expect_err("post-invocation fetch is invalid");
+        assert!(
+            error
+                .to_string()
+                .contains("`fetch(...)` is allowed only in authorization.pre_invocation"),
+            "PPE must reject fetch before the response classifier: {error}"
+        );
+        assert_eq!(
+            filter_post_steps(steps.get(1..).expect("metadata step"), "test", &metadata_plugins)?,
+            vec![Value::String("run(metadata)".to_owned())],
+            "the separate metadata-only run step remains supported"
+        );
+        Ok(())
     }
 
     #[test]
