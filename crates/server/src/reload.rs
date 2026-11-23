@@ -613,6 +613,7 @@ mod tests {
                 &meta,
                 &cluster_meta,
                 &shutdown,
+                None,
                 &empty_kv_stores(),
                 &empty_session_stores(),
                 &empty_slow_start_registry(),
