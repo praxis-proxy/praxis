@@ -53,6 +53,8 @@ response_headers_present_ands_with_status = "response_headers_present_ands_with_
 headers_present_ands_with_exact_headers = "headers_present_ands_with_exact_headers"
 # Deliberate misspellings of full configuration keys in negative tests.
 routing_overides = "routing_overides"
+# The jobs job_queue negative test misspells the built-in queue name.
+defualt = "defualt"
 alow_root = "alow_root"
 sampl_rate = "sampl_rate"
 body_acces = "body_acces"

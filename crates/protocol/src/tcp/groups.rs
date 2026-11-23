@@ -440,34 +440,42 @@ insecure_options:
         .unwrap()
     }
 
+    /// A TCP listener with no upstream, for configs validation would reject.
+    fn orphan_tcp_listener() -> Listener {
+        Listener {
+            name: "orphan".to_owned(),
+            address: "0.0.0.0:9999".to_owned(),
+            upgrade_policy: None,
+            cluster: None,
+            downstream_keepalive_timeout_ms: None,
+            downstream_read_timeout_ms: None,
+            filter_chains: vec![],
+            forward_proxy: None,
+            job_queue: None,
+            max_connections: None,
+            protocol: ProtocolKind::Tcp,
+            tcp_session_timeout_ms: None,
+            tcp_max_duration_secs: None,
+            tls: None,
+            upstream: None,
+        }
+    }
+
     /// Build a Config with a TCP listener lacking an upstream address.
     ///
     /// This bypasses `Config::from_yaml` validation which rejects TCP
     /// listeners without an upstream.
     fn config_with_tcp_no_upstream() -> Config {
         use praxis_core::config::{MetricsConfig, TelemetryConfig};
+        let orphan_listener = orphan_tcp_listener();
         Config {
             admin: AdminConfig::default(),
             body_limits: BodyLimitsConfig::default(),
             clusters: vec![],
             filter_chains: vec![],
             insecure_options: InsecureOptions::default(),
-            listeners: vec![Listener {
-                name: "orphan".to_owned(),
-                address: "0.0.0.0:9999".to_owned(),
-                upgrade_policy: None,
-                cluster: None,
-                downstream_keepalive_timeout_ms: None,
-                downstream_read_timeout_ms: None,
-                filter_chains: vec![],
-                forward_proxy: None,
-                max_connections: None,
-                protocol: ProtocolKind::Tcp,
-                tcp_session_timeout_ms: None,
-                tcp_max_duration_secs: None,
-                tls: None,
-                upstream: None,
-            }],
+            jobs: None,
+            listeners: vec![orphan_listener],
             metrics: MetricsConfig::default(),
             runtime: RuntimeConfig::default(),
             shutdown_drain_delay_secs: 0,
@@ -509,6 +517,7 @@ insecure_options:
             downstream_read_timeout_ms: None,
             filter_chains: vec![],
             forward_proxy: None,
+            job_queue: None,
             max_connections: None,
             protocol: ProtocolKind::Tcp,
             upgrade_policy: None,
