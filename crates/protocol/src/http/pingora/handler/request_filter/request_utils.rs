@@ -147,7 +147,7 @@ pub(in crate::http) fn create_request_span_for(
 /// filter's request metadata fall back to the filter-level [`TraceContext`]
 /// trace ID when this marker is absent.
 ///
-/// [`TraceContext`]: praxis_filter::trace_context::TraceContext
+/// [`TraceContext`]: praxis_filter::TraceContext
 pub(in crate::http) fn record_exported_trace_id(
     span: &tracing::Span,
     extensions: &mut praxis_filter::RequestExtensions,

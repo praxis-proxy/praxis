@@ -225,12 +225,11 @@ fn blank_environments_are_rejected_before_reading_the_policy_document() {
         cfg.environment = Some(label.to_owned());
         let error = PolicyFilter::new(cfg, None)
             .err()
-            .expect("blank environment must fail at startup");
+            .expect("blank environment must fail at startup")
+            .to_string();
         assert!(
-            error
-                .to_string()
-                .contains("environment must contain a non-whitespace character"),
-            "{error}"
+            error.contains("environment must contain a non-whitespace character"),
+            "blank environment must be rejected"
         );
     }
 }
