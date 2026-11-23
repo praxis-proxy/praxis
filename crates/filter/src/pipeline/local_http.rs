@@ -8,6 +8,11 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+use praxis_core::{
+    next_hop_headers::{StripHopByHopOptions, UpgradePreserve, strip_hop_by_hop},
+    reserved_headers::RESPONSE_HOP_BY_HOP_HEADERS,
+};
+
 use super::{FilterPipeline, check_failure_mode, filter::PipelineFilter, http_utils::skip_by_response_conditions};
 use crate::{
     AnyFilter, FilterAction, FilterError, HttpFilterContext,
@@ -114,8 +119,7 @@ impl FilterPipeline {
             if let Some(replacement) = replacement {
                 response.replace_with_extensions(replacement, &mut ctx.extensions).await;
                 if let Some(head) = ctx.response_header.as_deref_mut() {
-                    *head = response.head();
-                    edits.apply(&mut head.headers);
+                    apply_replacement_head(head, response, &edits);
                 }
                 replaced = true;
             }
@@ -184,6 +188,25 @@ impl FilterPipeline {
         // Includes configured sampling/condition suppression: no fallback record.
         crate::mark_access_record_emitted(ctx);
     }
+}
+
+/// Install a replacement without letting its nominations erase prior policy edits.
+fn apply_replacement_head(
+    head: &mut crate::Response,
+    response: &LocalResponse,
+    edits: &crate::local_http::headers::HeaderEdits,
+) {
+    *head = response.head();
+    strip_hop_by_hop(
+        &mut head.headers,
+        StripHopByHopOptions {
+            static_headers: RESPONSE_HOP_BY_HOP_HEADERS,
+            upgrade: UpgradePreserve::None,
+            restore_chunked_framing: false,
+            suppress_chunked_restore_on_websocket: false,
+        },
+    );
+    edits.apply(&mut head.headers);
 }
 
 /// Local conditions are header-only; construction rejects upstream predicates.

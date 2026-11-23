@@ -2265,7 +2265,7 @@ async fn response_policy_hop_by_hop_fields_are_stripped_at_commitment() {
 }
 
 #[tokio::test]
-async fn already_applied_cors_and_security_policies_survive_response_replacement() {
+async fn replacement_connection_nominations_cannot_erase_prior_policy_headers() {
     let state = State::default();
     let mut owner = Fixture::owner(state.clone());
     owner.behavior = Behavior::RejectResponse;
@@ -2279,6 +2279,20 @@ async fn already_applied_cors_and_security_policies_survive_response_replacement
     owner
         .response_headers
         .insert("x-service-secret", http::HeaderValue::from_static("private"));
+    for (name, value) in [
+        (
+            "connection",
+            "x-frame-options, access-control-allow-origin, x-replacement-only",
+        ),
+        ("keep-alive", "timeout=5"),
+        ("x-replacement-only", "private"),
+        ("x-end-to-end", "retained"),
+    ] {
+        owner.rejection_headers.insert(
+            http::header::HeaderName::from_static(name),
+            http::HeaderValue::from_static(value),
+        );
+    }
     let registry = registry(vec![owner]);
     let mut entries: Vec<praxis_filter::FilterEntry> = serde_yaml::from_str(
         r#"
@@ -2325,6 +2339,10 @@ async fn already_applied_cors_and_security_policies_survive_response_replacement
         "https://client.example"
     );
     assert_eq!(headers.get("x-frame-options").unwrap(), "DENY");
+    assert_eq!(headers.get("x-end-to-end").unwrap(), "retained");
+    for name in ["connection", "keep-alive", "x-replacement-only"] {
+        assert!(!headers.contains_key(name), "hop-by-hop header leaked: {name}");
+    }
     assert!(!headers.contains_key("x-service-secret"));
     drop(inner);
     assert_complete(&state, 1);

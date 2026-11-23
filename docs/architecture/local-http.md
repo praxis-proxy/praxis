@@ -58,6 +58,9 @@ replacement; untouched handler headers do not. Handler failures and
 request-limit denials take this same response path. The configured
 `cors` and `headers` filters can therefore apply CORS and security
 headers to local outcomes.
+Replacement heads have hop-by-hop fields removed before prior policy edits
+are replayed, so their `Connection` nominations cannot erase those edits
+at commitment.
 
 Before response policies run, the coordinator checks the handler's response
 status. A status outside `200..=599` attempts streamed-source cleanup for at
