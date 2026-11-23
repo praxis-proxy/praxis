@@ -1112,6 +1112,69 @@ async fn response_condition_when_no_match_skips_filter() {
     );
 }
 
+/// Required response work used to exercise upgrade admission through the request pipeline.
+struct RequiredResponseFilter;
+
+#[async_trait::async_trait]
+impl HttpFilter for RequiredResponseFilter {
+    fn name(&self) -> &'static str {
+        "required_response"
+    }
+
+    fn response_body_access(&self) -> BodyAccess {
+        BodyAccess::ReadOnly(crate::BodyRequirement::Required)
+    }
+
+    async fn on_request(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Continue)
+    }
+}
+
+#[tokio::test]
+async fn upgrade_admission_checks_selected_response_conditions_at_final_status() {
+    let pipeline =
+        make_pipeline_with_response_conditions(vec![(Box::new(RequiredResponseFilter), vec![when_status(&[200])])]);
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    FilterPipeline::mark_opaque_upgrade_requested(&mut ctx.extensions);
+    let action = pipeline.execute_http_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "conditional response work must wait for headers"
+    );
+    let mut response = crate::context::Response {
+        status: StatusCode::SWITCHING_PROTOCOLS,
+        headers: HeaderMap::new(),
+    };
+    assert!(
+        FilterPipeline::required_body_processing_for_response(&ctx.extensions, &response).is_none(),
+        "a 200-only condition must allow 101"
+    );
+    response.status = StatusCode::OK;
+    let evidence = FilterPipeline::required_body_processing_for_response(&ctx.extensions, &response)
+        .expect("selected 200 response requires body processing");
+    assert_eq!(
+        (evidence.filter_id(), evidence.filter_name(), evidence.phase()),
+        (0, "required_response", "response_body"),
+        "report the selected filter and phase"
+    );
+}
+
+#[tokio::test]
+async fn upgrade_admission_rejects_unconditional_required_response_before_dispatch() {
+    let pipeline = make_pipeline_with_response_conditions(vec![(Box::new(RequiredResponseFilter), Vec::new())]);
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    FilterPipeline::mark_opaque_upgrade_requested(&mut ctx.extensions);
+    let action = pipeline.execute_http_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Reject(_)),
+        "an unconditional requirement must reject during the request phase"
+    );
+    let evidence = FilterPipeline::required_body_processing(&ctx.extensions).expect("rejection retains its cause");
+    assert_eq!(evidence.phase(), "response_body", "identify the required phase");
+}
+
 #[test]
 fn response_body_condition_when_no_match_skips_filter_with_ctx_header() {
     let chunks = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -3523,6 +3586,7 @@ async fn skip_to_excludes_skipped_filters_from_response() {
     );
 
     let pipeline = with_body_indices(FilterPipeline {
+        upgrade_policy: None,
         body_capabilities: BodyCapabilities::default(),
         has_request_completion_observer: false,
         compression: None,
@@ -3608,6 +3672,7 @@ async fn skip_to_excludes_skipped_filters_from_body_hooks() {
     );
 
     let pipeline = with_body_indices(FilterPipeline {
+        upgrade_policy: None,
         body_capabilities: BodyCapabilities::default(),
         has_request_completion_observer: false,
         compression: None,
@@ -3671,6 +3736,7 @@ async fn body_hooks_run_for_every_filter_before_the_request_phase() {
     let log: Arc<std::sync::Mutex<Vec<&'static str>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
 
     let pipeline = with_body_indices(FilterPipeline {
+        upgrade_policy: None,
         body_capabilities: BodyCapabilities::default(),
         has_request_completion_observer: false,
         compression: None,
@@ -3747,6 +3813,7 @@ async fn all_executed_filters_run_on_response() {
     let log: Arc<std::sync::Mutex<Vec<&'static str>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
 
     let pipeline = with_body_indices(FilterPipeline {
+        upgrade_policy: None,
         body_capabilities: BodyCapabilities::default(),
         has_request_completion_observer: false,
         compression: None,
@@ -3979,6 +4046,7 @@ async fn skipped_filter_skips_its_branches() {
     parent.branches = vec![branch];
 
     let pipeline = with_body_indices(FilterPipeline {
+        upgrade_policy: None,
         body_capabilities: BodyCapabilities::default(),
         has_request_completion_observer: false,
         compression: None,
@@ -5626,6 +5694,7 @@ fn with_body_indices(mut pipeline: FilterPipeline) -> FilterPipeline {
 /// explicit body capabilities (defaults everywhere else).
 fn test_pipeline(body_capabilities: BodyCapabilities, filters: Vec<PipelineFilter>) -> FilterPipeline {
     with_body_indices(FilterPipeline {
+        upgrade_policy: None,
         body_capabilities,
         has_request_completion_observer: false,
         compression: None,
@@ -6071,6 +6140,7 @@ fn make_pipeline(filters: Vec<Box<dyn HttpFilter>>) -> FilterPipeline {
     let body_capabilities = compute_body_capabilities(&filters);
 
     with_body_indices(FilterPipeline {
+        upgrade_policy: None,
         body_capabilities,
         has_request_completion_observer: false,
         compression: None,
@@ -6114,6 +6184,7 @@ fn make_pipeline_with_conditions(
     let body_capabilities = compute_body_capabilities(&filters);
 
     with_body_indices(FilterPipeline {
+        upgrade_policy: None,
         body_capabilities,
         has_request_completion_observer: false,
         compression: None,
@@ -6157,6 +6228,7 @@ fn make_pipeline_with_response_conditions(
     let body_capabilities = compute_body_capabilities(&filters);
 
     with_body_indices(FilterPipeline {
+        upgrade_policy: None,
         body_capabilities,
         has_request_completion_observer: false,
         compression: None,
@@ -6830,6 +6902,7 @@ fn streaming_capability_not_detected_for_normal_filter() {
 fn streaming_capability_detected_when_filter_declares_it() {
     let streaming_pf = super::test_filters::streaming_capable_filter();
     let pipeline = with_body_indices(FilterPipeline {
+        upgrade_policy: None,
         body_capabilities: BodyCapabilities::default(),
         has_request_completion_observer: false,
         compression: None,

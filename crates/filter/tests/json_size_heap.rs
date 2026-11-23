@@ -3,35 +3,42 @@
 
 //! Isolated allocation regression test for public JSON utilities.
 
-#[cfg(test)]
-mod tests {
 
-    use praxis_filter::json_size::{JsonSizeError, serialized_len, serialized_len_capped, to_vec_capped};
+use praxis_filter::json_size::{JsonSizeError, serialized_len, serialized_len_capped, to_vec_capped};
 
-    /// Tracks only allocations made while the profiler is active.
-    #[global_allocator]
-    static ALLOC: dhat::Alloc = dhat::Alloc;
+/// Tracks only allocations made while the profiler is active.
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
 
-    #[test]
-    fn oversized_output_is_not_materialized() -> Result<(), JsonSizeError> {
-        let input = "x".repeat(1_048_576);
-        let profiler = dhat::Profiler::builder().testing().build();
-        let before = dhat::HeapStats::get();
-        assert_eq!(serialized_len(input.as_str())?, 1_048_578);
-        let measured = dhat::HeapStats::get();
-        assert_eq!(measured.total_bytes, before.total_bytes);
-        assert!(matches!(
+/// Run the allocation assertions without concurrent libtest allocations.
+fn main() -> Result<(), JsonSizeError> {
+    let input = "x".repeat(1_048_576);
+    let profiler = dhat::Profiler::builder().testing().build();
+    let before = dhat::HeapStats::get();
+    assert_eq!(
+        serialized_len(input.as_str())?,
+        1_048_578,
+        "encoded size includes both quotation marks"
+    );
+    let measured = dhat::HeapStats::get();
+    assert_eq!(
+        measured.total_bytes, before.total_bytes,
+        "counting bytes must allocate nothing"
+    );
+    assert!(
+        matches!(
             serialized_len_capped(input.as_str(), 64),
             Err(JsonSizeError::LimitExceeded)
-        ));
-        assert!(matches!(
-            to_vec_capped(input.as_str(), 64),
-            Err(JsonSizeError::LimitExceeded)
-        ));
-        let after = dhat::HeapStats::get();
-        assert!(after.max_bytes < 4096, "a megabyte output must never be materialized");
-        assert_eq!(after.curr_bytes, 0, "partial output and errors must be dropped");
-        drop(profiler);
-        Ok(())
-    }
+        ),
+        "capped sizing must reject oversized input"
+    );
+    assert!(
+        matches!(to_vec_capped(input.as_str(), 64), Err(JsonSizeError::LimitExceeded)),
+        "capped serialization must reject oversized input"
+    );
+    let after = dhat::HeapStats::get();
+    assert!(after.max_bytes < 4096, "a megabyte output must never be materialized");
+    assert_eq!(after.curr_bytes, 0, "partial output and errors must be dropped");
+    drop(profiler);
+    Ok(())
 }
