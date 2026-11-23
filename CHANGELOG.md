@@ -50,6 +50,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- Update the policy engine from PPE 0.6.0 to 0.7.0, including Limitador
+  0.14.1. This removes `heapless` and its nine temporary RustSec advisory
+  exceptions from the audit and deny configurations.
+
 - The `policy` filter admits at the request head: it runs
   `ratelimit.pre_identity` and the baseline identity check before any filter
   reads the body, even one listed before it, so over-limit and
@@ -163,13 +167,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Reject explicit listener `upgrade_policy` settings until protocol admission
+  enforcement is available, rather than silently accepting unenforced denials.
+
+- Return gRPC `DEADLINE_EXCEEDED` when Pingora's rounded upstream timeout fires just before the call's exact deadline, while preserving earlier transport timeouts.
 - Strip reserved and hop-by-hop headers from preformatted gRPC rejections while retaining safe gRPC fields, and frame empty HTTP/1 responses with one correct zero length even when filters supply stale or conflicting lengths.
 - Preserve final body-filter bytes with forwarded trailers on Hyper; abort Pingora delivery when both outputs cannot be represented or EOF filtering fails, while retaining ordinary trailers and deliberate conversion.
 
 - Record Hyper subrequest forwarding at dispatch rather than header staging,
   while preserving Pingora's header-write evidence during upload admission.
 
-- Return gRPC `DEADLINE_EXCEEDED` when Pingora's rounded upstream timeout fires just before the call's exact deadline, while preserving earlier transport timeouts.
 - Scale bounded zero-burst callout prefixes with the byte rate to amortize
   timer resolution, and preserve available upstream rejections after paced upload failures.
 - Upgrade `url` to 2.5.9 to prevent stack overflow when deriving origins from
@@ -282,6 +289,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   and `ring_hash` instead of silently hashing by request path.
 - **Breaking:** Reject HTTP-only downstream read and keepalive timeouts on TCP
   listeners instead of silently ignoring them.
+
 - **Breaking:** statically buffered request pipelines now reject a finite
   `body_limits.max_request_bytes` above `body_limits.max_buffer_bytes` at
   startup, config validation, and reload, naming both fields and byte values.
