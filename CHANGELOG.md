@@ -30,6 +30,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   opt into job submission independently. The reference is validated at config
   load: it must name a configured queue (today the built-in `default`) and
   requires the `jobs` section to be present.
+
+- Validate HTTP/1.1 WebSocket offers before request filters and upstream
+  dispatch. Malformed handshakes receive 400, selected required body processing
+  receives 403, and filter-mutated offers receive 502. Other upgrade protocols
+  continue as ordinary HTTP with their hop-by-hop headers stripped.
+
 - Core policy-enforcement guide with PPE use cases, integration conditions,
   and links from onboarding, architecture, and security documentation.
 - Expose compact JSON sizing and capped serialization utilities in

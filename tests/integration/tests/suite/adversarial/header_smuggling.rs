@@ -118,6 +118,8 @@ fn hop_by_hop_upgrade_header_preserved_for_upgrade_requests() {
          Upgrade: websocket\r\n\
          Connection: Upgrade\r\n\
          X-Normal: keep\r\n\
+         Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+         Sec-WebSocket-Version: 13\r\n\
          \r\n";
     let raw = http_send(proxy.addr(), request);
     let body = parse_body(&raw);
@@ -311,11 +313,12 @@ insecure_options:
 
 #[test]
 fn multiple_upgrade_headers_handled_safely() {
-    let backend_guard = start_header_echo_backend();
+    let (backend_guard, requests) = praxis_test_utils::start_request_counting_backend("ok");
     let proxy_port = free_port();
     let yaml = simple_proxy_yaml(proxy_port, backend_guard.port());
     let config = Config::from_yaml(&yaml).unwrap();
     let proxy = start_proxy(&config);
+    let baseline = requests.load(std::sync::atomic::Ordering::SeqCst);
 
     let request = "GET / HTTP/1.1\r\n\
          Host: localhost\r\n\
@@ -327,9 +330,11 @@ fn multiple_upgrade_headers_handled_safely() {
     let raw = http_send(proxy.addr(), request);
     let status = parse_status(&raw);
 
-    assert!(
-        status == 200 || status == 400,
-        "multiple Upgrade headers should be handled safely (got {status})"
+    assert_eq!(status, 403, "mixed WebSocket offers must be refused locally");
+    assert_eq!(
+        requests.load(std::sync::atomic::Ordering::SeqCst),
+        baseline,
+        "refused offers must not reach upstream"
     );
 }
 
@@ -347,6 +352,7 @@ fn upgrade_with_transfer_encoding_chunked_handled_safely() {
          Connection: Upgrade\r\n\
          Transfer-Encoding: chunked\r\n\
          Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+         Sec-WebSocket-Version: 13\r\n\
          \r\n\
          0\r\n\
          \r\n";
@@ -375,6 +381,7 @@ fn upgrade_request_with_body_handled_safely() {
          Connection: Upgrade\r\n\
          Content-Length: {}\r\n\
          Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+         Sec-WebSocket-Version: 13\r\n\
          \r\n\
          {body}",
         body.len()

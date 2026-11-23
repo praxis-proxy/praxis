@@ -104,7 +104,6 @@ hyper = { workspace = true, features = ["http1", "http2", "server"], optional = 
 hyper-util = { workspace = true, features = ["http1", "http2", "server", "server-auto", "server-graceful", "tokio"], optional = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
-openssl = { workspace = true }
 pingora-core = { workspace = true, optional = true }
 pingora-http = { workspace = true, optional = true }
 pingora-proxy = { workspace = true, optional = true }

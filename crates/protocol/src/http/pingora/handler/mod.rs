@@ -357,6 +357,24 @@ mod tests {
     /// Default Pingora retry body buffer limit (64 `KiB`).
     const RETRY_BODY_LIMIT: u64 = praxis_core::config::DEFAULT_RETRY_BODY_LIMIT_BYTES;
 
+    #[test]
+    fn new_context_carries_the_owning_listener_name() {
+        use pingora_proxy::ProxyHttp as _;
+
+        let pipeline = FilterPipeline::build(&mut [], &praxis_filter::FilterRegistry::with_builtins()).unwrap();
+        let handler = PingoraHttpHandler::new(
+            Arc::new(ArcSwap::from_pointee(pipeline)),
+            None,
+            None,
+            None,
+            "websocket-listener".into(),
+            #[cfg(feature = "forward-proxy")]
+            None,
+            LifecycleHandle::new(),
+        );
+        assert_eq!(handler.new_ctx().listener_name.as_ref(), "websocket-listener");
+    }
+
     #[tokio::test]
     async fn pending_local_rejection_stops_explicit_and_reused_connection_retries() {
         use pingora_proxy::ProxyHttp as _;

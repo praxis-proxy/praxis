@@ -9,7 +9,7 @@ use http::{HeaderMap, Method, Version};
 /// A valid single WebSocket offer accepted by the listener policy.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct WebSocketOffer {
-    /// Client key retained for validating the handshake response.
+    /// Client key retained for validating the forwarded handshake.
     pub(crate) key: String,
     /// Client-offered subprotocol tokens.
     pub(crate) subprotocols: Vec<String>,
@@ -26,19 +26,26 @@ pub(crate) struct UpgradeRefusal {
     pub(crate) message: &'static str,
 }
 
-/// Classify and validate a downstream HTTP/1.1 upgrade request.
+/// Classify an HTTP/1.1 WebSocket attempt; other offers follow ordinary HTTP.
+///
+/// HTTP/1.0 Upgrade fields are ignored per [RFC 9110 Section 7.8].
+///
+/// [RFC 9110 Section 7.8]: https://datatracker.ietf.org/doc/html/rfc9110#section-7.8
 pub(crate) fn classify_request(
     headers: &HeaderMap,
     method: &Method,
     version: Version,
     websocket_permitted: bool,
 ) -> Result<Option<WebSocketOffer>, UpgradeRefusal> {
-    let connection_upgrade = has_connection_upgrade(headers)?;
-    let offered_protocols = parse_upgrade_offers(headers)?;
-    if offered_protocols.is_empty() && !connection_upgrade {
+    if version != Version::HTTP_11
+        || !contains_list_token(headers, "connection", "upgrade")
+        || !contains_list_token(headers, "upgrade", "websocket")
+    {
         return Ok(None);
     }
-    if offered_protocols.is_empty() || !connection_upgrade || method != Method::GET || version != Version::HTTP_11 {
+    validate_connection_tokens(headers)?;
+    let offered_protocols = parse_upgrade_offers(headers)?;
+    if method != Method::GET {
         return Err(malformed_handshake());
     }
     if offered_protocols.len() != 1 || offered_protocols.first().map(String::as_str) != Some("websocket") {
@@ -51,33 +58,6 @@ pub(crate) fn classify_request(
         return Err(denied_upgrade());
     }
     Ok(Some(WebSocketOffer { key, subprotocols }))
-}
-
-/// Check the final, post-filter response before a 101 can reach the client.
-#[cfg(feature = "pingora")]
-pub(crate) fn validate_response(offer: &WebSocketOffer, headers: &HeaderMap) -> Result<(), &'static str> {
-    if !has_connection_upgrade(headers).unwrap_or(false) {
-        return Err("invalid WebSocket upgrade response headers");
-    }
-    let offered_protocols =
-        parse_upgrade_offers(headers).map_err(|_parse_error| "WebSocket response has malformed Upgrade syntax")?;
-    if offered_protocols.len() != 1 || offered_protocols.first().map(String::as_str) != Some("websocket") {
-        return Err("WebSocket response selected multiple or unsupported Upgrade protocols");
-    }
-    let Some(accept) = single_header(headers, "sec-websocket-accept") else {
-        return Err("WebSocket response omitted Sec-WebSocket-Accept");
-    };
-    if accept.is_empty() {
-        return Err("WebSocket response supplied an empty Sec-WebSocket-Accept");
-    }
-    let challenge = format!("{}258EAFA5-E914-47DA-95CA-C5AB0DC85B11", offer.key);
-    let digest = openssl::hash::hash(openssl::hash::MessageDigest::sha1(), challenge.as_bytes())
-        .map_err(|_digest_error| "failed to calculate the WebSocket handshake digest")?;
-    let expected = STANDARD.encode(digest);
-    if accept != expected {
-        return Err("WebSocket response supplied an invalid Sec-WebSocket-Accept");
-    }
-    validate_selected_subprotocol(offer, headers)
 }
 
 /// Ensure filters preserved the client offer that authorized this upgrade.
@@ -97,9 +77,18 @@ pub(crate) fn validate_forwarded_request(
     Ok(())
 }
 
+/// Detect a relevant token before imposing WebSocket syntax on an ordinary request.
+fn contains_list_token(headers: &HeaderMap, name: &str, token: &str) -> bool {
+    headers.get_all(name).iter().any(|value| {
+        value
+            .as_bytes()
+            .split(|byte| *byte == b',')
+            .any(|item| item.trim_ascii().eq_ignore_ascii_case(token.as_bytes()))
+    })
+}
+
 /// Parse every `Connection` field as a comma-separated token list.
-fn has_connection_upgrade(headers: &HeaderMap) -> Result<bool, UpgradeRefusal> {
-    let mut found = false;
+fn validate_connection_tokens(headers: &HeaderMap) -> Result<(), UpgradeRefusal> {
     for value in headers.get_all("connection") {
         let value = value.to_str().map_err(|_header_error| malformed_handshake())?;
         for token in value.split(',') {
@@ -110,10 +99,9 @@ fn has_connection_upgrade(headers: &HeaderMap) -> Result<bool, UpgradeRefusal> {
             if !is_token(token) {
                 return Err(malformed_handshake());
             }
-            found |= token.eq_ignore_ascii_case("upgrade");
         }
     }
-    Ok(found)
+    Ok(())
 }
 
 /// Parse all offered Upgrade protocol tokens, normalizing protocol names.
@@ -163,40 +151,27 @@ fn validate_websocket_version(headers: &HeaderMap) -> Result<(), UpgradeRefusal>
     }
 }
 
-/// Parse the optional client subprotocol list.
+/// Parse the optional client subprotocol list, requiring case-sensitive uniqueness.
+///
+/// [RFC 6455 Section 4.1] requires unique offered subprotocol strings.
+///
+/// [RFC 6455 Section 4.1]: https://datatracker.ietf.org/doc/html/rfc6455#section-4.1
 fn parse_subprotocols(headers: &HeaderMap) -> Result<Vec<String>, UpgradeRefusal> {
     let mut protocols = Vec::new();
     for value in headers.get_all("sec-websocket-protocol") {
         let value = value.to_str().map_err(|_header_error| malformed_handshake())?;
         for protocol in value.split(',') {
             let protocol = trim_ows(protocol);
-            if !is_token(protocol) {
+            if protocol.is_empty() {
+                continue;
+            }
+            if !is_token(protocol) || protocols.iter().any(|offered| offered == protocol) {
                 return Err(malformed_handshake());
             }
             protocols.push(protocol.to_owned());
         }
     }
     Ok(protocols)
-}
-
-/// Verify an upstream-selected subprotocol was offered exactly once.
-#[cfg(feature = "pingora")]
-fn validate_selected_subprotocol(offer: &WebSocketOffer, headers: &HeaderMap) -> Result<(), &'static str> {
-    let mut selected = headers.get_all("sec-websocket-protocol").iter();
-    let Some(value) = selected.next() else {
-        return Ok(());
-    };
-    if selected.next().is_some() {
-        return Err("WebSocket response selected multiple subprotocols");
-    }
-    let Ok(value) = value.to_str() else {
-        return Err("WebSocket response selected a malformed subprotocol");
-    };
-    let value = trim_ows(value);
-    if value.contains(',') || !offer.subprotocols.iter().any(|offered| offered == value) {
-        return Err("WebSocket response selected an unoffered subprotocol");
-    }
-    Ok(())
 }
 
 /// Read a single ASCII header value with surrounding optional whitespace removed.
@@ -258,8 +233,6 @@ mod tests {
     use super::*;
 
     const KEY: &str = "dGhlIHNhbXBsZSBub25jZQ==";
-    #[cfg(feature = "pingora")]
-    const ACCEPT: &str = "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=";
 
     fn valid_request() -> HeaderMap {
         let mut headers = HeaderMap::new();
@@ -267,15 +240,6 @@ mod tests {
         headers.insert("upgrade", "websocket".parse().unwrap());
         headers.insert("sec-websocket-key", KEY.parse().unwrap());
         headers.insert("sec-websocket-version", "13".parse().unwrap());
-        headers
-    }
-
-    #[cfg(feature = "pingora")]
-    fn valid_response() -> HeaderMap {
-        let mut headers = HeaderMap::new();
-        headers.insert("connection", "Upgrade".parse().unwrap());
-        headers.insert("upgrade", "WebSocket".parse().unwrap());
-        headers.insert("sec-websocket-accept", ACCEPT.parse().unwrap());
         headers
     }
 
@@ -292,8 +256,6 @@ mod tests {
     #[test]
     fn websocket_accepts_case_variation_and_repeated_connection_tokens() {
         let mut headers = valid_request();
-        headers.insert("upgrade", "WebSocket".parse().unwrap());
-        headers.remove("upgrade");
         headers.append("connection", "keep-alive".parse().unwrap());
         headers.append("connection", "uPgRaDe".parse().unwrap());
         headers.insert("upgrade", "WebSocket".parse().unwrap());
@@ -309,12 +271,13 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_and_repeated_upgrade_protocols_are_refused() {
+    fn unknown_upgrade_is_ignored_and_repeated_websocket_is_refused() {
         let mut headers = valid_request();
         headers.insert("upgrade", "h2c".parse().unwrap());
-        let refusal = classify_request(&headers, &Method::GET, Version::HTTP_11, true).unwrap_err();
-        assert_eq!(refusal.status, 403);
-        assert_eq!(refusal.code, "upgrade_protocol_unsupported");
+        assert_eq!(
+            classify_request(&headers, &Method::GET, Version::HTTP_11, true).unwrap(),
+            None
+        );
 
         headers = valid_request();
         headers.append("upgrade", "websocket".parse().unwrap());
@@ -332,51 +295,13 @@ mod tests {
 
         headers = valid_request();
         headers.remove("connection");
-        let refusal = classify_request(&headers, &Method::GET, Version::HTTP_11, true).unwrap_err();
-        assert_eq!(refusal.status, 400);
-
-        let refusal = classify_request(&valid_request(), &Method::GET, Version::HTTP_2, true).unwrap_err();
-        assert_eq!(refusal.status, 400);
-    }
-
-    #[test]
-    #[cfg(feature = "pingora")]
-    fn response_requires_the_matching_accept_and_offered_subprotocol() {
-        let mut request = valid_request();
-        request.insert("sec-websocket-protocol", "chat, superchat".parse().unwrap());
-        let offer = classify_request(&request, &Method::GET, Version::HTTP_11, true)
-            .unwrap()
-            .unwrap();
-        validate_response(&offer, &valid_response()).unwrap();
-
-        let mut response = valid_response();
-        response.insert("sec-websocket-accept", "incorrect".parse().unwrap());
-        assert!(validate_response(&offer, &response).is_err());
-
-        response = valid_response();
-        response.insert("sec-websocket-protocol", "other".parse().unwrap());
-        assert!(validate_response(&offer, &response).is_err());
-    }
-
-    #[test]
-    #[cfg(feature = "pingora")]
-    fn response_distinguishes_multiple_protocols_from_malformed_upgrade_syntax() {
-        let offer = classify_request(&valid_request(), &Method::GET, Version::HTTP_11, true)
-            .unwrap()
-            .unwrap();
-        let mut response = valid_response();
-        response.insert("upgrade", "websocket, permessage-deflate".parse().unwrap());
         assert_eq!(
-            validate_response(&offer, &response),
-            Err("WebSocket response selected multiple or unsupported Upgrade protocols"),
-            "a syntactically valid list of unsupported protocols is not malformed"
+            classify_request(&headers, &Method::GET, Version::HTTP_11, true).unwrap(),
+            None
         );
-
-        response.insert("upgrade", "websocket, bad protocol".parse().unwrap());
         assert_eq!(
-            validate_response(&offer, &response),
-            Err("WebSocket response has malformed Upgrade syntax"),
-            "invalid token syntax should be classified separately"
+            classify_request(&valid_request(), &Method::GET, Version::HTTP_2, true).unwrap(),
+            None
         );
     }
 
@@ -396,6 +321,58 @@ mod tests {
         changed = request.clone();
         changed.remove("upgrade");
         assert!(validate_forwarded_request(&offer, &Method::GET, &changed, Version::HTTP_11).is_err());
+    }
+
+    #[test]
+    fn ordinary_requests_do_not_acquire_websocket_syntax_requirements() {
+        for connection in [b"not a token".as_slice(), b"\xff".as_slice()] {
+            let mut headers = HeaderMap::new();
+            headers.insert("connection", http::HeaderValue::from_bytes(connection).unwrap());
+            assert_eq!(
+                classify_request(&headers, &Method::GET, Version::HTTP_11, true).unwrap(),
+                None
+            );
+        }
+        assert_eq!(
+            classify_request(&valid_request(), &Method::GET, Version::HTTP_10, true).unwrap(),
+            None
+        );
+        let mut headers = valid_request();
+        headers.insert("upgrade", "h2c".parse().unwrap());
+        assert_eq!(
+            classify_request(&headers, &Method::POST, Version::HTTP_11, true).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn websocket_subprotocols_skip_empty_members_and_reject_duplicates() {
+        let mut headers = valid_request();
+        headers.insert("sec-websocket-protocol", "chat,, superchat,".parse().unwrap());
+        let offer = classify_request(&headers, &Method::GET, Version::HTTP_11, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(offer.subprotocols, ["chat", "superchat"]);
+        for value in ["chat, chat", "chat"] {
+            headers.insert("sec-websocket-protocol", value.parse().unwrap());
+            if value == "chat" {
+                headers.append("sec-websocket-protocol", "chat".parse().unwrap());
+            }
+            assert_eq!(
+                classify_request(&headers, &Method::GET, Version::HTTP_11, true)
+                    .unwrap_err()
+                    .status,
+                400
+            );
+        }
+        headers.insert("sec-websocket-protocol", "chat, Chat".parse().unwrap());
+        assert_eq!(
+            classify_request(&headers, &Method::GET, Version::HTTP_11, true)
+                .unwrap()
+                .unwrap()
+                .subprotocols,
+            ["chat", "Chat"]
+        );
     }
 
     #[test]

@@ -497,6 +497,7 @@ fn resolve_listener_pipeline(config: &Config, listener: &Listener, registry: &Fi
     )
     .unwrap();
     configure_test_pipeline(&mut pipeline, config);
+    pipeline.set_upgrade_policy(listener.upgrade_policy.clone());
     Arc::new(pipeline)
 }
 

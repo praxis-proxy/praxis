@@ -173,10 +173,6 @@ pub(super) struct ConnectionFacts {
 ///
 /// Returns [`ProxyError::Config`] naming the address when it cannot be
 /// parsed or bound, or when its TLS settings cannot be built.
-#[expect(
-    clippy::too_many_lines,
-    reason = "registration binds, wraps TLS, and starts the accept loop in one flow"
-)]
 pub(super) fn register(
     runtime: &mut HyperRuntime,
     listener: &Listener,

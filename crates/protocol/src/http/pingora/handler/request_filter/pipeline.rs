@@ -204,17 +204,8 @@ pub(in crate::http) async fn execute(
             headers_to_set,
             header_mutations,
         }) => {
-            if ctx.admitted_websocket.is_some()
-                && let Some(required) = FilterPipeline::required_body_processing(&ctx.extensions)
-            {
-                warn!(
-                    listener = %ctx.listener_name,
-                    filter = required.filter_name(),
-                    filter_id = required.filter_id(),
-                    phase = required.phase(),
-                    "HTTP upgrade refused because selected filter requires body processing"
-                );
-                ctx.stamp_error_type("upgrade_requires_body_processing");
+            if ctx.admitted_websocket.is_some() && FilterPipeline::required_body_processing(&ctx.extensions).is_some() {
+                stamp_body_rejection(ctx);
                 let rejection = Rejection::status(403)
                     .with_body(b"requested upgrade conflicts with required HTTP body processing".as_slice());
                 send_rejection_for(session, rejection, ctx).await;
@@ -241,6 +232,9 @@ pub(in crate::http) async fn execute(
                     Cow::Borrowed(name) => req_headers.insert_header(name, value),
                     Cow::Owned(name) => req_headers.insert_header(name, value),
                 };
+            }
+            if reject_mutated_websocket(session, ctx).await {
+                return Ok(true);
             }
             #[cfg(feature = "hedged-requests")]
             if super::hedge::dispatch(pipeline, session, ctx).await? {
@@ -277,6 +271,24 @@ pub(in crate::http) async fn execute(
             Ok(true)
         },
     }
+}
+
+/// Refuse filter-mutated handshakes before either normal or hedged dispatch.
+#[cfg(feature = "pingora")]
+async fn reject_mutated_websocket(session: &mut Session, ctx: &mut PingoraRequestCtx) -> bool {
+    let Some(offer) = &ctx.admitted_websocket else {
+        return false;
+    };
+    let request = session.req_header();
+    let Err(reason) =
+        crate::http::upgrade::validate_forwarded_request(offer, &request.method, &request.headers, request.version)
+    else {
+        return false;
+    };
+    warn!(listener = %ctx.listener_name, reason, "HTTP upgrade refused after request filters changed the offer");
+    ctx.stamp_error_type("upgrade_request_mutated");
+    send_rejection_for(session, Rejection::status(502).with_body(reason.as_bytes()), ctx).await;
+    true
 }
 
 /// Handle session-wide refusals and `Max-Forwards` before request processing.
