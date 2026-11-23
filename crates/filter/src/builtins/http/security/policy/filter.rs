@@ -177,6 +177,12 @@ pub(super) enum ResponseCustomState {
 /// `policy`. Later ID changes are not reflected in the snapshot, and body
 /// pre-read callbacks can precede header filters even in that order.
 ///
+/// Both IDs can originate from inbound client headers, depending on how the
+/// `trace_context` and `request_id` filters are configured, so they are
+/// client-influenced. Policy authors should use `request.request_id` and
+/// `request.trace_id` for correlation and audit only, and base authorization
+/// decisions on verified identity fields from the identity plugins.
+///
 /// On the body phase, the filter consumes protocol classifier filter metadata
 /// (from the `praxis-ai` package) to dispatch the matching CMF
 /// hook chain. Policy routes
