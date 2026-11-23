@@ -77,7 +77,7 @@ Phase 1 runs on the tag push:
 5. Build and publish the standard and FIPS container
    images to GHCR with the immutable `:<version>` and
    `:sha-<hash>` tags, `-fips` suffixed for the FIPS
-   image (see [FIPS 140-3](operating/fips.md))
+   image (see [FIPS 140-3](../operating/fips.md))
 6. Cut a draft release (a pre-release draft for a
    pre-release tag) with generated notes
 
@@ -167,7 +167,7 @@ published, Phase 1 no longer rebuilds its images.
 
 ## Changelog
 
-Praxis keeps a hand-edited [`CHANGELOG.md`](../CHANGELOG.md)
+Praxis keeps a hand-edited [`CHANGELOG.md`](../../CHANGELOG.md)
 at the repository root under the org's [changelog
 convention][changelog-convention]: each PR with a
 user-visible change adds its entry under `[Unreleased]`,
@@ -215,6 +215,6 @@ The standard image is a minimal Alpine container:
 
 The `-fips` image runs on `ubi9/ubi-minimal` instead,
 with the same user name, ports, health check URL and
-config directory; see [FIPS 140-3](operating/fips.md).
+config directory; see [FIPS 140-3](../operating/fips.md).
 
 > **Note**: This is subject to change.

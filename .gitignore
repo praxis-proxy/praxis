@@ -45,6 +45,7 @@ docs/**/
 !docs/filters/http/*/
 !docs/filters/tcp/
 !docs/filters/tcp/*/
+!docs/getting-started/
 !docs/operating/
 !docs/security/
 

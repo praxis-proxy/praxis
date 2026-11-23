@@ -258,11 +258,11 @@ The response should be `200 OK` from the Python server.
 
 ## Where to go next
 
-- [Filter System](README.md) explains the request/response
+- [Filter System](../filters/README.md) explains the request/response
   lifecycle, context fields, body access, and execution order.
 - [Extensions](extensions.md) covers manual registration, TCP
   filters, custom load balancers, and production practices.
-- [Adding a Built-in Filter](../developing/adding-filters.md)
+- [Adding a Built-in Filter](adding-filters.md)
   lists the documentation, example, and integration-test
   requirements for contributing a filter to Praxis itself.
 - [Payload Processing](../architecture/payload-processing.md)

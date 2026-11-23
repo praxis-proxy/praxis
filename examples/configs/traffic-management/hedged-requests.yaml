@@ -5,7 +5,7 @@
 #
 # Usage:
 #   # Start one upstream per endpoint before Praxis. See
-#   # docs/filters/http-filter-tutorial.md for the local-server pattern.
+#   # docs/developing/http-filter-tutorial.md for the local-server pattern.
 #   python3 -m http.server 3001
 #   python3 -m http.server 3002
 #   cargo run -p praxis-proxy --features hedged-requests -- -c examples/configs/traffic-management/hedged-requests.yaml

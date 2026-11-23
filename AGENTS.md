@@ -206,7 +206,7 @@ configured variants.
 
 ## Adding a Filter
 
-See `docs/filters/extensions.md` for the full guide.
+See `docs/developing/extensions.md` for the full guide.
 
 **Choosing a category**: HTTP filters go under `observability`,
 `payload_processing`, `security`, `traffic_management`, or `transformation`.

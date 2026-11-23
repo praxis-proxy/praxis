@@ -31,7 +31,8 @@ curl http://127.0.0.1:8080/
 cargo xtask debug examples/configs/security/guardrails-per-model.yaml
 ```
 
-See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
+See [Build from source](../docs/getting-started/build-from-source.md#quick-test-servers)
+for full options.
 
 ## Configs
 

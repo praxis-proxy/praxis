@@ -11,7 +11,7 @@ Filters are chained into pipelines; the pipeline executor
 calls each filter in order on requests and in reverse on responses.
 
 New to filter development? Start with the
-[HTTP Filter Tutorial](http-filter-tutorial.md) to build,
+[HTTP Filter Tutorial](../developing/http-filter-tutorial.md) to build,
 register, test, and run a small filter end to end.
 
 For listener and chain resolution architecture, see
@@ -494,7 +494,7 @@ fn request_body_access(&self) -> BodyAccess {
 `requirement` is `BodyRequirement::Optional` or
 `BodyRequirement::Required`. `Required` also prevents an
 admitted opaque WebSocket tunnel from bypassing that selected
-HTTP body processing. See the [filter extension guide](extensions.md#declare-body-access-accurately).
+HTTP body processing. See the [filter extension guide](../developing/extensions.md#declare-body-access-accurately).
 
 ### Body Mode
 
@@ -755,6 +755,6 @@ on the later filter to permit it.
 
 - [Filter Reference](reference.md):
   configuration for all built-in filters
-- [Extensions](extensions.md): writing custom filters
+- [Extensions](../developing/extensions.md): writing custom filters
 - [Payload Processing](../architecture/payload-processing.md):
   body access architecture
