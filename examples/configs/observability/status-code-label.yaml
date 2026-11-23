@@ -40,6 +40,7 @@ filter_chains:
       # Deliberately tiny so a handful of curls produce 429s to graph.
       - filter: rate_limit
         mode: global
+        scope: local
         rate: 1
         burst: 3
 
