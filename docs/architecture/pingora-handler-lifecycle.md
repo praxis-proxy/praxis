@@ -350,7 +350,7 @@ connection. The resolved cluster or route retry policy
 decides whether the outcome, attempt count, request
 method, replayable body size, timeout, and retry budget
 permit another attempt. The legacy default retries
-GET, HEAD, and OPTIONS up to three times after the
+GET, HEAD, OPTIONS, and QUERY up to three times after the
 initial attempt, with a 64 KiB replay cap and the
 same endpoint. A configured policy can allow other
 methods, raise `max_retries` to 15, lower the body
@@ -526,7 +526,7 @@ adaptation ran; the retry-body replay guard accounts
 for `max(original downstream body, final adapted body)`.
 
 The legacy default permits three retries after the
-initial attempt for GET, HEAD, and OPTIONS, with a
+initial attempt for GET, HEAD, OPTIONS, and QUERY, with a
 64 KiB replay cap and the same endpoint. A configured
 policy may opt non-idempotent methods in with
 `allow_non_idempotent`, set `max_retries` up to 15,

@@ -47,8 +47,6 @@ dhat = "0.3.3"
 governor = "0.10.4"
 dashmap = "6.2.1"
 futures = "0.3.34"
-# Same backend pingora already builds (zlib-ng), so xtask adds no crate to the lockfile.
-flate2 = { version = "1.1.11", default-features = false, features = ["zlib-ng"] }
 h2 = "0.4.20"
 http = "1.5.0"
 # The hyper network backend (the `hyper` feature of praxis-proxy-core and
@@ -62,7 +60,6 @@ metrics = "0.24.6"
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 nix = { version = "0.31.4", default-features = false, features = ["process", "resource", "signal", "user"] }
 notify = "8.2.2"
-object = { version = "0.41.0", default-features = false, features = ["read_core", "elf", "std"] }
 opentelemetry = { version = "0.33.1", default-features = false, features = ["trace"] }
 opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["trace", "rt-tokio"] }
 opentelemetry-otlp = { version = "0.33.1", default-features = false, features = ["grpc-tonic", "http-proto", "reqwest-client", "tls-provider-agnostic", "tls-roots", "trace"] }
@@ -74,7 +71,7 @@ pingora-proxy = { version = "0.11.4", package = "quixotic-plecostomus-proxy", fe
 percent-encoding = "2.3.2"
 rand = "0.10.4"
 plotters = { version = "0.3.7", default-features = false, features = ["svg_backend", "line_series"] }
-ppe = { version = "0.6.0", package = "praxis-policy", default-features = false }
+ppe = { version = "0.7.0", package = "praxis-policy", default-features = false }
 parking_lot = "0.12.5"
 portable-atomic = "1.15.0"
 proptest = "1.12.0"
@@ -165,7 +162,7 @@ tracing-appender = "0.2.5"
 tracing-opentelemetry = "0.34.0"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json", "registry"] }
 unicase = "2.10.0"
-url = "2.5.8"
+url = "2.5.9"
 zeroize = "1.9.2"
 
 [profile.release]

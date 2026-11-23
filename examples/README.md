@@ -165,6 +165,8 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | [credential-injection.yaml](configs/security/credential-injection.yaml) | Injects per-cluster API credentials into upstream requests |
 | [csrf.yaml](configs/security/csrf.yaml) | Cross-site request forgery protection via origin validation |
 | [downstream-read-timeout.yaml](configs/security/downstream-read-timeout.yaml) | Protects against slow client attacks by limiting how long the proxy waits for data from downstream clients |
+| [forward-proxy-ip-acl.yaml](configs/security/forward-proxy-ip-acl.yaml) | Forward proxy with no destination allowlist: any destination other than a private or reserved address is reachable, and egress control rests on the ip_acl filter gating which clients may open tunnels |
+| [forward-proxy.yaml](configs/security/forward-proxy.yaml) | HTTP listener that doubles as an egress gateway for clients configured with HTTPS_PROXY: CONNECT tunnels reach only the destinations in allow_destinations |
 | [forwarded-headers.yaml](configs/security/forwarded-headers.yaml) | Injects X-Forwarded-For, X-Forwarded-Proto, and X-Forwarded-Host into upstream requests |
 | [guardrails-per-model.yaml](configs/security/guardrails-per-model.yaml) | Runs body-inspecting guardrails only for a model selected from the request body |
 | [guardrails.yaml](configs/security/guardrails.yaml) | Reject requests that match header or body inspection rules |
@@ -206,6 +208,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | [hedged-requests.yaml](configs/traffic-management/hedged-requests.yaml) | Races one idempotent request across two endpoints and returns the first 2xx, 3xx, or 4xx response |
 | [hostname-upstream.yaml](configs/traffic-management/hostname-upstream.yaml) | Demonstrates using DNS hostnames instead of IP addresses for upstream endpoints |
 | [hosts.yaml](configs/traffic-management/hosts.yaml) | One listener serves multiple domains |
+| [http-query.yaml](configs/traffic-management/http-query.yaml) | Forwards body-bearing QUERY requests with bounded retries and explicit browser CORS and CSRF settings for a read-only query resource |
 | [iterative-request-router-failover.yaml](configs/traffic-management/iterative-request-router-failover.yaml) | Demonstrates provider failover using the iterative_request_router filter |
 | [iterative-request-router-origin-failover.yaml](configs/traffic-management/iterative-request-router-origin-failover.yaml) | Demonstrates origin-aware failover: only an upstream 429 (rate limit) triggers the fallback |
 | [least-connections.yaml](configs/traffic-management/least-connections.yaml) | Routes each request to the backend with the fewest in-flight requests |
