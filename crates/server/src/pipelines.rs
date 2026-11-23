@@ -222,10 +222,12 @@ pub(crate) fn resolve_pipelines_with_composition(
             &config.insecure_options,
             &config.clusters,
         )?;
-        #[cfg(feature = "local-http")]
-        praxis_protocol::http::local::require_supported_adapter(&pipeline)?;
         configure_pipeline(
-            &mut pipeline,
+            {
+                #[cfg(feature = "local-http")]
+                praxis_protocol::http::local::require_supported_adapter(&pipeline)?;
+                &mut pipeline
+            },
             config,
             health_registry,
             kv_stores,
