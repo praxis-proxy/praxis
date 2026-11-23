@@ -65,6 +65,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   across local response replacements through
   `local_http::record_response_header_effects`. See
   `docs/architecture/local-http.md`.
+  Handler hop-by-hop fields are removed before policies run, so a handler's
+  Connection nominations cannot remove policy-set response headers.
 
 ## [0.8.0] - 2026-11-06
 
