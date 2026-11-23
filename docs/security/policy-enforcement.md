@@ -185,7 +185,7 @@ trusted endpoints, and response behavior.
 4. Run the [gateway demo][demo] and check both allowed and denied outcomes.
 
 [ppe]: https://github.com/praxis-proxy/policy
-[ai-quickstart]: https://github.com/praxis-proxy/ai/blob/main/docs/quickstart.md
+[ai-quickstart]: https://github.com/praxis-proxy/ai/blob/main/docs/getting-started/quickstart.md
 [build-features]: ../operating/build-features.md#selecting-policy-features
 [tool-access]:
   https://github.com/praxis-proxy/policy/blob/main/docs/content/use-cases.md#1-identity-aware-tool-access

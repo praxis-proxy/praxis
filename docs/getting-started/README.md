@@ -11,4 +11,4 @@ Start here to run Praxis for the first time. Read the pages in this order:
 Then continue with [configuration](../operating/configuration.md) and
 [security hardening](../operating/security-hardening.md) before you deploy.
 To proxy model APIs or agent protocols, use the
-[Praxis AI quickstart](https://github.com/praxis-proxy/ai/blob/main/docs/quickstart.md).
+[Praxis AI quickstart](https://github.com/praxis-proxy/ai/blob/main/docs/getting-started/quickstart.md).
