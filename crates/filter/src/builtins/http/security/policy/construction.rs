@@ -7,7 +7,7 @@
 
 use ppe::praxis_policy_core::{
     CRYPTO_FAILED_CODE,
-    config::{PolicyConfig, PolicyGroup},
+    config::{PolicyConfig, PolicyGroup, route_bundle_names},
     delegation::HOOK_TOKEN_DELEGATE,
     error::PluginError,
     identity::RouteIdentityConfig,
@@ -116,6 +116,74 @@ pub(super) fn require_dpop_external_base_url(policy: &PolicyConfig) -> Result<()
         }
     }
     Ok(())
+}
+
+/// Return a section-specific reason to defer identity resolution to the route.
+///
+/// Assumes inherited authentication steps decide consistently across HTTP and
+/// entity routes.
+pub(super) fn head_identity_blocker(policy: &PolicyConfig) -> Option<String> {
+    let global = &policy.global;
+    let sections = sorted(&global.defaults, "global.defaults")
+        .chain(sorted(&global.bundles, "groups"))
+        .chain(sorted(&policy.groups, "groups"))
+        .filter_map(|(section, group)| group.authentication.as_ref().map(|auth| (section, auth, false)));
+    let routes = policy.routes.iter().enumerate().filter_map(|(index, route)| {
+        route
+            .authentication
+            .as_ref()
+            .map(|auth| (format!("routes[{index}]"), auth, route.http.is_some()))
+    });
+    sections
+        .chain(routes)
+        .find_map(|(section, auth, http_route)| {
+            if http_route || section == "global.defaults.http" {
+                Some(format!("`{section}` adds authentication on the http coordinates"))
+            } else {
+                auth.replace_inherited
+                    .then(|| format!("`{section}` sets `authentication.replace_inherited`"))
+            }
+        })
+        .or_else(|| http_route_group_blocker(policy))
+}
+
+/// Return a reason to defer identity when an HTTP route's group adds authentication.
+fn http_route_group_blocker(policy: &PolicyConfig) -> Option<String> {
+    let authenticates = |name: &str| {
+        policy
+            .global
+            .bundles
+            .get(name)
+            .or_else(|| policy.groups.get(name))
+            .is_some_and(|group| group.authentication.is_some())
+    };
+    policy
+        .routes
+        .iter()
+        .enumerate()
+        .filter(|(_, route)| route.http.is_some())
+        .find_map(|(index, route)| {
+            route_bundle_names(route)
+                .into_iter()
+                .find(|name| authenticates(name))
+                .map(|name| {
+                    format!(
+                        "`routes[{index}]` joins `groups.{name}`, which adds authentication on the http coordinates"
+                    )
+                })
+        })
+}
+
+/// The named sections of `map` as `prefix.name`, in name order.
+fn sorted<'p>(
+    map: &'p std::collections::HashMap<String, PolicyGroup>,
+    prefix: &'p str,
+) -> impl Iterator<Item = (String, &'p PolicyGroup)> {
+    let mut names: Vec<_> = map.iter().collect();
+    names.sort_by(|left, right| left.0.cmp(right.0));
+    names
+        .into_iter()
+        .map(move |(name, group)| (format!("{prefix}.{name}"), group))
 }
 
 /// Every `authentication:` block in the document: global, entity defaults,

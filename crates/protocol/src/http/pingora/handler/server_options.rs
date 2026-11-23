@@ -11,10 +11,15 @@ use pingora_core::{apps::HttpServerOptions, protocols::http::v2::server::H2Optio
 
 /// Build [`HttpServerOptions`] with h2c enabled.
 ///
+/// `allow_connect` turns on CONNECT method proxying for the listener
+/// (its `forward_proxy.enabled` flag); without it the proxy layer
+/// answers CONNECT with 405 before any handler hook runs.
+///
 /// [`HttpServerOptions`]: pingora_core::apps::HttpServerOptions
-pub(super) fn h2c_server_options() -> HttpServerOptions {
+pub(super) fn h2c_server_options(allow_connect: bool) -> HttpServerOptions {
     let mut opts = HttpServerOptions::default();
     opts.h2c = true;
+    opts.allow_connect_method_proxying = allow_connect;
     opts
 }
 

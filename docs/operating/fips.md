@@ -24,7 +24,7 @@ features. The FIPS build leaves out what is not yet FIPS compliant:
 | `policy` filter (policy engine) | yes | no by default; opt-in on the FIPS backend, see [The policy filter on FIPS](#the-policy-filter-on-fips) |
 | Base image | Alpine, praxis built with upstream Rust | `ubi9/ubi-minimal`, praxis built with Red Hat's `rust-toolset` on `ubi9/ubi`, both pinned by digest and signature-verified |
 | OpenSSL | Alpine's, dynamically linked | UBI's, dynamically linked (`openssl-libs` and `openssl-fips-provider-so`), the validated module on a FIPS host |
-| Published tags | `<version>`, `<major>.<minor>`, `latest`, `sha-<hash>`, `nightly` (see [image tags](../release.md#image-tags)) | the same with a `-fips` suffix (`0.8.0-fips`, `latest-fips`) |
+| Published tags | `<version>`, `<major>.<minor>`, `latest`, `sha-<hash>`, `nightly` (see [image tags](../developing/release.md#image-tags)) | the same with a `-fips` suffix (`0.8.0-fips`, `latest-fips`) |
 
 The default FIPS build rejects a configuration that uses the `policy`
 filter at startup. Everything else, including TLS listeners, mTLS, SNI, the admin API
@@ -229,8 +229,8 @@ Three things the checks cannot supply belong in any claim:
   `3.0.7-cda111b5812c30d4`. NIST's Modules In Process list shows a Red Hat
   submission for this module under review; until it is on a certificate, the
   image carries a module in validation, not the validated one. `fips-host-check`
-  says so on every run (`xtask/assets/fips/certified-modules.json` is the
-  list it consults), and the release gate can be made to fail on it with
+  says so on every run (the list it consults is compiled into
+  `cargo fips-check`), and the release gate can be made to fail on it with
   `--require-certified` once that is the policy.
 - **The operating environment.** The certificate's tested environments are
   RHEL 9 on specific physical Intel, POWER and z machines. A virtual machine

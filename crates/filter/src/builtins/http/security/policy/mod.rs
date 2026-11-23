@@ -205,6 +205,34 @@
 //! the same id under a different subject is a different bucket and taint
 //! never crosses principals.
 //!
+//! # Admission at the request head
+//!
+//! Request-head admission rejects over-limit or unauthenticated requests before
+//! body buffering, declared-body-size checks and inference body validation.
+//! It uses the client's headers plus trusted mutations from earlier head filters.
+//! Entity authorization follows classification; `http.request` authorization runs
+//! in the request phase. Each rate limiter charges a request at most once.
+//!
+//! For entity policies, identity resolution waits for the route when an entity
+//! default, group or route sets `authentication.replace_inherited`, or when
+//! `global.defaults.http`, an `http:` route or its groups add authentication.
+//! A startup warning identifies the blocking section. Head admission then
+//! enforces only `ratelimit.pre_identity`.
+//!
+//! Policies with deferred identity buffer request bodies. In `body_access: read_only`
+//! mode, the limit is `max_buffer_bytes`, or `llm.max_request_bytes` for inference
+//! policies. Other filters can raise it
+//! within `body_limits.max_buffer_bytes` and `body_limits.max_request_bytes`;
+//! larger bodies receive HTTP 413. Requests left unauthenticated by a skipped
+//! body hook receive HTTP 500.
+//!
+//! Head admission is disabled when an earlier filter can answer or reject the
+//! request, or when policy has request conditions; pipeline construction warns in
+//! either case. Earlier filters retain precedence over policy body denials,
+//! and later body hooks do not run after a denial. Request conditions see headers
+//! published by head filters. Branch-chain policies and policies using
+//! `context_headers` also have no head phase.
+//!
 //! # Request and response phases
 //!
 //! - Request phase: after the body is buffered, the filter dispatches the pre-invoke CMF hook for the route's entity.
@@ -371,6 +399,11 @@ mod rate_limit_tests;
 #[cfg(feature = "policy-builtins")]
 #[expect(clippy::unwrap_used, clippy::panic, reason = "tests")]
 mod bodyless_tests;
+
+#[cfg(test)]
+#[cfg(feature = "policy-builtins")]
+#[expect(clippy::unwrap_used, clippy::expect_used, clippy::panic, reason = "tests")]
+mod head_tests;
 
 #[cfg(all(test, feature = "policy-crypto-fips"))]
 #[expect(clippy::expect_used, clippy::panic, reason = "tests")]

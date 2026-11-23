@@ -208,6 +208,10 @@ impl HttpFilter for GrpcWebFilter {
         "grpc_web"
     }
 
+    fn may_end_request(&self) -> bool {
+        false
+    }
+
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         let kind = GrpcWebKind::from_headers(&ctx.request.headers);
         if !self.accepts(kind) {

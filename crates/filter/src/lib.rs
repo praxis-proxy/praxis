@@ -152,8 +152,8 @@ pub use error_response::{
     ErrorResponseContext, ErrorResponseFormatter, ErrorResponseFormatterHandle, FormattedErrorResponse,
 };
 pub use extensions::{
-    AuthenticatedIdentity, ClientResponseHeadersCommitted, RequestExtensions, ResponseTrailersPending,
-    UpstreamForwardedEndpoint,
+    AuthenticatedIdentity, ClientResponseHeadersCommitted, ClusterNotContacted, RequestExtensions,
+    ResponseTrailersPending, UpstreamForwardedEndpoint,
 };
 pub use factory::{
     EmptyFilterConfig, FilterFactory, HttpFilterFactory, TcpFilterFactory, http_builtin, parse_filter_config,
@@ -170,7 +170,7 @@ pub use metadata::{FilterMetadata, MetadataLimit, MetadataRejected};
 #[cfg(feature = "upstream-binding")]
 pub use pipeline::catalog::{ClusterApplicationCatalog, ClusterApplicationMetadata, ClusterMetadataDeclaration};
 pub use pipeline::{
-    FilterPipeline, PipelineExtension,
+    FilterPipeline, PipelineExtension, RequiredBodyProcessing,
     introspection::{BodyAccessInfo, BranchConditionInfo, BranchIntrospection, FilterIntrospection},
     subrequest::{IterationState, NextIterationBody},
 };
@@ -271,8 +271,7 @@ pub(crate) mod test_utils {
             retry_policy: None,
             route_retry_policy: None,
             hedge_policy: None,
-            cluster_retry_state: None,
-            cluster_retry_state_released: false,
+            cluster_admission: None,
             endpoint_reselector: None,
             pinned_endpoint_address: None,
             time_source: &praxis_core::time::SystemTimeSource,

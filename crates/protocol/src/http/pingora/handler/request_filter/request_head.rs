@@ -23,7 +23,6 @@ use tracing::error;
 
 #[cfg(feature = "pingora")]
 use super::header_mutations::apply_pre_read_mutations;
-use super::stream_buffer::push_grouped_queues;
 use crate::http::pingora::context::PingoraRequestCtx;
 #[cfg(feature = "pingora")]
 use crate::http::pingora::{convert::send_rejection_for, metrics};
@@ -51,7 +50,7 @@ enum RequestHeadOutcome {
 
 /// Run opted-in head filters and reject an oversized declared body before reading it.
 #[cfg(feature = "pingora")]
-pub(super) async fn prepare(
+pub(in crate::http) async fn prepare(
     pipeline: &FilterPipeline,
     session: &mut Session,
     request: &mut Request,
@@ -162,10 +161,7 @@ pub(in crate::http) async fn run_head_filters(
 
         // Capture trusted header mutations with the same precedence as the
         // pre-read pass: the ordered log wins, else the grouped queues.
-        let mut mutations = std::mem::take(&mut filter_ctx.pre_read_mutations);
-        if mutations.is_empty() {
-            push_grouped_queues(&filter_ctx, &mut mutations);
-        }
+        let mutations = filter_ctx.take_pass_header_mutations();
 
         // Publish head facts back to ctx before propagating any error.
         // `build_filter_context` moved these out of ctx (including the

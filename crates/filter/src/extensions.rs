@@ -55,6 +55,18 @@ pub struct ResponseTrailersPending;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UpstreamForwardedEndpoint(pub Arc<str>);
 
+/// The request will not reach the cluster a router selects for it.
+///
+/// Published by an HTTP adapter before the request filters run, for a
+/// request it serves some other way. A forward-proxy `CONNECT` dials its own
+/// destination, yet its target still matches a catch-all route on a
+/// listener that also reverse-proxies. Filters that learn a cluster's health
+/// from request outcomes leave such a request uncounted: `circuit_breaker`
+/// takes no token for it, so it can neither hold the half-open probe nor
+/// close the circuit.
+#[derive(Clone, Copy, Debug)]
+pub struct ClusterNotContacted;
+
 // -----------------------------------------------------------------------------
 // AuthenticatedIdentity
 // -----------------------------------------------------------------------------

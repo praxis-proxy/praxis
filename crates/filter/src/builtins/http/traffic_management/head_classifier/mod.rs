@@ -159,6 +159,10 @@ impl HttpFilter for HeadClassifierFilter {
         "head_classifier"
     }
 
+    fn may_end_request(&self) -> bool {
+        false
+    }
+
     async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         Ok(FilterAction::Continue)
     }

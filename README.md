@@ -14,7 +14,8 @@ Praxis is a [Rust]-based framework for building **proxy servers**.
 
 ## Getting Started
 
-- [Quickstart](docs/quickstart.md)
+- [Quickstart](docs/getting-started/quickstart.md)
+- [Build from source](docs/getting-started/build-from-source.md)
 - [Example configs](examples/README.md)
 
 ## Documentation
@@ -27,7 +28,7 @@ The following are some good places to start:
 - [Policy enforcement](docs/security/policy-enforcement.md)
 - [Features](docs/features.md)
 - [Filters](docs/filters/README.md)
-- [Extensions](docs/filters/extensions.md)
+- [Extensions](docs/developing/extensions.md)
 - [TLS](docs/operating/tls.md)
 - [Security Hardening](docs/operating/security-hardening.md)
 

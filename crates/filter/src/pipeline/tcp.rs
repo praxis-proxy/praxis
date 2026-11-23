@@ -494,6 +494,7 @@ mod tests {
             .map(|(i, f)| crate::pipeline::filter::PipelineFilter::new(i, AnyFilter::Tcp(f), vec![], vec![]))
             .collect();
         FilterPipeline {
+            upgrade_policy: None,
             body_capabilities: BodyCapabilities::default(),
             has_request_completion_observer: false,
             compression: None,
@@ -514,6 +515,7 @@ mod tests {
             request_body_ceiling: None,
             response_body_ceiling: None,
             request_head_filter_indices: Vec::new(),
+            shielded_admitter_indices: Vec::new(),
             request_body_filter_indices: Vec::new(),
             response_body_filter_indices: Vec::new(),
             selected_upstream_request_body_filter_indices: Vec::new(),

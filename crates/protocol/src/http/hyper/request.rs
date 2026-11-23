@@ -104,10 +104,7 @@ fn capture_client(flight: &mut Flight, connection: &ConnectionFacts, parts: Part
     flight.ctx.client_addr = Some(normalize_mapped_ipv4(connection.peer.ip()));
     flight.ctx.downstream_tls = connection.tls;
     flight.ctx.peer_identity.clone_from(&connection.peer_identity);
-    flight.ctx.request_is_idempotent = matches!(
-        parts.method,
-        http::Method::GET | http::Method::HEAD | http::Method::OPTIONS
-    );
+    flight.ctx.request_is_idempotent = praxis_core::retry::replays_without_opt_in(&parts.method);
     flight.ctx.request_span =
         create_request_span_for(parts.method.as_str(), parts.uri.path(), &parts.headers, &flight.ctx);
 
@@ -453,10 +450,14 @@ mod tests {
             (Method::GET, true),
             (Method::HEAD, true),
             (Method::OPTIONS, true),
+            (Method::QUERY, true),
             (Method::POST, false),
             (Method::PUT, false),
             (Method::DELETE, false),
             (Method::PATCH, false),
+            (Method::TRACE, false),
+            (Method::CONNECT, false),
+            (Method::from_bytes(b"CUSTOM").unwrap(), false),
         ] {
             let mut flight = Flight::for_tests(empty_pipeline());
 

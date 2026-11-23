@@ -68,6 +68,10 @@ impl HttpFilter for GrpcDetectionFilter {
         "grpc_detection"
     }
 
+    fn may_end_request(&self) -> bool {
+        false
+    }
+
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         let kind = GrpcKind::from_headers(&ctx.request.headers);
         if kind == GrpcKind::None {

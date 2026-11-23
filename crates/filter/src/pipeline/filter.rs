@@ -82,7 +82,20 @@ impl fmt::Debug for PipelineFilter {
     }
 }
 
+/// Built-in filters that always answer the request themselves.
+pub(super) const ANSWERING_FILTERS: &[&str] = &["iterative_request_router", "redirect", "static_response"];
+
 impl PipelineFilter {
+    /// Whether this filter or any of its branches can end the request phase.
+    pub(crate) fn can_end_request(&self) -> bool {
+        matches!(&self.filter, AnyFilter::Http(filter) if filter.may_end_request() || filter.produces_terminal_response())
+            || ANSWERING_FILTERS.contains(&self.filter.name())
+            || self
+                .branches
+                .iter()
+                .any(|branch| branch.filters.iter().any(Self::can_end_request))
+    }
+
     /// Create a `PipelineFilter` with no branches or name.
     pub(crate) fn new(
         filter_id: usize,

@@ -3,9 +3,11 @@
 *
 
 # The locked workspace. Containerfile and Containerfile.fips both build from
-# all of it, and the FIPS report stage also runs xtask.
+# all of it (xtask included: it is a workspace member the lockfile covers),
+# and the FIPS report stage reads fips-check.toml.
 !Cargo.toml
 !Cargo.lock
+!fips-check.toml
 !crates/
 !tests/
 !xtask/

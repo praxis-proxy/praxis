@@ -11,6 +11,7 @@
 
 use std::sync::Arc;
 
+use praxis_core::health::PassiveTransition;
 use praxis_filter::FilterPipeline;
 
 use super::metrics;
@@ -144,13 +145,8 @@ fn apply_passive_threshold(
     cluster_name: &Arc<str>,
     is_failure: bool,
 ) {
-    if is_failure {
-        if let Some(threshold) = health.passive_unhealthy_threshold()
-            && health
-                .endpoints()
-                .get(idx)
-                .is_some_and(|ep| ep.record_failure(threshold))
-        {
+    match health.observe_passive(idx, is_failure) {
+        Some(PassiveTransition::Unhealthy { threshold }) => {
             tracing::warn!(
                 cluster = %cluster_name,
                 endpoint_index = idx,
@@ -158,20 +154,17 @@ fn apply_passive_threshold(
                 "passive health: endpoint marked unhealthy"
             );
             emit_passive_health_transition(health, cluster_name, metrics::HEALTH_RESULT_UNHEALTHY);
-        }
-    } else if let Some(threshold) = health.passive_healthy_threshold()
-        && health
-            .endpoints()
-            .get(idx)
-            .is_some_and(|ep| ep.record_success(threshold))
-    {
-        tracing::info!(
-            cluster = %cluster_name,
-            endpoint_index = idx,
-            threshold,
-            "passive health: endpoint recovered"
-        );
-        emit_passive_health_transition(health, cluster_name, metrics::HEALTH_RESULT_HEALTHY);
+        },
+        Some(PassiveTransition::Recovered { threshold }) => {
+            tracing::info!(
+                cluster = %cluster_name,
+                endpoint_index = idx,
+                threshold,
+                "passive health: endpoint recovered"
+            );
+            emit_passive_health_transition(health, cluster_name, metrics::HEALTH_RESULT_HEALTHY);
+        },
+        None => {},
     }
 }
 

@@ -973,6 +973,35 @@ pub(super) fn check_selected_upstream_condition_pre_read(
 // Warning Checks
 // -----------------------------------------------------------------------------
 
+/// Warn when filter ordering or request conditions prevent head admission.
+pub(super) fn check_head_admission_ordering(filters: &[PipelineFilter], warnings: &mut Vec<String>) {
+    for (position, pf) in filters.iter().enumerate() {
+        if !admits_at_request_head(pf) {
+            continue;
+        }
+        let name = pf.filter.name();
+        if let Some(ender) = super::body::first_request_ender(filters, position) {
+            let ender = ender.filter.name();
+            warnings.push(format!(
+                "filter '{name}' at position {position} admits in the request phase, not at the \
+                 request head: '{ender}' can answer or reject the request before it, so \
+                 requests are not rejected before their body is read"
+            ));
+        } else if !pf.conditions.is_empty() {
+            warnings.push(format!(
+                "filter '{name}' at position {position} admits in the request phase, not at the \
+                 request head: its request conditions must see the headers that head filters \
+                 publish, so requests are not rejected before their body is read"
+            ));
+        }
+    }
+}
+
+/// Whether `pf` runs a request-head hook that may reject the request.
+fn admits_at_request_head(pf: &PipelineFilter) -> bool {
+    matches!(&pf.filter, AnyFilter::Http(filter) if filter.runs_request_head() && filter.admits_at_request_head())
+}
+
 /// Router without any following LB (requests will 502).
 ///
 /// Suppressed when a consumer the binding router reaches selects an endpoint
@@ -1108,9 +1137,11 @@ mod tests {
     use praxis_core::config::{ConditionMatch, SelectedUpstreamMatch};
 
     use super::*;
+    use crate::pipeline::test_filters::{
+        admitting_head_filter, head_filter, lb_filter, noop_filter_with_conditions, selector_filter,
+    };
     #[cfg(feature = "upstream-binding")]
     use crate::pipeline::test_filters::{binding_router, bound_lb, terminal_filter};
-    use crate::pipeline::test_filters::{lb_filter, noop_filter_with_conditions, selector_filter};
 
     #[test]
     fn invalid_condition_header_name_rejected_at_build() {
@@ -3223,6 +3254,73 @@ mod tests {
         );
     }
 
+    #[test]
+    fn head_admitting_policy_first_in_the_chain_warns_about_nothing() {
+        let filters = vec![admitting_head_filter("policy"), security_noop_filter("ip_acl", vec![])];
+        let mut warnings = Vec::new();
+        check_head_admission_ordering(&filters, &mut warnings);
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn an_earlier_filter_that_can_end_the_request_moves_admission_out_of_the_head() {
+        for earlier in [
+            security_noop_filter("ip_acl", vec![]),
+            named_noop_filter("static_response", vec![]),
+            named_noop_filter("redirect", vec![]),
+        ] {
+            let ender = earlier.filter.name();
+            let filters = vec![earlier, admitting_head_filter("policy")];
+            let mut warnings = Vec::new();
+            check_head_admission_ordering(&filters, &mut warnings);
+            assert_eq!(warnings.len(), 1, "{ender}: {warnings:?}");
+            assert!(
+                warnings[0].contains("admits in the request phase") && warnings[0].contains(&format!("'{ender}'")),
+                "{warnings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_conditional_admitting_filter_admits_in_the_request_phase() {
+        for earlier in [vec![], vec![head_filter("head_classifier")], vec![make_pf(vec![])]] {
+            let mut policy = admitting_head_filter("policy");
+            policy.conditions = vec![make_condition()];
+            let filters: Vec<_> = earlier.into_iter().chain([policy]).collect();
+            let mut warnings = Vec::new();
+            check_head_admission_ordering(&filters, &mut warnings);
+            assert_eq!(warnings.len(), 1, "{warnings:?}");
+            assert!(
+                warnings[0].contains("admits in the request phase") && warnings[0].contains("request conditions"),
+                "{warnings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn head_admission_warnings_skip_filters_that_do_not_admit_at_the_head() {
+        let mut conditional_classifier = head_filter("head_classifier");
+        conditional_classifier.conditions = vec![make_condition()];
+        let cases = [
+            (
+                "a policy without a head phase",
+                vec![
+                    security_noop_filter("ip_acl", vec![]),
+                    named_noop_filter("policy", vec![]),
+                ],
+            ),
+            (
+                "a head filter that only publishes facts",
+                vec![security_noop_filter("ip_acl", vec![]), conditional_classifier],
+            ),
+        ];
+        for (case, filters) in cases {
+            let mut warnings = Vec::new();
+            check_head_admission_ordering(&filters, &mut warnings);
+            assert!(warnings.is_empty(), "{case}: {warnings:?}");
+        }
+    }
+
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
@@ -3239,9 +3337,11 @@ mod tests {
         pf
     }
 
-    /// Build a security-class noop named `name`.
+    /// A security-class filter named `name` whose request phase can end the
+    /// request.
     fn security_noop_filter(name: &'static str, conditions: Vec<Condition>) -> PipelineFilter {
-        let mut pf = named_noop_filter(name, conditions);
+        let mut pf = crate::pipeline::test_filters::ending_filter(name);
+        pf.conditions = conditions;
         pf.is_security = true;
         pf
     }

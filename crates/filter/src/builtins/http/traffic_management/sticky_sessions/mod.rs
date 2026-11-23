@@ -360,6 +360,10 @@ impl HttpFilter for StickySessionsFilter {
         "sticky_sessions"
     }
 
+    fn may_end_request(&self) -> bool {
+        false
+    }
+
     fn bind_session_stores(&self, registry: &Arc<SessionStoreRegistry>) {
         for (name, cfg) in &self.configs {
             if let Some(slot) = self.bound_stores.get(name) {
