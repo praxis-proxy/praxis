@@ -57,12 +57,13 @@ mod extensions;
 mod factory;
 mod filter;
 mod filtered_subrequest;
-mod grpc_response;
-pub mod json_ops;
-pub(crate) mod load_balancing;
 /// Experimental, adapter-neutral local HTTP handler contracts.
 #[cfg(feature = "local-http")]
 pub mod local_http;
+
+mod grpc_response;
+pub mod json_ops;
+pub(crate) mod load_balancing;
 mod metrics;
 pub(crate) mod path_match;
 mod pipeline;
