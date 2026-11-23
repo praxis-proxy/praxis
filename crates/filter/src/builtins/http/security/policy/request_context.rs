@@ -8,23 +8,38 @@ use std::sync::Arc;
 use chrono::{DateTime, SecondsFormat, Utc};
 use ppe::praxis_policy_core::extensions::RequestExtension;
 
-use crate::{filter::HttpFilterContext, trace_context::TraceContext};
+use crate::{ExportedSpanTraceId, filter::HttpFilterContext, trace_context::TraceContext};
 
 /// Build request metadata from the existing request ID, trace ID and clock.
 /// The caller keeps this record so response checks use the same IDs and timestamp.
+///
+/// The trace ID prefers the exported request span's ID (see
+/// [`ExportedSpanTraceId`]), so an audit record joins the trace a collector
+/// exports. The filter-level [`TraceContext`] supplies it when no exporter is
+/// active, and remains the source of the request ID either way.
+///
+/// [`ExportedSpanTraceId`]: crate::ExportedSpanTraceId
+/// [`TraceContext`]: crate::trace_context::TraceContext
 pub(super) fn get_request_context(ctx: &HttpFilterContext<'_>) -> Option<Arc<RequestExtension>> {
-    let Some(trace) = ctx.extensions.get::<TraceContext>() else {
+    let exported = ctx
+        .extensions
+        .get::<ExportedSpanTraceId>()
+        .map(|id| id.0.as_ref().to_owned());
+    let trace = ctx.extensions.get::<TraceContext>();
+    if exported.is_none() && trace.is_none() {
         tracing::debug!(target: "policy.filter", "no trace context; request IDs and timestamp will not be supplied");
         return None;
-    };
+    }
     let now = ctx.time_source.now();
     let timestamp = i64::try_from(now.as_secs())
         .ok()
         .and_then(|seconds| DateTime::<Utc>::from_timestamp(seconds, now.subsec_nanos()))
         .map(|time| time.to_rfc3339_opts(SecondsFormat::Millis, true));
+    let request_id = trace.map(|trace| trace.request_id().to_owned());
+    let trace_id = exported.or_else(|| trace.map(|trace| trace.trace_id().to_owned()));
     Some(Arc::new(RequestExtension {
-        request_id: Some(trace.request_id().to_owned()),
-        trace_id: Some(trace.trace_id().to_owned()),
+        request_id,
+        trace_id,
         timestamp,
         ..Default::default()
     }))
@@ -60,6 +75,7 @@ mod tests {
 
     use super::{get_request_context, with_environment};
     use crate::{
+        ExportedSpanTraceId,
         test_utils::{make_filter_context, make_request},
         trace_context::TraceContext,
     };
@@ -124,6 +140,29 @@ mod tests {
         ctx.time_source = &clock;
         let request = get_request_context(&ctx).expect("request metadata");
         assert_eq!(request.timestamp.as_deref(), Some("1970-01-01T00:00:00.000Z"));
+    }
+
+    #[test]
+    fn exported_span_trace_id_wins_over_trace_context() {
+        let req = make_request(Method::GET, "/");
+        let mut ctx = make_filter_context(&req);
+        ctx.extensions
+            .insert(TraceContext::new("request".into(), "filter-minted".into(), "01".into()));
+        ctx.extensions.insert(ExportedSpanTraceId(Arc::from("span-minted")));
+        let request = get_request_context(&ctx).expect("request metadata");
+        assert_eq!(request.request_id.as_deref(), Some("request"));
+        assert_eq!(request.trace_id.as_deref(), Some("span-minted"));
+    }
+
+    #[test]
+    fn exported_span_trace_id_alone_supplies_only_the_trace_id() {
+        let req = make_request(Method::GET, "/");
+        let mut ctx = make_filter_context(&req);
+        ctx.extensions.insert(ExportedSpanTraceId(Arc::from("span-minted")));
+        let request = get_request_context(&ctx).expect("request metadata");
+        assert!(request.request_id.is_none());
+        assert_eq!(request.trace_id.as_deref(), Some("span-minted"));
+        assert!(request.timestamp.is_some(), "the clock is still captured");
     }
 
     /// Records event metadata without installing a process-wide subscriber.

@@ -28,7 +28,7 @@ use crate::http::pingora::{
         header_mutations::apply_pre_read_mutations_to_request,
         pipeline::{PipelineResult, run_pipeline},
         request_head::run_head_filters,
-        request_utils::create_request_span_for,
+        request_utils::{create_request_span_for, record_exported_trace_id},
         stream_buffer::{PreReadMutations, PreReadPass, PreReadStop},
     },
     metrics,
@@ -110,6 +110,7 @@ fn capture_client(flight: &mut Flight, connection: &ConnectionFacts, parts: Part
     );
     flight.ctx.request_span =
         create_request_span_for(parts.method.as_str(), parts.uri.path(), &parts.headers, &flight.ctx);
+    record_exported_trace_id(&flight.ctx.request_span, &mut flight.ctx.extensions);
 
     let caps = flight.pipeline.body_capabilities();
     flight.ctx.request_body_mode = caps.request_body_mode;

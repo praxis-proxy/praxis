@@ -6,6 +6,9 @@
 //! Provides helpers for OpenTelemetry span creation, request snapshot
 //! population, and route template matching.
 
+#[cfg(feature = "otel")]
+use std::sync::Arc;
+
 #[cfg(feature = "pingora")]
 use pingora_proxy::Session;
 #[cfg(feature = "pingora")]
@@ -135,6 +138,41 @@ pub(in crate::http) fn create_request_span_for(
     span
 }
 
+/// Record the root request span's exported trace ID in the filter extensions.
+///
+/// No-op without the `otel` feature. With the feature, the ID is recorded only
+/// when the span has a valid OpenTelemetry span context, which requires a
+/// configured exporter; the tracing-opentelemetry layer returns an empty
+/// context (invalid span context) otherwise. Consumers such as the policy
+/// filter's request metadata fall back to the filter-level [`TraceContext`]
+/// trace ID when this marker is absent.
+///
+/// [`TraceContext`]: praxis_filter::trace_context::TraceContext
+pub(in crate::http) fn record_exported_trace_id(
+    span: &tracing::Span,
+    extensions: &mut praxis_filter::RequestExtensions,
+) {
+    #[cfg(feature = "otel")]
+    {
+        use opentelemetry::trace::TraceContextExt as _;
+        use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+
+        let context = span.context();
+        let span_ref = context.span();
+        let span_context = span_ref.span_context();
+        if span_context.is_valid() {
+            extensions.insert(praxis_filter::ExportedSpanTraceId(Arc::from(format!(
+                "{:032x}",
+                u128::from_be_bytes(span_context.trace_id().to_bytes())
+            ))));
+        }
+    }
+    #[cfg(not(feature = "otel"))]
+    {
+        let _ = (span, extensions);
+    }
+}
+
 #[cfg(test)]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
@@ -156,6 +194,17 @@ mod tests {
 
     fn make_ctx() -> PingoraRequestCtx {
         PingoraRequestCtx::default()
+    }
+
+    #[test]
+    fn record_exported_trace_id_without_an_otel_subscriber_inserts_nothing() {
+        let span = tracing::info_span!("http_request");
+        let mut extensions = praxis_filter::RequestExtensions::default();
+        record_exported_trace_id(&span, &mut extensions);
+        assert!(
+            extensions.get::<praxis_filter::ExportedSpanTraceId>().is_none(),
+            "without a registered OpenTelemetry layer the span context is invalid and must not be recorded"
+        );
     }
 
     #[test]

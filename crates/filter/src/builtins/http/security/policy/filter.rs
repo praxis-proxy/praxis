@@ -163,15 +163,19 @@ pub(super) enum ResponseCustomState {
 /// See [Header assertions].
 ///
 /// Request correlation is captured at this filter's first request or body
-/// callback and reused in response hooks. When a matching `trace_context`
-/// filter has initialized correlation, `request.request_id` and
-/// `request.trace_id` come from that context, and `request.timestamp` is the
-/// capture time from the request clock, in RFC 3339 UTC with millisecond
-/// precision, or absent if the clock value cannot be represented. The pipeline
+/// callback and reused in response hooks. `request.trace_id` prefers the
+/// exported root HTTP request span's trace ID, published when the `otel`
+/// feature is compiled in and an exporter is configured, so an audit record
+/// joins the trace a collector exports; the span-level and filter-level IDs
+/// agree whenever an inbound trace was joined. Without an active exporter the
+/// matching `trace_context` filter supplies it. `request.request_id` always
+/// comes from that context, and `request.timestamp` is the capture time from
+/// the request clock, in RFC 3339 UTC with millisecond precision, or absent if
+/// the clock value cannot be represented. The pipeline
 /// initializes matching top-level trace filters before executing the chain.
 /// Missing trace context logs at debug and leaves the
 /// request slot absent, or environment-only when `environment` is configured.
-/// `request.span_id` is unset: the trace context stores no exported span ID.
+/// `request.span_id` is unset: no exported span ID is carried.
 /// Establish the final request ID before this filter's first callback: in a
 /// normal header-first chain, place `request_id` and ID-rewriting filters before
 /// `policy`. Later ID changes are not reflected in the snapshot, and body

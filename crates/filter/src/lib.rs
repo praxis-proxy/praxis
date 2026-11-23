@@ -152,7 +152,7 @@ pub use error_response::{
     ErrorResponseContext, ErrorResponseFormatter, ErrorResponseFormatterHandle, FormattedErrorResponse,
 };
 pub use extensions::{
-    AuthenticatedIdentity, ClientResponseHeadersCommitted, ClusterNotContacted, RequestExtensions,
+    AuthenticatedIdentity, ClientResponseHeadersCommitted, ClusterNotContacted, ExportedSpanTraceId, RequestExtensions,
     ResponseTrailersPending, UpstreamForwardedEndpoint,
 };
 pub use factory::{
