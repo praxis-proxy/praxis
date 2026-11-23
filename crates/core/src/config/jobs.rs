@@ -302,7 +302,7 @@ const BUILT_IN_QUEUE: &str = "default";
 ///
 /// # Errors
 ///
-/// Returns [`ProxyError::Config`] when a listener names an unknown queue or
+/// Returns [`ProxyError::Config`](crate::errors::ProxyError::Config) when a listener names an unknown queue or
 /// opts in while the `jobs` section is absent.
 #[cfg(feature = "jobs-config")]
 pub(crate) fn validate_listener_job_queues(
