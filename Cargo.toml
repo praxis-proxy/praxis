@@ -72,7 +72,7 @@ pingora-proxy = { git = "https://github.com/rkaplan-hub/pingora.git", rev = "5c9
 percent-encoding = "2.3.2"
 rand = "0.10.4"
 plotters = { version = "0.3.7", default-features = false, features = ["svg_backend", "line_series"] }
-ppe = { version = "0.6.0", package = "praxis-policy", default-features = false }
+ppe = { version = "0.7.0", package = "praxis-policy", default-features = false }
 parking_lot = "0.12.5"
 portable-atomic = "1.15.0"
 proptest = "1.12.0"
