@@ -2,7 +2,7 @@
 
 This guide is for repository contributors building and changing Praxis.
 To configure and run your first local proxy, use the
-[operator quickstart](../quickstart.md).
+[operator quickstart](../getting-started/quickstart.md).
 
 ## Requirements
 
@@ -88,7 +88,8 @@ cargo xtask debug
 cargo xtask debug path/to/config.yaml
 ```
 
-See the [Quickstart](../quickstart.md#quick-test-servers) for full usage.
+See [Build from source](../getting-started/build-from-source.md#quick-test-servers)
+for full usage.
 
 ## Build
 

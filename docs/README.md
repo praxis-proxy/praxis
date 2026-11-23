@@ -5,57 +5,46 @@ with a composable filter pipeline for routing, load balancing,
 and security. AI Gateway docs live in
 [praxis-ai overview](https://github.com/praxis-proxy/ai/blob/main/docs/overview.md).
 
+The sections below are ordered for a first deployment: get a proxy running,
+operate it, choose filters, understand the design, then look up reference
+material. Extension and contributor material is last.
+
 ## Getting started
 
-Choose a path by the result you need:
+- [Getting started](getting-started/README.md): where to begin
+- [Quickstart](getting-started/quickstart.md):
+  run the container image in front of a backend and send a request
+- [Build from source](getting-started/build-from-source.md):
+  build the binary and run a local proxy
+- [Example configs](../examples/README.md):
+  working YAML for each feature
 
-- **Run an HTTP proxy:** [Quickstart](quickstart.md) builds Praxis and forwards
-  a request to a local backend.
-- **Configure an HTTP or TCP deployment:** start with
-  [configuration](operating/configuration.md), then review
-  [security hardening](operating/security-hardening.md) and
-  [TLS](operating/tls.md) before deploying.
-- **Control access and protect data:**
-  [policy enforcement](security/policy-enforcement.md) explains
-  use cases, filter selection, and how to connect Core to identity and
-  authorization policies.
-- **Proxy model APIs or agent protocols:** use the
-  [Praxis AI quickstart][ai-quickstart].
-- **Contribute to Praxis:** [contributor setup](developing/getting-started.md)
-  covers the repository toolchain, builds, tests, and linting.
-- **Build a custom HTTP filter:** follow the
-  [HTTP filter tutorial](filters/http-filter-tutorial.md).
+To proxy model APIs or agent protocols, use the
+[Praxis AI quickstart][ai-quickstart].
 
 [ai-quickstart]: https://github.com/praxis-proxy/ai/blob/main/docs/quickstart.md
-
-For capabilities and configurations:
-
-- [Features](features.md)
-- [Example configs](../examples/README.md)
 
 ## Operating Praxis
 
 - [Configuration](operating/configuration.md):
   YAML config, listeners, chains, runtime
-- [Filter Reference](filters/reference.md):
-  all built-in filter configurations
-- [Policy Enforcement](security/policy-enforcement.md):
-  identity, authorization, delegation, data protection, and approvals
+- [Security Hardening](operating/security-hardening.md):
+  production deployment guidance
 - [TLS](operating/tls.md):
   certificates, mTLS, SNI, hot-reload
-- [Observability](operating/observability.md):
-  Prometheus metrics, access logs, admin endpoints
-- [Diagnostics](operating/diagnostics.md):
-  config checks, live state, logs, and shutdown
-- [Distributed Tracing](operating/tracing.md):
-  OTLP export, W3C context propagation, and span privacy
-- [Health Checking](operating/health-checking.md):
-  active/passive probes, thresholds, admin endpoints
+- [Policy Enforcement](security/policy-enforcement.md):
+  identity, authorization, delegation, data protection, and approvals
 - [Load Balancing](operating/load-balancing.md):
   strategy selection, weighted endpoints, health-aware
   routing
-- [Security Hardening](operating/security-hardening.md):
-  production deployment guidance
+- [Health Checking](operating/health-checking.md):
+  active/passive probes, thresholds, admin endpoints
+- [Observability](operating/observability.md):
+  Prometheus metrics, access logs, admin endpoints
+- [Distributed Tracing](operating/tracing.md):
+  OTLP export, W3C context propagation, and span privacy
+- [Diagnostics](operating/diagnostics.md):
+  config checks, live state, logs, and shutdown
 - [Capacity Planning](operating/capacity-planning.md):
   file descriptor budget, limits, and load shedding
 - [Build Features](operating/build-features.md):
@@ -64,7 +53,60 @@ For capabilities and configurations:
   the FIPS build, host prerequisites,
   `PRAXIS_REQUIRE_FIPS`, verifying a deployment
 
-## Contributing
+## Filters
+
+- [Filter System](filters/README.md):
+  traits, context, body access, pipeline
+- [Filter Reference](filters/reference.md):
+  all built-in filter configurations
+- [Branch Chains](filters/branch-chains.md):
+  conditional branching in pipelines
+
+## Architecture
+
+- [Overview](architecture/overview.md):
+  design principles, protocol adapters, filter-first design
+- [Pipeline Concepts](architecture/pipeline-concepts.md):
+  chains, pipelines, filter results, naming
+- [Life of a Request](architecture/life-of-a-request.md):
+  step-by-step request walkthrough
+- [Connection Lifecycle](architecture/connection-lifecycle.md):
+  HTTP and TCP request flow
+- [Upstream Binding](architecture/upstream-binding.md):
+  logical cluster binding, freeze barrier, bound
+  conditions
+- [Payload Processing](architecture/payload-processing.md):
+  body access, StreamBuffer, conditions
+- [Body Buffering](architecture/body-buffering.md):
+  delivery modes, StreamBuffer, size limits
+- [TCP Proxy](architecture/tcp-proxy.md):
+  SNI peek-and-forward, timeout layering, SSRF
+- [HTTP Correctness](architecture/http-correctness.md):
+  RFC enforcement, Pingora boundary
+- [Pingora Handler Lifecycle](architecture/pingora-handler-lifecycle.md):
+  how the `ProxyHttp` hooks drive the filter pipeline
+- [Hyper Backend](architecture/hyper-backend.md):
+  the experimental hyper network backend
+- [Crate Layout](architecture/crate-layout.md):
+  workspace structure, module tree, dependency graph
+
+## Reference
+
+- [Features](features.md)
+- [Filter Reference](filters/reference.md)
+- [Benchmarks](benchmarks.md)
+- [Proposals](https://github.com/praxis-proxy/enhancements)
+
+## Developing
+
+### Extending Praxis
+
+- [HTTP Filter Tutorial](developing/http-filter-tutorial.md):
+  build, register, test, and run a custom filter
+- [Extensions](developing/extensions.md):
+  registration options, advanced examples, best practices
+
+### Contributing
 
 - [Getting Started](developing/getting-started.md):
   build, test, dev setup
@@ -83,43 +125,6 @@ For capabilities and configurations:
 - [Adding Filters](developing/adding-filters.md):
   new filter checklist
 - [Adding Protocols](developing/adding-protocols.md)
+- [Adding Network Backends](developing/adding-backends.md)
 - [Project Management](developing/project-management.md)
-
-## Architecture
-
-- [Overview](architecture/overview.md):
-  design principles, protocol adapters, filter-first design
-- [Pipeline Concepts](architecture/pipeline-concepts.md):
-  chains, pipelines, filter results, naming
-- [Upstream Binding](architecture/upstream-binding.md):
-  logical cluster binding, freeze barrier, bound
-  conditions
-- [Life of a Request](architecture/life-of-a-request.md):
-  step-by-step request walkthrough
-- [Connection Lifecycle](architecture/connection-lifecycle.md):
-  HTTP and TCP request flow
-- [Payload Processing](architecture/payload-processing.md):
-  body access, StreamBuffer, conditions
-- [Crate Layout](architecture/crate-layout.md):
-  workspace structure, module tree, dependency graph
-- [TCP Proxy](architecture/tcp-proxy.md):
-  SNI peek-and-forward, timeout layering, SSRF
-- [HTTP Correctness](architecture/http-correctness.md):
-  RFC enforcement, Pingora boundary
-
-## Filter Development
-
-- [HTTP Filter Tutorial](filters/http-filter-tutorial.md):
-  build, register, test, and run a custom filter
-- [Filter System](filters/README.md):
-  traits, context, body access, pipeline
-- [Branch Chains](filters/branch-chains.md):
-  conditional branching in pipelines
-- [Extensions](filters/extensions.md):
-  registration options, advanced examples, best practices
-
-## Reference
-
-- [Benchmarks](benchmarks.md)
-- [Release Process](release.md)
-- [Proposals](https://github.com/praxis-proxy/enhancements)
+- [Release Process](developing/release.md)
