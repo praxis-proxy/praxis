@@ -1658,8 +1658,7 @@ impl PolicyFilter {
         if let Some(rejection) = self.pre_identity_limit(ctx, view).await? {
             return Ok(Err(rejection));
         }
-        let gate_ext =
-            Self::identity_extensions(view, ENTITY_HTTP, ENTITY_NAME_GLOBAL, &self.cfg);
+        let gate_ext = Self::identity_extensions(view, ENTITY_HTTP, ENTITY_NAME_GLOBAL, &self.cfg);
         let payload = Self::identity_payload(view.headers().clone());
         let result = self
             .invoke::<IdentityHook>(ctx, HOOK_IDENTITY_RESOLVE, payload, gate_ext)
