@@ -69,7 +69,14 @@ impl LocalCompletion {
 /// Adapter obligations: bounded reads, awaited writes, no upstream capability.
 #[async_trait]
 pub trait LocalTransport: Send {
-    /// Send eligible 100-continue on the first approved body demand only.
+    /// Complete eligible 100-continue on the first approved body demand only.
+    ///
+    /// This operation is cancellation safe and idempotent. Keep acceptance
+    /// progress in the transport, not in this call's future: if a handler drops
+    /// a pending body pull, the next call resumes the same interim write rather
+    /// than starting another one. Return success only after that write finishes;
+    /// retain an error instead of retrying a write with uncertain progress.
+    /// Requests without an eligible expectation complete without an interim write.
     async fn accept_body(&mut self) -> Result<(), FilterError>;
     /// Read one bounded payload chunk; explicit EOF must be sticky.
     async fn read_body(&mut self) -> Result<Option<Bytes>, FilterError>;

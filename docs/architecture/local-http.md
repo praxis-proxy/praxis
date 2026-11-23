@@ -127,6 +127,15 @@ handler catches it. Excess declared Content-Length rejects before handler
 construction. Unknown lengths enforce the same limit before handing each
 chunk to the handler.
 
+On the first approved body pull, the coordinator awaits
+`LocalTransport::accept_body` before reading. Dropping that pull while
+acceptance is pending leaves the coordinator free to call `accept_body` again.
+The adapter therefore keeps acceptance progress in its per-request transport
+state: a retry resumes the same interim write, even after partial progress,
+and never queues another `100 Continue`. Success means the write completed;
+an uncertain or failed write stays failed rather than starting over. Later
+body pulls skip acceptance after success. Ineligible expectations are a no-op.
+
 Route counters use checked `u64` addition; overflow is a limit violation.
 Request bytes count before handler handoff. Response bytes count after
 response filtering; completion reports successfully written payload.

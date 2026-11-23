@@ -994,6 +994,71 @@ async fn declared_length_rejection_sends_no_interim_or_service_work() {
 }
 
 #[tokio::test]
+async fn dropped_first_body_pull_resumes_interim_acceptance_without_duplicate() {
+    const CONTINUE: &[u8] = b"HTTP/1.1 100 Continue\r\n\r\n";
+    for bytes_sent_before_drop in [b"HTTP/1.1 100 ".len(), CONTINUE.len()] {
+        let state = State::default();
+        let mut owner = Fixture::owner(state.clone());
+        owner.handler = HandlerKind::DropPendingFirstPull;
+        let pipeline = pipeline(vec![owner]);
+        let mut request = praxis_filter::Request {
+            method: http::Method::POST,
+            uri: "/files".parse().unwrap(),
+            headers: http::HeaderMap::new(),
+        };
+        request
+            .headers
+            .insert("expect", http::HeaderValue::from_static("100-continue"));
+        let mut head = Response {
+            status: http::StatusCode::OK,
+            headers: http::HeaderMap::new(),
+        };
+        let mut ctx = context::context(&request, &pipeline);
+        ctx.response_header = Some(&mut head);
+        let exchange = LocalExchange::claim(&pipeline, &mut ctx).unwrap();
+        let mut transport = ResumableAcceptanceTransport::new(
+            Transport {
+                state: state.clone(),
+                input: Input::bytes(1),
+            },
+            bytes_sent_before_drop,
+        );
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            exchange.run(&mut ctx, &mut transport),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.outcome, LocalOutcome::Completed);
+        assert_eq!(result.status, 200);
+        assert_eq!(result.request_bytes, 1);
+        assert!(result.request_eof);
+        assert_eq!(transport.accept_calls, 2, "the dropped pull must retry acceptance");
+        assert_eq!(transport.wire, CONTINUE, "the interim response must appear once");
+        let events = state.events();
+        let acceptance_events: Vec<_> = events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event.as_str(),
+                    "accept-start" | "dropped-body-pull" | "accept-resume" | "read"
+                )
+            })
+            .map(String::as_str)
+            .collect();
+        let expected = if bytes_sent_before_drop == CONTINUE.len() {
+            vec!["accept-start", "dropped-body-pull", "read", "read"]
+        } else {
+            vec!["accept-start", "dropped-body-pull", "accept-resume", "read", "read"]
+        };
+        assert_eq!(acceptance_events, expected);
+        assert_complete(&state, 1);
+    }
+}
+
+#[tokio::test]
 async fn disconnect_and_external_cancellation_finalize_once() {
     for disconnect in [false, true] {
         let state = State::default();

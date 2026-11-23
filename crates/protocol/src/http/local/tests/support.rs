@@ -96,6 +96,7 @@ pub(super) enum HandlerKind {
     SuppressWait,
     Wait,
     SwallowRead,
+    DropPendingFirstPull,
     Reclaim,
 }
 
@@ -370,6 +371,12 @@ impl LocalHttpHandler for Handler {
         if self.kind == HandlerKind::SwallowRead {
             let _ignored = body.next_chunk().await;
         } else if self.kind != HandlerKind::Early {
+            if self.kind == HandlerKind::DropPendingFirstPull {
+                let mut first_pull = Box::pin(body.next_chunk());
+                assert!(matches!(futures::poll!(first_pull.as_mut()), std::task::Poll::Pending));
+                drop(first_pull);
+                self.state.event("dropped-body-pull");
+            }
             while body.next_chunk().await?.is_some() {
                 if self.kind == HandlerKind::ObserveRequestChunks {
                     self.state.event("request-chunk");
@@ -551,6 +558,79 @@ impl LocalTransport for Transport {
         if let Some(extensions) = ctx.extensions.get::<ExtensionState>() {
             inner.completion_extensions = extensions.0.clone();
         }
+    }
+}
+
+/// A fake HTTP/1 adapter that retains a partially sent interim response.
+pub(super) struct ResumableAcceptanceTransport {
+    pub(super) inner: Transport,
+    pub(super) wire: Vec<u8>,
+    pub(super) accept_calls: usize,
+    bytes_sent_before_drop: usize,
+    acceptance_started: bool,
+}
+
+impl ResumableAcceptanceTransport {
+    pub(super) fn new(inner: Transport, bytes_sent_before_drop: usize) -> Self {
+        Self {
+            inner,
+            wire: Vec::new(),
+            accept_calls: 0,
+            bytes_sent_before_drop,
+            acceptance_started: false,
+        }
+    }
+}
+
+#[async_trait]
+impl LocalTransport for ResumableAcceptanceTransport {
+    async fn accept_body(&mut self) -> Result<(), FilterError> {
+        const CONTINUE: &[u8] = b"HTTP/1.1 100 Continue\r\n\r\n";
+        self.accept_calls += 1;
+        if !self.acceptance_started {
+            self.acceptance_started = true;
+            let first_write = CONTINUE
+                .get(..self.bytes_sent_before_drop)
+                .ok_or("invalid interim write length")?;
+            self.wire.extend_from_slice(first_write);
+            self.inner.state.event("accept-start");
+            std::future::pending::<()>().await;
+        }
+        if self.wire.len() < CONTINUE.len() {
+            self.inner.state.event("accept-resume");
+            let remainder = CONTINUE
+                .strip_prefix(self.wire.as_slice())
+                .ok_or("invalid interim write progress")?;
+            self.wire.extend_from_slice(remainder);
+        }
+        Ok(())
+    }
+
+    async fn read_body(&mut self) -> Result<Option<Bytes>, FilterError> {
+        if self.wire != b"HTTP/1.1 100 Continue\r\n\r\n" {
+            return Err("request body read before interim acceptance completed".into());
+        }
+        self.inner.read_body().await
+    }
+
+    async fn write_head(&mut self, head: &Response) -> Result<(), FilterError> {
+        self.inner.write_head(head).await
+    }
+
+    async fn write_body(&mut self, chunk: Bytes) -> Result<(), FilterError> {
+        self.inner.write_body(chunk).await
+    }
+
+    async fn finish(&mut self, request_eof: bool) -> Result<(), FilterError> {
+        self.inner.finish(request_eof).await
+    }
+
+    async fn abort(&mut self) {
+        self.inner.abort().await;
+    }
+
+    fn complete(&mut self, completion: LocalCompletion, ctx: &HttpFilterContext<'_>) {
+        self.inner.complete(completion, ctx);
     }
 }
 fn generated(remaining: &mut u64) -> Option<Bytes> {
