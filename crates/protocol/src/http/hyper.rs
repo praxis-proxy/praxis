@@ -128,7 +128,13 @@ impl HyperHttp {
 
         let connector = HyperConnector::new(runtime.keepalive_pool_size());
         for listener in listeners {
-            let pipeline = pipelines.get(&listener.name).map(Arc::clone).ok_or_else(|| {
+            let pipeline = pipelines.get(&listener.name).map(Arc::clone);
+            #[cfg(feature = "local-http")]
+            if let Some(pipeline) = &pipeline {
+                crate::http::local::require_supported_adapter(&pipeline.load())
+                    .map_err(|error| ProxyError::Config(error.to_string()))?;
+            }
+            let pipeline = pipeline.ok_or_else(|| {
                 ProxyError::Config(format!("no pipeline for listener '{name}'", name = listener.name))
             })?;
             let shared = ListenerShared::new(

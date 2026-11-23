@@ -245,6 +245,9 @@ pub fn load_http_handler_with_options(
     lifecycle: LifecycleHandle,
     options: &HttpHandlerOptions,
 ) -> Result<(), praxis_core::ProxyError> {
+    #[cfg(feature = "local-http")]
+    crate::http::local::require_supported_adapter(&pipeline.load())
+        .map_err(|error| praxis_core::ProxyError::Config(error.to_string()))?;
     let downstream_read_timeout = listener.downstream_read_timeout_ms.map(Duration::from_millis);
     let downstream_keepalive_timeout_secs = listener
         .downstream_keepalive_timeout_ms
@@ -253,16 +256,8 @@ pub fn load_http_handler_with_options(
         .max_connections
         .map(|max| Arc::new(Semaphore::new(max as usize)));
 
-    // The forward-proxy runtime is built once from validated config; a
-    // matcher that fails to rebuild here fails the listener rather than
-    // silently allowing every destination.
     #[cfg(feature = "forward-proxy")]
-    let forward_proxy = listener
-        .forward_proxy
-        .as_ref()
-        .filter(|config| config.enabled)
-        .map(|config| connect::ForwardProxyRuntime::try_from_config(config, options.allow_private_upstreams))
-        .transpose()?;
+    let forward_proxy = build_forward_proxy_runtime(listener, options)?;
     // Without the feature `listener.forward_proxy` is always `None` (the key
     // does not parse), so CONNECT stays gated off and the options go unused.
     #[cfg(not(feature = "forward-proxy"))]
@@ -286,6 +281,22 @@ pub fn load_http_handler_with_options(
     );
     wire_service(server, listener, handler, cert_watcher_shutdowns)?;
     Ok(())
+}
+
+/// Build the forward-proxy runtime from validated listener configuration.
+#[cfg(feature = "forward-proxy")]
+fn build_forward_proxy_runtime(
+    listener: &praxis_core::config::Listener,
+    options: &HttpHandlerOptions,
+) -> Result<Option<connect::ForwardProxyRuntime>, praxis_core::ProxyError> {
+    // A matcher that fails to rebuild must fail the listener rather than
+    // silently allowing every destination.
+    listener
+        .forward_proxy
+        .as_ref()
+        .filter(|config| config.enabled)
+        .map(|config| connect::ForwardProxyRuntime::try_from_config(config, options.allow_private_upstreams))
+        .transpose()
 }
 
 /// Create a Pingora HTTP proxy service, bind the listener, and add it to the server.

@@ -494,6 +494,12 @@ mod tests {
             .map(|(i, f)| crate::pipeline::filter::PipelineFilter::new(i, AnyFilter::Tcp(f), vec![], vec![]))
             .collect();
         FilterPipeline {
+            #[cfg(feature = "local-http")]
+            local_routes: Vec::new(),
+            #[cfg(feature = "local-http")]
+            local_http_valid: true,
+            #[cfg(feature = "local-http")]
+            nested_local_routes: false,
             upgrade_policy: None,
             body_capabilities: BodyCapabilities::default(),
             has_request_completion_observer: false,

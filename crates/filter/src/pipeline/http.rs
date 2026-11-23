@@ -154,6 +154,10 @@ impl FilterPipeline {
         &self,
         ctx: &mut HttpFilterContext<'_>,
     ) -> Result<FilterAction, FilterError> {
+        #[cfg(feature = "local-http")]
+        if self.requires_local_http(ctx) {
+            return Ok(FilterAction::Reject(Rejection::status(500)));
+        }
         for &idx in &self.request_head_filter_indices {
             let Some(pf) = self.filters.get(idx) else {
                 continue;
@@ -213,6 +217,10 @@ impl FilterPipeline {
     ///
     /// [`FilterError`]: crate::FilterError
     pub async fn execute_http_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        #[cfg(feature = "local-http")]
+        if self.requires_local_http(ctx) {
+            return Ok(FilterAction::Reject(Rejection::status(500)));
+        }
         let mut held = ctx.extensions.remove::<HeldRejection>();
         let action = self.run_request_filters(ctx, &mut held).await?;
         // A branch that skipped past the holder must not admit the request.

@@ -17,6 +17,8 @@ name = "json_size_heap"
 harness = false
 
 [features]
+# Adapter-neutral local HTTP lifecycle; live serving is not enabled yet.
+local-http = []
 default = ["policy-builtins"]
 # The `policy` filter and the Policy engine, with no builtin plugin and no
 # crypto backend. Every build that names it must also select exactly one

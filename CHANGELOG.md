@@ -162,6 +162,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Local HTTP response policies retain their headers when a handler nominates
+  the same fields in `Connection`; handler hop-by-hop fields are removed
+  before policies run.
 - Reject explicit listener `upgrade_policy` settings until protocol admission
   enforcement is available, rather than silently accepting unenforced denials.
 
@@ -299,6 +302,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Experimental, off-by-default `local-http` handler contracts with route and
+  pipeline validation. Pingora and Hyper adapters do not serve local handlers
+  yet, so startup and reload reject pipelines that declare local routes.
+  Custom policies can preserve explicit response-header writes and removals
+  across local response replacements through
+  `local_http::record_response_header_effects`. See
+  `docs/architecture/local-http.md`.
+  Handler hop-by-hop fields are removed before policies run, so a handler's
+  Connection nominations cannot remove policy-set response headers.
 - The HTTP CONNECT runtime for the experimental `forward_proxy` listener
   block (the `forward-proxy` cargo feature, off by default), which turns
   the block from inert config into an egress gateway: `CONNECT host:port`

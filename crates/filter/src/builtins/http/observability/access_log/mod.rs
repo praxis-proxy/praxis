@@ -1344,6 +1344,10 @@ impl AccessLogFilter {
     }
 
     fn maybe_emit(&self, ctx: &mut HttpFilterContext<'_>, status: u16, response_headers: Option<&http::HeaderMap>) {
+        #[cfg(feature = "local-http")]
+        if ctx.extensions.get::<crate::local_http::LocalHttpActive>().is_some() {
+            return;
+        }
         // Emit at most once per request: the bodyless on_response path and the
         // on_response_body end-of-stream path can both reach here, and the
         // protocol-layer fallback already relies on this marker.
@@ -1646,24 +1650,15 @@ fn request_is_grpc(ctx: &HttpFilterContext<'_>) -> bool {
     praxis_core::grpc::GrpcKind::from_headers(&ctx.request.headers).is_grpc()
 }
 
-/// Marker inserted into request extensions once an access record has been
-/// emitted for this request.
-///
-/// The protocol-layer fallback checks for it via
-/// [`access_record_already_emitted`] so a request the filter already logged
-/// (e.g. a bodyless response whose `on_response` emitted before a later
-/// response filter rejected) does not gain a duplicate fallback record.
-struct AccessRecordEmitted;
-
 /// Whether an access record has already been emitted for this request.
 #[must_use]
 pub fn access_record_already_emitted(ctx: &HttpFilterContext<'_>) -> bool {
-    ctx.extensions.get::<AccessRecordEmitted>().is_some()
+    ctx.extensions.get::<crate::extensions::AccessRecordEmitted>().is_some()
 }
 
 /// Record that an access record has been emitted for this request.
 pub fn mark_access_record_emitted(ctx: &mut HttpFilterContext<'_>) {
-    ctx.extensions.insert(AccessRecordEmitted);
+    ctx.extensions.insert(crate::extensions::AccessRecordEmitted);
 }
 
 /// Emit a structured access log record for the current request.
@@ -1818,6 +1813,26 @@ fn resolve_field<'a>(
 
 #[async_trait]
 impl HttpFilter for AccessLogFilter {
+    #[cfg(feature = "local-http")]
+    fn local_http_compatibility(&self) -> crate::local_http::LocalCompatibility {
+        crate::local_http::LocalCompatibility::Policy
+    }
+
+    #[cfg(feature = "local-http")]
+    fn complete_local_http(&self, ctx: &mut HttpFilterContext<'_>, status: u16) {
+        let active = ctx.extensions.remove::<crate::local_http::LocalHttpActive>();
+        let response_header = ctx.response_header.take();
+        let headers = self
+            .needs_response_headers
+            .then(|| response_header.as_deref().map(|response| &response.headers))
+            .flatten();
+        self.maybe_emit(ctx, status, headers);
+        ctx.response_header = response_header;
+        if let Some(active) = active {
+            ctx.extensions.insert(active);
+        }
+    }
+
     fn name(&self) -> &'static str {
         "access_log"
     }

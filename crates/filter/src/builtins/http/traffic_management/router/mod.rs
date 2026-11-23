@@ -585,6 +585,11 @@ fn intern_route_label(label: &str) -> &'static str {
 
 #[async_trait]
 impl HttpFilter for RouterFilter {
+    #[cfg(feature = "local-http")]
+    fn local_http_compatibility(&self) -> crate::local_http::LocalCompatibility {
+        crate::local_http::LocalCompatibility::UpstreamRoutingOnly
+    }
+
     fn name(&self) -> &'static str {
         "router"
     }

@@ -9,7 +9,6 @@
     clippy::iter_over_hash_type,
     clippy::min_ident_chars,
     clippy::mod_module_files,
-    clippy::shadow_unrelated,
     clippy::single_char_lifetime_names,
     reason = "TODO(conventions-sync): fix violations and remove"
 )]
@@ -21,6 +20,13 @@
         clippy::partial_pub_fields,
         clippy::pub_underscore_fields,
         clippy::wildcard_enum_match_arm,
+        reason = "TODO(conventions-sync): fix violations and remove"
+    )
+)]
+#![cfg_attr(
+    any(feature = "pingora", feature = "hyper", all(test, feature = "local-http")),
+    expect(
+        clippy::shadow_unrelated,
         reason = "TODO(conventions-sync): fix violations and remove"
     )
 )]
