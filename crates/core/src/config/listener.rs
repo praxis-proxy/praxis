@@ -136,8 +136,10 @@ pub struct Listener {
     /// changing existing configs; the built-in queue is `default`.
     ///
     /// Requires the `jobs-config` Cargo feature, which is off by default:
-    /// without it the key is unknown. Nothing reads the field yet — the
-    /// job runtime that consumes it is still pending, so a configured
+    /// without it the key is unknown. The reference is validated at config
+    /// load — it must name a configured queue, today the built-in `default`,
+    /// and the `jobs` section must be present. Nothing executes it yet: the
+    /// job runtime that consumes it is still pending, so a validated
     /// `job_queue` has no effect today.
     ///
     /// ```

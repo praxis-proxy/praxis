@@ -229,8 +229,10 @@ impl TryFrom<u64> for JobQueuedBytes {
 /// budget, regardless of how many listeners a deployment serves. Job
 /// submission is opt-in per listener through [`Listener::job_queue`](crate::config::Listener::job_queue), which
 /// names the queue that listener may submit to, so listeners sharing a chain
-/// can differ in whether they can enqueue. The field is parsed and validated
-/// here; the runtime that reads it is still pending.
+/// can differ in whether they can enqueue. The reference is validated at
+/// config load — it must name a configured queue, today the built-in
+/// `default`, and the `jobs` section must be present; the runtime that
+/// executes it is still pending.
 ///
 /// What each bound counts:
 ///
@@ -276,6 +278,56 @@ pub struct JobsConfig {
     /// Shared ceiling on the bytes held by waiting job payloads; running jobs
     /// hold no budget. Defaults to 4 `MiB`.
     pub max_queued_bytes: JobQueuedBytes,
+}
+
+// -----------------------------------------------------------------------------
+// Listener Validation
+// -----------------------------------------------------------------------------
+
+/// The only queue name config can express today.
+///
+/// The design reserves queue names so listeners can be isolated onto
+/// separate queues later without changing existing configs; until the
+/// runtime introduces named queues, the built-in `default` is the sole
+/// valid reference.
+#[cfg(feature = "jobs-config")]
+const BUILT_IN_QUEUE: &str = "default";
+
+/// Validate every listener's `job_queue` reference at config load.
+///
+/// A typo such as `defualt` must fail here rather than silently never
+/// matching a queue, and a listener cannot opt into job submission when no
+/// `jobs` section configures the runtime. Runtime enforcement of what a
+/// queue admits is separate and lands with the runtime.
+///
+/// # Errors
+///
+/// Returns [`ProxyError::Config`] when a listener names an unknown queue or
+/// opts in while the `jobs` section is absent.
+#[cfg(feature = "jobs-config")]
+pub(crate) fn validate_listener_job_queues(
+    listeners: &[crate::config::Listener],
+    jobs: Option<&JobsConfig>,
+) -> Result<(), crate::errors::ProxyError> {
+    for listener in listeners {
+        let Some(queue) = listener.job_queue.as_deref() else {
+            continue;
+        };
+        if jobs.is_none() {
+            return Err(crate::errors::ProxyError::Config(format!(
+                "listener {} sets job_queue '{}' but no jobs section is configured; \
+                 add a jobs section or remove the listener's job_queue",
+                listener.name, queue
+            )));
+        }
+        if queue != BUILT_IN_QUEUE {
+            return Err(crate::errors::ProxyError::Config(format!(
+                "listener {} names unknown job queue '{}'; the built-in queue is '{}'",
+                listener.name, queue, BUILT_IN_QUEUE
+            )));
+        }
+    }
+    Ok(())
 }
 
 // -----------------------------------------------------------------------------
@@ -459,6 +511,59 @@ filter_chains:
         assert!(
             parsed.is_err(),
             "job_queue must be an unknown listener key without the feature"
+        );
+    }
+
+    /// A typo in the queue name is rejected at config load, so it can never
+    /// silently never match a queue.
+    #[test]
+    #[cfg(feature = "jobs-config")]
+    fn an_unknown_queue_name_is_rejected_at_config_load() {
+        let parsed = crate::config::Config::from_yaml(
+            r#"
+listeners:
+  - name: internal
+    address: "127.0.0.1:8081"
+    filter_chains: [main]
+    job_queue: defualt
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+jobs: {}
+"#,
+        );
+        let err = parsed.expect_err("a typo'd queue name must be rejected");
+        assert!(
+            err.to_string().contains("unknown job queue 'defualt'"),
+            "the error should name the unknown queue, got: {err}"
+        );
+    }
+
+    /// Opting in without a jobs section is rejected: there is no queue
+    /// runtime for the listener to submit to.
+    #[test]
+    #[cfg(feature = "jobs-config")]
+    fn job_queue_without_a_jobs_section_is_rejected_at_config_load() {
+        let parsed = crate::config::Config::from_yaml(
+            r#"
+listeners:
+  - name: internal
+    address: "127.0.0.1:8081"
+    filter_chains: [main]
+    job_queue: default
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#,
+        );
+        let err = parsed.expect_err("job_queue without a jobs section must be rejected");
+        assert!(
+            err.to_string().contains("no jobs section is configured"),
+            "the error should name the missing section, got: {err}"
         );
     }
 
