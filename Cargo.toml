@@ -71,7 +71,7 @@ pingora-proxy = { version = "0.11.4", package = "quixotic-plecostomus-proxy", fe
 percent-encoding = "2.3.2"
 rand = "0.10.4"
 plotters = { version = "0.3.7", default-features = false, features = ["svg_backend", "line_series"] }
-ppe = { version = "0.6.0", package = "praxis-policy", default-features = false }
+ppe = { version = "0.7.0", package = "praxis-policy", default-features = false }
 parking_lot = "0.12.5"
 portable-atomic = "1.15.0"
 proptest = "1.12.0"
@@ -162,7 +162,7 @@ tracing-appender = "0.2.5"
 tracing-opentelemetry = "0.34.0"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json", "registry"] }
 unicase = "2.10.0"
-url = "2.5.8"
+url = "2.5.9"
 zeroize = "1.9.2"
 
 [profile.release]

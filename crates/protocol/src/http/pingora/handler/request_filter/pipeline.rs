@@ -146,7 +146,7 @@ pub(in crate::http) async fn execute(
             })
         })
         .map(Arc::new);
-    ctx.request_is_idempotent = crate::http::permits_automatic_replay(&session.req_header().method);
+    ctx.request_is_idempotent = praxis_core::retry::replays_without_opt_in(&session.req_header().method);
 
     ctx.request_span = create_request_span(session, ctx);
 

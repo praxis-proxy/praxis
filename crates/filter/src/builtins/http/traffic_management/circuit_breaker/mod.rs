@@ -34,7 +34,7 @@ use tracing::{debug, warn};
 
 use self::config::CircuitBreakerConfig;
 use crate::{
-    FilterError,
+    ClusterNotContacted, FilterError,
     actions::{FilterAction, Rejection},
     filter::{HttpFilter, HttpFilterContext},
 };
@@ -191,6 +191,15 @@ fn logical_open(state: CircuitState) -> bool {
     !matches!(state, CircuitState::Closed)
 }
 
+/// Whether the request will reach the cluster a router selected for it.
+///
+/// A request marked [`ClusterNotContacted`] (a forward-proxy `CONNECT`) says
+/// nothing about the cluster's health, and a token taken for it could be the
+/// half-open probe.
+fn reaches_cluster(ctx: &HttpFilterContext<'_>) -> bool {
+    ctx.extensions.get::<ClusterNotContacted>().is_none()
+}
+
 // -----------------------------------------------------------------------------
 // CircuitBreakerFilter
 // -----------------------------------------------------------------------------
@@ -205,6 +214,11 @@ fn logical_open(state: CircuitState) -> bool {
 /// the circuit opens and subsequent requests receive 503
 /// immediately. After the recovery window, a single probe
 /// request is forwarded; if it succeeds the circuit closes.
+///
+/// A forward-proxy `CONNECT` passes uncounted: its tunnel
+/// dials its own destination, never the cluster a route
+/// selects for it, so it neither takes the half-open probe
+/// nor records an outcome.
 ///
 /// # YAML configuration
 ///
@@ -294,8 +308,9 @@ impl HttpFilter for CircuitBreakerFilter {
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         // Clone the Arc, not the string: the token retains the cluster
         // name, and a refcount bump keys the response-phase lookup
-        // identically.
-        let Some(cluster_name) = ctx.cluster.clone() else {
+        // identically. A request that never reaches the cluster passes
+        // without a token.
+        let Some(cluster_name) = ctx.cluster.clone().filter(|_cluster| reaches_cluster(ctx)) else {
             return Ok(FilterAction::Continue);
         };
 

@@ -367,9 +367,68 @@ async fn on_response_no_header_without_upstream_does_not_trip() {
     );
 }
 
+#[tokio::test]
+async fn request_not_reaching_the_cluster_passes_an_open_circuit_without_a_token() {
+    // A forward-proxy CONNECT never reaches the cluster its route names, so
+    // that cluster's health is no reason to refuse it.
+    let filter = make_filter(1, 9999);
+    let req = crate::test_utils::make_request(http::Method::CONNECT, "/");
+    exchange(&filter, &req, http::StatusCode::INTERNAL_SERVER_ERROR, false).await;
+
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.cluster = Some(Arc::from("backend"));
+    ctx.current_filter_id = Some(0);
+    ctx.extensions.insert(crate::ClusterNotContacted);
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "the open circuit must not refuse a request it does not guard"
+    );
+    assert!(
+        ctx.remove_filter_state::<super::ActiveCircuitToken>().is_none(),
+        "no circuit token may be taken for it"
+    );
+}
+
+#[tokio::test]
+async fn outcome_of_a_request_not_reaching_the_cluster_is_not_recorded() {
+    // A tunnel's 200 must not reset the failure count of a cluster the
+    // tunnel never reached.
+    let filter = make_filter(2, 9999);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    exchange(&filter, &req, http::StatusCode::INTERNAL_SERVER_ERROR, false).await;
+    exchange(&filter, &req, http::StatusCode::OK, true).await;
+    exchange(&filter, &req, http::StatusCode::INTERNAL_SERVER_ERROR, false).await;
+
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.cluster = Some(Arc::from("backend"));
+    ctx.current_filter_id = Some(0);
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Reject(r) if r.status == 503),
+        "two failures with only an uncounted success between them must open the circuit"
+    );
+}
+
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
+
+/// Run one request to the "backend" cluster through `filter`, answered with
+/// `status`, optionally marked as never reaching the cluster.
+async fn exchange(filter: &CircuitBreakerFilter, req: &crate::Request, status: http::StatusCode, bypass: bool) {
+    let mut resp = crate::test_utils::make_response();
+    resp.status = status;
+    let mut ctx = crate::test_utils::make_filter_context(req);
+    ctx.cluster = Some(Arc::from("backend"));
+    ctx.current_filter_id = Some(0);
+    if bypass {
+        ctx.extensions.insert(crate::ClusterNotContacted);
+    }
+    drop(filter.on_request(&mut ctx).await.unwrap());
+    ctx.response_header = Some(&mut resp);
+    drop(filter.on_response(&mut ctx).await.unwrap());
+}
 
 /// Build a [`CircuitBreakerFilter`] for testing with a single cluster named "backend".
 fn make_filter(threshold: u32, recovery_secs: u64) -> CircuitBreakerFilter {

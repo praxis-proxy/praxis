@@ -91,7 +91,7 @@ See the [filter system documentation] for details, and
 the [extensions guide] for how to write your own.
 
 [filter system documentation]:../filters/README.md
-[extensions guide]:../filters/extensions.md
+[extensions guide]:../developing/extensions.md
 
 ### Listeners
 

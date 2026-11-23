@@ -72,6 +72,8 @@ mod fd_limits;
 mod filter_composition;
 mod filter_metadata;
 mod fips;
+#[cfg(feature = "forward-proxy")]
+mod forward_proxy;
 mod grpc_access_log;
 mod guardrails;
 mod health_check;

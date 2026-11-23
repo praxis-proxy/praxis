@@ -152,8 +152,8 @@ pub use error_response::{
     ErrorResponseContext, ErrorResponseFormatter, ErrorResponseFormatterHandle, FormattedErrorResponse,
 };
 pub use extensions::{
-    AuthenticatedIdentity, ClientResponseHeadersCommitted, RequestExtensions, ResponseTrailersPending,
-    UpstreamForwardedEndpoint,
+    AuthenticatedIdentity, ClientResponseHeadersCommitted, ClusterNotContacted, RequestExtensions,
+    ResponseTrailersPending, UpstreamForwardedEndpoint,
 };
 pub use factory::{
     EmptyFilterConfig, FilterFactory, HttpFilterFactory, TcpFilterFactory, http_builtin, parse_filter_config,
@@ -170,7 +170,7 @@ pub use metadata::{FilterMetadata, MetadataLimit, MetadataRejected};
 #[cfg(feature = "upstream-binding")]
 pub use pipeline::catalog::{ClusterApplicationCatalog, ClusterApplicationMetadata, ClusterMetadataDeclaration};
 pub use pipeline::{
-    FilterPipeline, PipelineExtension,
+    FilterPipeline, PipelineExtension, RequiredBodyProcessing,
     introspection::{BodyAccessInfo, BranchConditionInfo, BranchIntrospection, FilterIntrospection},
     subrequest::{IterationState, NextIterationBody},
 };

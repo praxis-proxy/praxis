@@ -95,6 +95,11 @@ pub(crate) fn response_header_from_pingora(upstream: &pingora_http::ResponseHead
 /// Only error statuses become gRPC statuses: a successful short-circuit
 /// (a CORS preflight `204`, a `static_response` `200`) is a real HTTP
 /// response the client asked for, not a proxy error.
+///
+/// A forward-proxy `CONNECT` always takes path 3, and never with a 2xx (see
+/// `connect::connect_refusal`): it is never a gRPC call, and to CONNECT any
+/// 2xx, gRPC's included, says the tunnel is open. Deciding here, as the
+/// answer is sent, covers every phase that can refuse a CONNECT.
 #[cfg(feature = "pingora")]
 pub(crate) async fn send_rejection_for(
     session: &mut Session,
@@ -108,6 +113,11 @@ pub(crate) async fn send_rejection_for(
         .is_some_and(|lifecycle| lifecycle.phase() == praxis_core::server::LifecyclePhase::Draining)
     {
         session.set_keepalive(None);
+    }
+    #[cfg(feature = "forward-proxy")]
+    if session.req_header().method == http::Method::CONNECT {
+        let rejection = super::handler::connect::connect_refusal(ctx, rejection);
+        return send_rejection(session, rejection).await;
     }
     // Path 1: gRPC filter already set grpc-status, just frame it.
     if rejection
