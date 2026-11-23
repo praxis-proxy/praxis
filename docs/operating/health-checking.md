@@ -335,8 +335,10 @@ curl http://127.0.0.1:9902/healthy
 ### /ready (Readiness)
 
 Returns per-cluster health status when active health
-checks are configured. Returns `503` when any cluster
-has zero healthy endpoints.
+checks are configured. The default `readiness: serving`
+keeps returning `200` once the replica is serving, even
+when a cluster has zero healthy endpoints. Set
+`readiness: upstreams` to return `503` in that case.
 
 ```console
 curl http://127.0.0.1:9902/ready
@@ -361,7 +363,27 @@ With health checks, all clusters healthy:
 }
 ```
 
-With a fully-down cluster (returns HTTP 503):
+With a fully-down cluster and the default `readiness: serving`, the replica
+stays ready (HTTP 200) while the body still reports the degraded cluster:
+
+```json
+{
+  "status": "ok",
+  "clusters": {
+    "total": 2,
+    "healthy": 1,
+    "degraded": 1
+  }
+}
+```
+
+Set `admin.readiness: upstreams` to fail readiness for that state:
+
+```yaml
+admin:
+  metrics_address: "127.0.0.1:9902"
+  readiness: upstreams
+```
 
 ```json
 {

@@ -112,7 +112,11 @@ async fn matched_rule_promotes_class() {
         Some("api"),
         "should promote the api class"
     );
-    assert_eq!(ctx.get_metadata("head_classifier.class"), Some("api"), "metadata set");
+    assert_eq!(
+        ctx.filter_metadata.get("head_classifier.class"),
+        Some("api"),
+        "metadata set"
+    );
     assert_eq!(
         ctx.filter_results.get("head_classifier").unwrap().get("class").unwrap(),
         "api",
@@ -180,7 +184,7 @@ async fn no_class_without_match_or_default() {
     assert!(matches!(action, FilterAction::Continue), "should continue unclassified");
     assert!(promoted_class(&ctx).is_none(), "no header should be promoted");
     assert!(
-        ctx.get_metadata("head_classifier.class").is_none(),
+        ctx.filter_metadata.get("head_classifier.class").is_none(),
         "no metadata should be set"
     );
 }

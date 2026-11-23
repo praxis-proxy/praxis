@@ -204,7 +204,8 @@ fn read_chunked(
     budget: ReadBudget,
 ) -> std::io::Result<()> {
     let mut buffer = [0_u8; 4096];
-    while !chunked_complete(&data[header_end..])? {
+    let mut progress = ChunkProgress::default();
+    while !progress.advance(&data[header_end..])? {
         let count = read_chunk(stream, &mut buffer, budget.deadline)?;
         if count == 0 {
             return Err(std::io::ErrorKind::UnexpectedEof.into());
@@ -220,31 +221,93 @@ fn read_chunked(
     Ok(())
 }
 
-/// Walks size-delimited chunks before looking for the trailer section's end.
-fn chunked_complete(mut body: &[u8]) -> std::io::Result<bool> {
-    loop {
-        let Some(line_end) = body.windows(2).position(|window| window == b"\r\n") else {
-            return Ok(false);
-        };
-        let size = chunk_size(&body[..line_end])?;
-        body = &body[line_end + 2..];
-        if size == 0 {
-            return Ok(body.starts_with(b"\r\n") || body.windows(4).any(|window| window == b"\r\n\r\n"));
+/// Current framing position; completed chunks are never examined again.
+#[derive(Default)]
+struct ChunkProgress {
+    /// First unconsumed or unscanned byte.
+    cursor: usize,
+    /// Beginning of the current framing line.
+    line_start: usize,
+    /// Start of the current size/trailer line, or the remaining data size.
+    phase: ChunkPhase,
+}
+
+/// Framing stage of a chunked response.
+#[derive(Clone, Copy, Default)]
+enum ChunkPhase {
+    /// Read the next chunk's size line.
+    #[default]
+    Size,
+    /// Wait for a chunk's data and terminating CRLF.
+    Data(usize),
+    /// Read the final chunk's trailer lines.
+    Trailer,
+}
+
+impl ChunkProgress {
+    /// Advance across all framing available in `body`.
+    #[expect(clippy::too_many_lines, reason = "four streaming chunk framing states")]
+    fn advance(&mut self, body: &[u8]) -> std::io::Result<bool> {
+        loop {
+            match self.phase {
+                ChunkPhase::Size | ChunkPhase::Trailer => {
+                    let Some(end) = self.line_end(body) else {
+                        return Ok(false);
+                    };
+                    if matches!(self.phase, ChunkPhase::Trailer) {
+                        if self.line_start == end {
+                            return Ok(true);
+                        }
+                    } else {
+                        let size = chunk_size(&body[self.line_start..end])?;
+                        self.phase = if size == 0 {
+                            ChunkPhase::Trailer
+                        } else {
+                            ChunkPhase::Data(size)
+                        };
+                    }
+                    self.cursor = end.saturating_add(2);
+                    self.line_start = self.cursor;
+                },
+                ChunkPhase::Data(size) => {
+                    let end = self
+                        .cursor
+                        .checked_add(size)
+                        .and_then(|end| end.checked_add(2))
+                        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "chunk size overflow"))?;
+                    if body.len() < end {
+                        return Ok(false);
+                    }
+                    if body.get(end.saturating_sub(2)..end) != Some(b"\r\n".as_slice()) {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "missing chunk CRLF",
+                        ));
+                    }
+                    self.cursor = end;
+                    self.line_start = end;
+                    self.phase = ChunkPhase::Size;
+                },
+            }
         }
-        let chunk_end = size
-            .checked_add(2)
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "chunk size overflow"))?;
-        if body.len() < chunk_end {
-            return Ok(false);
-        }
-        if &body[size..chunk_end] != b"\r\n" {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "missing chunk CRLF",
-            ));
-        }
-        body = &body[chunk_end..];
     }
+
+    /// Find CRLF from the saved scan cursor and retain a split CR byte.
+    fn line_end(&mut self, body: &[u8]) -> Option<usize> {
+        let end = body.get(self.cursor..)?.windows(2).position(|pair| pair == b"\r\n");
+        if let Some(relative) = end {
+            self.cursor.checked_add(relative)
+        } else {
+            self.cursor = body.len().saturating_sub(1);
+            None
+        }
+    }
+}
+
+/// Check one complete or incomplete chunked prefix in parser unit tests.
+#[cfg(test)]
+fn chunked_complete(body: &[u8]) -> std::io::Result<bool> {
+    ChunkProgress::default().advance(body)
 }
 
 /// Parses the hexadecimal size, leaving optional chunk extensions uninterpreted.
@@ -852,6 +915,24 @@ mod tests {
     }
 
     #[test]
+    fn incremental_chunk_parser_preserves_fragment_boundaries() {
+        let body = b"2 \t;name=value\r\nok\r\n0\r\nX-Checksum: value\r\n\r\n";
+        for split in 0..body.len() {
+            let mut progress = ChunkProgress::default();
+            assert!(
+                !progress.advance(&body[..split]).expect("valid incomplete prefix"),
+                "split at byte {split} must remain incomplete"
+            );
+            assert!(
+                progress.advance(body).expect("complete body"),
+                "split at byte {split} must complete"
+            );
+        }
+
+        assert_many_small_chunks_advance();
+    }
+
+    #[test]
     fn chunk_extensions_allow_only_spaces_and_tabs_before_the_semicolon() {
         for (line, expected) in [
             (b"2 ;name=value".as_slice(), 2),
@@ -1037,5 +1118,34 @@ mod tests {
         let raw = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nbody";
         let values = parse_header_all(raw, "X-Missing");
         assert!(values.is_empty(), "no matching headers should yield empty vec");
+    }
+
+    // -----------------------------------------------------------------------------
+    // Test Utilities
+    // -----------------------------------------------------------------------------
+
+    /// Require monotonic progress while a thousand one-byte chunks arrive.
+    fn assert_many_small_chunks_advance() {
+        let mut many = Vec::new();
+        for _ in 0..1000 {
+            many.extend_from_slice(b"1\r\nx\r\n");
+        }
+        many.extend_from_slice(b"0\r\n\r\n");
+        let mut progress = ChunkProgress::default();
+        let mut prior_cursor = 0;
+        for end in 1..=many.len() {
+            let complete = progress.advance(&many[..end]).expect("small chunks");
+            assert!(
+                progress.cursor >= prior_cursor,
+                "parser must not return to a completed chunk"
+            );
+            assert_eq!(complete, end == many.len(), "only the final trailer CRLF completes");
+            prior_cursor = progress.cursor;
+        }
+        assert_eq!(
+            progress.cursor,
+            many.len().saturating_sub(2),
+            "all framing advanced once"
+        );
     }
 }

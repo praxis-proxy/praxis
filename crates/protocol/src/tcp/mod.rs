@@ -12,6 +12,9 @@ pub(crate) mod hyper;
 /// TCP connection metrics (Prometheus counters, gauges and histograms).
 #[cfg(any(feature = "pingora", feature = "hyper"))]
 pub(crate) mod metrics;
+/// Pending pre-TLS admissions handed into the Pingora TCP service.
+#[cfg(feature = "pingora")]
+mod pending;
 /// Bidirectional TCP proxy application, shared by every backend.
 #[cfg(any(feature = "pingora", feature = "hyper"))]
 pub(crate) mod proxy;

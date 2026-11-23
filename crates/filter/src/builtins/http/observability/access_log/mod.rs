@@ -1807,7 +1807,7 @@ fn resolve_field<'a>(
                 .and_then(|headers| first_header_value(headers, name))
                 .unwrap_or("-"),
         ),
-        FieldToken::Metadata(key) => Cow::Borrowed(ctx.get_metadata(key).unwrap_or("-")),
+        FieldToken::Metadata(key) => Cow::Borrowed(ctx.filter_metadata.get(key).unwrap_or("-")),
     }
 }
 
@@ -1835,6 +1835,10 @@ impl HttpFilter for AccessLogFilter {
 
     fn name(&self) -> &'static str {
         "access_log"
+    }
+
+    fn may_end_request(&self) -> bool {
+        false
     }
 
     async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
@@ -1874,6 +1878,11 @@ impl HttpFilter for AccessLogFilter {
             return Ok(FilterAction::Continue);
         };
         let status = resp.status.as_u16();
+        // An informational head has no body, but does not finish the
+        // exchange. Keep the existing final 101 upgrade behavior.
+        if resp.status.is_informational() && resp.status != http::StatusCode::SWITCHING_PROTOCOLS {
+            return Ok(FilterAction::Continue);
+        }
         let bodyless = Self::is_bodyless(resp.status, &ctx.request.method);
         let response_headers = self.needs_response_headers.then(|| resp.headers.clone());
 

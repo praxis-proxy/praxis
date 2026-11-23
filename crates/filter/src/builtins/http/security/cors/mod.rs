@@ -350,13 +350,12 @@ impl CorsFilter {
             .headers
             .get_all("access-control-request-headers")
             .iter()
-            .any(|value| {
-                !value
-                    .to_str()
-                    .is_ok_and(|headers| headers.is_empty() || self.are_headers_allowed(headers))
+            .any(|value| match value.to_str() {
+                Ok(headers) => !headers.is_empty() && !self.are_headers_allowed(headers),
+                Err(_) => true,
             })
         {
-            debug!("preflight headers not allowed");
+            debug!("preflight requested headers not allowed or undecodable");
             return self.disallowed_preflight();
         }
 

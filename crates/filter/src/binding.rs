@@ -539,6 +539,13 @@ impl<'a> ChainBindingContext<'a> {
         entries: &[FilterEntry],
         chain_label: &str,
     ) -> Result<(), FilterError> {
+        if pipeline.has_request_completion_observer() {
+            return Err(format!(
+                "outbound chain '{chain_label}' contains a request-completion observer; \
+                 terminal completion runs only for listener requests"
+            )
+            .into());
+        }
         let errors = pipeline.ordering_errors(
             entries,
             self.insecure.allow_open_security_filters,
@@ -1437,6 +1444,50 @@ mod tests {
     // so it drops the terminal action and then errors that no upstream resolved.
     // Reject terminal filters at build time instead.
     // -------------------------------------------------------------------------
+
+    #[cfg(feature = "cloud-events-filter")]
+    #[test]
+    fn outbound_chain_with_request_completion_observer_rejected() {
+        let mut registry = FilterRegistry::with_builtins();
+        register_outbound_callout(&mut registry);
+        let mut top = entries(
+            "
+- filter: outbound_callout
+  outbound_chain:
+    name: outbound
+    filters:
+      - filter: cloud_events
+        on: request_complete
+        destination: https://events.example.test/events
+        source: urn:praxis:test
+        type: test.event
+",
+        );
+        let chains = HashMap::new();
+        let err = FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default(), &[])
+            .err()
+            .expect("completion observer in an outbound chain must be rejected");
+        assert!(
+            err.to_string().contains("request-completion observer"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[cfg(feature = "cloud-events-filter")]
+    #[test]
+    fn outbound_chain_keeps_supported_cloud_events_phases() {
+        let mut registry = FilterRegistry::with_builtins();
+        register_outbound_callout(&mut registry);
+        for phase in ["response_headers", "response_complete"] {
+            let yaml = format!(
+                "- filter: outbound_callout\n  outbound_chain:\n    name: outbound\n    filters:\n      - filter: cloud_events\n        on: {phase}\n        destination: https://events.example.test/events\n        source: urn:praxis:test\n        type: test.event\n"
+            );
+            let mut top = entries(&yaml);
+            let chains = HashMap::new();
+            FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default(), &[])
+                .unwrap_or_else(|error| panic!("{phase} remains supported in outbound chains: {error}"));
+        }
+    }
 
     #[cfg(feature = "iterative-request-router")]
     #[test]

@@ -155,6 +155,14 @@ async fn read_body<R: AdminRequest>(req: &mut R) -> Result<String, Response<Vec<
             warn!(limit = MAX_BODY_BYTES, "KV admin request body exceeded size limit");
             return Err(json_response(413, br#"{"error":"request body too large"}"#));
         },
+        Err(BodyReadError::TimedOut) => {
+            warn!("KV admin request body timed out");
+            let mut response = json_response(408, br#"{"error":"request body timed out"}"#);
+            response
+                .headers_mut()
+                .insert(http::header::CONNECTION, http::HeaderValue::from_static("close"));
+            return Err(response);
+        },
         Err(BodyReadError::Io(error)) => {
             warn!(%error, "KV admin request body read failed");
             return Err(json_response(502, br#"{"error":"request body read failed"}"#));

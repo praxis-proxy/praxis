@@ -104,7 +104,7 @@ assert_eq!(status, 403, "ACL should block loopback");
 
 #### Coverage Floor
 
-`make coverage-check` enforces a hard floor: **96% line
+`make coverage-check` enforces a hard floor: **97% line
 coverage** across the workspace. Binary entrypoints
 (`src/main.rs`), test crates, and benchmarks are excluded
 from coverage. Keep entrypoints to wiring; all logic
@@ -674,6 +674,8 @@ type(scope): summary
 - Body explains what and why when the subject is not
   enough
 
+[shared PR description requirements]: https://github.com/praxis-proxy/conventions/blob/main/docs/conventions.md#pull-request-conventions
+
 ### Pull Request Conventions
 
 Reviewability is enforced by CI
@@ -686,8 +688,8 @@ defect regardless of the quality of its code. The gates:
   `Cargo.toml`/`Cargo.lock`, tests, docs, examples, and
   benchmarks do not count toward the limit. Split larger
   changes into a stack of reviewable PRs.
-- **Description**: every PR must explain what it does
-  and why.
+- **Description**: follow the [shared PR description requirements],
+  including non-empty Why, What, and How sections and a related issue.
 - **Commit format**: subjects follow the conventional
   commit format above.
 - **DCO**: every commit carries a `Signed-off-by`

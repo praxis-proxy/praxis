@@ -262,6 +262,10 @@ impl HttpFilter for JsonBodyFilter {
         "json_body"
     }
 
+    fn may_end_request(&self) -> bool {
+        false
+    }
+
     fn request_body_access(&self) -> BodyAccess {
         direction_access(&self.request_ops)
     }

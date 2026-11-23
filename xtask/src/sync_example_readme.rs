@@ -49,7 +49,7 @@ const SPECIAL_ENTRIES: &[(&str, &str, &str, &str)] = &[(
 
 /// Marker line that separates the hand-maintained header from the
 /// auto-generated tables.
-const CONFIGS_MARKER: &str = "## Configs\n";
+const CONFIGS_MARKER: &str = "## Configs";
 
 // -----------------------------------------------------------------------------
 // CLI
@@ -77,22 +77,42 @@ pub(crate) fn run(args: &Args) {
     let entries = collect_entries(&configs_dir);
     let new_tables = generate_tables(&categories, &entries);
 
-    let current = std::fs::read_to_string(&readme_path).unwrap_or_default();
-    let (header, current_tables) = split_at_marker(&current);
-
-    if args.fix {
-        let output = format!("{header}{new_tables}");
-        std::fs::write(&readme_path, &output).unwrap();
-        println!("wrote {}", readme_path.display());
-        return;
+    match sync_readme(&readme_path, &new_tables, args.fix) {
+        Ok(SyncOutcome::Written) => println!("wrote {}", readme_path.display()),
+        Ok(SyncOutcome::UpToDate) => println!("examples/README.md tables are up to date"),
+        Err(reason) => {
+            eprintln!("{reason}");
+            std::process::exit(1);
+        },
     }
+}
 
-    if current_tables == new_tables {
-        println!("examples/README.md tables are up to date");
+/// Result of a successful README synchronization.
+enum SyncOutcome {
+    /// The generated section already matches.
+    UpToDate,
+    /// The generated section was written.
+    Written,
+}
+
+/// Check or replace the generated tables without mutating an invalid README.
+fn sync_readme(path: &Path, tables: &str, fix: bool) -> Result<SyncOutcome, String> {
+    let current = std::fs::read_to_string(path).map_err(|err| format!("cannot read {}: {err}", path.display()))?;
+    let (header, old_tables) = split_at_marker(&current).ok_or_else(|| {
+        format!(
+            "{} has no `## Configs` marker; restore that heading before regenerating",
+            path.display()
+        )
+    })?;
+    if fix {
+        std::fs::write(path, format!("{header}{tables}"))
+            .map_err(|err| format!("cannot write {}: {err}", path.display()))?;
+        return Ok(SyncOutcome::Written);
+    }
+    if old_tables == tables {
+        Ok(SyncOutcome::UpToDate)
     } else {
-        eprintln!("examples/README.md tables are out of date");
-        eprintln!("run `cargo xtask sync-example-readme --fix` to regenerate");
-        std::process::exit(1);
+        Err("examples/README.md tables are out of date; run `cargo xtask sync-example-readme --fix`".to_owned())
     }
 }
 
@@ -337,18 +357,66 @@ fn normalize_description(s: &str) -> String {
 // Utilities
 // -----------------------------------------------------------------------------
 
-/// Split README content at the `## Configs` marker, returning the header
-/// (including the marker line) and the table section.
-fn split_at_marker(content: &str) -> (&str, &str) {
-    if let Some(pos) = content.find(CONFIGS_MARKER) {
-        let split = pos + CONFIGS_MARKER.len();
-        (
-            content.get(..split).unwrap_or(content),
-            content.get(split..).unwrap_or_default(),
-        )
-    } else {
-        (content, "")
+/// Split at a standalone Configs heading outside code and HTML comments.
+/// The returned header includes the heading's original newline.
+fn split_at_marker(content: &str) -> Option<(&str, &str)> {
+    let mut offset = 0_usize;
+    let mut fence = None;
+    let mut comment = false;
+    for segment in content.split_inclusive('\n') {
+        let line = segment.trim_end_matches(['\r', '\n']);
+        let body = line.trim_start_matches(' ');
+        let indent = line.len().saturating_sub(body.len());
+        if indent <= 3 || comment {
+            if let Some((symbol, minimum)) = fence {
+                if let Some((found, length, rest)) = fence_run(body)
+                    && found == symbol
+                    && length >= minimum
+                    && rest.trim().is_empty()
+                {
+                    fence = None;
+                }
+            } else if comment {
+                comment = comment_state_after_line(body, comment);
+            } else if let Some((symbol, length, _)) = fence_run(body) {
+                fence = Some((symbol, length));
+            } else if body.contains("<!--") {
+                comment = comment_state_after_line(body, comment);
+            } else if segment.ends_with('\n') && body.trim_end() == CONFIGS_MARKER {
+                let split = offset.checked_add(segment.len())?;
+                return Some((content.get(..split)?, content.get(split..)?));
+            }
+        }
+        offset = offset.checked_add(segment.len())?;
     }
+    None
+}
+
+/// Process comment delimiters in source order, including close then open.
+fn comment_state_after_line(line: &str, mut inside: bool) -> bool {
+    let mut rest = line;
+    loop {
+        let delimiter = if inside { "-->" } else { "<!--" };
+        let Some((_, after)) = rest.split_once(delimiter) else {
+            return inside;
+        };
+        rest = after;
+        inside = !inside;
+    }
+}
+
+/// Return an opening or closing Markdown fence run and its trailing content.
+fn fence_run(line: &str) -> Option<(u8, usize, &str)> {
+    let symbol = match line.as_bytes().first()? {
+        b'`' => b'`',
+        b'~' => b'~',
+        _ => return None,
+    };
+    let length = line.bytes().take_while(|byte| *byte == symbol).count();
+    if length < 3 {
+        return None;
+    }
+    Some((symbol, length, line.get(length..)?))
 }
 
 // -----------------------------------------------------------------------------
@@ -513,7 +581,7 @@ listeners:
     #[test]
     fn split_at_marker_found() {
         let content = "# Header\n\n## Configs\nsome tables\n";
-        let (header, tables) = split_at_marker(content);
+        let (header, tables) = split_at_marker(content).expect("marker exists");
         assert_eq!(header, "# Header\n\n## Configs\n");
         assert_eq!(tables, "some tables\n");
     }
@@ -521,9 +589,121 @@ listeners:
     #[test]
     fn split_at_marker_not_found() {
         let content = "# No configs section\n";
-        let (header, tables) = split_at_marker(content);
-        assert_eq!(header, "# No configs section\n");
-        assert_eq!(tables, "");
+        assert!(split_at_marker(content).is_none(), "missing marker is explicit");
+    }
+
+    #[test]
+    fn marker_inside_code_or_longer_heading_is_not_a_configs_section() {
+        for content in [
+            "# Guide\n```markdown\n## Configs\n```\nold data\n",
+            "# Guide\n~~~yaml\n## Configs\n~~~\nold data\n",
+            "# Guide\n    ## Configs\nold data\n",
+            "# Guide\n<!--\n## Configs\n    -->\nold data\n",
+            "# Guide\n<!-- closed --> <!-- open\n## Configs\n-->\nold data\n",
+            "# Guide\n<!-- first\n--> <!-- second\n## Configs\n-->\nold data\n",
+            "# Guide\n### Configs\nold data\n",
+            "# Guide\n## Configs and notes\nold data\n",
+        ] {
+            assert!(split_at_marker(content).is_none(), "false marker: {content}");
+            let dir = tempfile::tempdir().expect("temp dir");
+            let path = dir.path().join("README.md");
+            std::fs::write(&path, content).expect("write fixture");
+            for fix in [false, true] {
+                let error = sync_readme(&path, "replacement\n", fix)
+                    .err()
+                    .expect("false marker must fail");
+                assert!(error.contains("no `## Configs` marker"), "{error}");
+                assert_eq!(std::fs::read_to_string(&path).expect("read fixture"), content);
+            }
+        }
+    }
+
+    #[test]
+    fn real_marker_after_code_fences_is_repaired_without_clobbering_header() {
+        for opening in ["```markdown", "~~~yaml"] {
+            let closing = if opening.starts_with('`') { "```" } else { "~~~" };
+            let header = format!("# Guide\n{opening}\n## Configs\n{closing}\n\n  ## Configs  \n");
+            let original = format!("{header}stale\n");
+            let dir = tempfile::tempdir().expect("temp dir");
+            let path = dir.path().join("README.md");
+            std::fs::write(&path, original).expect("write fixture");
+            assert!(matches!(sync_readme(&path, "fresh\n", true), Ok(SyncOutcome::Written)));
+            assert_eq!(
+                std::fs::read_to_string(&path).expect("read repair"),
+                format!("{header}fresh\n")
+            );
+            assert!(matches!(
+                sync_readme(&path, "fresh\n", false),
+                Ok(SyncOutcome::UpToDate)
+            ));
+        }
+    }
+
+    #[test]
+    fn real_marker_after_html_comment_ignores_commented_heading() {
+        for comments in [
+            "<!--\n## Configs\n-->\n",
+            "<!-- closed --> <!-- open\n## Configs\n-->\n",
+            "<!-- first\n--> <!-- second\n## Configs\n-->\n",
+        ] {
+            let header = format!("# Guide\n{comments}\n## Configs\n");
+            let dir = tempfile::tempdir().expect("temp dir");
+            let path = dir.path().join("README.md");
+            std::fs::write(&path, format!("{header}stale\n")).expect("write fixture");
+            assert!(matches!(sync_readme(&path, "fresh\n", true), Ok(SyncOutcome::Written)));
+            assert_eq!(
+                std::fs::read_to_string(&path).expect("read repair"),
+                format!("{header}fresh\n")
+            );
+        }
+    }
+
+    #[test]
+    fn missing_marker_repair_preserves_input() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("README.md");
+        let original = b"# Custom heading\n\nOld table data\n";
+        std::fs::write(&path, original).expect("write fixture");
+        for attempt in 1..=2 {
+            let error = sync_readme(&path, "new tables\n", true)
+                .err()
+                .expect("repair must fail");
+            assert!(error.contains("## Configs"), "attempt {attempt}: {error}");
+            assert_eq!(
+                std::fs::read(&path).expect("read fixture"),
+                original,
+                "attempt {attempt} left bytes unchanged"
+            );
+        }
+    }
+
+    #[test]
+    fn valid_marker_repair_is_idempotent() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("README.md");
+        std::fs::write(&path, "# Hand header\n\n## Configs\nstale\n").expect("write fixture");
+        assert!(matches!(sync_readme(&path, "fresh\n", true), Ok(SyncOutcome::Written)));
+        let first = std::fs::read(&path).expect("read repaired README");
+        assert_eq!(first, b"# Hand header\n\n## Configs\nfresh\n");
+        assert!(matches!(
+            sync_readme(&path, "fresh\n", false),
+            Ok(SyncOutcome::UpToDate)
+        ));
+        assert!(matches!(sync_readme(&path, "fresh\n", true), Ok(SyncOutcome::Written)));
+        assert_eq!(std::fs::read(&path).expect("read repeated repair"), first);
+    }
+
+    #[test]
+    fn missing_readme_is_not_silently_generated() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("README.md");
+        for fix in [false, true] {
+            let error = sync_readme(&path, "fresh\n", fix)
+                .err()
+                .expect("missing file must fail");
+            assert!(error.contains("cannot read"), "missing file error: {error}");
+            assert!(!path.exists(), "no README is created");
+        }
     }
 
     #[test]

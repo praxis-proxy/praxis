@@ -45,8 +45,8 @@ use crate::{
 /// wildcard match. Case-insensitive per [RFC 4343].
 ///
 /// Connections without SNI or with no matching route use
-/// `default_upstream` if configured, otherwise receive a
-/// TLS alert rejection.
+/// `default_upstream` if configured; otherwise the connection is
+/// rejected and closed.
 ///
 /// Bare wildcards (`*`), IP addresses as server names, and
 /// duplicate server names across routes are rejected at
@@ -676,6 +676,7 @@ default_upstream: "10.0.0.1:443"
             local_addr: "0.0.0.0:443",
             sni,
             upstream_addr: None,
+            lb_selection: None,
             cluster: None,
             health_registry: None,
             kv_stores: None,

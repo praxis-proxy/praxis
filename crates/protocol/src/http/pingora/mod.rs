@@ -25,6 +25,7 @@ use praxis_core::{
     ProxyError,
     backend::Runtime,
     config::{Config, ProtocolKind},
+    server::ServerRuntime as _,
 };
 
 #[cfg(feature = "pingora")]
@@ -65,7 +66,8 @@ mod rejection_cleanup;
 ///
 /// Registers HTTP listeners from the configuration, binding them to Pingora
 /// HTTP proxy services with filter pipelines. Delegates to
-/// [`handler::load_http_handler`] for each listener. Implements [`Protocol`].
+/// [`handler::load_http_handler_with_options`] for each listener. Implements
+/// [`Protocol`].
 ///
 /// [`Protocol`]: crate::Protocol
 #[cfg(feature = "pingora")]
@@ -89,16 +91,26 @@ impl Protocol for PingoraHttp {
             return Ok(Vec::new());
         }
 
-        let mut cert_watcher_shutdowns = Vec::new();
+        let options = handler::HttpHandlerOptions::default()
+            .with_allow_private_upstreams(config.insecure_options.allow_private_upstreams);
+        let mut cert_watcher_shutdowns = crate::cert_watcher_shutdowns::RegistrationWatchers::default();
+        let lifecycle = server.lifecycle();
         for listener in &http_listeners {
             let pipeline = pipelines.get(&listener.name).map(Arc::clone).ok_or_else(|| {
                 ProxyError::Config(format!("no pipeline for listener '{name}'", name = listener.name))
             })?;
 
-            handler::load_http_handler(server.server_mut(), listener, pipeline, &mut cert_watcher_shutdowns)?;
+            handler::load_http_handler_with_options(
+                server.server_mut(),
+                listener,
+                pipeline,
+                cert_watcher_shutdowns.senders_mut(),
+                lifecycle.clone(),
+                &options,
+            )?;
         }
 
-        Ok(cert_watcher_shutdowns)
+        Ok(cert_watcher_shutdowns.finish())
     }
 }
 
@@ -140,6 +152,7 @@ mod tests {
             listeners,
             metrics: MetricsConfig::default(),
             runtime: RuntimeConfig::default(),
+            shutdown_drain_delay_secs: 0,
             shutdown_timeout_secs: 30,
             telemetry: TelemetryConfig::default(),
         }
@@ -148,6 +161,7 @@ mod tests {
     /// Build a Listener with the given name and protocol.
     fn make_listener(name: &str, protocol: ProtocolKind) -> Listener {
         Listener {
+            upgrade_policy: None,
             name: name.to_owned(),
             address: "127.0.0.1:8080".to_owned(),
             protocol,

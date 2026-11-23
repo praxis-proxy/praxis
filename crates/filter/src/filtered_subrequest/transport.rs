@@ -73,3 +73,17 @@ pub(super) fn termination_cause(error: &SubRequestError) -> StreamTerminationCau
         _ => StreamTerminationCause::Io,
     }
 }
+
+/// Publish only the current attempt's observed forwarding, including cancellation.
+pub(super) fn publish_forwarding(
+    ctx: &mut crate::HttpFilterContext<'_>,
+    forwarding: Option<&(std::sync::Arc<str>, praxis_core::subrequest::RequestProgress)>,
+) {
+    ctx.extensions.remove::<crate::UpstreamForwardedEndpoint>();
+    if let Some((endpoint, progress)) = forwarding
+        && progress.forwarded()
+    {
+        ctx.extensions
+            .insert(crate::UpstreamForwardedEndpoint(std::sync::Arc::clone(endpoint)));
+    }
+}

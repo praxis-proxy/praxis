@@ -10,7 +10,7 @@ use praxis_core::{config::ProtocolKind, health::HealthRegistry};
 use serde::Serialize;
 
 use super::{
-    cluster_meta::{ClusterMeta, ClusterMetaStore},
+    cluster_meta::{ClusterMeta, ClusterMetaStore, RoutedClusterDefinition},
     listener_meta::{ListenerMeta, ListenerMetaStore},
     pipelines_admin,
 };
@@ -96,6 +96,10 @@ struct ListenerStatsView {
 struct ClusterStatsView {
     /// Cluster name.
     name: String,
+    /// Existing endpoint rows describe the selected health declaration.
+    endpoint_scope: &'static str,
+    /// Config declaration supplying the endpoint rows.
+    endpoint_source: String,
     /// Healthy upstream endpoints at snapshot time.
     healthy_endpoints: u64,
     /// Total configured upstream endpoints.
@@ -106,6 +110,9 @@ struct ClusterStatsView {
     upstream_connect_failures_total: u64,
     /// Per-endpoint health rows.
     endpoints: Vec<EndpointStatsView>,
+    /// Routed declarations that differ from those health rows.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    routed_declarations: Vec<RoutedClusterDefinition>,
 }
 
 /// Per-endpoint health row.
@@ -132,9 +139,11 @@ pub(super) fn resolve_health_registry(
         return admin_registry.cloned();
     };
     let meta = listener_meta.load();
-    let current_listeners: std::collections::HashSet<String> = meta.keys().cloned().collect();
     for name in state.pipelines.listener_names() {
-        if !current_listeners.contains(name) {
+        if !meta
+            .get(name)
+            .is_some_and(|entry| entry.configured_in_current_generation)
+        {
             continue;
         }
         let Some(slot) = state.pipelines.get(name) else {
@@ -181,7 +190,8 @@ fn build_stats_response(
     let listener_meta = state.listener_meta.load();
     let cluster_meta = state.cluster_meta.load();
 
-    let gaps = stats_gaps(&snapshot);
+    let mut gaps = stats_gaps(&snapshot);
+    add_routed_endpoint_gap(&mut gaps, cluster_meta.values().any(has_divergent_routes));
 
     let mut listeners: Vec<ListenerStatsView> = listener_meta
         .values()
@@ -206,6 +216,16 @@ fn build_stats_response(
         listeners,
         clusters,
     })
+}
+
+/// Explain when health rows omit endpoint sets used by routing declarations.
+fn add_routed_endpoint_gap(gaps: &mut BTreeMap<&'static str, &'static str>, divergent: bool) {
+    if divergent {
+        gaps.insert(
+            "routed_endpoint_provenance",
+            "cluster endpoint health rows describe one declaration; routed_declarations list differing routed endpoint sets",
+        );
+    }
 }
 
 /// Document known Phase 1 schema limitations.
@@ -268,6 +288,8 @@ fn cluster_stats_view(
 
     ClusterStatsView {
         name: meta.name.clone(),
+        endpoint_scope: "health_declaration",
+        endpoint_source: meta.endpoint_source.clone(),
         healthy_endpoints,
         total_endpoints,
         upstream_requests_total: snapshot
@@ -281,7 +303,20 @@ fn cluster_stats_view(
             .copied()
             .unwrap_or(0),
         endpoints,
+        routed_declarations: meta
+            .routed_definitions
+            .iter()
+            .filter(|definition| definition.endpoints != meta.endpoints)
+            .cloned()
+            .collect(),
     }
+}
+
+/// Whether routing defines endpoints absent from the chosen health view.
+fn has_divergent_routes(meta: &ClusterMeta) -> bool {
+    meta.routed_definitions
+        .iter()
+        .any(|definition| definition.endpoints != meta.endpoints)
 }
 
 /// Build endpoint health rows for one cluster.
@@ -434,6 +469,8 @@ filter_chains:
         let meta = ClusterMeta {
             name: "backend".to_owned(),
             endpoints: vec!["10.0.0.1:80".to_owned(), "10.0.0.2:80".to_owned()],
+            endpoint_source: "top_level".to_owned(),
+            routed_definitions: Vec::new(),
         };
         let entry = ClusterHealthEntry::new(
             vec![EndpointHealth::new(), EndpointHealth::new()],
@@ -492,6 +529,57 @@ filter_chains:
         let empty_meta = new_listener_meta_store(std::collections::HashMap::new());
         let result = resolve_health_registry(None, None, &empty_meta);
         assert!(result.is_none(), "should return None when no admin registry");
+    }
+
+    #[test]
+    fn resolve_health_registry_skips_retained_removed_listener() {
+        use praxis_filter::{FilterPipeline, FilterRegistry};
+
+        let old_registry: HealthRegistry = Arc::new(std::collections::HashMap::new());
+        let current_registry: HealthRegistry = Arc::new(std::collections::HashMap::new());
+        let registry = FilterRegistry::with_builtins();
+        let mut old_pipeline = FilterPipeline::build(&mut [], &registry).expect("old empty pipeline");
+        old_pipeline.set_health_registry(Arc::clone(&old_registry));
+        let mut current_pipeline = FilterPipeline::build(&mut [], &registry).expect("current empty pipeline");
+        current_pipeline.set_health_registry(Arc::clone(&current_registry));
+        let pipelines = Arc::new(crate::ListenerPipelines::new(std::collections::HashMap::from([
+            ("removed".to_owned(), Arc::new(old_pipeline)),
+            ("current".to_owned(), Arc::new(current_pipeline)),
+        ])));
+        let mut metadata = std::collections::HashMap::new();
+        for (name, configured) in [("removed", false), ("current", true)] {
+            metadata.insert(
+                name.to_owned(),
+                ListenerMeta {
+                    name: name.to_owned(),
+                    configured_in_current_generation: configured,
+                    address: "127.0.0.1:8080".to_owned(),
+                    protocol: ProtocolKind::Http,
+                    tls: false,
+                    chain_names: Vec::new(),
+                },
+            );
+        }
+        let meta = new_listener_meta_store(metadata);
+        let state = pipelines_admin::PipelinesAdminState {
+            pipelines,
+            meta: Arc::clone(&meta),
+        };
+        let selected = resolve_health_registry(None, Some(&state), &meta).expect("current registry");
+        assert!(
+            Arc::ptr_eq(&selected, &current_registry),
+            "removed listener cannot supply stale health"
+        );
+        let mut only_removed = (*meta.load_full()).clone();
+        only_removed
+            .get_mut("current")
+            .expect("current metadata")
+            .configured_in_current_generation = false;
+        meta.store(Arc::new(only_removed));
+        assert!(
+            resolve_health_registry(None, Some(&state), &meta).is_none(),
+            "no current slot means no registry"
+        );
     }
 
     #[test]
@@ -680,6 +768,7 @@ filter_chains:
     fn listener_stats_view_tcp_protocol() {
         let meta = ListenerMeta {
             name: "tcp_listener".to_owned(),
+            configured_in_current_generation: true,
             address: "127.0.0.1:8080".to_owned(),
             protocol: ProtocolKind::Tcp,
             tls: true,
@@ -699,6 +788,7 @@ filter_chains:
     fn listener_stats_view_http_protocol() {
         let meta = ListenerMeta {
             name: "http_listener".to_owned(),
+            configured_in_current_generation: true,
             address: "127.0.0.1:8081".to_owned(),
             protocol: ProtocolKind::Http,
             tls: false,
@@ -718,6 +808,7 @@ filter_chains:
     fn listener_stats_view_missing_metrics() {
         let meta = ListenerMeta {
             name: "new_listener".to_owned(),
+            configured_in_current_generation: true,
             address: "127.0.0.1:8082".to_owned(),
             protocol: ProtocolKind::Http,
             tls: false,
@@ -734,6 +825,8 @@ filter_chains:
         let meta = ClusterMeta {
             name: "cluster1".to_owned(),
             endpoints: vec!["10.0.0.1:80".to_owned()],
+            endpoint_source: "top_level".to_owned(),
+            routed_definitions: Vec::new(),
         };
         let mut snapshot = metrics::StatsMetricsSnapshot::default();
         snapshot
@@ -753,6 +846,8 @@ filter_chains:
         let meta = ClusterMeta {
             name: "cluster2".to_owned(),
             endpoints: vec!["10.0.0.1:80".to_owned(), "10.0.0.2:80".to_owned()],
+            endpoint_source: "top_level".to_owned(),
+            routed_definitions: Vec::new(),
         };
         let snapshot = metrics::StatsMetricsSnapshot::default();
 
@@ -770,6 +865,8 @@ filter_chains:
                 "10.0.0.2:80".to_owned(),
                 "10.0.0.3:80".to_owned(),
             ],
+            endpoint_source: "top_level".to_owned(),
+            routed_definitions: Vec::new(),
         };
 
         let rows = endpoint_rows(&meta, None);
@@ -784,6 +881,8 @@ filter_chains:
         let meta = ClusterMeta {
             name: "other_cluster".to_owned(),
             endpoints: vec!["10.0.0.1:80".to_owned()],
+            endpoint_source: "top_level".to_owned(),
+            routed_definitions: Vec::new(),
         };
         let entry = ClusterHealthEntry::new(vec![EndpointHealth::new()], vec![Arc::from("10.0.0.1:80")], None, None);
         let registry: HealthRegistry = Arc::new(
@@ -809,6 +908,8 @@ filter_chains:
                 "10.0.0.1:80".to_owned(),
                 "10.0.0.2:80".to_owned(),
             ],
+            endpoint_source: "top_level".to_owned(),
+            routed_definitions: Vec::new(),
         };
         let entry = ClusterHealthEntry::new(
             vec![EndpointHealth::new(), EndpointHealth::new(), EndpointHealth::new()],
@@ -838,6 +939,8 @@ filter_chains:
                 "10.0.0.2:80".to_owned(),
                 "10.0.0.99:80".to_owned(),
             ],
+            endpoint_source: "top_level".to_owned(),
+            routed_definitions: Vec::new(),
         };
         let entry = ClusterHealthEntry::new(
             vec![EndpointHealth::new(), EndpointHealth::new()],
@@ -1014,5 +1117,103 @@ filter_chains:
         assert_eq!(clusters[0]["name"], "apple", "clusters should be sorted");
         assert_eq!(clusters[1]["name"], "banana");
         assert_eq!(clusters[2]["name"], "zoo");
+    }
+
+    #[test]
+    fn stats_discloses_divergent_routing_endpoints() {
+        let config = praxis_core::config::Config::from_yaml(
+            r#"
+insecure_options:
+  allow_private_endpoints: true
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+clusters:
+  - name: shared
+    endpoints: [{ address: "127.0.0.1:9000" }]
+filter_chains:
+  - name: main
+    filters:
+      - filter: load_balancer
+        clusters:
+          - name: shared
+            endpoints: [{ address: "127.0.0.1:9000" }]
+      - filter: load_balancer
+        clusters:
+          - name: shared
+            endpoints: [{ address: "127.0.0.1:9100" }]
+      - filter: load_balancer
+        clusters:
+          - name: shared
+            endpoints: [{ address: "127.0.0.1:9200" }]
+      - filter: static_response
+        status: 200
+        branch_chains:
+          - name: alternate
+            chains:
+              - name: branch_inline
+                filters:
+                  - filter: load_balancer
+                    clusters:
+                      - name: shared
+                        endpoints: [{ address: "127.0.0.1:9300" }]
+"#,
+        )
+        .expect("valid config");
+        let state = StatsAdminState {
+            started_at: Instant::now(),
+            version: ProcessVersionInfo {
+                semver: "0.0.0".to_owned(),
+                display: "0.0.0".to_owned(),
+                git_sha: None,
+            },
+            listener_meta: new_listener_meta_store(listener_meta_from_config(&config)),
+            cluster_meta: new_cluster_meta_store(cluster_meta_from_config(&config)),
+        };
+        let response = stats_response(None, &state, "GET");
+        let json: serde_json::Value = serde_json::from_slice(response.body()).expect("valid stats JSON");
+        let cluster = &json["clusters"][0];
+        assert_eq!(
+            json["clusters"].as_array().map(Vec::len),
+            Some(1),
+            "same-name declarations share one row"
+        );
+        assert_eq!(cluster["endpoint_scope"], "health_declaration");
+        assert_eq!(cluster["endpoint_source"], "top_level");
+        assert_eq!(cluster["endpoints"][0]["address"], "127.0.0.1:9000");
+        assert_eq!(cluster["routed_declarations"].as_array().map(Vec::len), Some(3));
+        assert_eq!(cluster["routed_declarations"][0]["endpoints"][0], "127.0.0.1:9100");
+        assert_eq!(cluster["routed_declarations"][1]["endpoints"][0], "127.0.0.1:9200");
+        assert!(
+            cluster["routed_declarations"][2]["source"]
+                .as_str()
+                .is_some_and(|source| source.contains("branch:alternate/chain:branch_inline"))
+        );
+        assert!(json["gaps"]["routed_endpoint_provenance"].is_string());
+        assert!(cluster["routed_declarations"][0]["upstream_requests_total"].is_null());
+        let mut equal_only = cluster_meta_from_config(&config);
+        equal_only
+            .get_mut("shared")
+            .expect("shared cluster")
+            .routed_definitions
+            .retain(|definition| {
+                definition.endpoints.len() == 1
+                    && definition
+                        .endpoints
+                        .first()
+                        .is_some_and(|address| address == "127.0.0.1:9000")
+            });
+        state.cluster_meta.store(Arc::new(equal_only));
+        let equal = stats_response(None, &state, "GET");
+        let equal_json: serde_json::Value = serde_json::from_slice(equal.body()).expect("valid equal stats JSON");
+        assert!(
+            equal_json["gaps"]["routed_endpoint_provenance"].is_null(),
+            "equal endpoints need no gap"
+        );
+        assert!(
+            equal_json["clusters"][0]["routed_declarations"].is_null(),
+            "equal lists have no divergence rows"
+        );
     }
 }

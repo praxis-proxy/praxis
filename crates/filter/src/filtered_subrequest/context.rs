@@ -45,15 +45,60 @@ pub(super) struct SubrequestRuntimeResources<'a> {
     pub(super) time_source: &'a dyn praxis_core::time::TimeSource,
 }
 
-/// Build a [`HttpFilterContext`] for running a sub-request's pipeline,
+/// A nested [`HttpFilterContext`] that returns its cluster admission slot when dropped.
+pub(super) struct ScopedSubrequestContext<'a> {
+    /// The guarded context. Private, and never moved out of, so the [`Drop`]
+    /// impl below stays legal; reached through [`Deref`](std::ops::Deref).
+    ctx: HttpFilterContext<'a>,
+}
+
+#[cfg(test)]
+impl<'a> ScopedSubrequestContext<'a> {
+    /// Wrap an already-built context so a test can exercise the release on
+    /// drop without standing up a whole sub-request.
+    pub(super) fn for_test(ctx: HttpFilterContext<'a>) -> Self {
+        Self { ctx }
+    }
+}
+
+impl<'a> std::ops::Deref for ScopedSubrequestContext<'a> {
+    type Target = HttpFilterContext<'a>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.ctx
+    }
+}
+
+impl std::ops::DerefMut for ScopedSubrequestContext<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.ctx
+    }
+}
+
+impl Drop for ScopedSubrequestContext<'_> {
+    fn drop(&mut self) {
+        let Some(lease) = self.ctx.cluster_admission.take() else {
+            return;
+        };
+        if !lease.release() {
+            return;
+        }
+        if let (Some(reselector), Some(upstream)) = (&self.ctx.endpoint_reselector, &self.ctx.upstream) {
+            reselector.release(&upstream.address);
+        }
+        tracing::debug!("returned a sub-request's cluster admission slot without a response phase");
+    }
+}
+
+/// Build a [`ScopedSubrequestContext`] for running a sub-request's pipeline,
 /// inheriting server-injected resources from the containing request.
 #[expect(clippy::too_many_lines, reason = "all fields must be initialized")]
 pub(super) fn build_sub_filter_context<'a>(
     pipeline: &'a FilterPipeline,
     request: &'a crate::Request,
     runtime: SubrequestRuntimeResources<'a>,
-) -> HttpFilterContext<'a> {
-    HttpFilterContext {
+) -> ScopedSubrequestContext<'a> {
+    let ctx = HttpFilterContext {
         grpc_completion: None,
         buffered_request_body: None,
         body_done_indices: Vec::new(),
@@ -66,7 +111,7 @@ pub(super) fn build_sub_filter_context<'a>(
         executed_branch_filters: Vec::new(),
         executed_filter_indices: Vec::new(),
         extra_request_headers: Vec::new(),
-        filter_metadata: HashMap::new(),
+        filter_metadata: crate::FilterMetadata::default(),
         filter_results: HashMap::new(),
         filter_state: HashMap::new(),
         health_registry: runtime.health_registry,
@@ -82,6 +127,7 @@ pub(super) fn build_sub_filter_context<'a>(
         request_body_mode: pipeline.body_capabilities().request_body_mode,
         request_headers_to_remove: Vec::new(),
         request_headers_to_set: Vec::new(),
+        request_header_mutations: Vec::new(),
         request_start: runtime.request_start,
         response_body_bytes: 0,
         response_body_mode: pipeline.body_capabilities().response_body_mode,
@@ -94,8 +140,7 @@ pub(super) fn build_sub_filter_context<'a>(
         retry_policy: None,
         route_retry_policy: None,
         hedge_policy: None,
-        cluster_retry_state: None,
-        cluster_retry_state_released: false,
+        cluster_admission: None,
         endpoint_reselector: None,
         pinned_endpoint_address: None,
         structured_metadata: HashMap::new(),
@@ -103,5 +148,6 @@ pub(super) fn build_sub_filter_context<'a>(
         subrequest_response_mode: SubRequestResponseMode::Buffered,
         time_source: runtime.time_source,
         upstream: None,
-    }
+    };
+    ScopedSubrequestContext { ctx }
 }

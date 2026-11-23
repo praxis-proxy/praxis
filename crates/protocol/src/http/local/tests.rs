@@ -1954,7 +1954,11 @@ async fn access_logging_preserves_request_eligibility_after_header_removal() {
             )
             .await;
         assert_eq!(result.status, 200);
-        assert!(ctx.request_headers_to_remove.iter().any(|name| name == "x-log"));
+        assert!(
+            ctx.request_header_mutations.iter().any(
+                |mutation| matches!(mutation, praxis_filter::TrustedHeaderMutation::Remove(name) if name == "x-log")
+            )
+        );
         assert!(praxis_filter::access_record_already_emitted(&ctx));
         pipeline.complete_local_http(&mut ctx, result.status);
         let mut records = Vec::<serde_json::Value>::new();

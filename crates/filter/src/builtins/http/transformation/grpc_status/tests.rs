@@ -127,3 +127,27 @@ async fn messages_can_be_suppressed() {
         "include_message: false should suppress grpc-message"
     );
 }
+
+#[tokio::test]
+async fn the_request_head_arms_grpc_requests() {
+    let grpc = request_with(Some("application/grpc"));
+    let mut ctx = make_filter_context(&grpc);
+    let action = filter("").on_request_head(&mut ctx).await.unwrap();
+    assert!(matches!(action, FilterAction::Continue), "should continue");
+    assert!(mapping(&ctx).is_some(), "the head arms a gRPC request");
+
+    let plain = request_with(Some("application/json"));
+    let mut ctx = make_filter_context(&plain);
+    let _action = filter("").on_request_head(&mut ctx).await.unwrap();
+    assert!(mapping(&ctx).is_none(), "the head leaves other requests alone");
+}
+
+#[test]
+fn the_head_hook_repeats_in_the_request_phase() {
+    let f = filter("");
+    assert!(f.runs_request_head(), "arms before head filters can reject");
+    assert!(
+        f.repeats_request_head(),
+        "on_request arms where no head phase runs, such as an iterative step"
+    );
+}

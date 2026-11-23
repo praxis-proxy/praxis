@@ -204,6 +204,26 @@ pub(crate) fn resolve_pipelines_with_composition(
     let chains = expanded_chains.as_slices();
     let mut pipelines = HashMap::with_capacity(config.listeners.len());
     for listener in &config.listeners {
+        if listener.upgrade_policy.is_some() {
+            return Err(format!(
+                "listener '{}': explicit upgrade_policy requires protocol admission support, which is not available yet",
+                listener.name
+            )
+            .into());
+        }
+        #[cfg(feature = "hyper")]
+        if listener
+            .upgrade_policy
+            .as_ref()
+            .is_some_and(praxis_core::config::UpgradePolicy::permits_websocket)
+        {
+            return Err(format!(
+                "HTTP listener '{name}' cannot permit WebSocket passthrough with the Hyper backend",
+                name = listener.name
+            )
+            .into());
+        }
+
         let mut entries = expanded_chains.for_listener(listener)?;
 
         validate_terminal_position(&entries, &listener.name)?;
@@ -222,6 +242,8 @@ pub(crate) fn resolve_pipelines_with_composition(
             &config.insecure_options,
             &config.clusters,
         )?;
+        let listener_session_stores = Arc::new(session_stores.candidate());
+        pipeline.set_upgrade_policy(listener.upgrade_policy.clone());
         configure_pipeline(
             {
                 #[cfg(feature = "local-http")]
@@ -231,7 +253,7 @@ pub(crate) fn resolve_pipelines_with_composition(
             config,
             health_registry,
             kv_stores,
-            session_stores,
+            &listener_session_stores,
             slow_start_registry,
             subrequest_client,
         )
@@ -262,6 +284,9 @@ pub(crate) fn resolve_pipelines_with_composition(
         // validator sees the pristine flattened entries, not the husks left by
         // build_with_chains.
         composition.validate(&ValidatorContext::new(config, listener, &entry_snapshot, &pipeline))?;
+
+        listener_session_stores.prune_unused();
+        session_stores.retain_used_from(&listener_session_stores);
 
         pipelines.insert(listener.name.clone(), Arc::new(pipeline));
     }
@@ -321,9 +346,8 @@ fn configure_pipeline(
     // `kv_store` mode deny every request.
     pipeline.set_kv_stores(kv_stores.clone());
 
-    // Always inject the process-wide registry (even while empty): the sticky
-    // sessions filter adopts per-cluster stores into it on demand, which is
-    // what lets session bindings survive config reloads.
+    // Each listener owns only its bound stores, including nested pipelines.
+    // Identical configurations reuse Arcs from the publication candidate.
     pipeline.set_session_stores(Arc::clone(session_stores));
     pipeline.set_slow_start_registry(Arc::clone(slow_start_registry));
     pipeline.set_subrequest_client(subrequest_client.clone());
@@ -451,6 +475,27 @@ mod tests {
         fn prepare(&self, extensions: &mut RequestExtensions) {
             extensions.insert(self.clone());
         }
+    }
+
+    /// Explicit denials must not be accepted before adapters enforce them.
+    #[test]
+    fn resolve_pipelines_rejects_unenforced_upgrade_policy() {
+        let mut config = valid_config();
+        config.listeners[0].upgrade_policy = Some(serde_yaml::from_str("default: deny").unwrap());
+        let result = resolve_pipelines(
+            &config,
+            &FilterRegistry::with_builtins(),
+            &empty_health_registry(),
+            &empty_kv_stores(),
+            &empty_session_stores(),
+            &empty_subrequest_client(),
+        );
+        let error = result.err().expect("an unenforced policy must fail startup");
+        assert!(
+            error
+                .to_string()
+                .contains("explicit upgrade_policy requires protocol admission support")
+        );
     }
 
     #[test]

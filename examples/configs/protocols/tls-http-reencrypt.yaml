@@ -7,7 +7,9 @@
 #   Client -> TLS -> Praxis :8443 -> TLS -> Backend :9443
 #
 # Usage:
-#   mkcert -install && mkcert localhost 127.0.0.1
+#   mkcert -install && mkcert localhost 127.0.0.1 && mkcert backend.example.com
+#   Start an HTTPS backend on 127.0.0.1:9443 using the generated
+#   backend.example.com certificate and key.
 #   cargo run -p praxis-proxy -- -c examples/configs/protocols/tls-http-reencrypt.yaml
 #   curl https://localhost:8443/
 
@@ -18,8 +20,8 @@ listeners:
       - main
     tls:
       certificates:
-        - cert_path: /etc/ssl/certs/server.pem
-          key_path: /etc/ssl/private/server-key.pem
+        - cert_path: ./localhost+1.pem
+          key_path: ./localhost+1-key.pem
 
 filter_chains:
   - name: main

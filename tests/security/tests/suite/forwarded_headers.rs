@@ -4,7 +4,7 @@
 //! Forwarded headers adversarial tests.
 
 use praxis_core::config::Config;
-use praxis_test_utils::{free_port, http_send, parse_body, start_header_echo_backend, start_proxy};
+use praxis_test_utils::{free_port, http_send, parse_body, parse_status, start_header_echo_backend, start_proxy};
 
 // -----------------------------------------------------------------------------
 // Tests
@@ -203,12 +203,30 @@ fn multiple_xff_headers_from_untrusted_overwritten() {
          X-Forwarded-For: 192.168.1.1\r\n\
          Connection: close\r\n\r\n",
     );
+    assert_eq!(parse_status(&raw), 200);
     let body = parse_body(&raw);
-    let xff = body_header(&body, "x-forwarded-for");
-    let xff = xff.unwrap_or_default();
-    assert!(
-        xff.contains("127.0.0.1"),
-        "real client IP must appear in XFF; got: {xff}"
+    assert_eq!(body_headers(&body, "x-forwarded-for"), ["127.0.0.1"]);
+}
+
+#[test]
+fn trusted_duplicate_xff_chain_is_combined_once() {
+    let backend = start_header_echo_backend();
+    let proxy_port = free_port();
+    let yaml = fwd_yaml(proxy_port, backend.port(), &["127.0.0.0/8"]);
+    let proxy = start_proxy(&Config::from_yaml(&yaml).unwrap());
+    let raw = http_send(
+        proxy.addr(),
+        "GET / HTTP/1.1\r\n\
+         Host: localhost\r\n\
+         X-Forwarded-For: 203.0.113.50\r\n\
+         X-Forwarded-For: 198.51.100.7\r\n\
+         Connection: close\r\n\r\n",
+    );
+    assert_eq!(parse_status(&raw), 200);
+    let body = parse_body(&raw);
+    assert_eq!(
+        body_headers(&body, "x-forwarded-for"),
+        ["203.0.113.50, 198.51.100.7, 127.0.0.1"]
     );
 }
 
@@ -229,14 +247,9 @@ fn multiple_xfp_headers_from_untrusted_overwritten() {
          X-Forwarded-Proto: wss\r\n\
          Connection: close\r\n\r\n",
     );
+    assert_eq!(parse_status(&raw), 200);
     let body = parse_body(&raw);
-
-    let proto = body_header(&body, "x-forwarded-proto");
-    let proto = proto.unwrap_or_default();
-    assert_eq!(
-        proto, "http",
-        "spoofed proto headers must be overwritten with actual scheme; got: {proto}"
-    );
+    assert_eq!(body_headers(&body, "x-forwarded-proto"), ["http"]);
 }
 
 #[test]
@@ -256,14 +269,9 @@ fn multiple_xfh_headers_from_untrusted_overwritten() {
          X-Forwarded-Host: evil2.com\r\n\
          Connection: close\r\n\r\n",
     );
+    assert_eq!(parse_status(&raw), 200);
     let body = parse_body(&raw);
-
-    let host = body_header(&body, "x-forwarded-host");
-    let host = host.unwrap_or_default();
-    assert_eq!(
-        host, "real-host.com",
-        "spoofed host headers must be overwritten with actual Host; got: {host}"
-    );
+    assert_eq!(body_headers(&body, "x-forwarded-host"), ["real-host.com"]);
 }
 
 #[test]
@@ -680,4 +688,14 @@ fn body_header(body: &str, name: &str) -> Option<String> {
         let (k, v) = line.split_once(':')?;
         (k.trim().to_lowercase() == lower).then(|| v.trim().to_owned())
     })
+}
+
+/// Extract every matching case-insensitive header value from the echo body.
+fn body_headers<'a>(body: &'a str, name: &str) -> Vec<&'a str> {
+    body.lines()
+        .filter_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            key.trim().eq_ignore_ascii_case(name).then(|| value.trim())
+        })
+        .collect()
 }

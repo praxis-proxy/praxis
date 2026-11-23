@@ -63,7 +63,9 @@ pub mod local_http;
 
 mod grpc_response;
 pub mod json_ops;
+pub mod json_size;
 pub(crate) mod load_balancing;
+mod metadata;
 mod metrics;
 pub(crate) mod path_match;
 mod pipeline;
@@ -154,7 +156,8 @@ pub use error_response::{
     ErrorResponseContext, ErrorResponseFormatter, ErrorResponseFormatterHandle, FormattedErrorResponse,
 };
 pub use extensions::{
-    AuthenticatedIdentity, ClientResponseHeadersCommitted, RequestExtensions, ResponseTrailersPending,
+    AuthenticatedIdentity, ClientResponseHeadersCommitted, ClusterNotContacted, RequestExtensions,
+    ResponseTrailersPending, UpstreamForwardedEndpoint,
 };
 pub use factory::{
     EmptyFilterConfig, FilterFactory, HttpFilterFactory, TcpFilterFactory, http_builtin, parse_filter_config,
@@ -167,10 +170,11 @@ pub use filtered_subrequest::{
 };
 pub use grpc_response::GrpcErrorMapping;
 pub use load_balancing::slow_start::{SlowStartGeneration, SlowStartRegistry};
+pub use metadata::{FilterMetadata, MetadataLimit, MetadataRejected};
 #[cfg(feature = "upstream-binding")]
 pub use pipeline::catalog::{ClusterApplicationCatalog, ClusterApplicationMetadata, ClusterMetadataDeclaration};
 pub use pipeline::{
-    FilterPipeline, PipelineExtension,
+    FilterPipeline, PipelineExtension, RequiredBodyProcessing,
     introspection::{BodyAccessInfo, BranchConditionInfo, BranchIntrospection, FilterIntrospection},
     subrequest::{IterationState, NextIterationBody},
 };
@@ -181,7 +185,7 @@ pub use praxis_core::{
 pub use praxis_tls::TlsPeerIdentity;
 pub use registry::{FilterRegistry, SecurityClass};
 pub use results::{FilterResultSet, matches_filter_result};
-pub use tcp_filter::{TcpFilter, TcpFilterContext};
+pub use tcp_filter::{TcpFilter, TcpFilterContext, TcpLbSelection};
 pub use trace_context::TraceContext;
 
 // -----------------------------------------------------------------------------
@@ -241,7 +245,8 @@ pub(crate) mod test_utils {
             extra_request_headers: Vec::new(),
             request_headers_to_remove: Vec::new(),
             request_headers_to_set: Vec::new(),
-            filter_metadata: std::collections::HashMap::new(),
+            request_header_mutations: Vec::new(),
+            filter_metadata: crate::FilterMetadata::default(),
             prior_pre_read_mutations: Vec::new(),
             pre_read_mutations: Vec::new(),
             structured_metadata: std::collections::HashMap::new(),
@@ -270,8 +275,7 @@ pub(crate) mod test_utils {
             retry_policy: None,
             route_retry_policy: None,
             hedge_policy: None,
-            cluster_retry_state: None,
-            cluster_retry_state_released: false,
+            cluster_admission: None,
             endpoint_reselector: None,
             pinned_endpoint_address: None,
             time_source: &praxis_core::time::SystemTimeSource,

@@ -54,32 +54,12 @@ fn h2spec_strict_conformance() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    // Guard against a vacuous pass: h2spec exits 0 when its arguments match
-    // no test cases ("No matched tests found."), so require the summary line
-    // proving a non-zero number of tests actually ran.
-    let ran = parse_tests_run(&stdout);
-    assert!(
-        ran > 0,
-        "h2spec ran no tests\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
-    );
-
-    let failures = parse_failures(&stdout);
-
-    let unexpected: Vec<&String> = failures
-        .iter()
-        .filter(|name| !KNOWN_UPSTREAM_FAILURES.contains(&name.as_str()))
-        .collect();
-    assert!(
-        unexpected.is_empty(),
-        "h2spec: {} unexpected failure(s):\n{}\n\n\
-         --- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
-        unexpected.len(),
-        unexpected
-            .iter()
-            .map(|s| format!("  - {s}"))
-            .collect::<Vec<_>>()
-            .join("\n"),
-    );
+    let failures = evaluate_result(&stdout, output.status.code()).unwrap_or_else(|reason| {
+        panic!(
+            "h2spec result invalid: {reason}\nstatus: {}\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
+            output.status
+        )
+    });
 
     // The raced checks pass or fail nondeterministically, so a passing
     // allowlist entry is informational, not an error.
@@ -127,33 +107,89 @@ fn report_dir() -> String {
     format!("{}/../../target/praxis-conformance-tests", env!("CARGO_MANIFEST_DIR"))
 }
 
-/// Extract the total test count from the h2spec summary line
-/// (`146 tests, 146 passed, 0 skipped, 0 failed`).
-fn parse_tests_run(stdout: &str) -> usize {
-    stdout
-        .lines()
-        .filter_map(|line| {
-            line.trim()
-                .split_once(" tests, ")
-                .and_then(|(count, _)| count.parse().ok())
-        })
-        .next_back()
-        .unwrap_or(0)
+/// h2spec's final summary counts.
+#[derive(Debug, PartialEq, Eq)]
+struct Summary {
+    total: usize,
+    passed: usize,
+    skipped: usize,
+    failed: usize,
 }
 
-/// Extract failure names from h2spec verbose output.
-fn parse_failures(stdout: &str) -> Vec<String> {
-    stdout
+/// Parse one exact h2spec 2.6 summary line.
+fn parse_summary(line: &str) -> Option<Summary> {
+    let fields: Vec<_> = line.trim().split(", ").collect();
+    let count = |field: Option<&&str>, suffix: &str| -> Option<usize> { field?.strip_suffix(suffix)?.parse().ok() };
+    Some(Summary {
+        total: count(fields.first(), " tests")?,
+        passed: count(fields.get(1), " passed")?,
+        skipped: count(fields.get(2), " skipped")?,
+        failed: count(fields.get(3), " failed")?,
+    })
+    .filter(|_| fields.len() == 4)
+}
+
+/// Parse a failure title from h2spec's `× section: title` line.
+fn failure_name(line: &str) -> Option<String> {
+    line.trim()
+        .strip_prefix('×')?
+        .trim()
+        .split_once(": ")
+        .map(|(_, name)| name.to_owned())
+}
+
+/// Check the final report, verbose failures, and process termination together.
+fn evaluate_result(stdout: &str, exit_code: Option<i32>) -> Result<Vec<String>, String> {
+    let summary = stdout
         .lines()
-        .filter_map(|line| {
-            let trimmed = line.trim();
-            if trimmed.starts_with('×') {
-                trimmed.split_once(": ").map(|(_, name)| name.to_owned())
+        .filter_map(parse_summary)
+        .next_back()
+        .ok_or("missing or malformed h2spec summary")?;
+    let counted = summary
+        .passed
+        .checked_add(summary.skipped)
+        .and_then(|count| count.checked_add(summary.failed));
+    if counted != Some(summary.total) {
+        return Err(format!("inconsistent h2spec counts: {summary:?}"));
+    }
+    if summary.passed + summary.failed == 0 {
+        return Err("h2spec executed no checks".to_owned());
+    }
+    let mut final_section = false;
+    let mut verbose = Vec::new();
+    let mut failures = Vec::new();
+    for line in stdout.lines() {
+        if line.trim() == "Failures:" {
+            final_section = true;
+        } else if let Some(name) = failure_name(line) {
+            if final_section {
+                failures.push(name);
             } else {
-                None
+                verbose.push(name);
             }
-        })
-        .collect()
+        }
+    }
+    let mut sorted_verbose = verbose.clone();
+    let mut sorted_failures = failures.clone();
+    sorted_verbose.sort_unstable();
+    sorted_failures.sort_unstable();
+    if failures.len() != summary.failed || sorted_verbose != sorted_failures {
+        return Err(format!(
+            "h2spec failure report disagrees with summary: {summary:?}, verbose={verbose:?}, failures={failures:?}"
+        ));
+    }
+    let unexpected: Vec<_> = failures
+        .iter()
+        .filter(|name| !KNOWN_UPSTREAM_FAILURES.contains(&name.as_str()))
+        .collect();
+    if !unexpected.is_empty() {
+        return Err(format!("unexpected h2spec failures: {unexpected:?}"));
+    }
+    let expected_exit = if summary.failed == 0 { 0 } else { 1 };
+    if exit_code != Some(expected_exit) {
+        return Err(format!("h2spec exit {exit_code:?}, expected {expected_exit}"));
+    }
+    Ok(failures)
 }
 
 /// Locate the `h2spec` binary in `$PATH`.
@@ -193,4 +229,53 @@ filter_chains:
         body: "h2spec conformance"
 "#
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::evaluate_result;
+
+    const KNOWN: &str = "Sends invalid connection preface";
+
+    fn report(summary: &str, failed: &[&str]) -> String {
+        let mut output = String::new();
+        for name in failed {
+            output.push_str(&format!("× 3.4: {name}\n"));
+        }
+        if !failed.is_empty() {
+            output.push_str("Failures:\n");
+            for name in failed {
+                output.push_str(&format!("× 3.4: {name}\n"));
+            }
+        }
+        output.push_str(summary);
+        output
+    }
+
+    #[test]
+    fn summary_and_failure_lines_must_reconcile() {
+        evaluate_result(&report("2 tests, 2 passed, 0 skipped, 0 failed", &[]), Some(0)).unwrap();
+        evaluate_result(&report("2 tests, 1 passed, 0 skipped, 1 failed", &[KNOWN]), Some(1)).unwrap();
+        evaluate_result(&report("2 tests, 1 passed, 0 skipped, 1 failed", &["unknown"]), Some(1)).unwrap_err();
+        evaluate_result(&report("2 tests, 1 passed, 0 skipped, 1 failed", &[]), Some(1)).unwrap_err();
+        evaluate_result(&report("3 tests, 1 passed, 0 skipped, 1 failed", &[KNOWN]), Some(1)).unwrap_err();
+        evaluate_result("no summary", Some(0)).unwrap_err();
+        evaluate_result("2 tests, bad passed, 0 skipped, 0 failed", Some(0)).unwrap_err();
+    }
+
+    #[test]
+    fn all_skipped_run_is_not_conformance() {
+        evaluate_result(&report("2 tests, 0 passed, 2 skipped, 0 failed", &[]), Some(0)).unwrap_err();
+        evaluate_result(&report("2 tests, 1 passed, 1 skipped, 0 failed", &[]), Some(0)).unwrap();
+    }
+
+    #[test]
+    fn execution_error_after_summary_is_failure() {
+        let passed = report("2 tests, 2 passed, 0 skipped, 0 failed", &[]);
+        evaluate_result(&passed, Some(1)).unwrap_err();
+        evaluate_result(&passed, None).unwrap_err();
+        let failed = report("2 tests, 1 passed, 0 skipped, 1 failed", &[KNOWN]);
+        evaluate_result(&failed, Some(1)).unwrap();
+        evaluate_result(&failed, Some(2)).unwrap_err();
+    }
 }

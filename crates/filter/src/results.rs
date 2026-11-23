@@ -27,16 +27,13 @@
 
 use std::{borrow::Cow, collections::HashMap};
 
-use praxis_core::config::ResultMatch;
+use praxis_core::config::{MAX_RESULT_KEY_LEN, ResultMatch};
 
 use crate::FilterError;
 
 // -----------------------------------------------------------------------------
 // Constants
 // -----------------------------------------------------------------------------
-
-/// Maximum length of a result key in bytes.
-const MAX_KEY_LEN: usize = 64;
 
 /// Maximum length of a result value in bytes.
 const MAX_VALUE_LEN: usize = 256;
@@ -249,9 +246,9 @@ fn result_matches(actual: Option<&str>, matcher: &ResultMatch) -> bool {
 
 /// Validate a result key.
 fn validate_result_key(key: &str) -> Result<(), FilterError> {
-    if key.is_empty() || key.len() > MAX_KEY_LEN {
+    if key.is_empty() || key.len() > MAX_RESULT_KEY_LEN {
         let len = key.len();
-        return Err(format!("result key must be 1-{MAX_KEY_LEN} bytes, got {len}").into());
+        return Err(format!("result key must be 1-{MAX_RESULT_KEY_LEN} bytes, got {len}").into());
     }
     if !key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {
         return Err(format!("result key '{key}' must be ASCII alphanumeric, '_', or '-'").into());

@@ -15,16 +15,15 @@ use super::proxy::PingoraTcpProxy;
 
 /// Add TCP or TLS listeners to a service.
 ///
-/// Returns any TLS certificate watcher shutdown senders. The
-/// caller must keep these alive; dropping them signals the
-/// watcher tasks to stop.
+/// Appends TLS watcher shutdown senders to `shutdown_senders`.
+/// A failed registration must explicitly signal every prior sender.
 pub(super) fn register_tcp_listeners(
     service: &mut Service<PingoraTcpProxy>,
     listeners: &[&praxis_core::config::Listener],
     upstream: Option<&str>,
-) -> Result<Vec<tokio::sync::watch::Sender<bool>>, ProxyError> {
+    shutdown_senders: &mut Vec<tokio::sync::watch::Sender<bool>>,
+) -> Result<(), ProxyError> {
     let display_upstream = upstream.unwrap_or("filter-routed");
-    let mut shutdown_senders = Vec::new();
     for listener in listeners {
         if let Some(tls) = &listener.tls {
             let (tls_settings, watcher_shutdown) = build_tcp_tls_settings(tls, &listener.address)?;
@@ -42,7 +41,7 @@ pub(super) fn register_tcp_listeners(
             "TCP listener registered"
         );
     }
-    Ok(shutdown_senders)
+    Ok(())
 }
 
 // -----------------------------------------------------------------------------

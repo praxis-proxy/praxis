@@ -267,10 +267,13 @@ fn skip_identity_verification(
 fn trust_store(ca: Option<&CachedCaCerts>) -> Result<rustls::RootCertStore, String> {
     let mut roots = rustls::RootCertStore::empty();
     if let Some(ca) = ca {
-        for der in ca.der_certs() {
-            roots
-                .add(rustls::pki_types::CertificateDer::from(der.clone()))
-                .map_err(|error| error.to_string())?;
+        for (index, der) in ca.der_certs().iter().enumerate() {
+            if let Err(error) = roots.add(rustls::pki_types::CertificateDer::from(der.as_slice())) {
+                tracing::warn!(index, %error, "skipping unusable health probe CA certificate");
+            }
+        }
+        if roots.is_empty() {
+            return Err("none of the health probe CA certificates is usable".to_owned());
         }
     } else {
         pingora_core::tls::load_platform_certs_incl_env_into_store(&mut roots).map_err(|error| error.to_string())?;
@@ -429,6 +432,35 @@ mod tests {
         assert!(
             tls_server_name(&probe.tls, "example.com:443").is_err(),
             "empty SNI cannot disable certificate verification"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn health_probe_explicit_ca_keeps_valid_roots_and_rejects_empty() -> Result<(), String> {
+        let key = rcgen::KeyPair::generate().map_err(|error| error.to_string())?;
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).map_err(|error| error.to_string())?;
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let valid = params
+            .self_signed(&key)
+            .map_err(|error| error.to_string())?
+            .der()
+            .to_vec();
+
+        for material in [Vec::new(), vec![vec![1, 2, 3]]] {
+            let ca = CachedCaCerts::new(material);
+            assert!(
+                trust_store(Some(&ca)).is_err(),
+                "explicit unusable roots must fail closed"
+            );
+        }
+
+        let ca = CachedCaCerts::new(vec![vec![1, 2, 3], valid]);
+        let roots = trust_store(Some(&ca))?;
+        assert_eq!(
+            roots.len(),
+            1,
+            "the health probe must use the valid root from a mixed bundle"
         );
         Ok(())
     }

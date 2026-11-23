@@ -90,6 +90,10 @@ pub enum GrpcTimeoutParseError {
     #[error("grpc-timeout is empty")]
     Empty,
 
+    /// The header contains bytes that cannot be read as text.
+    #[error("grpc-timeout is not valid header text")]
+    InvalidText,
+
     /// The value carried a unit but no digits.
     #[error("grpc-timeout has no digits before its unit")]
     MissingDigits,
@@ -191,11 +195,16 @@ impl GrpcTimeout {
 
     /// Read and parse `grpc-timeout` from a header map.
     ///
-    /// Returns `None` when the header is absent or not readable as text,
-    /// so an absent deadline and a malformed one stay distinguishable.
+    /// Returns `None` only when the header is absent. Present values that
+    /// cannot be read as text return [`GrpcTimeoutParseError::InvalidText`].
     pub fn from_headers(headers: &http::HeaderMap) -> Option<Result<Self, GrpcTimeoutParseError>> {
-        let value = headers.get("grpc-timeout")?.to_str().ok()?;
-        Some(Self::parse(value))
+        let value = headers.get("grpc-timeout")?;
+        Some(
+            value
+                .to_str()
+                .map_err(|_err| GrpcTimeoutParseError::InvalidText)
+                .and_then(Self::parse),
+        )
     }
 
     /// This timeout as a [`Duration`], saturating rather than overflowing.
@@ -554,18 +563,30 @@ mod tests {
     }
 
     #[test]
-    fn from_headers_with_non_utf8() {
+    fn non_utf8_timeout_is_malformed() {
         use http::header::HeaderValue;
 
         let mut headers = http::HeaderMap::new();
-        // Create a header value with non-UTF8 bytes (invalid for grpc-timeout)
+        assert_eq!(
+            GrpcTimeout::from_headers(&headers),
+            None,
+            "absent header has no timeout"
+        );
+
         let non_utf8 = HeaderValue::from_bytes(&[0xFF, 0xFE]).unwrap();
         let _prev = headers.insert("grpc-timeout", non_utf8);
 
-        // Should return None because to_str() fails
-        assert!(
-            GrpcTimeout::from_headers(&headers).is_none(),
-            "a non-UTF8 header should be treated as absent, not malformed"
+        assert_eq!(
+            GrpcTimeout::from_headers(&headers),
+            Some(Err(GrpcTimeoutParseError::InvalidText)),
+            "a present unreadable header is malformed"
+        );
+
+        let _prev = headers.insert("grpc-timeout", HeaderValue::from_static("100m"));
+        assert_eq!(
+            GrpcTimeout::from_headers(&headers).map(|parsed| parsed.map(GrpcTimeout::as_duration)),
+            Some(Ok(Duration::from_millis(100))),
+            "a valid header still parses"
         );
     }
 

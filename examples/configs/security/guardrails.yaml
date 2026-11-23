@@ -4,35 +4,40 @@
 # rules. Rules use literal substring matching (`contains`)
 # or regex (`pattern`). Set `negate: true` to invert the
 # match (reject when content does NOT match). Any triggered
-# rule returns 401 Unauthorized.
+# rule returns 403 Forbidden.
 #
 # Usage:
 #   cargo run -p praxis-proxy -- \
 #     -c examples/configs/security/guardrails.yaml
 #
 # Exercise:
-#   # 200: clean request
-#   curl http://localhost:8080/
+#   # 200: clean JSON-shaped request with required header
+#   curl -H 'X-Authorized: trusted-client' \
+#     -d '{"key":"value"}' http://localhost:8080/
 #
-#   # 401: bad-bot User-Agent matches pattern
-#   curl -H "User-Agent: bad-bot/1.0" \
-#     http://localhost:8080/
+#   # 403: bad-bot User-Agent matches pattern
+#   curl -H 'User-Agent: bad-bot/1.0' \
+#     -H 'X-Authorized: trusted-client' \
+#     -d '{"key":"value"}' http://localhost:8080/
 #
-#   # 401: body contains "evilmonkey"
-#   curl -d "evilmonkey payload" http://localhost:8080/
+#   # 403: body contains "evilmonkey"
+#   curl -H 'X-Authorized: trusted-client' \
+#     -d '{"text":"evilmonkey payload"}' http://localhost:8080/
 #
-#   # 401: missing X-Authorized header (negate rule)
-#   curl -X POST http://localhost:8080/
-#
-#   # 200: X-Authorized header present with "trusted"
-#   curl -H "X-Authorized: trusted-client" \
-#     http://localhost:8080/
-#
-#   # 401: body is not valid JSON shape (negate rule)
-#   curl -d "not json" http://localhost:8080/
-#
-#   # 200: body looks like JSON
+#   # 403: missing X-Authorized header (negate rule)
 #   curl -d '{"key":"value"}' http://localhost:8080/
+#
+#   # 200: X-Authorized header present with "trusted" and valid body shape
+#   curl -H 'X-Authorized: trusted-client' \
+#     -d '{"key":"value"}' http://localhost:8080/
+#
+#   # 403: body does not match the brace-delimited shape (negate rule)
+#   curl -H 'X-Authorized: trusted-client' \
+#     -d 'not json' http://localhost:8080/
+#
+#   # 200: body matches the shape check (not full JSON syntax validation)
+#   curl -H 'X-Authorized: trusted-client' \
+#     -d '{"key":"value"}' http://localhost:8080/
 
 listeners:
   - name: default
@@ -61,7 +66,7 @@ filter_chains:
             contains: "trusted"
             negate: true
 
-          # Require body to look like JSON
+          # Require a brace-delimited body shape (not JSON syntax validation)
           # (reject if body does NOT match the pattern)
           - target: body
             pattern: "^\\{.*\\}$"

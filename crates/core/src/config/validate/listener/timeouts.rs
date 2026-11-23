@@ -226,6 +226,35 @@ listeners:
     }
 
     #[test]
+    fn http_timeout_fields_require_http_listener() {
+        for field in ["downstream_read_timeout_ms", "downstream_keepalive_timeout_ms"] {
+            for (protocol, routing) in [
+                ("http", "filter_chains: [main]"),
+                ("tcp", "upstream: \"10.0.0.1:5432\""),
+            ] {
+                let yaml = timeout_listener_yaml(protocol, routing, Some(field));
+                let result = Config::from_yaml(&yaml);
+                if protocol == "http" {
+                    assert!(result.is_ok(), "{field} should load for HTTP: {result:?}");
+                } else {
+                    let err = result.unwrap_err();
+                    assert!(
+                        err.to_string()
+                            .contains(&format!("'{field}' only applies to protocol: http")),
+                        "{field} should be rejected for TCP: {err}"
+                    );
+                }
+            }
+        }
+
+        let yaml = timeout_listener_yaml("tcp", "upstream: \"10.0.0.1:5432\"", None);
+        let config = Config::from_yaml(&yaml).unwrap();
+        assert_eq!(config.listeners[0].tcp_session_timeout_ms, Some(300_000));
+        assert_eq!(config.listeners[0].downstream_read_timeout_ms, None);
+        assert_eq!(config.listeners[0].downstream_keepalive_timeout_ms, None);
+    }
+
+    #[test]
     fn tcp_listener_preserves_explicit_idle_timeout() {
         let yaml = r#"
 listeners:
@@ -323,6 +352,25 @@ listeners:
     address: "0.0.0.0:8080"
     downstream_keepalive_timeout_ms: {millis}
     filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+"#
+        )
+    }
+
+    /// Valid listener fixture with an optional HTTP-only timeout field.
+    fn timeout_listener_yaml(protocol: &str, routing: &str, field: Option<&str>) -> String {
+        let timeout = field.map_or_else(String::new, |name| format!("{name}: 1000"));
+        format!(
+            r#"
+listeners:
+  - name: service
+    address: "0.0.0.0:8080"
+    protocol: {protocol}
+    {routing}
+    {timeout}
 filter_chains:
   - name: main
     filters:

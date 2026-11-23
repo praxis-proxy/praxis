@@ -28,6 +28,7 @@ mod circuit_breaker;
 #[cfg(feature = "cloud-events-filter")]
 mod cloud_events;
 mod cluster_base_path;
+mod cluster_max_connections;
 mod cluster_references;
 mod conditional_filters;
 mod credential_injection;
@@ -38,6 +39,8 @@ mod endpoint_selector;
 mod errors_total;
 #[cfg(target_os = "linux")]
 mod file_descriptor_limits;
+#[cfg(feature = "forward-proxy")]
+mod forward_proxy;
 mod grpc_access_log;
 mod grpc_condition;
 mod grpc_detection;
@@ -56,6 +59,7 @@ mod health_checks;
 mod hedged_requests;
 mod hostname_upstream;
 mod http_active_requests;
+mod http_query;
 #[cfg(feature = "iterative-request-router")]
 mod iterative_request_router_circuit_breaker;
 #[cfg(feature = "iterative-request-router")]
@@ -86,6 +90,8 @@ mod peer_identity_trust;
 mod pipeline;
 #[cfg(feature = "policy-builtins")]
 mod policy;
+#[cfg(feature = "policy-builtins")]
+mod policy_admission;
 #[cfg(any(
     feature = "policy-builtins",
     feature = "policy-api-key-fips",
@@ -127,6 +133,7 @@ mod ring_hash;
 mod round_robin;
 mod route_on_promoted_header;
 mod route_templates;
+mod routing_health;
 mod security_examples;
 mod selected_upstream_conditions;
 mod session_affinity;
@@ -140,6 +147,7 @@ mod tcp_byte_counters;
 mod tcp_connection_metrics;
 mod tcp_connections_total;
 mod timeout;
+mod tls_examples;
 mod trace_context;
 #[cfg(feature = "otel")]
 mod tracing_otlp;

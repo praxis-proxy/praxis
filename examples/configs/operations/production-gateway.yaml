@@ -10,6 +10,12 @@
 #   cargo run -p praxis-proxy -- -c examples/configs/operations/production-gateway.yaml
 #   curl https://localhost/api/v1/users
 #   curl https://localhost/
+#   curl http://localhost:9902/ready
+
+admin:
+  address: "127.0.0.1:9901"
+  metrics_address: "127.0.0.1:9902"
+  readiness: serving
 
 listeners:
   - name: https
@@ -101,3 +107,4 @@ runtime:
   work_stealing: true
 
 shutdown_timeout_secs: 30
+shutdown_drain_delay_secs: 2

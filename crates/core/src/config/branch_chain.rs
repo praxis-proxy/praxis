@@ -25,6 +25,10 @@ use serde::Deserialize;
 
 use super::chain_ref::ChainRef;
 
+/// Maximum length of a filter result key in bytes, shared by branch validation
+/// and result insertion.
+pub const MAX_RESULT_KEY_LEN: usize = 64;
+
 // -----------------------------------------------------------------------------
 // BranchChainConfig
 // -----------------------------------------------------------------------------
@@ -96,10 +100,9 @@ pub struct BranchChainConfig {
     ///   target appears later in the pipeline, this becomes a forward skip. If earlier, it becomes re-entrance and
     ///   requires [`max_iterations`] to prevent infinite loops.
     ///
-    /// Named targets work across chains because all listener
-    /// chains are concatenated into one flat pipeline during
-    /// startup. Cross-chain rejoin targets use `"chain:filter"`
-    /// syntax.
+    /// Named targets use the bare filter name, which must be unique across
+    /// the listener's flattened pipeline. Listener chains are concatenated
+    /// during startup, so a target in another chain uses the same syntax.
     ///
     /// [`max_iterations`]: BranchChainConfig::max_iterations
     /// [`FilterEntry`]: super::FilterEntry

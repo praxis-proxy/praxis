@@ -126,13 +126,9 @@ impl SubRequestCircuitBreakerConfig {
 pub struct RuntimeConfig {
     /// Tokio scheduler global queue check interval, in ticks.
     ///
-    /// Currently a no-op: the async runtime is managed by
-    /// Pingora, which does not expose this setting, so the value
-    /// cannot be applied. Defaults to `null` (unset). Setting it
-    /// to any value parses and validates but logs a startup
-    /// warning that it has no effect. The field is retained so a
-    /// future runtime that exposes the knob can honour it without
-    /// a config break.
+    /// Positive values apply with the Hyper backend. Pingora warns
+    /// and ignores this setting because it manages its own runtime.
+    /// `null` leaves it unset; config validation rejects zero.
     ///
     /// ```
     /// use praxis_core::config::RuntimeConfig;

@@ -52,7 +52,7 @@ fn duplicate_identical_host_headers_rejected() {
     );
     let status = parse_status(&raw);
 
-    // Pingora 0.9.0 rejects any request carrying more than one Host header
+    // The pinned Pingora fork rejects any request carrying more than one Host header
     // field (RFC 9112 Section 3.2) at the protocol layer, even byte-identical
     // duplicates, before Praxis's identical-Host canonicalization runs.
     assert_eq!(

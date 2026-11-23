@@ -239,18 +239,17 @@ pub(super) fn reserialize_json_rpc_body(envelope: serde_json::Value, method: &st
 ///
 /// The actual tool data lives in `result.content[].text` (a
 /// JSON-stringified payload) and/or `result.structuredContent`. We prefer
-/// `structuredContent` when present; otherwise, fold **every** text block (not
-/// just the first) so policy evaluates against all of the response's text
-/// content. A lone text block that parses as JSON is exposed as that
+/// `structuredContent` for `result.*` projection; alongside it,
+/// expose each text block as CMF Text for whole-message scanners. Without
+/// structured content, fold **every** text block. A lone text block that
+/// parses as JSON is exposed as that
 /// object (so `result.<field>` predicates resolve); otherwise the raw
 /// text — or the concatenation of multiple blocks — is wrapped as
 /// `{ "text": "<raw>" }` so `result.text` predicates still resolve.
 ///
-/// Folding all blocks is load-bearing for policy: if policy only saw the
-/// first block, a later block could carry data the policy never vetted
-/// and [`reserialize_json_rpc_response_body`] never rewrote, leaking it
-/// downstream. The view here and the bytes emitted there are kept to
-/// the same content set.
+/// PPE's `result.*` projection still prefers the structured `ToolResult`;
+/// secondary Text parts are visible only to scanners of the whole CMF
+/// message. No-mutation allows keep the original response bytes.
 #[expect(
     clippy::too_many_lines,
     reason = "per-method envelope orchestration; splitting per-method obscures the JSON-RPC shape"
@@ -272,19 +271,21 @@ pub(super) fn build_response_content_for_method(
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
 
-    let content_value = if let Some(structured) = result.get("structuredContent") {
+    let texts: Vec<&str> = result
+        .get("content")
+        .and_then(serde_json::Value::as_array)
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter(|block| block.get("type").and_then(serde_json::Value::as_str) == Some("text"))
+                .filter_map(|block| block.get("text").and_then(serde_json::Value::as_str))
+                .collect()
+        })
+        .unwrap_or_default();
+    let structured = result.get("structuredContent");
+    let content_value = if let Some(structured) = structured {
         structured.clone()
     } else {
-        let texts: Vec<&str> = result
-            .get("content")
-            .and_then(|c| c.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
-                    .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
-                    .collect()
-            })
-            .unwrap_or_default();
         match texts.as_slice() {
             [] => serde_json::Value::Null,
             [single] => serde_json::from_str::<serde_json::Value>(single)
@@ -297,14 +298,22 @@ pub(super) fn build_response_content_for_method(
         }
     };
 
-    vec![ContentPart::ToolResult {
+    let mut parts = vec![ContentPart::ToolResult {
         content: ToolResult {
             tool_call_id: correlation_id.to_owned(),
             tool_name: entity_name.to_owned(),
             content: content_value,
             is_error,
         },
-    }]
+    }];
+    if structured.is_some() {
+        parts.extend(
+            texts
+                .into_iter()
+                .map(|text| ContentPart::Text { text: text.to_owned() }),
+        );
+    }
+    parts
 }
 
 // -----------------------------------------------------------------------------
@@ -319,11 +328,9 @@ pub(super) fn build_response_content_for_method(
 /// **entire** array is replaced with a single canonical text block
 /// holding the vetted `ToolResult.content` (JSON-stringified — the
 /// legacy JSON-RPC shape every client supports). Collapsing to one block is
-/// deliberate: [`build_response_content_for_method`] folds every text
-/// block into the single value policy evaluates, so any *other* block left
-/// in place here would be content the policy never inspected and never
-/// rewrote — a redaction bypass. Dropping the extra (text and non-text)
-/// blocks guarantees the bytes we emit are exactly what policy vetted.
+/// deliberate: a mutator rewrites the selected `ToolResult`, not each parallel
+/// text or binary representation. Dropping the original blocks prevents a
+/// stale unmodified copy from surviving the mutation.
 ///
 /// `result.structuredContent` is mirrored to the same value, but
 /// only when the original response already had it (we don't invent

@@ -16,9 +16,9 @@ workspace = true
 [features]
 default = ["dev"]
 # Everything except the FIPS tasks: the proxy itself (echo, debug), the
-# benchmark harness and the filter-docs generator. Off inside the FIPS check
-# image, which needs only `cargo xtask fips` and must not compile the standard
-# proxy build to get it.
+# benchmark harness and the filter-docs generator. Off for the FIPS targets,
+# which need only `cargo xtask fips` and must not compile the standard proxy
+# build to get it.
 dev = [
     "dep:chrono",
     "dep:nix",
@@ -43,9 +43,7 @@ base64 = { workspace = true }
 cargo_metadata = { workspace = true }
 chrono = { workspace = true, optional = true }
 clap = { workspace = true }
-flate2 = { workspace = true }
 nix = { workspace = true, optional = true }
-object = { workspace = true }
 openssl = { workspace = true }
 plotters = { workspace = true, optional = true }
 praxis = { workspace = true, optional = true }
@@ -53,7 +51,6 @@ praxis-core = { workspace = true, optional = true }
 praxis-proxy-benchmarks = { workspace = true, optional = true }
 praxis-tests-rollout = { workspace = true, optional = true }
 quote = { workspace = true, optional = true }
-regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true, optional = true }

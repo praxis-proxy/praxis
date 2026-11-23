@@ -24,7 +24,7 @@ use super::super::{super::context::PingoraRequestCtx, span_util::http_version_la
 /// handling) would otherwise leave it unset and the record silently
 /// skipped: precisely the requests operators most want logged.
 #[cfg(feature = "pingora")]
-pub(super) fn snapshot_for_early_exit(session: &mut Session, ctx: &mut PingoraRequestCtx) {
+pub(in crate::http) fn snapshot_for_early_exit(session: &mut Session, ctx: &mut PingoraRequestCtx) {
     if ctx.request_snapshot.is_none() {
         ctx.request_snapshot = Some(request_header_from_session(session));
     }
@@ -74,7 +74,7 @@ pub(super) fn templated_route(
 /// [`Empty`]: tracing::field::Empty
 /// [`record_response_span_attributes`]: super::super::span_util::record_response_span_attributes
 #[cfg(feature = "pingora")]
-pub(super) fn create_request_span(session: &Session, ctx: &PingoraRequestCtx) -> tracing::Span {
+pub(in crate::http) fn create_request_span(session: &Session, ctx: &PingoraRequestCtx) -> tracing::Span {
     let header = session.req_header();
     create_request_span_for(header.method.as_str(), header.uri.path(), &header.headers, ctx)
 }

@@ -35,7 +35,7 @@ async fn websocket_upgrade_succeeds() {
     assert_eq!(resp.status(), 101, "proxy should forward 101 Switching Protocols");
 
     ws.send(Message::Text("hello".into())).await.unwrap();
-    let Some(echo) = recv_ws(&mut ws).await else { return };
+    let echo = recv_ws(&mut ws, "hello echo").await;
     assert_eq!(
         echo,
         Message::Text("hello".into()),
@@ -43,7 +43,7 @@ async fn websocket_upgrade_succeeds() {
     );
 
     ws.send(Message::Text("world".into())).await.unwrap();
-    let Some(echo) = recv_ws(&mut ws).await else { return };
+    let echo = recv_ws(&mut ws, "world echo").await;
     assert_eq!(echo, Message::Text("world".into()), "multiple messages should work");
 
     drop(ws.close(None).await);
@@ -62,7 +62,7 @@ async fn websocket_binary_messages() {
 
     let payload: bytes::Bytes = vec![0xDE, 0xAD, 0xBE, 0xEF].into();
     ws.send(Message::Binary(payload.clone())).await.unwrap();
-    let Some(echo) = recv_ws(&mut ws).await else { return };
+    let echo = recv_ws(&mut ws, "binary echo").await;
     assert_eq!(
         echo,
         Message::Binary(payload),
@@ -88,7 +88,7 @@ async fn websocket_message_ordering_preserved() {
     }
 
     for i in 0..10 {
-        let Some(echo) = recv_ws(&mut ws).await else { return };
+        let echo = recv_ws(&mut ws, "ordered text echo").await;
         assert_eq!(
             echo,
             Message::Text(format!("msg-{i}").into()),
@@ -228,7 +228,7 @@ async fn websocket_ping_pong_frames() {
     let mut ws = connect_ws(&url).await;
 
     ws.send(Message::Ping(vec![1, 2, 3].into())).await.unwrap();
-    let Some(reply) = recv_ws(&mut ws).await else { return };
+    let reply = recv_ws(&mut ws, "ping or pong frame").await;
     assert!(
         reply.is_pong() || reply.is_ping(),
         "proxy should forward ping/pong frames, got {reply:?}"
@@ -250,7 +250,7 @@ async fn websocket_large_message() {
 
     let payload: bytes::Bytes = vec![0xAB; 128 * 1024].into();
     ws.send(Message::Binary(payload.clone())).await.unwrap();
-    let Some(echo) = recv_ws(&mut ws).await else { return };
+    let echo = recv_ws(&mut ws, "large binary echo").await;
     assert_eq!(
         echo,
         Message::Binary(payload),
@@ -277,9 +277,9 @@ async fn websocket_multiple_simultaneous_connections() {
     ws2.send(Message::Text("from-2".into())).await.unwrap();
     ws3.send(Message::Text("from-3".into())).await.unwrap();
 
-    let Some(echo1) = recv_ws(&mut ws1).await else { return };
-    let Some(echo2) = recv_ws(&mut ws2).await else { return };
-    let Some(echo3) = recv_ws(&mut ws3).await else { return };
+    let echo1 = recv_ws(&mut ws1, "connection 1 echo").await;
+    let echo2 = recv_ws(&mut ws2, "connection 2 echo").await;
+    let echo3 = recv_ws(&mut ws3, "connection 3 echo").await;
 
     assert_eq!(
         echo1,
@@ -304,7 +304,7 @@ async fn websocket_multiple_simultaneous_connections() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn websocket_close_with_status_code() {
-    let ws_backend = start_websocket_echo_backend().await;
+    let ws_backend = CloseAwareBackend::start().await;
     let proxy_port = free_port();
     let yaml = simple_proxy_yaml(proxy_port, ws_backend.port());
     let config = Config::from_yaml(&yaml).unwrap();
@@ -314,7 +314,7 @@ async fn websocket_close_with_status_code() {
     let mut ws = connect_ws(&url).await;
 
     ws.send(Message::Text("before-close".into())).await.unwrap();
-    let Some(echo) = recv_ws(&mut ws).await else { return };
+    let echo = recv_ws(&mut ws, "pre-close text echo").await;
     assert_eq!(
         echo,
         Message::Text("before-close".into()),
@@ -327,12 +327,57 @@ async fn websocket_close_with_status_code() {
     };
     ws.send(Message::Close(Some(close_frame))).await.unwrap();
 
-    let close_result = ws.next().await;
-    let got_close = match close_result {
-        Some(Ok(msg)) => msg.is_close(),
-        Some(Err(_)) | None => true,
+    let close_result = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
+        .await
+        .expect("timed out waiting for close-frame outcome");
+    let received = close_result
+        .expect("connection ended without a close frame")
+        .expect("WebSocket reset or error after close frame");
+    let Message::Close(Some(frame)) = received else {
+        panic!("expected close frame with status, got {received:?}");
     };
-    assert!(got_close, "connection should close after close frame");
+    assert_eq!(frame.code, CloseCode::Normal, "close status should be forwarded");
+}
+
+struct CloseAwareBackend {
+    port: u16,
+    worker: tokio::task::JoinHandle<()>,
+}
+
+impl CloseAwareBackend {
+    async fn start() -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind WebSocket backend");
+        let port = listener.local_addr().expect("WebSocket backend address").port();
+        let worker = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let Ok(mut websocket) = tokio_tungstenite::accept_async(stream).await else {
+                        return;
+                    };
+                    while let Some(Ok(message)) = websocket.next().await {
+                        if message.is_close() {
+                            websocket.flush().await.expect("flush close reply");
+                            break;
+                        }
+                        websocket.send(message).await.expect("echo WebSocket message");
+                    }
+                });
+            }
+        });
+        Self { port, worker }
+    }
+
+    fn port(&self) -> u16 {
+        self.port
+    }
+}
+
+impl Drop for CloseAwareBackend {
+    fn drop(&mut self) {
+        self.worker.abort();
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -420,16 +465,13 @@ insecure_options:
 // Test Utilities
 // ---------------------------------------------------------------------------
 
-/// Receive the next WebSocket message, returning `None` on
-/// `ResetWithoutClosingHandshake` (transient under CI load).
-async fn recv_ws(ws: &mut WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>) -> Option<Message> {
-    match ws.next().await {
-        Some(Ok(msg)) => Some(msg),
-        Some(Err(tungstenite::Error::Protocol(tungstenite::error::ProtocolError::ResetWithoutClosingHandshake))) => {
-            None
-        },
-        Some(Err(e)) => panic!("unexpected WebSocket error: {e}"),
-        None => panic!("WebSocket stream ended unexpectedly"),
+/// Receive a required exchange frame within a bounded interval.
+async fn recv_ws(ws: &mut WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>, expected: &str) -> Message {
+    match tokio::time::timeout(std::time::Duration::from_secs(5), ws.next()).await {
+        Ok(Some(Ok(msg))) => msg,
+        Ok(Some(Err(error))) => panic!("expected {expected}, received WebSocket error: {error}"),
+        Ok(None) => panic!("expected {expected}, WebSocket stream ended"),
+        Err(_) => panic!("timed out waiting for {expected}"),
     }
 }
 

@@ -1,22 +1,19 @@
 # Multi-Listener Body Processing Pipeline
 #
-# Three listeners, each with a different body processing
-# strategy. Demonstrates how filter chain composition per
-# listener controls body buffering, inspection, and routing
-# behavior.
+# Three listeners with different field extraction and routing
+# behavior. Their filter chains determine whether a request
+# body is inspected before routing or forwarded unchanged.
 #
-# Listener 1 (stream-buffer): Extracts multiple JSON fields
-# from the request body in a single parse and routes based
-# on the promoted headers. StreamBuffer mode accumulates
-# chunks and defers forwarding until extraction completes.
+# Listener 1 (stream-buffer): Extracts model and user_id from
+# the JSON body, then routes by the promoted model header.
 #
-# Listener 2 (buffered): Enforces a body size ceiling via
-# body_limits.max_request_bytes. Oversized requests receive 413
-# before reaching the filter pipeline.
+# Listener 2 (buffered): Extracts only model from the JSON
+# body and uses default routing. Both extraction listeners
+# use the json_body_field StreamBuffer contract.
 #
-# Listener 3 (passthrough): No body inspection. Requests
-# are routed by path only, body flows through unmodified
-# in streaming mode.
+# Listener 3 (passthrough): Does not inspect the body. Requests
+# use default routing, and the body is forwarded unchanged.
+# The 1 MiB request transfer ceiling applies to all listeners.
 #
 # This pattern is common in production gateways that serve
 # multiple protocols or tenants with different processing

@@ -34,7 +34,7 @@ use tracing::{debug, warn};
 
 use self::config::CircuitBreakerConfig;
 use crate::{
-    FilterError,
+    ClusterNotContacted, FilterError,
     actions::{FilterAction, Rejection},
     filter::{HttpFilter, HttpFilterContext},
 };
@@ -61,7 +61,24 @@ struct ActiveCircuitToken {
     /// Cluster whose breaker issued the token.
     cluster: Arc<str>,
     /// Generation-bearing token from [`CircuitBreaker::try_acquire`].
-    token: CircuitToken,
+    token: Option<CircuitToken>,
+    /// Breaker that issued the token, retained across pipeline cancellation.
+    breaker: Arc<InstrumentedCircuitBreaker>,
+    /// Nested transport outcome, when this filter runs in a sub-request.
+    nested_outcome: Option<crate::filtered_subrequest::NestedTransportOutcome>,
+}
+
+impl Drop for ActiveCircuitToken {
+    fn drop(&mut self) {
+        let Some(token) = self.token.take() else {
+            return;
+        };
+        match self.nested_outcome.as_ref() {
+            Some(outcome) if outcome.failed() => self.breaker.record_failure(token),
+            Some(outcome) if outcome.succeeded() => self.breaker.record_success(token),
+            Some(_) | None => self.breaker.release(token),
+        }
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -174,6 +191,15 @@ fn logical_open(state: CircuitState) -> bool {
     !matches!(state, CircuitState::Closed)
 }
 
+/// Whether the request will reach the cluster a router selected for it.
+///
+/// A request marked [`ClusterNotContacted`] (a forward-proxy `CONNECT`) says
+/// nothing about the cluster's health, and a token taken for it could be the
+/// half-open probe.
+fn reaches_cluster(ctx: &HttpFilterContext<'_>) -> bool {
+    ctx.extensions.get::<ClusterNotContacted>().is_none()
+}
+
 // -----------------------------------------------------------------------------
 // CircuitBreakerFilter
 // -----------------------------------------------------------------------------
@@ -188,6 +214,11 @@ fn logical_open(state: CircuitState) -> bool {
 /// the circuit opens and subsequent requests receive 503
 /// immediately. After the recovery window, a single probe
 /// request is forwarded; if it succeeds the circuit closes.
+///
+/// A forward-proxy `CONNECT` passes uncounted: its tunnel
+/// dials its own destination, never the cluster a route
+/// selects for it, so it neither takes the half-open probe
+/// nor records an outcome.
 ///
 /// # YAML configuration
 ///
@@ -218,7 +249,7 @@ fn logical_open(state: CircuitState) -> bool {
 /// ```
 pub struct CircuitBreakerFilter {
     /// Per-cluster circuit breaker state.
-    breakers: HashMap<Arc<str>, InstrumentedCircuitBreaker>,
+    breakers: HashMap<Arc<str>, Arc<InstrumentedCircuitBreaker>>,
 }
 
 impl CircuitBreakerFilter {
@@ -253,14 +284,14 @@ impl CircuitBreakerFilter {
             }
             breakers.insert(
                 Arc::clone(&cluster.name),
-                InstrumentedCircuitBreaker::new(
+                Arc::new(InstrumentedCircuitBreaker::new(
                     &cluster.name,
                     CoreCircuitBreakerConfig {
                         threshold: cluster.consecutive_failures,
                         recovery_window: std::time::Duration::from_secs(cluster.recovery_window_secs),
                         half_open_timeout: std::time::Duration::from_secs(cluster.half_open_timeout_secs),
                     },
-                ),
+                )),
             );
         }
 
@@ -277,8 +308,9 @@ impl HttpFilter for CircuitBreakerFilter {
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         // Clone the Arc, not the string: the token retains the cluster
         // name, and a refcount bump keys the response-phase lookup
-        // identically.
-        let Some(cluster_name) = ctx.cluster.clone() else {
+        // identically. A request that never reaches the cluster passes
+        // without a token.
+        let Some(cluster_name) = ctx.cluster.clone().filter(|_cluster| reaches_cluster(ctx)) else {
             return Ok(FilterAction::Continue);
         };
 
@@ -289,9 +321,15 @@ impl HttpFilter for CircuitBreakerFilter {
         match breaker.try_acquire() {
             CircuitCheck::Allowed(token) => {
                 debug!(cluster = %cluster_name, "circuit closed/half-open, allowing request");
+                let nested_outcome = ctx
+                    .extensions
+                    .get::<crate::filtered_subrequest::NestedTransportOutcome>()
+                    .cloned();
                 ctx.insert_filter_state(ActiveCircuitToken {
                     cluster: cluster_name,
-                    token,
+                    token: Some(token),
+                    breaker: Arc::clone(breaker),
+                    nested_outcome,
                 });
                 Ok(FilterAction::Continue)
             },
@@ -305,35 +343,35 @@ impl HttpFilter for CircuitBreakerFilter {
     }
 
     async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        let Some(active) = ctx.remove_filter_state::<ActiveCircuitToken>() else {
+        let Some(mut active) = ctx.remove_filter_state::<ActiveCircuitToken>() else {
             return Ok(FilterAction::Continue);
         };
-
-        let Some(breaker) = self.breakers.get(&active.cluster) else {
+        let Some(token) = active.token.take() else {
             return Ok(FilterAction::Continue);
         };
+        let breaker = &active.breaker;
 
         match ctx.response_header.as_ref() {
             Some(resp) if resp.status.is_server_error() => {
                 warn!(cluster = %active.cluster, "recording upstream failure");
-                breaker.record_failure(active.token);
+                breaker.record_failure(token);
             },
             Some(_) => {
                 debug!(cluster = %active.cluster, "recording upstream success");
-                breaker.record_success(active.token);
+                breaker.record_success(token);
             },
             None if ctx.upstream_reached => {
                 // Reached the upstream but received no response header (a
                 // connect or read failure): a genuine upstream failure.
                 warn!(cluster = %active.cluster, "recording upstream failure (no response header)");
-                breaker.record_failure(active.token);
+                breaker.record_failure(token);
             },
             None => {
                 // Rejected or aborted before the upstream was contacted, so
                 // this request carries no signal about the cluster: release
                 // the token without recording success or failure.
                 debug!(cluster = %active.cluster, "releasing circuit token: upstream not reached");
-                breaker.release(active.token);
+                breaker.release(token);
             },
         }
 

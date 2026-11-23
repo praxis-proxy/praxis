@@ -15,7 +15,7 @@ Experimental: requires the off-by-default `cloud-events-filter` feature. Review 
 
 | Field | Type | Required | Description |
 |-------|------|---------|-------------|
-| `on` | `request` \| `response_headers` \| `response_complete` | yes | Lifecycle phase for this publisher. |
+| `on` | `request` \| `response_headers` \| `response_complete` \| `request_complete` | yes | Choose `response_complete` for a final bodyless response or response-body end-of-stream, and `request_complete` for terminal success, aborts, or early failures. `request_complete` is supported only in listener pipelines. Response conditions use the final response at this filter's position; if unavailable, header-dependent conditions skip publication and status-only conditions require a known written status. For `request_complete`, `response.status` is unavailable when no status was written; a required mapping then suppresses the event. |
 | `destination` | string | yes | HTTP endpoint receiving the structured `CloudEvent`. |
 | `authorization` | CloudEventsAuthorizationConfig | no | Optional environment-backed bearer authorization for the receiver. |
 | `authorization.env_var` | string | yes | Environment variable containing the bearer token. |
