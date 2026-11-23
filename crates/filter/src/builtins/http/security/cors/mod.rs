@@ -329,10 +329,10 @@ impl CorsFilter {
     }
 
     /// Handle a preflight OPTIONS request.
-    fn handle_preflight(&self, origin: &str, request: &crate::context::Request) -> (FilterAction, bool) {
+    fn handle_preflight(&self, origin: &str, request: &crate::context::Request) -> FilterAction {
         if self.resolve_origin(origin).is_none() {
             debug!(origin = %origin, "preflight origin disallowed");
-            return (self.disallowed_preflight(), false);
+            return self.disallowed_preflight();
         }
 
         let request_method = request
@@ -343,20 +343,24 @@ impl CorsFilter {
 
         if !self.is_method_allowed(request_method) {
             debug!(method = %request_method, "preflight method not allowed");
-            return (self.disallowed_preflight(), false);
+            return self.disallowed_preflight();
         }
 
-        if let Some(rh) = request.headers.get("access-control-request-headers")
-            && let Ok(rh) = rh.to_str()
-            && !rh.is_empty()
-            && !self.are_headers_allowed(rh)
+        if request
+            .headers
+            .get_all("access-control-request-headers")
+            .iter()
+            .any(|value| {
+                !value
+                    .to_str()
+                    .is_ok_and(|headers| headers.is_empty() || self.are_headers_allowed(headers))
+            })
         {
-            debug!(headers = %rh, "preflight headers not allowed");
-            return (self.disallowed_preflight(), false);
+            debug!("preflight headers not allowed");
+            return self.disallowed_preflight();
         }
 
-        let rejection = build_preflight_rejection(self, origin, request);
-        (FilterAction::Reject(rejection), true)
+        FilterAction::Reject(build_preflight_rejection(self, origin, request))
     }
 
     /// Retain generated cache variation only for this filter's approved response.
@@ -412,17 +416,18 @@ impl HttpFilter for CorsFilter {
             && ctx.request.headers.contains_key("access-control-request-method")
         {
             debug!(origin = %origin, "handling CORS preflight");
-            let (action, approved) = self.handle_preflight(origin, ctx.request);
+            let action = self.handle_preflight(origin, ctx.request);
             #[cfg(feature = "local-http")]
-            if approved
-                && is_local_preflight_request(ctx)
+            if is_local_preflight_request(ctx)
                 && let FilterAction::Reject(rejection) = &action
+                // Both approval and omit-mode denial can return 204.
+                && rejection.headers.iter().any(|(name, _)| {
+                    name.eq_ignore_ascii_case(http::header::ACCESS_CONTROL_ALLOW_ORIGIN.as_str())
+                })
             {
                 let headers = rejection.headers.clone();
                 ctx.extensions.insert(LocalCorsPreflightPending { headers });
             }
-            #[cfg(not(feature = "local-http"))]
-            let _ = approved;
             return Ok(action);
         }
 

@@ -1758,6 +1758,76 @@ async fn allowed_options_preflight_keeps_permissions_through_local_exchange() {
 }
 
 #[tokio::test]
+async fn denied_options_preflight_does_not_preserve_permissions_through_local_exchange() {
+    for (method, second_header) in [("POST", "x-disallowed"), ("DELETE", "x-custom")] {
+        let state = State::default();
+        let registry = registry(vec![Fixture::owner(state.clone())]);
+        let mut entries: Vec<praxis_filter::FilterEntry> = serde_yaml::from_str(
+            r#"
+- filter: cors
+  allow_origins: ["https://client.example"]
+  allow_methods: [POST]
+  allow_headers: [x-custom]
+  allow_credentials: true
+  max_age: 600
+- filter: owner
+"#,
+        )
+        .unwrap();
+        let pipeline = Arc::new(FilterPipeline::build(&mut entries, &registry).unwrap());
+        let mut request = praxis_filter::Request {
+            method: http::Method::OPTIONS,
+            uri: "/files".parse().unwrap(),
+            headers: http::HeaderMap::from_iter([
+                (
+                    http::header::ORIGIN,
+                    http::HeaderValue::from_static("https://client.example"),
+                ),
+                (
+                    http::header::ACCESS_CONTROL_REQUEST_METHOD,
+                    http::HeaderValue::from_static(method),
+                ),
+            ]),
+        };
+        for value in ["x-custom", second_header] {
+            request.headers.append(
+                http::header::ACCESS_CONTROL_REQUEST_HEADERS,
+                http::HeaderValue::from_static(value),
+            );
+        }
+        let mut head = Response {
+            status: http::StatusCode::OK,
+            headers: http::HeaderMap::new(),
+        };
+        let mut ctx = context::context(&request, &pipeline);
+        ctx.response_header = Some(&mut head);
+        let result = LocalExchange::claim(&pipeline, &mut ctx)
+            .unwrap()
+            .run(
+                &mut ctx,
+                &mut Transport {
+                    state: state.clone(),
+                    input: Input::bytes(0),
+                },
+            )
+            .await;
+        assert_eq!(result.status, 204, "omit-mode denial should return 204");
+        let observed = state.inner.lock().unwrap();
+        let (_, headers) = observed.head.as_ref().unwrap();
+        for name in [
+            "access-control-allow-methods",
+            "access-control-allow-headers",
+            "access-control-max-age",
+            "access-control-allow-private-network",
+        ] {
+            assert!(!headers.contains_key(name), "denied preflight retained {name}");
+        }
+        drop(observed);
+        assert_complete(&state, 0);
+    }
+}
+
+#[tokio::test]
 async fn allowed_options_preflight_merges_vary_fields_through_response_replacement() {
     for private_network in [false, true] {
         let state = State::default();
