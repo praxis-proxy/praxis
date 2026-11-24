@@ -3356,6 +3356,34 @@ fn reserialize_resource_writes_each_part_back_to_its_entry() {
     assert!(!String::from_utf8_lossy(&out).contains("123-45-6789"));
 }
 
+#[test]
+fn reserialize_resource_skips_malformed_entry_without_discarding_rewrites() {
+    use ppe::praxis_policy_core::cmf::{Message, Role};
+
+    use super::json_rpc::reserialize_json_rpc_response_body;
+
+    let body = bytes::Bytes::from_static(
+        br#"{"jsonrpc":"2.0","id":1,"result":{"contents":[
+             {"uri":"hr://a","text":"SSN 123-45-6789"},
+             null]}}"#,
+    );
+    let message = Message::with_content(
+        Role::Assistant,
+        vec![
+            resource_part("hr://a", Some("[REDACTED]")),
+            resource_part("hr://null", None),
+        ],
+    );
+    let out = reserialize_json_rpc_response_body(parse_dom(&body), "resources/read", &message).expect("Some");
+    let parsed: serde_json::Value = serde_json::from_slice(&out).expect("valid JSON");
+    let entries = parsed["result"]["contents"].as_array().expect("contents array");
+    assert_eq!(entries[0]["text"], "[REDACTED]", "valid entry must be rewritten");
+    assert!(
+        !String::from_utf8_lossy(&out).contains("123-45-6789"),
+        "original SSN must not leak"
+    );
+}
+
 /// `prompts/get` result with two text messages, the first carrying an SSN.
 const PROMPT_REWRITE_BODY: &[u8] = br#"{"jsonrpc":"2.0","id":1,"result":{"description":"old","messages":[
      {"role":"user","content":{"type":"text","text":"first SSN 123-45-6789"}},
@@ -3413,6 +3441,42 @@ fn reserialize_prompt_writes_each_message_back_keeping_roles() {
     assert_eq!(messages[1]["content"]["text"], "second, vetted");
     assert_eq!(parsed["result"]["description"], "new");
     assert!(!String::from_utf8_lossy(&out).contains("123-45-6789"));
+}
+
+/// A later message whose vetted text is gone is sent empty, never with the
+/// original text policy removed.
+#[test]
+fn reserialize_prompt_empties_a_later_message_with_no_vetted_text() {
+    use ppe::praxis_policy_core::cmf::{Message, Role};
+
+    use super::json_rpc::reserialize_json_rpc_response_body;
+
+    const BODY: &[u8] = br#"{"jsonrpc":"2.0","id":1,"result":{"messages":[
+         {"role":"user","content":{"type":"text","text":"first"}},
+         {"role":"assistant","content":{"type":"text","text":"second SSN 123-45-6789"}}]}}"#;
+
+    // Case 1: the vetted list is shorter than the response.
+    // Case 2: the vetted message exists but has no Text part.
+    let shorter = vec![Message::text(Role::User, "ignored")];
+    let no_text = vec![
+        Message::text(Role::User, "ignored"),
+        Message::with_content(Role::Assistant, vec![]),
+    ];
+
+    for (case, vetted) in [("shorter list", shorter), ("no text part", no_text)] {
+        let original = bytes::Bytes::from_static(BODY);
+        let message = Message::with_content(Role::Assistant, vec![prompt_result_part("new", vetted, "first")]);
+        let out = reserialize_json_rpc_response_body(parse_dom(&original), "prompts/get", &message).expect("Some");
+        let parsed: serde_json::Value = serde_json::from_slice(&out).expect("valid JSON");
+        assert_eq!(
+            parsed["result"]["messages"][1]["content"]["text"], "",
+            "{case}: a later message with no vetted text is sent empty"
+        );
+        assert!(
+            !String::from_utf8_lossy(&out).contains("123-45-6789"),
+            "{case}: the removed SSN must not reach the client"
+        );
+    }
 }
 
 /// Routes that redact PII from a `summarize` prompt result and a CSV resource.

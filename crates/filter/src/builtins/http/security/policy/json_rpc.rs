@@ -495,7 +495,12 @@ fn rewrite_resource_result(
     });
     let entries = result_obj.get_mut("contents")?.as_array_mut()?;
     for (entry, resource) in entries.iter_mut().zip(resources) {
-        let entry = entry.as_object_mut()?;
+        // Non-object entries (e.g. null) carry no text to leak and produced
+        // an empty Resource part, so skipping them is safe.  Aborting via `?`
+        // would discard rewrites already applied to earlier entries.
+        let Some(entry) = entry.as_object_mut() else {
+            continue;
+        };
         if let Some(mime_type) = &resource.mime_type {
             entry.insert("mimeType".to_owned(), mime_type.clone().into());
         }
@@ -525,7 +530,7 @@ fn rewrite_prompt_result(result_obj: &mut serde_json::Map<String, serde_json::Va
     for (index, original) in messages.iter_mut().enumerate() {
         let vetted = match index {
             0 => Some(prompt.content.as_deref().unwrap_or_default()),
-            _ => prompt.messages.get(index).and_then(first_text_part),
+            _ => Some(prompt.messages.get(index).and_then(first_text_part).unwrap_or_default()),
         };
         if let Some(text) = vetted {
             set_message_text(original, text);

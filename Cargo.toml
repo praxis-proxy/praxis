@@ -475,15 +475,15 @@ invalid_html_tags = "deny"
 missing_crate_level_docs = "deny"
 private_doc_tests = "allow"
 
-# BRANCH DEV: pin the PPE crates to a commit on the policy feature branch
-# (feat/apl-resource-prompt-projection) so this branch builds against the
-# unreleased resource/prompt projection (issue 75). Remove before merging,
+# BRANCH DEV: pin the PPE crates to the policy `main` commit that merged the
+# resource/prompt projection (praxis-proxy/policy#305, issue 75), so this
+# branch builds against it before PPE is released. Remove before merging,
 # once PPE is released with these changes.
 [patch.crates-io]
-praxis-policy = { git = "https://github.com/monshri/policy.git", rev = "80dd6564f77a9d9ad5089a79a5df756b6ad7b7bb" }
-praxis-policy-core = { git = "https://github.com/monshri/policy.git", rev = "80dd6564f77a9d9ad5089a79a5df756b6ad7b7bb" }
-praxis-policy-orchestration = { git = "https://github.com/monshri/policy.git", rev = "80dd6564f77a9d9ad5089a79a5df756b6ad7b7bb" }
-praxis-policy-apl-core = { git = "https://github.com/monshri/policy.git", rev = "80dd6564f77a9d9ad5089a79a5df756b6ad7b7bb" }
-praxis-policy-apl-cmf = { git = "https://github.com/monshri/policy.git", rev = "80dd6564f77a9d9ad5089a79a5df756b6ad7b7bb" }
-praxis-policy-apl-runtime = { git = "https://github.com/monshri/policy.git", rev = "80dd6564f77a9d9ad5089a79a5df756b6ad7b7bb" }
-praxis-policy-builtins = { git = "https://github.com/monshri/policy.git", rev = "80dd6564f77a9d9ad5089a79a5df756b6ad7b7bb" }
+praxis-policy = { git = "https://github.com/praxis-proxy/policy.git", rev = "3beda7389ab47ef22fdbfa4caf00068bdc5e00b8" }
+praxis-policy-core = { git = "https://github.com/praxis-proxy/policy.git", rev = "3beda7389ab47ef22fdbfa4caf00068bdc5e00b8" }
+praxis-policy-orchestration = { git = "https://github.com/praxis-proxy/policy.git", rev = "3beda7389ab47ef22fdbfa4caf00068bdc5e00b8" }
+praxis-policy-apl-core = { git = "https://github.com/praxis-proxy/policy.git", rev = "3beda7389ab47ef22fdbfa4caf00068bdc5e00b8" }
+praxis-policy-apl-cmf = { git = "https://github.com/praxis-proxy/policy.git", rev = "3beda7389ab47ef22fdbfa4caf00068bdc5e00b8" }
+praxis-policy-apl-runtime = { git = "https://github.com/praxis-proxy/policy.git", rev = "3beda7389ab47ef22fdbfa4caf00068bdc5e00b8" }
+praxis-policy-builtins = { git = "https://github.com/praxis-proxy/policy.git", rev = "3beda7389ab47ef22fdbfa4caf00068bdc5e00b8" }
