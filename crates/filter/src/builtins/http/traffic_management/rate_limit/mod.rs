@@ -6,7 +6,7 @@
 mod config;
 mod limiter;
 
-pub use self::config::RateLimitMode;
+pub use self::config::{RateLimitMode, RateLimitScope};
 
 #[cfg(test)]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
@@ -216,7 +216,9 @@ impl PerIpState {
 /// addresses can hold the table full more cheaply; on internet-facing
 /// listeners prefer `ipv6_prefix_len: 64` and a modest ratio.
 ///
-/// State is all managed locally.
+/// Bucket counter scope is in explicit `local` mode - each replica
+/// enforces its own `rate` and `burst`, and a restart or filter rebuild
+/// resets its buckets. `local` is the only supported value for the moment.
 ///
 /// `shadow: true` evaluates the limit without rejecting: over-limit
 /// requests are allowed through, counted in
@@ -231,6 +233,7 @@ impl PerIpState {
 /// ```yaml
 /// filter: rate_limit
 /// mode: per_ip        # "per_ip" or "global"
+/// scope: local        # counters are process-local
 /// rate: 100           # tokens per second
 /// burst: 200          # max bucket capacity
 /// ipv6_prefix_len: 64 # per_ip: group IPv6 clients by /64 (default 128)
@@ -245,6 +248,7 @@ impl PerIpState {
 /// let yaml: serde_yaml::Value = serde_yaml::from_str(
 ///     r#"
 /// mode: global
+/// scope: local
 /// rate: 50
 /// burst: 100
 /// "#,
@@ -305,6 +309,7 @@ impl RateLimitFilter {
     /// let yaml: serde_yaml::Value = serde_yaml::from_str(
     ///     r#"
     /// mode: per_ip
+    /// scope: local
     /// rate: 100
     /// burst: 200
     /// "#,
@@ -314,11 +319,18 @@ impl RateLimitFilter {
     /// assert_eq!(filter.name(), "rate_limit");
     ///
     /// // Invalid: rate is zero.
-    /// let bad: serde_yaml::Value = serde_yaml::from_str("mode: global\nrate: 0\nburst: 10").unwrap();
+    /// let bad: serde_yaml::Value =
+    ///     serde_yaml::from_str("mode: global\nscope: local\nrate: 0\nburst: 10").unwrap();
+    /// assert!(RateLimitFilter::from_config(&bad).is_err());
+    ///
+    /// // Invalid: scope is required.
+    /// let bad: serde_yaml::Value = serde_yaml::from_str("mode: global\nrate: 10\nburst: 20").unwrap();
     /// assert!(RateLimitFilter::from_config(&bad).is_err());
     /// ```
     pub fn from_config(config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
         let cfg: RateLimitConfig = parse_filter_config("rate_limit", config)?;
+
+        let RateLimitScope::Local = cfg.scope;
 
         if !cfg.rate.is_finite() || cfg.rate <= 0.0 {
             return Err("rate_limit: rate must be a finite number greater than 0".into());

@@ -79,7 +79,7 @@ impl HttpFilter for MetadataWriterFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional)
     }
 
     async fn on_request_body(
@@ -89,13 +89,15 @@ impl HttpFilter for MetadataWriterFilter {
         _end_of_stream: bool,
     ) -> Result<FilterAction, FilterError> {
         if body.as_ref().is_some_and(|b| !b.is_empty()) {
-            ctx.set_metadata("test.proof", "body_phase_value");
+            ctx.filter_metadata
+                .insert("test.proof", "body_phase_value")
+                .expect("entry must fit in the filter's metadata");
         }
         Ok(FilterAction::Continue)
     }
 
     async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        let val = ctx.get_metadata("test.proof").map(str::to_owned);
+        let val = ctx.filter_metadata.get("test.proof").map(str::to_owned);
         if let Some(val) = val
             && let Some(resp) = ctx.response_header.as_mut()
         {

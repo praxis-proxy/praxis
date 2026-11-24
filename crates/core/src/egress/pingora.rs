@@ -37,29 +37,36 @@ use crate::connectivity::peer::{apply_cached_tls, apply_connection_options, ca_f
 /// let mut spec = PeerSpec::plain("127.0.0.1:8080".parse().unwrap());
 /// spec.pool_group = 7;
 ///
-/// let peer = http_peer(&spec);
+/// let peer = http_peer(&spec).unwrap();
 /// assert_eq!(peer.group_key, 7);
 /// ```
-#[must_use]
-pub fn http_peer(spec: &PeerSpec) -> HttpPeer {
+///
+/// # Errors
+///
+/// Returns [`EgressError::Connect`] when configured TLS material cannot be
+/// converted into a usable Pingora peer.
+pub fn http_peer(spec: &PeerSpec) -> Result<HttpPeer, EgressError> {
     let mut peer = HttpPeer::new(spec.address, spec.tls, (*spec.sni).to_owned());
     peer.group_key = spec.pool_group;
     apply_connection_options(&mut peer, &spec.connection);
 
     if let Some(tls) = &spec.tls_config {
-        apply_cached_tls(&mut peer, tls, &spec.address.to_string());
+        apply_cached_tls(&mut peer, tls, &spec.address.to_string()).map_err(EgressError::Connect)?;
     }
 
     if spec.tls
         && peer.options.ca.is_none()
         && let Some(anchors) = &spec.trust_anchors
-        && let Some(converted) =
-            anchors.converted_or_init(|| -> Arc<[WrappedX509]> { Arc::from(ca_from_cached(anchors)) })
     {
+        let converted = anchors
+            .converted_or_init(|| -> Result<Arc<[WrappedX509]>, String> { ca_from_cached(anchors).map(Arc::from) })
+            .ok_or_else(|| EgressError::Connect("cached CA conversion has an incompatible type".to_owned()))?
+            .as_ref()
+            .map_err(|error| EgressError::Connect(error.clone()))?;
         peer.options.ca = Some(Arc::clone(converted));
     }
 
-    peer
+    Ok(peer)
 }
 
 // -----------------------------------------------------------------------------
@@ -105,7 +112,7 @@ impl Connector for PingoraConnector {
         reason = "Pingora's session future is large and the caller already boxes the connect"
     )]
     async fn connect(&self, peer: &PeerSpec, timeout: Duration) -> Result<PingoraSession, EgressError> {
-        let mut http_peer = http_peer(peer);
+        let mut http_peer = http_peer(peer)?;
         clamp_peer_timeouts(&mut http_peer, timeout);
 
         let (inner, reused) = self
@@ -294,7 +301,7 @@ mod tests {
             ..ConnectionOptions::default()
         });
 
-        let peer = http_peer(&spec);
+        let peer = http_peer(&spec).unwrap();
 
         assert_eq!(peer.group_key, 42, "the pool partition must become the group key");
         assert_eq!(
@@ -307,11 +314,11 @@ mod tests {
 
     #[test]
     fn trust_anchors_apply_to_tls_peers_without_a_cluster_ca() {
-        let anchors = Arc::new(CachedCaCerts::new(vec![vec![1, 2, 3]]));
+        let anchors = Arc::new(CachedCaCerts::new(vec![ca_der()]));
         let mut spec = PeerSpec::new("127.0.0.1:8443".parse().unwrap(), true, "upstream.test");
         spec.trust_anchors = Some(Arc::clone(&anchors));
 
-        let peer = http_peer(&spec);
+        let peer = http_peer(&spec).unwrap();
 
         assert!(
             peer.options.ca.is_some(),
@@ -319,7 +326,8 @@ mod tests {
         );
 
         let first = Arc::as_ptr(peer.options.ca.as_ref().unwrap());
-        let second = Arc::as_ptr(http_peer(&spec).options.ca.as_ref().unwrap());
+        let second_peer = http_peer(&spec).unwrap();
+        let second = Arc::as_ptr(second_peer.options.ca.as_ref().unwrap());
         assert_eq!(first, second, "the conversion must be memoized on the cached anchors");
     }
 
@@ -329,7 +337,7 @@ mod tests {
         spec.trust_anchors = Some(Arc::new(CachedCaCerts::new(vec![vec![1, 2, 3]])));
 
         assert!(
-            http_peer(&spec).options.ca.is_none(),
+            http_peer(&spec).unwrap().options.ca.is_none(),
             "trust anchors mean nothing without TLS"
         );
     }
@@ -338,7 +346,7 @@ mod tests {
     fn a_tls_peer_without_cluster_tls_verifies_certificate_and_hostname() {
         let spec = PeerSpec::new("203.0.113.10:443".parse().unwrap(), true, "idp.example.com");
 
-        let peer = http_peer(&spec);
+        let peer = http_peer(&spec).unwrap();
 
         assert!(peer.options.verify_cert, "certificate verification stays on by default");
         assert!(
@@ -346,6 +354,63 @@ mod tests {
             "hostname verification stays on by default"
         );
         assert_eq!(peer.sni, "idp.example.com", "the server name carries over unchanged");
+    }
+
+    #[test]
+    fn explicit_unusable_runtime_ca_returns_error() {
+        let mut spec = PeerSpec::new("127.0.0.1:8443".parse().unwrap(), true, "upstream.test");
+        for roots in [Vec::new(), vec![vec![1, 2, 3]]] {
+            spec.trust_anchors = Some(Arc::new(CachedCaCerts::new(roots)));
+            assert!(
+                matches!(http_peer(&spec), Err(EgressError::Connect(_))),
+                "explicit empty or invalid CA material must fail before dialing"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "fixture setup and peer/connector propagation checks"
+    )]
+    async fn invalid_cached_client_identity_stops_peer_and_connector() {
+        praxis_tls::provider::install();
+        let dir = tempfile::TempDir::new().unwrap();
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert = rcgen::CertificateParams::new(vec!["localhost".to_owned()])
+            .unwrap()
+            .self_signed(&key)
+            .unwrap();
+        let cert_path = dir.path().join("client.pem");
+        let key_path = dir.path().join("client-key.pem");
+        std::fs::write(&cert_path, cert.pem()).unwrap();
+        std::fs::write(&key_path, key.serialize_pem()).unwrap();
+        let tls = praxis_tls::ClusterTls {
+            client_cert: Some(praxis_tls::CertKeyPair {
+                cert_path: cert_path.to_str().unwrap().to_owned(),
+                default: false,
+                key_path: key_path.to_str().unwrap().to_owned(),
+                server_names: Vec::new(),
+            }),
+            ..praxis_tls::ClusterTls::default()
+        };
+        let cached = praxis_tls::CachedClusterTls::try_from_config(&tls).unwrap();
+        assert_eq!(cached.client_cert().unwrap().converted_or_init(|| 1_u64), Some(&1_u64));
+        let mut spec = PeerSpec::new("127.0.0.1:8443".parse().unwrap(), true, "localhost");
+        spec.tls_config = Some(cached);
+
+        assert!(
+            matches!(http_peer(&spec), Err(EgressError::Connect(_))),
+            "peer must not omit mTLS"
+        );
+        let connector = PingoraConnector::new(1);
+        assert!(
+            matches!(
+                Box::pin(connector.connect(&spec, Duration::from_secs(1))).await,
+                Err(EgressError::Connect(_))
+            ),
+            "connector must return the conversion error before dialing"
+        );
     }
 
     #[test]
@@ -506,5 +571,13 @@ mod tests {
             Arc::ptr_eq(&first.inner, &second.inner),
             "a cloned connector must share the pool"
         );
+    }
+
+    /// Generate a trust anchor accepted by both Pingora and rustls.
+    fn ca_der() -> Vec<u8> {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        params.self_signed(&key).unwrap().der().to_vec()
     }
 }

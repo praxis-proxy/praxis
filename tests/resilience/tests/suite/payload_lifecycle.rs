@@ -836,7 +836,7 @@ impl praxis_filter::HttpFilter for ReleaseOnChunk {
     }
 
     fn request_body_access(&self) -> praxis_filter::BodyAccess {
-        praxis_filter::BodyAccess::ReadOnly
+        praxis_filter::BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional)
     }
 
     async fn on_request(
@@ -1007,7 +1007,7 @@ impl praxis_filter::HttpFilter for GenerationFilter {
     }
 
     fn request_body_access(&self) -> praxis_filter::BodyAccess {
-        praxis_filter::BodyAccess::ReadOnly
+        praxis_filter::BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional)
     }
 
     fn request_body_mode(&self) -> praxis_filter::BodyMode {
@@ -1250,7 +1250,7 @@ fn released_upload_times_out_or_cancels_during_shutdown() {
 }
 
 /// Observe the request-context lifetime gauge, not an inferred Tokio task count.
-fn wait_active_requests(admin: &str, expected: u64) {
+pub(super) fn wait_active_requests(admin: &str, expected: u64) {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let mut socket = TcpStream::connect(admin).unwrap();

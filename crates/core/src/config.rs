@@ -22,11 +22,13 @@ mod branch_chain;
 mod chain_ref;
 mod cluster;
 mod condition;
+mod deprecation;
 mod expanded_chains;
 mod filters;
 mod forward_proxy;
 mod hedge_policy;
 mod insecure_options;
+mod jobs;
 mod listener;
 mod logging;
 mod metrics;
@@ -37,13 +39,13 @@ pub mod runtime;
 mod telemetry;
 mod validate;
 
-pub use admin::AdminConfig;
+pub use admin::{AdminConfig, ReadinessMode};
 pub use body_limits::{
     ABSOLUTE_MAX_BODY_BYTES, BodyLimitsConfig, BufferLimit, DEFAULT_MAX_BODY_BYTES, DEFAULT_MAX_BUFFER_BYTES,
     MAX_BUFFER_BYTES,
 };
 pub use bootstrap::{ConfigFile, DEFAULT_CONFIG, load_config};
-pub use branch_chain::{BranchChainConfig, BranchCondition, ResultMatch};
+pub use branch_chain::{BranchChainConfig, BranchCondition, MAX_RESULT_KEY_LEN, ResultMatch};
 pub use chain_ref::ChainRef;
 pub use cluster::{
     AuthoritySource, BackoffConfig, BudgetPercent, Cluster, ClusterHttpOptions, ConsistentHashOpts,
@@ -56,12 +58,14 @@ pub use cluster::{
 pub use condition::{
     ApplicationMatch, Condition, ConditionMatch, ResponseCondition, ResponseConditionMatch, SelectedUpstreamMatch,
 };
+pub use deprecation::{DeprecationWarnings, InlineChainDeprecations};
 pub use expanded_chains::ExpandedFilterChains;
 pub use filters::{FailureMode, FilterChainConfig, FilterEntry};
 pub use forward_proxy::{DestinationRule, ForwardProxyConfig};
 pub use hedge_policy::{HedgePolicy, MAX_HEDGE_ATTEMPTS};
 pub use insecure_options::{InsecureFlag, InsecureOptions, SkipPipelineChecks};
-pub use listener::{Listener, ListenerTls, ProtocolKind};
+pub use jobs::{JobQueueSize, JobQueuedBytes, JobTimeoutSecs, JobWorkers, JobsConfig};
+pub use listener::{Listener, ListenerTls, ProtocolKind, UpgradeAction, UpgradePolicy};
 pub use logging::{DEFAULT_BUFFER_SIZE_LINES, LogOutput, LoggingConfig};
 pub use metrics::{MetricLabel, MetricLabelsConfig, MetricsConfig, RouteTemplates};
 use parse::check_yaml_safety;
@@ -127,6 +131,15 @@ pub struct Config {
     #[serde(default)]
     pub insecure_options: InsecureOptions,
 
+    /// Background job queue settings. Absent means no job runtime is started.
+    ///
+    /// Requires the `jobs-config` Cargo feature, which is off by default:
+    /// without it the key is unknown, and a build that enables the feature
+    /// warns at startup because nothing reads the section yet.
+    #[cfg_attr(not(feature = "jobs-config"), serde(skip))]
+    #[serde(default)]
+    pub jobs: Option<JobsConfig>,
+
     /// Proxy listeners to bind.
     pub listeners: Vec<Listener>,
 
@@ -138,7 +151,12 @@ pub struct Config {
     #[serde(default)]
     pub runtime: RuntimeConfig,
 
-    /// Upper bound on the duration of a graceful shutdown.
+    /// Delay after shutdown begins before graceful connection shutdown; it
+    /// counts against `shutdown_timeout_secs`.
+    #[serde(default)]
+    pub shutdown_drain_delay_secs: u64,
+
+    /// Total budget for a graceful shutdown, including the drain delay.
     #[serde(default = "default_shutdown_timeout_secs")]
     pub shutdown_timeout_secs: u64,
 
@@ -182,6 +200,17 @@ impl Config {
     ///
     /// [`ProxyError::Config`]: crate::errors::ProxyError::Config
     pub fn from_yaml(yaml: &str) -> Result<Self, crate::errors::ProxyError> {
+        let (config, warnings) = Self::from_yaml_with_deprecations(yaml)?;
+        warnings.emit();
+        Ok(config)
+    }
+
+    /// Parse a candidate and retain its deprecation warnings until logging is configured.
+    ///
+    /// # Errors
+    ///
+    /// Returns a configuration error for invalid YAML or invalid settings.
+    pub fn from_yaml_with_deprecations(yaml: &str) -> Result<(Self, DeprecationWarnings), crate::errors::ProxyError> {
         check_yaml_safety(yaml)?;
 
         let mut config: Config = serde_yaml::from_str(yaml)
@@ -189,7 +218,8 @@ impl Config {
 
         config.validate()?;
 
-        Ok(config)
+        let warnings = deprecation::collect(&config, yaml);
+        Ok((config, warnings))
     }
 
     /// Load and validate config from a YAML file.
@@ -340,6 +370,10 @@ mod tests {
     #[test]
     fn default_shutdown_timeout_is_30() {
         let config = Config::from_yaml(VALID_YAML).unwrap();
+        assert_eq!(
+            config.shutdown_drain_delay_secs, 0,
+            "drain delay should default to zero"
+        );
         assert_eq!(
             config.shutdown_timeout_secs, 30,
             "default shutdown timeout should be 30s"
@@ -733,6 +767,7 @@ listeners:
   - name: web
     address: "127.0.0.1:8080"
     filter_chains: [main]
+shutdown_drain_delay_secs: 2
 filter_chains:
   - name: main
     filters:
@@ -768,6 +803,10 @@ filter_chains:
         assert_eq!(
             roundtripped.shutdown_timeout_secs, original.shutdown_timeout_secs,
             "shutdown_timeout_secs should survive roundtrip"
+        );
+        assert_eq!(
+            roundtripped.shutdown_drain_delay_secs, original.shutdown_drain_delay_secs,
+            "shutdown_drain_delay_secs should survive roundtrip"
         );
     }
 

@@ -36,8 +36,8 @@ pub mod tls_probe;
 pub use example_config::{allow_loopback_endpoints, example_config_path, load_example_config, patch_yaml};
 pub use fips::{FIPS_HOST_ENV, approved_mode, assert_fips_host_if_declared, expect_approved_mode, fips_host};
 pub use load::{
-    LoadReport, collect_responses, concurrent_gets, idle_keepalive_connections, is_closed_by_peer, open_requests,
-    read_raw_responses,
+    ContinuousLoadDriver, ContinuousLoadReport, ContinuousLoadSnapshot, LoadReport, collect_responses, concurrent_gets,
+    idle_keepalive_connections, is_closed_by_peer, open_requests, read_raw_responses,
 };
 pub use net::*;
 pub use payload::PayloadSpec;
@@ -48,6 +48,6 @@ pub use process_metrics::{ProcessSample, sample_process};
 pub use proxy::{
     PRAXIS_BIN_ENV, ProxyGuard, ReloadableProxyGuard, build_pipeline, custom_filter_yaml, praxis_bin, registry_with,
     simple_proxy_yaml, start_full_proxy, start_full_proxy_with_kv_stores, start_full_proxy_with_registry, start_proxy,
-    start_proxy_with_registry, start_reloadable_proxy, start_tls_proxy, start_tls_proxy_no_wait,
-    start_tls_proxy_no_wait_with_registry,
+    start_proxy_with_registry, start_reloadable_proxy, start_reloadable_proxy_with_registry, start_tls_proxy,
+    start_tls_proxy_no_wait, start_tls_proxy_no_wait_with_registry,
 };

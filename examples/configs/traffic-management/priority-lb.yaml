@@ -18,6 +18,25 @@ listeners:
     filter_chains:
       - main
 
+clusters:
+  - name: backend
+    endpoints:
+      - address: "127.0.0.1:3001"
+        priority: 0
+      - address: "127.0.0.1:3002"
+        priority: 0
+      - address: "127.0.0.1:3003"
+        priority: 1
+      - address: "127.0.0.1:3004"
+        priority: 1
+    health_check:
+      type: http
+      path: "/healthz"
+      interval_ms: 2000
+      timeout_ms: 1000
+      healthy_threshold: 1
+      unhealthy_threshold: 1
+
 filter_chains:
   - name: main
     filters:
@@ -33,15 +52,7 @@ filter_chains:
               priority:
                 inner_strategy: round_robin
                 overprovisioning_factor: 140
-            endpoints:
-              - address: "127.0.0.1:3001"
-                priority: 0
-              - address: "127.0.0.1:3002"
-                priority: 0
-              - address: "127.0.0.1:3003"
-                priority: 1
-              - address: "127.0.0.1:3004"
-                priority: 1
 
 insecure_options:
   allow_private_endpoints: true # example proxies to local backends
+  allow_private_health_checks: true # example probes local backends

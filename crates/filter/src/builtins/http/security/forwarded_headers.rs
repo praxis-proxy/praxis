@@ -316,6 +316,10 @@ impl HttpFilter for ForwardedHeadersFilter {
         "forwarded_headers"
     }
 
+    fn may_end_request(&self) -> bool {
+        false
+    }
+
     #[expect(clippy::too_many_lines, reason = "header construction")]
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         use std::fmt::Write as _;

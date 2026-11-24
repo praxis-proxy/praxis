@@ -6,9 +6,10 @@
 //! A listener with `forward_proxy.enabled: true` routes `CONNECT
 //! host:port` requests here instead of the reverse-proxy request path.
 //! The filter pipeline runs first (so `ip_acl`, `policy`, and conditions
-//! apply to the tunnel request), then the destination rules and the
-//! private-IP guard decide the dial, and the tunnel relays raw bytes with
-//! idle and duration limits.
+//! apply to the tunnel request), its body filters getting the end of the
+//! CONNECT's empty body as on any bodyless request; then the destination
+//! rules and the private-IP guard decide the dial, and the tunnel relays raw
+//! bytes, which no body filter sees, with idle and duration limits.
 //!
 //! Non-CONNECT requests keep using the reverse-proxy pipeline, with one
 //! forward-proxy addition: an HTTP/1 absolute-form request
@@ -30,18 +31,21 @@ use praxis_core::{
     config::ForwardProxyConfig,
     connectivity::{ConnectionOptions, Upstream, is_private_upstream_ip, peer::resolve_client_host},
 };
-use praxis_filter::{FilterAction, FilterPipeline, Rejection, Request};
+use praxis_filter::{FilterAction, FilterMetadata, FilterPipeline, Rejection, Request};
 use praxis_tls::{CachedClusterTls, ClusterTls, SniMatcher};
 use tracing::{Instrument as _, debug, info, warn};
-use tunnel::{TunnelStats, pump};
+use tunnel::{TunnelCloseReason, TunnelStats, pump};
 
 use super::{
     body_util::BodyFilterOutput,
     inbound_admission::admit_inbound_session,
+    request_body_filter::run_request_body,
     request_filter::{
-        pipeline::run_pipeline,
+        header_mutations::apply_pre_read_mutations_to_request,
+        pipeline::{PipelineResult, run_pipeline},
         request_head,
         request_utils::{create_request_span, snapshot_for_early_exit},
+        stream_buffer::{PreReadPass, PreReadStop},
         terminal_responses::{run_streaming_terminal_response, run_terminal_response},
     },
     response_filter::run_response_filters,
@@ -50,9 +54,12 @@ use crate::{
     http::pingora::{
         context::PingoraRequestCtx,
         convert::send_rejection_for,
-        metrics::{ERROR_TYPE_FILTER_REJECT, ERROR_TYPE_INTERNAL, ERROR_TYPE_UPSTREAM_UNAVAILABLE},
+        metrics::{
+            ERROR_TYPE_DOWNSTREAM, ERROR_TYPE_FILTER_REJECT, ERROR_TYPE_INTERNAL, ERROR_TYPE_UPSTREAM_PROTOCOL,
+            ERROR_TYPE_UPSTREAM_UNAVAILABLE,
+        },
     },
-    tcp::proxy::connect_resolved,
+    tcp::proxy::{UPSTREAM_CONNECT_TIMEOUT, connect_resolved, find_private_addr},
 };
 
 /// Status for a filter's 2xx answer to a CONNECT.
@@ -88,7 +95,9 @@ pub(super) struct ForwardProxyRuntime {
     /// IP-literal destinations the rules list, each with its port.
     addresses: BTreeSet<std::net::SocketAddr>,
 
-    /// How long the tunnel may stay idle before closing.
+    /// How long the tunnel may stay idle before closing, and the read and
+    /// write timeout toward the destination an absolute-form request is
+    /// forwarded to when no pipeline-selected upstream takes it.
     idle_timeout: Duration,
 
     /// Hard cap on total tunnel duration.
@@ -289,17 +298,17 @@ fn absolute_name(host: &str) -> String {
 /// rather than left as the client spelled them, so `policy` and conditions
 /// (a `headers: {host: ...}` match included) judge exactly the host the
 /// destination rules check and the proxy dials. The fork has already held
-/// `Host` equal to the target, so this changes only its spelling. `Host`
-/// is rewritten on the session too, for the request span and logs.
+/// a present `Host` equal to the target, so this changes only its spelling;
+/// an HTTP/1.0 CONNECT that omits `Host` gets one, so a `Host` condition
+/// still meets it (admission has refused an HTTP/1.1 one without `Host`).
+/// `Host` is rewritten on the session too, for the request span and logs.
 /// Returns `None` for a non-UTF-8 or unparseable target.
 fn connect_request(session: &mut Session) -> Option<(Request, ConnectDestination)> {
     let target = std::str::from_utf8(session.req_header().raw_path()).ok()?;
     let parsed = parse_destination(target)?;
     let authority = dial_address(&parsed);
     let header = session.req_header_mut();
-    if header.headers.contains_key(http::header::HOST) {
-        header.insert_header(http::header::HOST, authority.as_str()).ok()?;
-    }
+    header.insert_header(http::header::HOST, authority.as_str()).ok()?;
     let uri = http::Uri::builder().authority(authority).build().ok()?;
     Some((
         Request {
@@ -358,8 +367,12 @@ pub(super) async fn handle(
         .await
 }
 
-/// Record the request facts later phases (logging, metrics) need.
+/// Record the request facts the filters and later phases (logging, metrics)
+/// need.
 fn prepare_context(pipeline: &FilterPipeline, session: &Session, ctx: &mut PingoraRequestCtx) {
+    // The tunnel dials its own destination, never the cluster a route
+    // selects for the CONNECT; a catch-all route matches it too.
+    ctx.extensions.insert(praxis_filter::ClusterNotContacted);
     ctx.client_http_version = Some(session.req_header().version);
     ctx.client_addr = session
         .client_addr()
@@ -403,10 +416,10 @@ async fn serve_connect(
     // The head phase runs first, as on every other request: a head hook may
     // refuse the CONNECT, and what it publishes (head_classifier's class,
     // trusted header sets) must reach the request pipeline.
-    if request_head::prepare(pipeline, session, &mut request, ctx).await {
+    if prepare_request(pipeline, session, &mut request, ctx).await {
         return Ok(true);
     }
-    let outcome = run_pipeline(pipeline, request, ctx).await;
+    let outcome = Box::pin(run_request_filters(pipeline, request, ctx)).await;
     if let Some(status) = outcome.as_ref().ok().and_then(|result| success_answer(&result.action)) {
         refuse_filter_success(session, ctx, status).await;
         return Ok(true);
@@ -431,6 +444,91 @@ async fn serve_connect(
         },
     }
     Ok(true)
+}
+
+/// Run the phases that precede the request filters, as on any request: the
+/// request-head phase, then the pre-read of the CONNECT's empty body when
+/// the pipeline buffers request bodies (see [`pre_read_empty_body`]).
+///
+/// Returns `true` when the CONNECT has been answered.
+async fn prepare_request(
+    pipeline: &FilterPipeline,
+    session: &mut Session,
+    request: &mut Request,
+    ctx: &mut PingoraRequestCtx,
+) -> bool {
+    if request_head::prepare(pipeline, session, request, ctx).await {
+        return true;
+    }
+    let Err(rejection) = Box::pin(pre_read_empty_body(pipeline, request, ctx)).await else {
+        return false;
+    };
+    ctx.request_snapshot = Some(request.clone());
+    send_rejection_for(session, rejection, ctx).await;
+    true
+}
+
+/// Pre-read the CONNECT's empty request body when the pipeline buffers
+/// request bodies.
+///
+/// The reverse path pre-reads a `StreamBuffer` body before the request
+/// filters, so they run with the body filters' verdict and promotions. A
+/// CONNECT has no body (RFC 9110 Section 9.3.6), so the pass ends at once;
+/// nothing is read from the session, where the bytes after the CONNECT head
+/// belong to the tunnel. Header mutations the body filters emit reach the
+/// request the filters see.
+async fn pre_read_empty_body(
+    pipeline: &FilterPipeline,
+    request: &mut Request,
+    ctx: &mut PingoraRequestCtx,
+) -> Result<(), Rejection> {
+    let Some(mut pass) = PreReadPass::new(pipeline) else {
+        return Ok(());
+    };
+    match Box::pin(pass.feed(pipeline, ctx, request, None)).await {
+        Ok(_ended) => {},
+        Err(PreReadStop::Rejected(rejection)) => {
+            ctx.stamp_error_type(ERROR_TYPE_FILTER_REJECT);
+            return Err(rejection);
+        },
+        Err(PreReadStop::Filter(error)) => {
+            tracing::error!(error = %error, "CONNECT body filter error during pre-read");
+            ctx.stamp_error_type(ERROR_TYPE_INTERNAL);
+            return Err(Rejection::status(500));
+        },
+    }
+    let pre_read = pass.finish(pipeline, ctx);
+    apply_pre_read_mutations_to_request(request, &pre_read.mutations);
+    ctx.pre_read_mutations = pre_read.mutations;
+    Ok(())
+}
+
+/// Run the request filters, then, when they approve, give the body filters
+/// the end of the CONNECT's empty body before anything is dialed.
+///
+/// On the reverse path a bodyless request's body filters run once, at end
+/// of stream, after the request filters, and a filter may decide there: an
+/// entity-aware `policy` authorizes at that call. A CONNECT gets the same
+/// call, which drains the pre-read instead when one ran. Tunnel bytes are
+/// not the request body and never reach the body filters. A refusal from
+/// the body filters becomes the outcome, answered like the request filters'.
+async fn run_request_filters(
+    pipeline: &FilterPipeline,
+    request: Request,
+    ctx: &mut PingoraRequestCtx,
+) -> Result<PipelineResult, praxis_filter::FilterError> {
+    let mut outcome = run_pipeline(pipeline, request, ctx).await;
+    if let Ok(result) = &mut outcome
+        && matches!(
+            result.action,
+            FilterAction::Continue | FilterAction::Release | FilterAction::BodyDone
+        )
+        && let Err(halt) = Box::pin(run_request_body(pipeline, &mut None, true, ctx)).await
+    {
+        tracing::debug!(reason = %halt.reason, "CONNECT request body filters refused the tunnel");
+        result.action = FilterAction::Reject(halt.rejection.unwrap_or_else(|| Rejection::status(500)));
+    }
+    outcome
 }
 
 /// The status of a filter's 2xx answer to the CONNECT, if it gave one.
@@ -463,6 +561,55 @@ async fn refuse_filter_success(session: &mut Session, ctx: &mut PingoraRequestCt
     );
     ctx.stamp_error_type(ERROR_TYPE_INTERNAL);
     send_rejection_for(session, Rejection::status(CONNECT_SUCCESS_REFUSED), ctx).await;
+}
+
+/// Refuse a terminal answer to a CONNECT that the response filters made a 2xx.
+///
+/// The request-phase check ([`success_answer`]) cannot see a response filter
+/// rewrite a 4xx answer to a 2xx, or reject with one. Either would claim a
+/// tunnel no one opened (see [`CONNECT_SUCCESS_REFUSED`]), so the outcome is
+/// replaced by a rejection. Anything else, and any other method, passes
+/// through.
+pub(in crate::http) fn refuse_unopened_tunnel(
+    ctx: &mut PingoraRequestCtx,
+    outcome: Result<praxis_filter::Response, Rejection>,
+) -> Result<praxis_filter::Response, Rejection> {
+    let is_connect = ctx
+        .request_snapshot
+        .as_ref()
+        .is_some_and(|request| request.method == http::Method::CONNECT);
+    let status = match &outcome {
+        Ok(response) => response.status.as_u16(),
+        Err(rejection) => rejection.status,
+    };
+    if !is_connect || !is_success(status) {
+        return outcome;
+    }
+    warn!(
+        status,
+        "response filter made a CONNECT terminal answer a 2xx, which would claim an unopened tunnel"
+    );
+    ctx.stamp_error_type(ERROR_TYPE_INTERNAL);
+    Err(Rejection::status(CONNECT_SUCCESS_REFUSED))
+}
+
+/// The refusal a CONNECT is sent in place of `rejection`.
+///
+/// Every local refusal of a CONNECT passes through here as it is sent, in
+/// plain HTTP (`send_rejection_for` calls it), whichever phase refused: the
+/// head and body phases included, which no earlier check sees. A 2xx would
+/// claim the tunnel being refused (see [`CONNECT_SUCCESS_REFUSED`]), so it
+/// is replaced, without its body; any other status passes through.
+pub(in crate::http) fn connect_refusal(ctx: &mut PingoraRequestCtx, rejection: Rejection) -> Rejection {
+    if !is_success(rejection.status) {
+        return rejection;
+    }
+    warn!(
+        status = rejection.status,
+        "CONNECT refused with a 2xx, which would claim an unopened tunnel"
+    );
+    ctx.stamp_error_type(ERROR_TYPE_INTERNAL);
+    Rejection::status(CONNECT_SUCCESS_REFUSED)
 }
 
 /// Answer the CONNECT with a filter's rejection.
@@ -502,7 +649,12 @@ async fn open_tunnel(
     ))
     .await;
     record_tunnel_close(ctx, &stats, started);
-    finish_tunnel_response(pipeline, ctx);
+    // A tunnel a peer broke off is a response cut off midway, as on any
+    // request: its body filters see no end of stream, and the logging hook
+    // writes its access record unsampled.
+    if !record_tunnel_failure(ctx, stats.reason) {
+        finish_tunnel_response(pipeline, ctx);
+    }
     Ok(true)
 }
 
@@ -631,13 +783,15 @@ fn established_head(
     Ok(head)
 }
 
-/// End the tunnel's response once its bytes are counted.
+/// End the response of a tunnel that closed normally, once its bytes are
+/// counted.
 ///
 /// Tunneled bytes are opaque, so the response-body filters see only the
 /// end of the stream, with no body; filters that act at the end of the
 /// response (`access_log` among them) then do so with the final tunnel
 /// byte counts. The response is then delivered, so no fallback record
-/// follows.
+/// follows. A tunnel a peer broke off gets no end of stream, as a response
+/// cut off midway gets none (see [`record_tunnel_failure`]).
 fn finish_tunnel_response(pipeline: &FilterPipeline, ctx: &mut PingoraRequestCtx) {
     let Some((mut fctx, response_header)) = ctx.response_body_context_for(pipeline) else {
         return;
@@ -710,18 +864,53 @@ async fn resolve_destination(address: &str, host: &str, port: u16) -> Option<Vec
         .ok()
 }
 
-/// Fold tunnel totals into the request counters and emit the close event.
+/// Filter metadata key holding how a tunnel closed
+/// ([`TunnelCloseReason::as_str`]), which an access record or `CloudEvent`
+/// reads as `metadata.tunnel.close_reason`.
+const TUNNEL_CLOSE_REASON: &str = "tunnel.close_reason";
+
+/// Fold tunnel totals into the request counters, emit the close event, and
+/// publish the close reason as [`TUNNEL_CLOSE_REASON`].
 fn record_tunnel_close(ctx: &mut PingoraRequestCtx, stats: &TunnelStats, started: Instant) {
     ctx.request_body_bytes = ctx.request_body_bytes.saturating_add(stats.bytes_in);
     ctx.response_body_bytes = ctx.response_body_bytes.saturating_add(stats.bytes_out);
     let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let reason = stats.reason.as_str();
     info!(
         bytes_in = stats.bytes_in,
         bytes_out = stats.bytes_out,
         duration_ms,
-        reason = stats.reason.as_str(),
+        reason,
         "tunnel_close"
     );
+    ctx.filter_metadata
+        .insert(TUNNEL_CLOSE_REASON, reason)
+        .unwrap_or_else(FilterMetadata::log_loss);
+}
+
+/// Record a tunnel a peer broke off as a failed request, returning whether
+/// it was one.
+///
+/// The client already has the tunnel's 200, so the failure goes where a
+/// response cut off midway records one: a failed read or write at the
+/// destination is an upstream failure, one at the client a downstream one.
+/// A tunnel has no upstream exchange span to carry an upstream failure, so
+/// the request span does. Closing at the idle timeout or the maximum
+/// duration is the tunnel's configured end, not a failure.
+fn record_tunnel_failure(ctx: &mut PingoraRequestCtx, reason: TunnelCloseReason) -> bool {
+    match reason {
+        TunnelCloseReason::DestinationError => {
+            ctx.stamp_error_type(ERROR_TYPE_UPSTREAM_PROTOCOL);
+            ctx.request_span.record("otel.status_code", "ERROR");
+            ctx.request_span.record("error.type", reason.as_str());
+            true
+        },
+        TunnelCloseReason::ClientError => {
+            ctx.stamp_error_type(ERROR_TYPE_DOWNSTREAM);
+            true
+        },
+        TunnelCloseReason::Completed | TunnelCloseReason::IdleTimeout | TunnelCloseReason::MaxDuration => false,
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -736,8 +925,8 @@ struct ForwardDestination {
     /// Whether the scheme was `https` (TLS origination with SNI).
     tls: bool,
 
-    /// `Host` header value for the upstream leg: the authority without
-    /// any userinfo.
+    /// The destination's canonical `Host` ([`canonical_host`]): what the
+    /// filters see and the upstream leg sends.
     host_header: http::HeaderValue,
 }
 
@@ -769,47 +958,130 @@ fn forward_destination(target: &str) -> Option<ForwardDestination> {
         },
         None => wire_host,
     };
-    let destination = destination(host, authority.port_u16().unwrap_or(default_port))?;
-    // Filters judge this request by its `Host`, which the fork holds equal
-    // to the target's authority byte for byte. Only a host already in the
-    // canonical form the destination rules check is accepted, so no
-    // spelling (`EXAMPLE.com`, `example.com.`) can satisfy a filter and
-    // reach a destination the filter would refuse.
+    let destination = destination(host, authority_port(authority, default_port)?)?;
+    // Only a host already in the canonical form the destination rules check
+    // is accepted (`EXAMPLE.com` and `example.com.` are refused), so the
+    // target names its destination in the one spelling the filters, the
+    // rules, and the dialer read. The port is canonicalized instead: filters
+    // see it in `canonical_host`'s form, which `set_forward_host` writes to
+    // `Host` before they run.
     if destination.host != host {
         return None;
     }
-    let host_header = match authority.port() {
-        Some(port) => format!("{}:{port}", authority.host()),
-        None => authority.host().to_owned(),
-    };
+    let host_header = http::HeaderValue::try_from(canonical_host(&destination, default_port)).ok()?;
     Some(ForwardDestination {
         destination,
         tls,
-        host_header: http::HeaderValue::try_from(host_header).ok()?,
+        host_header,
     })
 }
 
-/// The address the HTTP upstream resolver dials: [`dial_address`] with a
-/// host name made absolute (see [`absolute_name`]). IP literals are left as
-/// they are; they are not resolved and would not parse with a dot.
-fn resolve_address(destination: &ConnectDestination) -> String {
-    if destination.host.parse::<std::net::IpAddr>().is_ok() {
-        return dial_address(destination);
+/// The canonical `Host` for a forward destination: its canonical host,
+/// bracketed when IPv6, with the port only when it is not the scheme's
+/// default.
+///
+/// RFC 3986 Section 6.2.3: an empty port and the scheme's default name the
+/// same destination as no port, and a port is a number, so
+/// `example.com:`, `example.com:80`, and `example.com:080` all become
+/// `example.com`, and `example.com:08080` becomes `example.com:8080`. A
+/// filter matching `Host` sees one spelling per destination.
+fn canonical_host(destination: &ConnectDestination, default_port: u16) -> String {
+    match (destination.port == default_port, destination.host.contains(':')) {
+        (true, true) => format!("[{}]", destination.host),
+        (true, false) => destination.host.clone(),
+        (false, _) => dial_address(destination),
     }
-    format!("{}:{}", absolute_name(&destination.host), destination.port)
 }
 
-/// Build the upstream for a forward destination.
+/// The port an absolute-form authority names, or `default_port` when it
+/// names none.
 ///
-/// HTTPS destinations originate TLS with SNI from the destination host
-/// and verification against the system roots: no custom CA, no client
-/// certificate. The dialed authority becomes the upstream `Host`.
+/// An empty port (`host:`) means the scheme's default, as RFC 3986 Section
+/// 3.2.3 allows. `None` for a port that is present but not a number from 0
+/// to 65535: `Authority` accepts any digits there, and reading such a port
+/// as absent would check and dial the default port instead of refusing the
+/// target.
+fn authority_port(authority: &http::uri::Authority, default_port: u16) -> Option<u16> {
+    let host_port = authority
+        .as_str()
+        .rsplit_once('@')
+        .map_or(authority.as_str(), |(_userinfo, host_port)| host_port);
+    match host_port.strip_prefix(authority.host())? {
+        "" | ":" => Some(default_port),
+        rest => rest.strip_prefix(':')?.parse().ok(),
+    }
+}
+
+/// Resolve a forward destination to the one address to dial, under the
+/// bounds and checks the CONNECT dialer applies.
+///
+/// The name is client-chosen, so it resolves through the bounded per-call
+/// resolver (see [`resolve_destination`]), not the shared cached one that
+/// configured endpoints use: slow DNS fails the request instead of pinning a
+/// blocking thread per name, and client names never fill the shared cache.
+/// A name with any private or reserved answer is refused unless
+/// `insecure_options.allow_private_upstreams` is set, as the CONNECT dialer
+/// refuses it. IPv4 is preferred, as for configured endpoints. `None`,
+/// after logging why, when there is nothing to dial.
+async fn checked_dial_address(
+    forward_proxy: &ForwardProxyRuntime,
+    destination: &ConnectDestination,
+) -> Option<std::net::SocketAddr> {
+    let address = dial_address(destination);
+    let addrs = resolve_destination(&address, &destination.host, destination.port).await?;
+    if !forward_proxy.allow_private_upstreams
+        && let Some(private) = find_private_addr(&addrs)
+    {
+        warn!(
+            destination = %address,
+            ip = %private,
+            "forward request destination resolves to a private/reserved address; \
+             set insecure_options.allow_private_upstreams to allow"
+        );
+        return None;
+    }
+    addrs
+        .iter()
+        .find(|addr| addr.is_ipv4())
+        .or_else(|| addrs.first())
+        .copied()
+}
+
+/// Connection limits for a client-chosen destination.
+///
+/// No configuration names these upstreams, so nothing else would bound
+/// them: the connect, including the TLS handshake, gets the CONNECT dialer's
+/// limit, and each read and write gets the listener's forward-proxy idle
+/// timeout, so a destination that stops answering cannot hold the request
+/// and its connection indefinitely.
+fn forward_connection_options(idle_timeout: Duration) -> ConnectionOptions {
+    ConnectionOptions {
+        connection_timeout: Some(UPSTREAM_CONNECT_TIMEOUT),
+        total_connection_timeout: Some(UPSTREAM_CONNECT_TIMEOUT),
+        read_timeout: Some(idle_timeout),
+        write_timeout: Some(idle_timeout),
+        ..ConnectionOptions::default()
+    }
+}
+
+/// Build the upstream for a forward destination that dials `dial`.
+///
+/// `dial` is the checked address from [`checked_dial_address`]; the
+/// upstream connects to it directly, so nothing resolves the client's name
+/// again. The name stays in the `Host` header and, for HTTPS, in the SNI
+/// that the certificate is verified against. HTTPS destinations originate
+/// TLS with verification against the system roots: no custom CA, no client
+/// certificate.
 ///
 /// # Errors
 ///
 /// Returns the TLS material error when the HTTPS TLS settings cannot be
 /// built.
-fn build_destination_upstream(parsed: &ForwardDestination) -> Result<Upstream, praxis_tls::TlsError> {
+fn build_destination_upstream(
+    parsed: &ForwardDestination,
+    dial: std::net::SocketAddr,
+    idle_timeout: Duration,
+) -> Result<Upstream, praxis_tls::TlsError> {
     let tls = parsed
         .tls
         .then(|| {
@@ -820,29 +1092,64 @@ fn build_destination_upstream(parsed: &ForwardDestination) -> Result<Upstream, p
         })
         .transpose()?;
     Ok(Upstream {
-        // Absolute, so the resolver dials exactly the host the rules approved.
-        address: Arc::from(resolve_address(&parsed.destination)),
+        address: Arc::from(dial.to_string()),
         authority: Some(parsed.host_header.clone()),
         base_path: None,
-        connection: Arc::new(ConnectionOptions::default()),
+        connection: Arc::new(forward_connection_options(idle_timeout)),
         tls,
     })
+}
+
+/// Give an absolute-form request the canonical `Host` of the destination its
+/// target names, before any filter reads it.
+///
+/// RFC 9112 Section 3.2.2: a proxy that receives an absolute-form target
+/// ignores the `Host` it received and replaces it with the target's
+/// authority. Filters (`policy`, a `headers: {host: ...}` condition) judge
+/// the request by `Host`, since the fork keeps the target's authority off
+/// the `Uri`. Without this, an HTTP/1.0 request that omits `Host` would
+/// reach them naming no destination, and one that pads its port (`:08080`)
+/// would reach them spelled apart from the destination the rules check and
+/// the proxy dials. The value written is the one sent upstream.
+///
+/// An HTTP/1.1 request without `Host` is left without one, for admission
+/// to refuse with 400 (RFC 9112 Section 3.2). A target that names no
+/// destination is left alone: [`forward_egress`] refuses it after the
+/// pipeline, so a filter's own refusal still answers first.
+///
+/// # Errors
+///
+/// Returns the header error if `Host` cannot be replaced, so the request
+/// fails rather than reaching the filters with the client's spelling.
+pub(super) fn set_forward_host(session: &mut Session) -> pingora_core::Result<()> {
+    let ForwardTarget::Destination(parsed) = forward_target(session) else {
+        return Ok(());
+    };
+    let header = session.req_header_mut();
+    if header.version == http::Version::HTTP_11 && !header.headers.contains_key(http::header::HOST) {
+        return Ok(());
+    }
+    header.insert_header(http::header::HOST, parsed.host_header)
 }
 
 /// Gate and forward an absolute-form request (`GET http://host/path`) on a
 /// forward-proxy listener.
 ///
 /// Runs after the reverse-proxy request pipeline approved the request, so
-/// filters (`ip_acl`, `policy`, conditions) saw it first. The destination
-/// rules then decide the egress: a host or port that is not allowlisted is
-/// answered with 403. A pipeline-selected upstream (`router`,
-/// `load_balancer`) keeps control; otherwise the URI's destination becomes
-/// the upstream and the request is rewritten to origin-form for the
-/// upstream leg. Requests that are not HTTP/1 absolute-form — including
-/// everything on HTTP/2 listeners — keep reverse-proxy behavior when the
-/// pipeline selected an upstream, and are answered with 400 when it did not:
-/// such a request names no destination for the forward proxy and has no
-/// reverse-proxy route either.
+/// filters (`ip_acl`, `policy`, conditions) saw it first, with the `Host`
+/// [`set_forward_host`] wrote. The destination rules then decide the
+/// egress: a host or port that is not allowlisted is answered with 403. A
+/// pipeline-selected upstream (`router`, `load_balancer`) keeps control;
+/// otherwise the URI's destination becomes the upstream and the request is
+/// rewritten to origin-form for the upstream leg. An absolute-form target that names no destination the
+/// proxy can forward to (a port of 0, a scheme other than `http`/`https`, a
+/// host in a non-canonical spelling) is answered with 400, whatever the
+/// pipeline selected, so it never takes a reverse-proxy route instead.
+/// Requests that are not HTTP/1 absolute-form, including everything on
+/// HTTP/2 listeners, keep reverse-proxy behavior when the pipeline selected
+/// an upstream, and are answered with 400 when it did not: such a request
+/// names no destination for the forward proxy and has no reverse-proxy
+/// route either.
 ///
 /// Returns `Ok(true)` when the request was answered with a rejection.
 pub(super) async fn forward_egress(
@@ -850,8 +1157,10 @@ pub(super) async fn forward_egress(
     session: &mut Session,
     ctx: &mut PingoraRequestCtx,
 ) -> pingora_core::Result<bool> {
-    let Some(parsed) = absolute_form_destination(session) else {
-        return reject_unrouted(session, ctx).await;
+    let parsed = match forward_target(session) {
+        ForwardTarget::NotAbsolute => return reject_unrouted(session, ctx).await,
+        ForwardTarget::Invalid => return reject_invalid_target(session, ctx).await,
+        ForwardTarget::Destination(parsed) => parsed,
     };
     if let Some(answered) = gate_and_select(forward_proxy, &parsed, session, ctx).await? {
         return Ok(answered);
@@ -860,15 +1169,55 @@ pub(super) async fn forward_egress(
     Ok(false)
 }
 
-/// The forward destination of an HTTP/1 absolute-form request, if this is
-/// one.
-fn absolute_form_destination(session: &Session) -> Option<ForwardDestination> {
+/// What a request's target asks of the forward proxy.
+enum ForwardTarget {
+    /// Origin-form or asterisk-form, or any HTTP/2 request: no destination
+    /// for the forward proxy.
+    NotAbsolute,
+
+    /// Absolute-form, but not a destination the proxy can forward to.
+    Invalid,
+
+    /// Absolute-form, naming a destination to gate and forward to.
+    Destination(ForwardDestination),
+}
+
+/// Classify the request's target for the forward proxy.
+///
+/// HTTP/2 requests always carry scheme and authority as pseudo-headers, so
+/// only an HTTP/1 request target can be absolute-form.
+fn forward_target(session: &Session) -> ForwardTarget {
     if session.as_downstream().is_http2() {
-        return None;
+        return ForwardTarget::NotAbsolute;
     }
-    std::str::from_utf8(session.req_header().raw_path())
+    classify_target(session.req_header().raw_path())
+}
+
+/// Classify an HTTP/1 request target read verbatim from the wire.
+///
+/// Origin-form starts with `/` and asterisk-form is `*` (RFC 9112 Section
+/// 3.2); authority-form is CONNECT's and never reaches here. Any other
+/// target is absolute-form, and is [`ForwardTarget::Invalid`] when
+/// [`forward_destination`] cannot read a destination from it.
+fn classify_target(target: &[u8]) -> ForwardTarget {
+    if target.starts_with(b"/") || target == b"*" {
+        return ForwardTarget::NotAbsolute;
+    }
+    std::str::from_utf8(target)
         .ok()
         .and_then(forward_destination)
+        .map_or(ForwardTarget::Invalid, ForwardTarget::Destination)
+}
+
+/// Answer an absolute-form request whose target names no destination the
+/// proxy can forward to with 400.
+///
+/// Returns `Ok(true)`: the request was answered.
+async fn reject_invalid_target(session: &mut Session, ctx: &mut PingoraRequestCtx) -> pingora_core::Result<bool> {
+    debug!("absolute-form request names no destination the forward proxy can forward to");
+    ctx.stamp_error_type(ERROR_TYPE_FILTER_REJECT);
+    send_rejection_for(session, Rejection::status(400), ctx).await;
+    Ok(true)
 }
 
 /// Answer a request that is not a forward request with 400 when the
@@ -931,44 +1280,85 @@ async fn gate_and_select(
         send_rejection_for(session, Rejection::status(status), ctx).await;
         return Ok(Some(true));
     }
-    if ctx.upstream.is_none() {
-        match build_destination_upstream(parsed) {
-            Ok(upstream) => ctx.upstream = Some(upstream),
-            Err(error) => {
-                warn!(
-                    destination = %dial_address(&parsed.destination),
-                    error = %error,
-                    "forward destination TLS setup failed"
-                );
-                ctx.stamp_error_type(ERROR_TYPE_INTERNAL);
-                send_rejection_for(session, Rejection::status(500), ctx).await;
-                return Ok(Some(true));
-            },
-        }
+    // A pipeline-selected upstream keeps control, and the destination is
+    // then neither resolved nor dialed.
+    if ctx.upstream.is_some() {
+        return Ok(None);
     }
-    Ok(None)
+    match select_destination_upstream(forward_proxy, parsed).await {
+        Ok(upstream) => {
+            ctx.upstream = Some(upstream);
+            ctx.upstream_is_forward_destination = true;
+            Ok(None)
+        },
+        Err((status, error_type)) => {
+            ctx.stamp_error_type(error_type);
+            send_rejection_for(session, Rejection::status(status), ctx).await;
+            Ok(Some(true))
+        },
+    }
+}
+
+/// Resolve the destination and build its upstream, or the status and error
+/// type that answer the request instead: 502 when there is nothing safe to
+/// dial, 500 when the HTTPS TLS settings cannot be built.
+async fn select_destination_upstream(
+    forward_proxy: &ForwardProxyRuntime,
+    parsed: &ForwardDestination,
+) -> Result<Upstream, (u16, &'static str)> {
+    let dial = checked_dial_address(forward_proxy, &parsed.destination)
+        .await
+        .ok_or((502, ERROR_TYPE_UPSTREAM_UNAVAILABLE))?;
+    build_destination_upstream(parsed, dial, forward_proxy.idle_timeout).map_err(|error| {
+        warn!(
+            destination = %dial_address(&parsed.destination),
+            error = %error,
+            "forward destination TLS setup failed"
+        );
+        (500, ERROR_TYPE_INTERNAL)
+    })
 }
 
 /// Rewrite an absolute-form request to origin-form for the upstream leg.
 ///
 /// Origin servers must accept absolute-form request targets, but every
 /// reverse-proxied request already arrives in origin-form; forwarding the
-/// same shape keeps the upstream leg conventional. A target that cannot
-/// be rebuilt (an empty path, say) is forwarded as received.
+/// same shape keeps the upstream leg conventional. An `OPTIONS` request for
+/// the server as a whole (`OPTIONS http://host`, with an empty path and no
+/// query) is forwarded with the `*` target, as RFC 9112 Section 3.2.4
+/// requires of the last proxy; any other empty path becomes `/`. A target
+/// that cannot be rebuilt is forwarded as received.
 fn rewrite_origin_form(session: &mut Session) {
+    let whole_server =
+        session.req_header().method == http::Method::OPTIONS && names_whole_server(session.req_header().raw_path());
     let header = session.req_header_mut();
     let mut parts = http::uri::Parts::default();
-    parts.path_and_query = Some(
+    parts.path_and_query = Some(if whole_server {
+        http::uri::PathAndQuery::from_static("*")
+    } else {
         header
             .uri
             .path_and_query()
             .cloned()
-            .unwrap_or_else(|| http::uri::PathAndQuery::from_static("/")),
-    );
+            .unwrap_or_else(|| http::uri::PathAndQuery::from_static("/"))
+    });
     if let Ok(origin) = http::Uri::from_parts(parts) {
-        debug!(path = %origin.path(), "rewriting absolute-form target to origin-form");
+        debug!(target = %origin, "rewriting absolute-form target to origin-form");
         header.set_uri(origin);
     }
+}
+
+/// Whether an absolute-form target has an empty path and no query
+/// (`http://host`, `http://host:8080`).
+///
+/// Read from the wire target: `Uri::path` reports `/` for an empty path once
+/// a scheme is present. An authority holds neither `/` nor `?`, so a target
+/// with neither after its `://` names the authority alone.
+fn names_whole_server(target: &[u8]) -> bool {
+    std::str::from_utf8(target)
+        .ok()
+        .and_then(|target| target.split_once("://"))
+        .is_some_and(|(_scheme, rest)| !rest.contains(['/', '?']))
 }
 
 // -----------------------------------------------------------------------------
@@ -1280,6 +1670,7 @@ allow_destinations:
         }
     }
 
+
     #[test]
     fn runtime_carries_timeout_configuration() {
         let forward_proxy = runtime("enabled: true\nidle_timeout_ms: 60000\nmax_duration_secs: 3600\n");
@@ -1356,6 +1747,40 @@ allow_destinations:
         ))
         .await;
         assert_eq!(status_of(&response), 403, "{response}");
+    }
+
+    #[tokio::test]
+    async fn refusals_are_never_sent_in_grpc_shape() {
+        // gRPC's error shape is an HTTP 200, which to CONNECT says the tunnel
+        // is open; and a CONNECT is never a gRPC call.
+        let always = "- filter: grpc_status\n  detect: always\n";
+        let grpc_typed = "CONNECT other.invalid:443 HTTP/1.1\r\nHost: other.invalid:443\r\ncontent-type: \
+                          application/grpc\r\n\r\n";
+        for (filters, raw, status) in [
+            // The destination gate's refusal.
+            (always.to_owned(), DENIED_CONNECT, 403),
+            // A request filter's refusal.
+            (
+                format!("{always}- filter: static_response\n  status: 407\n"),
+                DENIED_CONNECT,
+                407,
+            ),
+            // The refusal standing in for a filter's 2xx.
+            (
+                format!("{always}- filter: static_response\n  status: 200\n"),
+                DENIED_CONNECT,
+                CONNECT_SUCCESS_REFUSED,
+            ),
+            // The default detection, armed by the client's own content-type.
+            ("- filter: grpc_status\n".to_owned(), grpc_typed, 403),
+        ] {
+            let response = Box::pin(handle_raw(&pipeline(&filters), raw)).await;
+            assert_eq!(status_of(&response), status, "{filters}: {response}");
+            assert!(
+                !response.to_ascii_lowercase().contains("grpc-status"),
+                "{filters}: the refusal must be plain HTTP: {response}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1476,6 +1901,14 @@ allow_destinations:
                 "{target}: the condition must match: {response}"
             );
         }
+        // HTTP/1.0 lets the client omit `Host`; the condition still meets
+        // the destination the target names.
+        let response = Box::pin(handle_raw(&pipeline, "CONNECT ALLOWED.invalid:443 HTTP/1.0\r\n\r\n")).await;
+        assert_eq!(
+            status_of(&response),
+            451,
+            "an HTTP/1.0 CONNECT without Host must meet the condition: {response}"
+        );
     }
 
     #[tokio::test]
@@ -1487,7 +1920,7 @@ allow_destinations:
         assert_eq!(status_of(&response), 400, "{response}");
     }
 
-    /// A test filter that refuses CONNECTs to `allowed.invalid`, `2001:db8::1`,
+    /// A test filter that refuses `CONNECT` requests to `allowed.invalid`, `2001:db8::1`,
     /// and `93.184.216.34`, matching the host filters see the way a
     /// `policy` rule does.
     struct HostGate;
@@ -1529,6 +1962,18 @@ allow_destinations:
     async fn head_error_answers_500() {
         let response = Box::pin(handle_raw(&test_pipeline(|| Box::new(HeadHook::Fail)), DENIED_CONNECT)).await;
         assert_eq!(status_of(&response), 500, "{response}");
+    }
+
+    #[tokio::test]
+    async fn head_success_rejection_is_answered_with_502() {
+        // The head phase sends its own refusals; a 2xx from it would claim a
+        // tunnel no one opened all the same.
+        let response = Box::pin(handle_raw(
+            &test_pipeline(|| Box::new(HeadHook::Reject(204))),
+            DENIED_CONNECT,
+        ))
+        .await;
+        assert_eq!(status_of(&response), CONNECT_SUCCESS_REFUSED, "{response}");
     }
 
     #[tokio::test]
@@ -1595,6 +2040,63 @@ allow_destinations:
     }
 
     #[tokio::test]
+    async fn terminal_answer_rewritten_to_a_success_by_a_response_filter_is_refused() {
+        let response = Box::pin(handle_raw(
+            &test_pipeline(|| Box::new(ResponseHook::AnswerThenRewrite(http::StatusCode::OK))),
+            "CONNECT allowed.invalid:443 HTTP/1.1\r\nHost: allowed.invalid:443\r\n\r\n",
+        ))
+        .await;
+        assert_eq!(
+            status_of(&response),
+            CONNECT_SUCCESS_REFUSED,
+            "a 2xx here would claim a tunnel no one opened: {response}"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_answer_rejected_with_a_success_by_a_response_filter_is_refused() {
+        let response = Box::pin(handle_raw(
+            &test_pipeline(|| Box::new(ResponseHook::AnswerThenReject(200))),
+            "CONNECT allowed.invalid:443 HTTP/1.1\r\nHost: allowed.invalid:443\r\n\r\n",
+        ))
+        .await;
+        assert_eq!(
+            status_of(&response),
+            CONNECT_SUCCESS_REFUSED,
+            "a 2xx rejection here would claim a tunnel no one opened: {response}"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_answer_rejected_with_a_success_by_a_body_filter_is_refused() {
+        // The response body phase runs after the header phase's check.
+        let response = Box::pin(handle_raw(
+            &test_pipeline(|| Box::new(ResponseHook::AnswerThenRejectBody(200))),
+            "CONNECT allowed.invalid:443 HTTP/1.1\r\nHost: allowed.invalid:443\r\n\r\n",
+        ))
+        .await;
+        assert_eq!(
+            status_of(&response),
+            CONNECT_SUCCESS_REFUSED,
+            "a 2xx rejection here would claim a tunnel no one opened: {response}"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_answer_left_alone_by_the_response_filters_is_sent_as_is() {
+        let response = Box::pin(handle_raw(
+            &test_pipeline(|| Box::new(ResponseHook::AnswerThenRewrite(http::StatusCode::NOT_FOUND))),
+            "CONNECT allowed.invalid:443 HTTP/1.1\r\nHost: allowed.invalid:443\r\n\r\n",
+        ))
+        .await;
+        assert_eq!(
+            status_of(&response),
+            404,
+            "a non-2xx rewrite of a terminal answer is not touched: {response}"
+        );
+    }
+
+    #[tokio::test]
     async fn response_success_rejection_is_answered_with_502() {
         // A 2xx rejection would claim the tunnel it refuses.
         let (response, ctx) = Box::pin(connect_to_loopback(&test_pipeline(|| {
@@ -1627,6 +2129,156 @@ allow_destinations:
             "a 2xx to CONNECT carries no framing: {head}"
         );
         assert_eq!(ctx.upstream_response_status, Some(200));
+    }
+
+    // -------------------------------------------------------------------------
+    // Request Body Phase
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn body_filter_refusal_answers_before_the_destination_gate() {
+        // The destination rules would answer this CONNECT with 403.
+        for buffered in [false, true] {
+            let pipeline = body_hook_pipeline(buffered, BodyAnswer::Refuse(418));
+            let response = Box::pin(handle_raw(&pipeline, DENIED_CONNECT)).await;
+            assert_eq!(status_of(&response), 418, "buffered {buffered}: {response}");
+        }
+    }
+
+    #[tokio::test]
+    async fn body_filter_error_answers_500() {
+        for buffered in [false, true] {
+            let pipeline = body_hook_pipeline(buffered, BodyAnswer::Fail);
+            let response = Box::pin(handle_raw(&pipeline, DENIED_CONNECT)).await;
+            assert_eq!(status_of(&response), 500, "buffered {buffered}: {response}");
+        }
+    }
+
+    #[tokio::test]
+    async fn body_filter_success_answer_is_refused() {
+        // A 2xx would claim a tunnel no one opened.
+        for buffered in [false, true] {
+            let pipeline = body_hook_pipeline(buffered, BodyAnswer::Refuse(200));
+            let response = Box::pin(handle_raw(&pipeline, DENIED_CONNECT)).await;
+            assert_eq!(
+                status_of(&response),
+                CONNECT_SUCCESS_REFUSED,
+                "buffered {buffered}: {response}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn body_filters_see_the_end_of_the_empty_body_once_before_the_tunnel_opens() {
+        // As for a bodyless request on the reverse path: a buffering pipeline
+        // pre-reads the body before the request filters run, a streaming one
+        // ends it after them.
+        for (buffered, first_hook) in [(false, "request"), (true, "body")] {
+            let pipeline = body_hook_pipeline(buffered, BodyAnswer::Admit);
+            let (response, ctx) = Box::pin(connect_to_loopback(&pipeline)).await;
+            assert_eq!(status_of(&response), 200, "buffered {buffered}: {response}");
+            assert_eq!(
+                ctx.filter_metadata.get(BODY_ENDS),
+                Some("1"),
+                "buffered {buffered}: one end-of-stream call"
+            );
+            assert_eq!(
+                ctx.filter_metadata.get(FIRST_HOOK),
+                Some(first_hook),
+                "buffered {buffered}: hook order"
+            );
+        }
+    }
+
+    /// A one-filter pipeline whose [`BodyHook`] answers `answer`.
+    fn body_hook_pipeline(buffered: bool, answer: BodyAnswer) -> FilterPipeline {
+        test_pipeline(move || Box::new(BodyHook { buffered, answer }))
+    }
+
+    /// Metadata key counting a [`BodyHook`]'s end-of-stream calls.
+    const BODY_ENDS: &str = "test.body_ends";
+
+    /// Metadata key naming the [`BodyHook`] hook that ran first.
+    const FIRST_HOOK: &str = "test.first_hook";
+
+    /// A test filter that decides at the end of the request body.
+    struct BodyHook {
+        /// Whether the filter buffers the body (`StreamBuffer`) rather than
+        /// streaming it.
+        buffered: bool,
+
+        /// The filter's answer at the end of the body.
+        answer: BodyAnswer,
+    }
+
+    /// A [`BodyHook`]'s answer at the end of the request body.
+    #[derive(Clone, Copy)]
+    enum BodyAnswer {
+        /// Let the request continue.
+        Admit,
+
+        /// Refuse the request with this status.
+        Refuse(u16),
+
+        /// Fail with the default (closed) failure mode.
+        Fail,
+    }
+
+    #[async_trait::async_trait]
+    impl praxis_filter::HttpFilter for BodyHook {
+        fn name(&self) -> &'static str {
+            "test_hook"
+        }
+
+        fn request_body_access(&self) -> praxis_filter::BodyAccess {
+            praxis_filter::BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Required)
+        }
+
+        fn request_body_mode(&self) -> praxis_filter::BodyMode {
+            if self.buffered {
+                praxis_filter::BodyMode::StreamBuffer { max_bytes: None }
+            } else {
+                praxis_filter::BodyMode::Stream
+            }
+        }
+
+        async fn on_request(
+            &self,
+            ctx: &mut praxis_filter::HttpFilterContext<'_>,
+        ) -> Result<FilterAction, praxis_filter::FilterError> {
+            if ctx.filter_metadata.get(FIRST_HOOK).is_none() {
+                ctx.filter_metadata.insert(FIRST_HOOK, "request").unwrap();
+            }
+            Ok(FilterAction::Continue)
+        }
+
+        async fn on_request_body(
+            &self,
+            ctx: &mut praxis_filter::HttpFilterContext<'_>,
+            body: &mut Option<bytes::Bytes>,
+            end_of_stream: bool,
+        ) -> Result<FilterAction, praxis_filter::FilterError> {
+            assert!(end_of_stream, "a CONNECT's body filters see only the end of its body");
+            assert!(
+                body.as_ref().is_none_or(bytes::Bytes::is_empty),
+                "a CONNECT has no body"
+            );
+            if ctx.filter_metadata.get(FIRST_HOOK).is_none() {
+                ctx.filter_metadata.insert(FIRST_HOOK, "body").unwrap();
+            }
+            let ends: u32 = ctx
+                .filter_metadata
+                .get(BODY_ENDS)
+                .map_or(0, |ends| ends.parse().unwrap());
+            ctx.filter_metadata
+                .insert(BODY_ENDS, ends.saturating_add(1).to_string())
+                .unwrap();
+            match self.answer {
+                BodyAnswer::Admit => Ok(FilterAction::Continue),
+                BodyAnswer::Refuse(status) => Ok(FilterAction::Reject(Rejection::status(status))),
+                BodyAnswer::Fail => Err("body hook failed".into()),
+            }
+        }
     }
 
     /// A request context whose CONNECT tunnel has just been established.
@@ -1692,6 +2344,18 @@ allow_destinations:
 
         /// Rewrite the response status.
         Rewrite(http::StatusCode),
+
+        /// Answer the CONNECT with a 403 terminal response, then rewrite
+        /// its status in the response phase.
+        AnswerThenRewrite(http::StatusCode),
+
+        /// Answer the CONNECT with a 403 terminal response, then reject it
+        /// with this status in the response phase.
+        AnswerThenReject(u16),
+
+        /// Answer the CONNECT with a 403 terminal response, then reject it
+        /// with this status in the response body phase.
+        AnswerThenRejectBody(u16),
     }
 
     #[async_trait::async_trait]
@@ -1700,11 +2364,37 @@ allow_destinations:
             "test_hook"
         }
 
+        fn response_body_access(&self) -> praxis_filter::BodyAccess {
+            if matches!(self, Self::AnswerThenRejectBody(_)) {
+                praxis_filter::BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Required)
+            } else {
+                praxis_filter::BodyAccess::None
+            }
+        }
+
         async fn on_request(
             &self,
             _ctx: &mut praxis_filter::HttpFilterContext<'_>,
         ) -> Result<FilterAction, praxis_filter::FilterError> {
-            Ok(FilterAction::Continue)
+            match self {
+                Self::AnswerThenRewrite(_) | Self::AnswerThenReject(_) | Self::AnswerThenRejectBody(_) => Ok(
+                    FilterAction::TerminalResponse(Box::new(praxis_filter::TerminalResponse::new(403))),
+                ),
+                Self::Reject(_) | Self::Fail | Self::Rewrite(_) => Ok(FilterAction::Continue),
+            }
+        }
+
+        fn on_response_body(
+            &self,
+            _ctx: &mut praxis_filter::HttpFilterContext<'_>,
+            _body: &mut Option<bytes::Bytes>,
+            _end_of_stream: bool,
+        ) -> Result<FilterAction, praxis_filter::FilterError> {
+            Ok(if let Self::AnswerThenRejectBody(status) = self {
+                FilterAction::Reject(Rejection::status(*status))
+            } else {
+                FilterAction::Continue
+            })
         }
 
         async fn on_response(
@@ -1712,20 +2402,23 @@ allow_destinations:
             ctx: &mut praxis_filter::HttpFilterContext<'_>,
         ) -> Result<FilterAction, praxis_filter::FilterError> {
             match self {
-                Self::Reject(status) => Ok(FilterAction::Reject(Rejection::status(*status))),
+                Self::Reject(status) | Self::AnswerThenReject(status) => {
+                    Ok(FilterAction::Reject(Rejection::status(*status)))
+                },
                 Self::Fail => Err("response hook failed".into()),
-                Self::Rewrite(status) => {
+                Self::Rewrite(status) | Self::AnswerThenRewrite(status) => {
                     if let Some(response) = ctx.response_header.as_mut() {
                         response.status = *status;
                     }
                     Ok(FilterAction::Continue)
                 },
+                Self::AnswerThenRejectBody(_) => Ok(FilterAction::Continue),
             }
         }
     }
 
     /// A one-filter pipeline running the test filter `make` builds.
-    fn test_pipeline(make: fn() -> Box<dyn praxis_filter::HttpFilter>) -> FilterPipeline {
+    fn test_pipeline(make: impl Fn() -> Box<dyn praxis_filter::HttpFilter> + Send + Sync + 'static) -> FilterPipeline {
         let mut registry = praxis_filter::FilterRegistry::with_builtins();
         registry
             .register(
@@ -1737,12 +2430,29 @@ allow_destinations:
         FilterPipeline::build(&mut entries, &registry).unwrap()
     }
 
+    /// How the loopback destination of [`connect_to_loopback_ending`] ends
+    /// an opened tunnel.
+    #[derive(Clone, Copy)]
+    enum DestinationEnd {
+        /// Close its side cleanly.
+        Close,
+
+        /// Reset the connection, as a destination that fails does.
+        Reset,
+    }
+
     /// Run `handle` on a CONNECT to a loopback listener and return the
     /// response head, read until the blank line, and the request context.
     ///
     /// The listener accepts and holds the dial, so an opened tunnel stays
     /// open until the head has arrived and the destination then closes.
     async fn connect_to_loopback(pipeline: &FilterPipeline) -> (String, PingoraRequestCtx) {
+        Box::pin(connect_to_loopback_ending(pipeline, DestinationEnd::Close)).await
+    }
+
+    /// [`connect_to_loopback`], with the destination ending the tunnel as
+    /// `end` says.
+    async fn connect_to_loopback_ending(pipeline: &FilterPipeline, end: DestinationEnd) -> (String, PingoraRequestCtx) {
         use tokio::io::AsyncWriteExt as _;
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1760,8 +2470,12 @@ allow_destinations:
         let handled = handle(&forward_proxy, pipeline, &mut session, &mut ctx);
         let (served, head) = tokio::join!(handled, async {
             let head = reader.await.unwrap();
-            // Closing the destination ends an opened tunnel.
-            drop(destination.await.unwrap());
+            // Ending the destination ends an opened tunnel.
+            let destination = destination.await.unwrap();
+            if let (Ok(stream), DestinationEnd::Reset) = (&destination, end) {
+                stream.set_zero_linger().unwrap();
+            }
+            drop(destination);
             head
         });
         assert!(served.unwrap(), "every CONNECT outcome is answered by the handler");
@@ -1785,6 +2499,65 @@ allow_destinations:
     fn access_record_emitted(ctx: &mut PingoraRequestCtx, pipeline: &FilterPipeline) -> bool {
         ctx.filter_context_for(pipeline, None)
             .is_some_and(|fctx| praxis_filter::access_record_already_emitted(&fctx))
+    }
+
+    // -------------------------------------------------------------------------
+    // Tunnel Close
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn a_tunnel_a_peer_breaks_off_is_recorded_as_that_peer_s_failure() {
+        for (reason, error_type, failed) in [
+            (TunnelCloseReason::Completed, None, false),
+            (TunnelCloseReason::IdleTimeout, None, false),
+            (TunnelCloseReason::MaxDuration, None, false),
+            (TunnelCloseReason::ClientError, Some(ERROR_TYPE_DOWNSTREAM), true),
+            (
+                TunnelCloseReason::DestinationError,
+                Some(ERROR_TYPE_UPSTREAM_PROTOCOL),
+                true,
+            ),
+        ] {
+            let mut ctx = PingoraRequestCtx::default();
+            let stats = TunnelStats {
+                bytes_in: 7,
+                bytes_out: 9,
+                reason,
+            };
+            record_tunnel_close(&mut ctx, &stats, Instant::now());
+            assert_eq!(record_tunnel_failure(&mut ctx, reason), failed, "{reason:?}");
+            assert_eq!(ctx.error_type, error_type, "{reason:?}");
+            assert_eq!(
+                ctx.filter_metadata.get(TUNNEL_CLOSE_REASON),
+                Some(reason.as_str()),
+                "{reason:?}: the close reason is published"
+            );
+            assert_eq!((ctx.request_body_bytes, ctx.response_body_bytes), (7, 9), "{reason:?}");
+            drop(ctx);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_tunnel_the_destination_resets_is_an_incomplete_failed_response() {
+        // The client has the 200; the logging hook then records the tunnel
+        // as a response cut off midway, unsampled, with the error.
+        let (response, ctx) = Box::pin(connect_to_loopback_ending(&pipeline(""), DestinationEnd::Reset)).await;
+        assert_eq!(status_of(&response), 200, "the tunnel opened: {response}");
+        assert_eq!(ctx.filter_metadata.get(TUNNEL_CLOSE_REASON), Some("destination_error"));
+        assert_eq!(ctx.error_type, Some(ERROR_TYPE_UPSTREAM_PROTOCOL));
+        assert!(
+            !ctx.response_delivery_complete,
+            "a broken-off tunnel is not a delivered response"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_tunnel_both_peers_close_is_a_delivered_response() {
+        let (response, ctx) = Box::pin(connect_to_loopback(&pipeline(""))).await;
+        assert_eq!(status_of(&response), 200, "the tunnel opened: {response}");
+        assert_eq!(ctx.filter_metadata.get(TUNNEL_CLOSE_REASON), Some("completed"));
+        assert_eq!(ctx.error_type, None, "a clean close is no error");
+        assert!(ctx.response_delivery_complete, "the end-of-stream pass ran");
     }
 
     #[test]
@@ -1912,12 +2685,175 @@ allow_destinations:
     }
 
     #[test]
-    fn destination_upstream_plain_http_dials_with_authority() {
+    fn forward_destination_refuses_a_port_out_of_range() {
+        // `Authority` accepts any digits as a port; reading this one as
+        // absent would check and dial port 80 instead.
+        for target in [
+            "http://origin.example:65536/",
+            "http://origin.example:99999999999/",
+            "http://user@origin.example:65536/",
+        ] {
+            assert!(forward_destination(target).is_none(), "{target} must be refused");
+        }
+    }
+
+    #[test]
+    fn forward_destination_reads_an_empty_port_as_the_default() {
+        // RFC 3986 Section 3.2.3: an empty port means the scheme's default.
+        assert_eq!(forwarded("http://origin.example:/").destination.port, 80);
+        assert_eq!(forwarded("https://origin.example:/").destination.port, 443);
+        assert_eq!(forwarded("http://user@origin.example:8080/").destination.port, 8080);
+        assert_eq!(forwarded("http://[::1]:8080/").destination.port, 8080);
+    }
+
+    #[test]
+    fn forward_destination_spells_the_port_one_way_in_its_host_header() {
+        // RFC 3986 Section 6.2.3: each spelling names the same socket, so a
+        // filter matching `Host` must see it one way.
+        for (target, host) in [
+            ("http://origin.example:08080/", "origin.example:8080"),
+            ("http://origin.example:/", "origin.example"),
+            ("http://origin.example:80/", "origin.example"),
+            ("http://origin.example:080/", "origin.example"),
+            ("https://origin.example:443/", "origin.example"),
+            ("https://origin.example:80/", "origin.example:80"),
+            ("http://[::1]:0080/", "[::1]"),
+            ("https://[2001:db8::1]:08443/", "[2001:db8::1]:8443"),
+        ] {
+            assert_eq!(forwarded(target).host_header.to_str().unwrap(), host, "{target}");
+        }
+    }
+
+    /// The `Host` a raw HTTP/1 request carries once [`set_forward_host`] has
+    /// run on it, `None` when it carries none.
+    async fn host_after_set_forward_host(raw: &str) -> Option<String> {
+        use tokio::io::AsyncWriteExt as _;
+
+        let (mut client, server) = tokio::io::duplex(65_536);
+        client.write_all(raw.as_bytes()).await.unwrap();
+        let mut session = Session::new_h1(Box::new(server));
+        assert!(session.read_request().await.unwrap(), "the request head must parse");
+        set_forward_host(&mut session).unwrap();
+        session
+            .req_header()
+            .headers
+            .get(http::header::HOST)
+            .map(|host| host.to_str().unwrap().to_owned())
+    }
+
+    #[tokio::test]
+    async fn filters_see_the_canonical_host_an_absolute_form_target_names() {
+        for (raw, host) in [
+            // HTTP/1.0 lets the client omit `Host`; the target still names it.
+            (
+                "GET http://origin.example:8080/ HTTP/1.0\r\n\r\n",
+                Some("origin.example:8080"),
+            ),
+            // A padded or default port reaches the filters spelled one way.
+            (
+                "GET http://origin.example:08080/ HTTP/1.1\r\nHost: origin.example:08080\r\n\r\n",
+                Some("origin.example:8080"),
+            ),
+            (
+                "GET http://origin.example:80/ HTTP/1.0\r\nHost: origin.example:80\r\n\r\n",
+                Some("origin.example"),
+            ),
+            // HTTP/1.1 requires `Host`: admission refuses the request without one.
+            ("GET http://origin.example/ HTTP/1.1\r\n\r\n", None),
+            // Origin-form and invalid targets keep the client's `Host`.
+            (
+                "GET / HTTP/1.1\r\nHost: origin.example:08080\r\n\r\n",
+                Some("origin.example:08080"),
+            ),
+            (
+                "GET http://ORIGIN.example/ HTTP/1.1\r\nHost: ORIGIN.example\r\n\r\n",
+                Some("ORIGIN.example"),
+            ),
+        ] {
+            assert_eq!(host_after_set_forward_host(raw).await.as_deref(), host, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn only_a_target_with_an_empty_path_and_no_query_names_the_whole_server() {
+        for target in [
+            "http://origin.example",
+            "http://origin.example:8080",
+            "https://user@[::1]:443",
+        ] {
+            assert!(
+                names_whole_server(target.as_bytes()),
+                "{target} names the server as a whole"
+            );
+        }
+        for target in [
+            "http://origin.example/",
+            "http://origin.example?q=1",
+            "http://origin.example/path",
+            "/",
+            "*",
+        ] {
+            assert!(!names_whole_server(target.as_bytes()), "{target} names a resource");
+        }
+    }
+
+    #[test]
+    fn origin_and_asterisk_form_targets_are_not_absolute_form() {
+        for target in ["/", "/status/418?q=1", "*"] {
+            assert!(
+                matches!(classify_target(target.as_bytes()), ForwardTarget::NotAbsolute),
+                "{target} names no forward destination"
+            );
+        }
+    }
+
+    #[test]
+    fn absolute_form_targets_without_a_forward_destination_are_invalid() {
+        // Each is absolute-form, so it must not fall back to a reverse-proxy
+        // route the pipeline selected.
+        for target in [
+            "http://origin.example:0/",
+            "ftp://origin.example/file",
+            "http://ORIGIN.example/",
+            "http://origin.example./",
+            "http:///no-authority",
+            "not a target",
+        ] {
+            assert!(
+                matches!(classify_target(target.as_bytes()), ForwardTarget::Invalid),
+                "{target} must be refused as an invalid absolute-form target"
+            );
+        }
+        assert!(matches!(classify_target(b"http://\xff/"), ForwardTarget::Invalid));
+    }
+
+    #[test]
+    fn absolute_form_targets_name_their_destination() {
+        assert!(
+            matches!(
+                classify_target(b"https://origin.example:8443/path"),
+                ForwardTarget::Destination(parsed)
+                    if parsed.destination.host == "origin.example" && parsed.destination.port == 8443 && parsed.tls
+            ),
+            "an https target names its host, port, and TLS"
+        );
+    }
+
+    /// A dial address for upstream-building tests.
+    fn dial(address: &str) -> std::net::SocketAddr {
+        address.parse().unwrap()
+    }
+
+    /// Idle timeout for upstream-building tests.
+    const IDLE: Duration = Duration::from_secs(120);
+
+    #[test]
+    fn destination_upstream_dials_the_checked_address_with_the_name_as_host() {
         let parsed = forwarded("http://api.example.com:8080/");
-        let upstream = build_destination_upstream(&parsed).unwrap();
-        // Dialed as an absolute name, so search domains are never appended;
-        // the Host header keeps the name the client sent.
-        assert_eq!(&*upstream.address, "api.example.com.:8080");
+        let upstream = build_destination_upstream(&parsed, dial("93.184.216.34:8080"), IDLE).unwrap();
+        // The checked address is dialed as is, so nothing resolves the
+        // client's name again; the Host header keeps the name it sent.
+        assert_eq!(&*upstream.address, "93.184.216.34:8080");
         assert!(upstream.tls.is_none(), "plain http must not originate TLS");
         assert_eq!(
             upstream
@@ -1930,12 +2866,60 @@ allow_destinations:
     }
 
     #[test]
-    fn destination_upstream_https_originate_tls_with_sni() {
+    fn destination_upstream_https_verifies_the_name_while_dialing_the_address() {
         let parsed = forwarded("https://api.example.com/");
-        let upstream = build_destination_upstream(&parsed).unwrap();
-        assert_eq!(&*upstream.address, "api.example.com.:443");
+        let upstream = build_destination_upstream(&parsed, dial("[2001:db8::1]:443"), IDLE).unwrap();
+        assert_eq!(&*upstream.address, "[2001:db8::1]:443");
         let tls = upstream.tls.as_ref().unwrap();
-        assert_eq!(tls.sni(), Some("api.example.com"), "SNI is never fully qualified");
+        assert_eq!(
+            tls.sni(),
+            Some("api.example.com"),
+            "SNI is the name, never fully qualified"
+        );
+    }
+
+    #[test]
+    fn destination_upstream_bounds_connect_reads_and_writes() {
+        let parsed = forwarded("http://api.example.com/");
+        let upstream =
+            build_destination_upstream(&parsed, dial("93.184.216.34:80"), Duration::from_millis(1500)).unwrap();
+        let options = &upstream.connection;
+        assert_eq!(options.connection_timeout, Some(UPSTREAM_CONNECT_TIMEOUT));
+        assert_eq!(options.total_connection_timeout, Some(UPSTREAM_CONNECT_TIMEOUT));
+        assert_eq!(options.read_timeout, Some(Duration::from_millis(1500)));
+        assert_eq!(options.write_timeout, Some(Duration::from_millis(1500)));
+    }
+
+    #[tokio::test]
+    async fn names_resolve_through_the_per_call_resolver_and_private_answers_are_refused() {
+        let destination = forwarded("http://localhost:8080/").destination;
+        let config: ForwardProxyConfig = serde_yaml::from_str("enabled: true\n").unwrap();
+        let allowing = ForwardProxyRuntime::try_from_config(&config, true).unwrap();
+        let addr = checked_dial_address(&allowing, &destination)
+            .await
+            .expect("localhost must resolve");
+        assert!(addr.ip().is_loopback() && addr.port() == 8080, "{addr}");
+        assert!(
+            checked_dial_address(&runtime("enabled: true\n"), &destination)
+                .await
+                .is_none(),
+            "a name answering with a private address is refused without allow_private_upstreams"
+        );
+    }
+
+    #[tokio::test]
+    async fn ip_literal_destinations_are_dialed_as_given() {
+        let config: ForwardProxyConfig = serde_yaml::from_str("enabled: true\n").unwrap();
+        let allowing = ForwardProxyRuntime::try_from_config(&config, true).unwrap();
+        for (target, expected) in [
+            ("http://10.0.0.1:8080/", "10.0.0.1:8080"),
+            ("http://[::1]:8080/", "[::1]:8080"),
+        ] {
+            let addr = checked_dial_address(&allowing, &forwarded(target).destination)
+                .await
+                .unwrap();
+            assert_eq!(addr.to_string(), expected, "{target}");
+        }
     }
 
     #[test]
@@ -1964,13 +2948,5 @@ allow_destinations:
         // An IPv4-mapped spelling is not canonical, so it is refused at parse
         // and never reaches the dial.
         assert!(forward_destination("https://[::ffff:10.0.0.1]/").is_none());
-    }
-
-    #[test]
-    fn destination_upstream_dials_ip_literals_as_given() {
-        let upstream = build_destination_upstream(&forwarded("http://10.0.0.1:8080/")).unwrap();
-        assert_eq!(&*upstream.address, "10.0.0.1:8080");
-        let upstream = build_destination_upstream(&forwarded("http://[::1]:8080/")).unwrap();
-        assert_eq!(&*upstream.address, "[::1]:8080");
     }
 }

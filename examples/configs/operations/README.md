@@ -18,6 +18,8 @@ Operational configurations for deployment, administration, and runtime managemen
 
 **Config Reload**: Enables live configuration reloading without process restart. Watches the config file for changes and swaps filter pipelines atomically.
 
+**Drain Handoff**: Reports draining on `/ready` while keeping listeners open for a short delay, then closes HTTP/1 connections cleanly so orchestrators stop routing to the pod before it exits.
+
 **TLS**: Configures TLS termination for listeners and TLS origination for upstreams with certificate validation.
 
 **File Descriptor Limits**: Pins the process open file limit, sheds requests with 503 before descriptors run out, and closes idle keep-alive clients and pooled upstream connections.

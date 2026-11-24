@@ -30,7 +30,10 @@ async fn non_grpc_produces_no_metadata() {
     let filter = GrpcDetectionFilter;
     let action = filter.on_request(&mut ctx).await.expect("filter should not error");
     assert!(matches!(action, FilterAction::Continue), "should continue");
-    assert!(ctx.get_metadata("grpc.kind").is_none(), "should not set grpc metadata");
+    assert!(
+        ctx.filter_metadata.get("grpc.kind").is_none(),
+        "should not set grpc metadata"
+    );
 }
 
 #[tokio::test]
@@ -43,7 +46,7 @@ async fn detects_grpc_bare() {
     let action = filter.on_request(&mut ctx).await.expect("filter should not error");
     assert!(matches!(action, FilterAction::Continue), "should continue");
     assert_eq!(
-        ctx.get_metadata("grpc.kind").unwrap(),
+        ctx.filter_metadata.get("grpc.kind").unwrap(),
         "grpc",
         "should detect bare gRPC"
     );
@@ -59,7 +62,7 @@ async fn detects_grpc_proto() {
     let action = filter.on_request(&mut ctx).await.expect("filter should not error");
     assert!(matches!(action, FilterAction::Continue), "should continue");
     assert_eq!(
-        ctx.get_metadata("grpc.kind").unwrap(),
+        ctx.filter_metadata.get("grpc.kind").unwrap(),
         "grpc+proto",
         "should detect gRPC+proto"
     );
@@ -75,7 +78,7 @@ async fn detects_grpc_json() {
     let action = filter.on_request(&mut ctx).await.expect("filter should not error");
     assert!(matches!(action, FilterAction::Continue), "should continue");
     assert_eq!(
-        ctx.get_metadata("grpc.kind").unwrap(),
+        ctx.filter_metadata.get("grpc.kind").unwrap(),
         "grpc+json",
         "should detect gRPC+json"
     );
@@ -93,7 +96,7 @@ async fn detects_grpc_unknown_codec() {
     let action = filter.on_request(&mut ctx).await.expect("filter should not error");
     assert!(matches!(action, FilterAction::Continue), "should continue");
     assert_eq!(
-        ctx.get_metadata("grpc.kind").unwrap(),
+        ctx.filter_metadata.get("grpc.kind").unwrap(),
         "grpc+other",
         "should detect unknown gRPC codec"
     );

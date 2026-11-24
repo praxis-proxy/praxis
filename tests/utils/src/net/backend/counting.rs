@@ -181,6 +181,10 @@ fn observe_request(
     max_body: u64,
     first_byte: &Sender<Instant>,
 ) -> BackendReceipt {
+    // Accepted sockets inherit the listener's nonblocking mode on macOS.
+    stream
+        .set_nonblocking(false)
+        .expect("set accepted backend socket blocking");
     stream
         .set_read_timeout(Some(Duration::from_secs(15)))
         .expect("set backend read timeout");

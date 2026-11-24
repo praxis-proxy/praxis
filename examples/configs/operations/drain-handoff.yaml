@@ -1,0 +1,34 @@
+# Drain Handoff
+#
+# Readiness-first SIGTERM handoff: `/ready` reports draining immediately
+# while the listener keeps accepting for `shutdown_drain_delay_secs`, then
+# closes existing HTTP/1 connections cleanly.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/operations/drain-handoff.yaml
+#   curl http://localhost:9902/ready
+#   kill -TERM <pid>   # /ready returns 503 {"status":"draining"}
+
+admin:
+  address: "127.0.0.1:9901"
+  metrics_address: "127.0.0.1:9902"
+  readiness: serving
+
+shutdown_timeout_secs: 20
+shutdown_drain_delay_secs: 3
+
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - welcome
+
+filter_chains:
+  - name: welcome
+    filters:
+      - filter: static_response
+        status: 200
+        headers:
+          - name: Content-Type
+            value: text/plain
+        body: "ok"

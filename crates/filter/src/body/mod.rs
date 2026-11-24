@@ -9,7 +9,7 @@ mod builder;
 mod limits;
 mod mode;
 
-pub use access::BodyAccess;
+pub use access::{BodyAccess, BodyRequirement};
 pub use buffer::{BodyBuffer, BodyBufferOverflow};
 pub use builder::BodyCapabilities;
 pub use limits::{DEFAULT_JSON_BODY_MAX_BYTES, MAX_JSON_BODY_BYTES};

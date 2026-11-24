@@ -1,0 +1,76 @@
+# Configuration for `cargo fips-check` (the FIPS compliance report):
+# https://github.com/praxis-proxy/cargo-fips-check
+#
+# What is specific to this tree; the checks themselves are the tool's. The
+# Makefile's FIPS targets pass the feature set (FIPS_FEATURES, which follows
+# FIPS_POLICY_PROFILE), so the one here is the default published build.
+# See docs/developing/fips.md.
+
+package = "praxis-proxy"
+features = "pingora,config-reload,admin-api"
+
+# Where a denied crate usually comes from in this tree, and what to do.
+
+[graph.hints.ring]
+location = "a dependency enabling rustls' 'ring' feature (the Pingora fork before 0.10.0 did); rcgen outside dev-dependencies; a manifest built from 'cargo metadata' (which activates rustls-webpki's weak 'ring?/alloc' feature) when the graph itself is clean"
+fix = "find the edge with 'cargo tree -e features -i ring'; keep rustls/tokio-rustls/reqwest on no-provider features; the only provider is praxis-tls' OpenSSL one"
+
+[graph.hints.aws-lc-rs]
+location = "a dependency enabling rustls' 'aws_lc_rs' feature (rustls' default, kept off in the workspace Cargo.toml); jsonwebtoken via the 'policy-jwt' (not 'policy-jwt-fips') or 'policy-builtins' feature"
+fix = "find the edge with 'cargo tree -e features -i aws-lc-rs'; keep rustls default-features off; leave the FIPS profiles on 'policy-jwt-fips', never 'policy-jwt'"
+
+[graph.hints.aws-lc-sys]
+location = "a dependency enabling rustls' 'aws_lc_rs' feature (rustls' default, kept off in the workspace Cargo.toml); jsonwebtoken via the 'policy-jwt' (not 'policy-jwt-fips') or 'policy-builtins' feature"
+fix = "find the edge with 'cargo tree -e features -i aws-lc-rs'; keep rustls default-features off; leave the FIPS profiles on 'policy-jwt-fips', never 'policy-jwt'"
+
+[graph.hints.sha2]
+location = "Policy's RustCrypto backend ('policy-crypto-default' or 'policy-builtins' instead of 'policy-crypto-fips'); policy 'oauth' and 'valkey' builtins; basic-auth filter (feature basic-auth-filter)"
+
+[graph.hints.hmac]
+location = "policy 'oauth' builtin (delegator-oauth cache/key.rs)"
+
+[graph.hints.sha1]
+location = "tokio-tungstenite WebSocket accept key (test utilities)"
+
+[graph.hints.boring]
+location = "pingora 'boringssl' feature"
+fix = "build pingora with the 'rustls' feature only"
+
+[graph.hints.boring-sys]
+location = "pingora 'boringssl' feature"
+fix = "build pingora with the 'rustls' feature only"
+
+# What each source guard scans. The report stage of Containerfile.fips copies
+# only the sources, so the build files are checked from the checkout
+# (make fips-deps), not there.
+
+[guards]
+source = ["crates"]
+manifests = ["Cargo.toml", "crates"]
+build_files = ["Containerfile", "Containerfile.fips", "Makefile", ".github"]
+
+# The crates `make test-fips` tests, all resolved together, and the crates
+# whose features choose a crypto backend on top of the tool's own list
+# (jsonwebtoken, rustls, openssl, openssl-sys).
+
+[test_graph]
+packages = [
+    "praxis-proxy",
+    "praxis-proxy-protocol",
+    "praxis-proxy-filter",
+    "praxis-proxy-core",
+    "praxis-proxy-tls",
+]
+watched = [
+    "praxis-policy",
+    "praxis-policy-core",
+    "praxis-policy-builtins",
+    "praxis-policy-apl-cmf",
+    "praxis-policy-apl-runtime",
+]
+
+# Denied crates the unit-test graph may carry, each with why it cannot reach
+# the code under test.
+
+[test_graph.test_only]
+ring = "rcgen, a dev-dependency that generates test certificates; it signs with its own ring and is never installed as a rustls provider"

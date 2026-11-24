@@ -8,6 +8,7 @@ mod echo;
 mod grpc;
 mod payload_response;
 mod raw;
+mod recording;
 mod simple;
 mod specialized;
 mod websocket;
@@ -21,6 +22,7 @@ pub use payload_response::{
     PayloadResponseBackend, PayloadResponseFraming, PayloadResponseReceipt, start_payload_response_backend,
 };
 pub use raw::{read_http_request, spawn_raw_http_backend};
+pub use recording::{RecordedRequest, RequestLog, start_recording_backend};
 pub use simple::{
     Backend, ChunkedBackend, RoutedBackend, start_backend, start_backend_v6, start_backend_with_shutdown,
 };

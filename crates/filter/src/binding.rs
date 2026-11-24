@@ -83,6 +83,10 @@ pub type ChainBindingHttpFactory =
 pub(crate) struct ResolutionStack {
     /// Names currently being resolved, innermost last.
     active: RefCell<Vec<Box<str>>>,
+
+    /// Warning and traversal limits shared by all inline outbound bindings in this build.
+    #[cfg(feature = "chain-binding")]
+    inline_deprecations: RefCell<praxis_core::config::InlineChainDeprecations>,
 }
 
 impl ResolutionStack {
@@ -90,6 +94,8 @@ impl ResolutionStack {
     pub(crate) fn new() -> Self {
         Self {
             active: RefCell::new(Vec::new()),
+            #[cfg(feature = "chain-binding")]
+            inline_deprecations: RefCell::default(),
         }
     }
 
@@ -405,6 +411,7 @@ impl<'a> ChainBindingContext<'a> {
         // `load_balancer` with no cluster selector, a misplaced terminal filter,
         // etc. would otherwise 502 at request time instead of failing the build.
         self.enforce_bound_ordering(&pipeline, &entries, name.unwrap_or("<inline>"))?;
+        self.stack.inline_deprecations.borrow_mut().warn(chain_ref);
         Ok(pipeline)
     }
 
@@ -539,6 +546,13 @@ impl<'a> ChainBindingContext<'a> {
         entries: &[FilterEntry],
         chain_label: &str,
     ) -> Result<(), FilterError> {
+        if pipeline.has_request_completion_observer() {
+            return Err(format!(
+                "outbound chain '{chain_label}' contains a request-completion observer; \
+                 terminal completion runs only for listener requests"
+            )
+            .into());
+        }
         let errors = pipeline.ordering_errors(
             entries,
             self.insecure.allow_open_security_filters,
@@ -841,6 +855,37 @@ mod tests {
             *sink.lock().expect("sink lock"),
             Some(2),
             "callout should bind the 2-filter inline outbound chain"
+        );
+    }
+
+    #[test]
+    fn warns_about_deprecated_fields_in_bound_inline_chains() {
+        let mut registry = FilterRegistry::with_builtins();
+        register_probe(&mut registry, Arc::new(Mutex::new(None)));
+        let mut top = entries(
+            "
+- filter: test_callout
+  outbound_chain:
+    name: outbound
+    filters:
+      - filter: credential_injection
+        clusters:
+          - {name: api, header: authorization, value: fixture, strip_client_credential: false}
+",
+        );
+        let log = tempfile::NamedTempFile::new().expect("open warning capture");
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(log.reopen().expect("open warning writer"))
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            FilterPipeline::build_with_chains(&mut top, &registry, &HashMap::new(), &InsecureOptions::default(), &[])
+                .expect("build bound pipeline");
+        });
+        let messages = std::fs::read_to_string(log.path()).expect("read warnings");
+        assert!(
+            messages.contains("outbound].filters[0].clusters[0].strip_client_credential"),
+            "bound chain warning should identify the inline chain and deprecated field: {messages}"
         );
     }
 
@@ -1437,6 +1482,50 @@ mod tests {
     // so it drops the terminal action and then errors that no upstream resolved.
     // Reject terminal filters at build time instead.
     // -------------------------------------------------------------------------
+
+    #[cfg(feature = "cloud-events-filter")]
+    #[test]
+    fn outbound_chain_with_request_completion_observer_rejected() {
+        let mut registry = FilterRegistry::with_builtins();
+        register_outbound_callout(&mut registry);
+        let mut top = entries(
+            "
+- filter: outbound_callout
+  outbound_chain:
+    name: outbound
+    filters:
+      - filter: cloud_events
+        on: request_complete
+        destination: https://events.example.test/events
+        source: urn:praxis:test
+        type: test.event
+",
+        );
+        let chains = HashMap::new();
+        let err = FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default(), &[])
+            .err()
+            .expect("completion observer in an outbound chain must be rejected");
+        assert!(
+            err.to_string().contains("request-completion observer"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[cfg(feature = "cloud-events-filter")]
+    #[test]
+    fn outbound_chain_keeps_supported_cloud_events_phases() {
+        let mut registry = FilterRegistry::with_builtins();
+        register_outbound_callout(&mut registry);
+        for phase in ["response_headers", "response_complete"] {
+            let yaml = format!(
+                "- filter: outbound_callout\n  outbound_chain:\n    name: outbound\n    filters:\n      - filter: cloud_events\n        on: {phase}\n        destination: https://events.example.test/events\n        source: urn:praxis:test\n        type: test.event\n"
+            );
+            let mut top = entries(&yaml);
+            let chains = HashMap::new();
+            FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default(), &[])
+                .unwrap_or_else(|error| panic!("{phase} remains supported in outbound chains: {error}"));
+        }
+    }
 
     #[cfg(feature = "iterative-request-router")]
     #[test]

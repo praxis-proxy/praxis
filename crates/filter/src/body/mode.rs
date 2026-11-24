@@ -73,9 +73,9 @@ pub enum BodyMode {
     /// ```
     /// use praxis_filter::BodyMode;
     ///
-    /// let unlimited = BodyMode::StreamBuffer { max_bytes: None };
+    /// let inherited_limit = BodyMode::StreamBuffer { max_bytes: None };
     /// assert!(matches!(
-    ///     unlimited,
+    ///     inherited_limit,
     ///     BodyMode::StreamBuffer { max_bytes: None }
     /// ));
     ///

@@ -13,13 +13,13 @@ Security filters protect against threats, enforce access control, and validate r
 
 ## Key Filters
 
-**Guardrails**: Inspects request and response bodies for forbidden content patterns. Supports regex matching, size limits, and conditional execution (e.g., per-model gating).
+**Guardrails**: Inspects request headers and bodies for forbidden content patterns. Supports regex matching, size limits, and conditional execution (e.g., per-model gating).
 
 **CORS**: Handles cross-origin resource sharing with configurable origins, methods, headers, and credentials.
 
 **Policy**: Integrates with external policy engines (PPE) for complex authorization decisions based on identity, resource attributes, and environmental context.
 
-**Forward proxy**: A listener's `forward_proxy` block accepts CONNECT tunnels, gated by a destination allowlist, by `ip_acl`/`policy` filters on the client, or both. An enabled block with neither is rejected at load, so the listener is never an open relay. A destination rule can also list one IP address and port, such as a service on the proxy's own host; see [forward-proxy-local-service.yaml](forward-proxy-local-service.yaml).
+**Forward proxy**: A listener's `forward_proxy` block accepts CONNECT tunnels, gated by a destination allowlist, by `ip_acl`/`policy` filters on the client, or both. An enabled block with neither is rejected at load. That check is for the presence of a control, not its strictness: an `ip_acl` with no entries admits every client, so keep its `allow` list narrow. A destination rule can also list one IP address and port, such as a service on the proxy's own host; see [forward-proxy-local-service.yaml](forward-proxy-local-service.yaml).
 
 ## Best Practices
 

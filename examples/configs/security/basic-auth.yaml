@@ -6,8 +6,9 @@
 # WWW-Authenticate challenge header. The Authorization header is
 # stripped before forwarding to prevent credential leakage upstream.
 #
-# ⚠️  EXPERIMENTAL: This example uses the `basic-auth-filter` experimental feature.
-# Not recommended for production use. Build with --features basic-auth-filter.
+# ⚠️  DEPRECATED / EXPERIMENTAL: Praxis warns when `basic_auth` is configured.
+# Prefer the `policy` filter for authentication. This example remains available
+# for compatibility and requires --features basic-auth-filter.
 #
 # Usage:
 #   cargo run -p praxis-proxy --features basic-auth-filter -- -c examples/configs/security/basic-auth.yaml

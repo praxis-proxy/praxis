@@ -28,7 +28,8 @@ compose a bespoke proxy server from the same primitives.
 - **Egress**: Workloads call Praxis; Praxis reaches configured
   upstreams
 - **East/West**: Sidecar or colocated proxy next to a workload
-- **Security gateway**: Guardrails, network policy
+- **Security gateway**: Guardrails, network policy,
+  [identity, delegation, and authorization](../security/policy-enforcement.md)
 - **AI inference and agents**: [AI Gateway][ai-overview] on
   `praxis-ai` (not the core `praxis` binary)
 
@@ -90,7 +91,7 @@ See the [filter system documentation] for details, and
 the [extensions guide] for how to write your own.
 
 [filter system documentation]:../filters/README.md
-[extensions guide]:../filters/extensions.md
+[extensions guide]:../developing/extensions.md
 
 ### Listeners
 

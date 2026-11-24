@@ -485,7 +485,7 @@ fn body_access_is_read_only() {
     let filter = make_filter("f", "H");
     assert_eq!(
         filter.request_body_access(),
-        crate::body::BodyAccess::ReadOnly,
+        crate::body::BodyAccess::ReadOnly(crate::BodyRequirement::Required),
         "body access should be read-only"
     );
 }

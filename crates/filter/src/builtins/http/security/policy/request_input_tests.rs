@@ -174,6 +174,23 @@ async fn the_scheme_comes_from_downstream_tls() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn requiring_a_missing_timestamp_fails_closed() {
+    for predicate in [
+        "exists(request.timestamp)",
+        "request.timestamp > '2026-01-01T00:00:00.000Z'",
+    ] {
+        let rules =
+            format!("    pre_invocation:\n      - \"require(authenticated)\"\n      - \"require({predicate})\"");
+        let (_dir, filter) = api_key_filter(HEADER_CREDENTIAL, &rules);
+        let req = request("/widgets", &[("x-api-key", TEST_API_KEY)]);
+        let rejection = header_phase(&filter, &req, false)
+            .await
+            .expect("missing timestamp must not satisfy require");
+        assert_eq!(rejection.status, 403, "{predicate}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_trusted_proxy_chain_sets_the_client_address() {
     let rules = "    pre_invocation:\n      - \"require(authenticated)\"\n      - \"http.client_address != '203.0.113.7': deny('other client', 'test.other_client')\"";
     let (_dir, filter) = api_key_filter_trusting(HEADER_CREDENTIAL, rules, &["10.0.0.0/8"]);
@@ -284,8 +301,14 @@ async fn the_original_query_reaches_a_later_cmf_hook() {
     body_ctx.current_filter_id = Some(0);
     body_ctx.extensions = std::mem::take(&mut ctx.extensions);
     body_ctx.filter_state = std::mem::take(&mut ctx.filter_state);
-    body_ctx.set_metadata("mcp.method", "tools/call");
-    body_ctx.set_metadata("mcp.name", "echo");
+    body_ctx
+        .filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    body_ctx
+        .filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
     let body = Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#);
     let action = filter
         .on_request_body(&mut body_ctx, &mut Some(body), true)

@@ -60,8 +60,8 @@ pub(super) fn set_headers(
 
 /// Parse header names at config time but keep raw string values.
 ///
-/// Used for `request_add` where the value is combined with existing
-/// header values at request time via string formatting.
+/// Used for `request_add`, whose value is appended as a separate field
+/// after validation instead of being combined with an existing field.
 ///
 /// # Errors
 ///

@@ -1,0 +1,42 @@
+# CloudEvents Request Completion
+#
+# Publishes a bounded, best-effort CloudEvent when a request ends, including
+# responses that abort after their headers are sent.
+#
+# ⚠️  EXPERIMENTAL: This example uses the `cloud-events-filter` experimental feature.
+# Not recommended for production use. Build with --features cloud-events-filter.
+#
+# Usage:
+#   cargo run -p praxis-proxy --features cloud-events-filter -- -c examples/configs/observability/cloud-events-request-complete.yaml
+#   curl http://localhost:8080/
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: cloud_events
+        on: request_complete
+        destination: http://127.0.0.1:3001/events
+        source: urn:praxis:gateway
+        type: gateway.request.completed
+        data:
+          status: { value: response.status, type: integer, required: true }
+
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to a local backend

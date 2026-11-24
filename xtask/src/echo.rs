@@ -70,9 +70,11 @@ fn build_config(args: &Args) -> Config {
             filters: vec![entry],
         }],
         insecure_options: InsecureOptions::default(),
+        jobs: None,
         listeners: vec![echo_listener(&args.address)],
         metrics: MetricsConfig::default(),
         runtime: RuntimeConfig::default(),
+        shutdown_drain_delay_secs: 0,
         shutdown_timeout_secs: 30,
         telemetry: TelemetryConfig::default(),
     }
@@ -81,12 +83,14 @@ fn build_config(args: &Args) -> Config {
 /// Build the echo listener bound to `address`.
 fn echo_listener(address: &str) -> Listener {
     Listener {
+        upgrade_policy: None,
         address: address.into(),
         cluster: None,
         downstream_keepalive_timeout_ms: None,
         downstream_read_timeout_ms: None,
         filter_chains: vec!["echo".into()],
         forward_proxy: None,
+        job_queue: None,
         max_connections: None,
         name: "echo".into(),
         protocol: ProtocolKind::default(),

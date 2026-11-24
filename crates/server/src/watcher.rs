@@ -24,7 +24,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-use crate::{composition::PipelineComposition, reload::reload_pipelines};
+use crate::{composition::PipelineComposition, reload::reload_pipelines, server::HealthTaskLifecycle};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -54,6 +54,9 @@ pub(crate) struct WatcherParams {
 
     /// Health check shutdown token, swapped on each reload.
     pub(crate) health_shutdown: Arc<Mutex<CancellationToken>>,
+
+    /// Health threads and root cancellation shared with the server owner.
+    pub(crate) health_lifecycle: Option<Arc<HealthTaskLifecycle>>,
 
     /// [`composite_hash`] of the text `initial_config` was parsed from, used
     /// to detect changes that occurred before the watcher was ready.
@@ -121,7 +124,11 @@ pub(crate) struct WatcherParams {
 /// The thread runs until the `shutdown` token is cancelled or
 /// the process exits.
 pub(crate) fn spawn_config_watcher(params: WatcherParams) -> std::thread::JoinHandle<()> {
+    #[cfg(test)]
+    let observation = crate::server::background_observation::capture();
     std::thread::spawn(move || {
+        #[cfg(test)]
+        let _observation = crate::server::background_observation::start("config watcher", observation);
         let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
             Ok(rt) => rt,
             Err(err) => {
@@ -214,6 +221,7 @@ async fn run_event_loop(rx: &mut mpsc::Receiver<()>, params: WatcherParams) {
         &params.listener_meta,
         &params.cluster_meta,
         &params.health_shutdown,
+        params.health_lifecycle.as_deref(),
         &params.kv_stores,
         &params.session_stores,
         &params.slow_start_registry,
@@ -264,6 +272,7 @@ async fn run_event_loop(rx: &mut mpsc::Receiver<()>, params: WatcherParams) {
             &params.listener_meta,
             &params.cluster_meta,
             &params.health_shutdown,
+            params.health_lifecycle.as_deref(),
             &params.kv_stores,
             &params.session_stores,
             &params.slow_start_registry,
@@ -319,6 +328,7 @@ fn handle_reload(
     listener_meta: &praxis_protocol::http::health::ListenerMetaStore,
     cluster_meta: &praxis_protocol::http::health::ClusterMetaStore,
     health_shutdown: &Arc<Mutex<CancellationToken>>,
+    health_lifecycle: Option<&HealthTaskLifecycle>,
     kv_stores: &praxis_core::kv::KvStoreRegistry,
     session_stores: &Arc<praxis_filter::SessionStoreRegistry>,
     slow_start_registry: &Arc<praxis_filter::SlowStartRegistry>,
@@ -375,6 +385,7 @@ fn handle_reload(
         listener_meta,
         cluster_meta,
         health_shutdown,
+        health_lifecycle,
         kv_stores,
         session_stores,
         slow_start_registry,
@@ -1003,6 +1014,7 @@ mod tests {
             &listener_meta,
             &cluster_meta,
             &health_shutdown,
+            None,
             &kv_stores,
             &session_stores,
             &slow_start_registry,
@@ -1028,6 +1040,7 @@ mod tests {
             &listener_meta,
             &cluster_meta,
             &health_shutdown,
+            None,
             &kv_stores,
             &session_stores,
             &slow_start_registry,
@@ -1085,6 +1098,7 @@ mod tests {
             &listener_meta,
             &cluster_meta,
             &health_shutdown,
+            None,
             &kv_stores,
             &session_stores,
             &slow_start_registry,
@@ -1166,6 +1180,7 @@ mod tests {
         let handle = spawn_config_watcher(WatcherParams {
             config_path,
             health_shutdown,
+            health_lifecycle: None,
             initial_content_hash: composite_hash(VALID_YAML, &[]),
             initial_config: config.clone(),
             kv_stores: praxis_core::kv::KvStoreRegistry::new(),
@@ -1221,6 +1236,7 @@ mod tests {
         let _handle = spawn_config_watcher(WatcherParams {
             config_path: config_path.clone(),
             health_shutdown,
+            health_lifecycle: None,
             initial_content_hash: composite_hash(VALID_YAML, &[]),
             initial_config: config.clone(),
             kv_stores: praxis_core::kv::KvStoreRegistry::new(),
@@ -1284,6 +1300,7 @@ mod tests {
         let _handle = spawn_config_watcher(WatcherParams {
             config_path: config_path.clone(),
             health_shutdown,
+            health_lifecycle: None,
             initial_content_hash: composite_hash(VALID_YAML, &[]),
             initial_config: config.clone(),
             kv_stores: praxis_core::kv::KvStoreRegistry::new(),
@@ -1377,6 +1394,7 @@ mod tests {
         let handle = spawn_config_watcher(WatcherParams {
             config_path: PathBuf::from("praxis.yaml"),
             health_shutdown,
+            health_lifecycle: None,
             initial_content_hash: composite_hash(VALID_YAML, &[]),
             initial_config: config.clone(),
             kv_stores,
@@ -1452,6 +1470,7 @@ mod tests {
         let _handle = spawn_config_watcher(WatcherParams {
             config_path: config_path.clone(),
             health_shutdown,
+            health_lifecycle: None,
             initial_content_hash: composite_hash(VALID_YAML, &[]),
             initial_config: config.clone(),
             kv_stores: praxis_core::kv::KvStoreRegistry::new(),
@@ -1529,6 +1548,7 @@ mod tests {
         let _handle = spawn_config_watcher(WatcherParams {
             config_path: config_path.clone(),
             health_shutdown,
+            health_lifecycle: None,
             initial_content_hash: 0,
             initial_config: config.clone(),
             kv_stores: praxis_core::kv::KvStoreRegistry::new(),
@@ -1605,6 +1625,7 @@ mod tests {
         let _handle = spawn_config_watcher(WatcherParams {
             config_path: link.clone(),
             health_shutdown,
+            health_lifecycle: None,
             initial_content_hash: composite_hash(VALID_YAML, &[]),
             initial_config: config.clone(),
             kv_stores: praxis_core::kv::KvStoreRegistry::new(),
@@ -1774,6 +1795,7 @@ mod tests {
         let _handle = spawn_config_watcher(WatcherParams {
             config_path: config_path.clone(),
             health_shutdown: Arc::new(Mutex::new(CancellationToken::new())),
+            health_lifecycle: None,
             initial_content_hash: composite_hash(VALID_YAML, &[]),
             initial_config: config.clone(),
             kv_stores: praxis_core::kv::KvStoreRegistry::new(),
@@ -1880,6 +1902,7 @@ mod tests {
             &listener_meta,
             &cluster_meta,
             &Arc::new(Mutex::new(CancellationToken::new())),
+            None,
             &kv_stores,
             &session_stores,
             &slow_start_registry,

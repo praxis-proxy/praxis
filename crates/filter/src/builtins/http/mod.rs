@@ -30,13 +30,16 @@ pub use security::{
     GuardrailsAction, GuardrailsFilter, IpAclFilter, PiiKind, RuleTargetKind,
 };
 #[cfg(feature = "policy-engine")]
-pub use security::{PolicyFilter, PolicyPluginFactoryFn, fips_crypto_blocker, register_policy_plugin_factory};
+pub use security::{
+    PolicyFilter, PolicyPluginFactoryFn, PolicyResponseContext, PolicyResponseOutput, fips_crypto_blocker,
+    register_policy_plugin_factory,
+};
 #[cfg(feature = "iterative-request-router")]
 pub use traffic_management::IterativeRequestRouterFilter;
 pub use traffic_management::{
     CircuitBreakerFilter, EndpointReselector, EndpointSelectorFilter, GrpcDetectionFilter, GrpcTimeoutFilter,
-    HeadClassifierFilter, LoadBalancerFilter, RateLimitFilter, RateLimitMode, RedirectFilter, RedirectStatus,
-    RouterFilter, StaticResponseFilter, StickySessionsFilter, TimeoutFilter,
+    HeadClassifierFilter, LoadBalancerFilter, RateLimitFilter, RateLimitMode, RateLimitScope, RedirectFilter,
+    RedirectStatus, RouterFilter, StaticResponseFilter, StickySessionsFilter, TimeoutFilter,
     sticky_sessions::{SessionStore, SessionStoreRegistry},
 };
 pub use transformation::{

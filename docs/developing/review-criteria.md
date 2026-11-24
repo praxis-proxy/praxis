@@ -246,7 +246,7 @@ invariants are easy to break from a distance.
 
 ## 11. Test Depth Beyond Coverage
 
-The 96% line-coverage floor proves execution, not
+The 97% line-coverage floor proves execution, not
 correctness. Review what the suite would *fail to notice*.
 
 - Mutation results (`make mutants`): surviving mutants are
@@ -279,7 +279,7 @@ correctness. Review what the suite would *fail to notice*.
 - Doc quality at the contract: every trait method should
   state its call ordering, its relationship to body modes,
   and what a returned action does; the tutorial
-  (`docs/filters/http-filter-tutorial.md`) must stay
+  (`docs/developing/http-filter-tutorial.md`) must stay
   buildable against the current API.
 
 ## 13. Dependency and Supply-Chain Hygiene
@@ -304,7 +304,7 @@ documentation into misinformation.
   enforcing source (`Makefile`, CI workflows, config
   defaults). Example of the failure mode: `AGENTS.md`
   advertised a 95% coverage floor while the `Makefile`
-  enforced 96%.
+  enforced 97%.
 - Cross-check boundary claims: the "Pingora handles /
   Praxis handles" split, filter reference docs
   (`docs/filters/reference.md`) vs `from_config`

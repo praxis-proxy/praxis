@@ -63,6 +63,7 @@ mod credential_store_parity;
 mod csrf;
 mod downstream_keepalive;
 mod downstream_read_timeout;
+mod drain_handoff;
 mod error_response;
 mod examples;
 mod failure_mode;
@@ -71,6 +72,8 @@ mod fd_limits;
 mod filter_composition;
 mod filter_metadata;
 mod fips;
+#[cfg(feature = "forward-proxy")]
+mod forward_proxy;
 mod grpc_access_log;
 mod guardrails;
 mod health_check;
@@ -88,9 +91,14 @@ mod path_rewrite;
 mod payload_processing;
 mod payload_transport;
 mod per_listener_pipeline;
+#[cfg(any(feature = "pingora", feature = "hyper"))]
+mod pingora_response_trailers;
 mod pipelines_admin;
+#[cfg(feature = "policy-builtins")]
+mod policy_boundary;
 mod process_logging;
 mod prometheus_metrics;
+mod query;
 mod rate_limit;
 #[cfg(feature = "pingora")]
 mod rejection_lifecycle;
@@ -125,6 +133,8 @@ mod url_rewrite;
 mod url_target_tls;
 mod via;
 mod websocket;
+#[cfg(feature = "pingora")]
+mod websocket_admission;
 mod wildcard_routing;
 
 #[cfg(feature = "tls-health-check")]

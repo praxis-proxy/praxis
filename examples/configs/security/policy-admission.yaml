@@ -1,0 +1,50 @@
+# Policy admission at the request head
+#
+# The `policy` filter rate-limits and authenticates from the request head,
+# before any filter reads the body, even when a body-reading filter comes first
+# in the chain. Here `json_body_field` buffers each request body to promote its
+# `model` field, yet an unauthenticated or over-limit request is rejected
+# before a byte of its body is read. Authenticated requests reach the
+# classifier and then the backend. The policy declares no entity routes: it
+# rate-limits and authenticates at the head and applies its `global` rule on
+# that identity; entity-aware policies authorize once the body is classified.
+#
+# The policy document at /etc/praxis/admission-policy.yaml must be provisioned
+# before startup; see tests/integration/fixtures/admission-policy.yaml for a
+# reference.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/security/policy-admission.yaml
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      # Buffers the body to promote `model`. It runs after policy's head
+      # admission even though it is listed first.
+      - filter: json_body_field
+        field: model
+        header: X-Model
+        max_body_bytes: 65536 # 64 KiB
+
+      - filter: policy
+        config_path: /etc/praxis/admission-policy.yaml
+
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends

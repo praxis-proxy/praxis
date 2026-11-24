@@ -26,13 +26,21 @@ Two delivery modes:
   incrementally (like Stream) but accumulated in a buffer
   and not forwarded to upstream until a filter returns
   `FilterAction::Release` or end-of-stream. After release,
-  remaining chunks flow through in stream mode. No size
-  limit by default; an optional `max_bytes` returns 413
-  when exceeded. Enables streaming inspection with deferred
-  forwarding for protocol parsing, body-based routing, and
-  security use cases including content scanning and payload
-  inspection. [praxis-ai][ai-overview] builds on the same
-  StreamBuffer model for AI request classification.
+  remaining chunks flow through in stream mode. The default
+  transfer limit is 10 MiB per request or response. Buffered
+  bodies also obey `body_limits.max_buffer_bytes`, which
+  defaults to 64 MiB. An optional filter `max_bytes` can set a
+  tighter limit. An oversized request returns 413; an oversized
+  response fails delivery and is aborted if headers were already
+  sent. Explicitly removing the transfer limit while declaring
+  an unbounded buffer requires
+  `insecure_options.allow_unbounded_body`; buffering is still
+  clamped to the configured cap. This mode enables streaming
+  inspection with deferred forwarding for protocol parsing,
+  body-based routing, and security use cases including content
+  scanning and payload inspection. [praxis-ai][ai-overview]
+  builds on the same StreamBuffer model for AI request
+  classification.
 
 [ai-overview]: https://github.com/praxis-proxy/ai/blob/main/docs/overview.md
 
@@ -46,9 +54,11 @@ established.
 Precedence: `StreamBuffer` > `SizeLimit` > `Stream`. If
 any filter requests `StreamBuffer`, the pipeline uses
 stream-buffered mode.
-Global `body_limits.max_request_bytes` / `body_limits.max_response_bytes`
-config limits force buffer mode for size enforcement even
-when no filter requests body access.
+Global `body_limits.max_request_bytes` /
+`body_limits.max_response_bytes` enforce transfer limits.
+When no filter requests body access, the pipeline counts
+bytes in streaming `SizeLimit` mode. An explicitly declared
+`Stream` mode stays streaming.
 
 The `on_response_body` hook is synchronous (not async):
 the `HttpFilter` trait declares it as a plain `fn`, even

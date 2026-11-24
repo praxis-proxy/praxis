@@ -266,6 +266,15 @@ impl PraxisProcess {
         }
     }
 
+    /// Rewrite the running process's config file to trigger hot reload.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the config file cannot be written.
+    pub fn write_config(&self, config_yaml: &str) {
+        fs::write(self.dir.path().join("praxis.yaml"), config_yaml).expect("write config");
+    }
+
     /// Write `config_yaml` to a temp dir and start `praxis` on it, applying
     /// `ulimit` and `env` to the child, then wait for `ready_addr`.
     fn spawn_inner(config_yaml: &str, ready_addr: &str, ulimit: Option<&str>, env: &[(&str, &str)]) -> Self {

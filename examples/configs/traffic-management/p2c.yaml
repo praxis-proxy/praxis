@@ -1,9 +1,8 @@
 # P2C (Power of Two Choices) Load Balancing
 #
 # Samples two random endpoints and picks the one with fewer
-# in-flight requests. O(1) selection with near-optimal load
-# distribution. Preferred over least_connections for large
-# endpoint pools.
+# in-flight requests. It scans eligible endpoints to build the
+# weighted candidate set, then compares the two sampled loads.
 #
 # Usage:
 #   cargo run -p praxis-proxy -- -c examples/configs/traffic-management/p2c.yaml

@@ -348,6 +348,28 @@ fn head_hook_rejection_refuses_the_connect() {
 }
 
 #[test]
+fn body_hook_rejection_refuses_the_connect_before_dialing() {
+    // A CONNECT has no body, so its body filters get just the end of it, as
+    // a bodyless request's do. A filter that decides there (an entity-aware
+    // policy authorizes at that call) must decide before the dial.
+    let (destination, port) = praxis_test_utils::bind_unique_port();
+    let proxy = start_allowlist_example_with_registry(
+        port,
+        "      - filter: test_hook\n",
+        &registry_with("test_hook", || Box::new(RejectingHook::Body)),
+    );
+
+    let tunnel = connect_tunnel(proxy.addr(), &format!("localhost:{port}"));
+    assert_eq!(tunnel.status, 418, "the body hook's refusal answers the CONNECT");
+    // A dial would have connected before the refusal was written.
+    destination.set_nonblocking(true).unwrap();
+    assert!(
+        matches!(destination.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+        "the refused CONNECT must not dial its destination"
+    );
+}
+
+#[test]
 fn response_hook_rejection_refuses_the_tunnel() {
     let destination = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = destination.local_addr().unwrap().port();
@@ -391,6 +413,57 @@ fn response_header_edits_reach_the_tunnel_200() {
         "the tunnel still relays"
     );
     tunnel.stream.shutdown(Shutdown::Both).unwrap();
+}
+
+#[test]
+fn allowlist_example_releases_a_connection_whose_client_stopped_reading() {
+    within(TRANSFER_DEADLINE, || {
+        let (destination, port) = praxis_test_utils::bind_unique_port();
+        let destination = std::thread::spawn(move || {
+            let (stream, _peer) = destination.accept().unwrap();
+            let mut stream = bounded(stream);
+            let chunk = vec![b'd'; 65_536]; // 64 KiB
+            while stream.write_all(&chunk).is_ok() {}
+        });
+        let yaml = allowlist_example_yaml(port, "")
+            .replacen("idle_timeout_ms: 120000", "idle_timeout_ms: 500", 1)
+            .replacen(
+                "filter_chains: [egress]\n",
+                "filter_chains: [egress]\n    max_connections: 1\n",
+                1,
+            );
+        assert!(
+            yaml.contains("idle_timeout_ms: 500"),
+            "the idle timeout should be patched"
+        );
+        assert!(
+            yaml.contains("max_connections: 1"),
+            "the listener should admit one connection"
+        );
+        let proxy = start_example(&yaml);
+
+        let stalled = connect_tunnel(proxy.addr(), &format!("localhost:{port}"));
+        assert_eq!(stalled.status, 200, "the first CONNECT should open a tunnel");
+        std::thread::sleep(Duration::from_millis(200));
+
+        let while_open = connect_tunnel(proxy.addr(), "other.example.org:443");
+        assert_eq!(
+            while_open.status, 503,
+            "the open tunnel should hold the listener's only connection slot"
+        );
+
+        std::thread::sleep(Duration::from_secs(3));
+        let after_idle = connect_tunnel(proxy.addr(), "other.example.org:443");
+        assert_eq!(
+            after_idle.status, 403,
+            "a tunnel closed at its idle timeout must release the connection slot while its client \
+             still is not reading, but a CONNECT got {}",
+            after_idle.status
+        );
+
+        drop(stalled);
+        destination.join().unwrap();
+    });
 }
 
 // -----------------------------------------------------------------------------
@@ -455,6 +528,9 @@ enum RejectingHook {
     /// Reject in the request-head phase.
     Head,
 
+    /// Reject at the end of the request body.
+    Body,
+
     /// Reject the tunnel's response.
     Response,
 }
@@ -469,6 +545,13 @@ impl HttpFilter for RejectingHook {
         matches!(self, Self::Head)
     }
 
+    fn request_body_access(&self) -> praxis_filter::BodyAccess {
+        match self {
+            Self::Body => praxis_filter::BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Required),
+            Self::Head | Self::Response => praxis_filter::BodyAccess::None,
+        }
+    }
+
     async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         Ok(FilterAction::Continue)
     }
@@ -477,9 +560,22 @@ impl HttpFilter for RejectingHook {
         Ok(FilterAction::Reject(Rejection::status(418)))
     }
 
+    async fn on_request_body(
+        &self,
+        _ctx: &mut HttpFilterContext<'_>,
+        _body: &mut Option<bytes::Bytes>,
+        end_of_stream: bool,
+    ) -> Result<FilterAction, FilterError> {
+        Ok(if end_of_stream {
+            FilterAction::Reject(Rejection::status(418))
+        } else {
+            FilterAction::Continue
+        })
+    }
+
     async fn on_response(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         Ok(match self {
-            Self::Head => FilterAction::Continue,
+            Self::Head | Self::Body => FilterAction::Continue,
             Self::Response => FilterAction::Reject(Rejection::status(418)),
         })
     }

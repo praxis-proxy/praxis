@@ -113,7 +113,7 @@ impl Drop for Release {
     reason = "body capture, the race, and the client response stay on one path"
 )]
 #[expect(clippy::large_stack_frames, reason = "Pingora session types are large")]
-pub(super) async fn dispatch(
+pub(in crate::http) async fn dispatch(
     pipeline: &FilterPipeline,
     session: &mut Session,
     ctx: &mut PingoraRequestCtx,
@@ -152,9 +152,7 @@ pub(super) async fn dispatch(
         end_lease(ctx);
         return Err(upstream_failure(miss));
     }
-    if let HedgeDelivery::Ready { address, .. } = &delivery {
-        note_winner(ctx, address);
-    }
+    note_delivery_winner(ctx, &delivery);
     end_lease(ctx);
     let terminal = terminal_for(session, pipeline, delivery);
     Box::pin(super::terminal_responses::run_terminal_response(
@@ -215,7 +213,11 @@ fn is_grpc(session: &Session) -> bool {
 
 /// An event stream has to stay on the streaming path.
 fn is_event_stream(session: &Session) -> bool {
-    contains_header_ascii(session, http::header::ACCEPT, b"text/event-stream")
+    contains_header_ascii(
+        &session.req_header().headers,
+        http::header::ACCEPT,
+        b"text/event-stream",
+    )
 }
 
 /// `header`'s value starts with `prefix`, ignoring ASCII case.
@@ -229,8 +231,8 @@ fn has_header_prefix(session: &Session, header: http::HeaderName, prefix: &[u8])
 }
 
 /// `header`'s value contains `needle`, ignoring ASCII case.
-fn contains_header_ascii(session: &Session, header: http::HeaderName, needle: &[u8]) -> bool {
-    session.req_header().headers.get(header).is_some_and(|value| {
+fn contains_header_ascii(headers: &HeaderMap, header: http::HeaderName, needle: &[u8]) -> bool {
+    headers.get_all(header).iter().any(|value| {
         value
             .as_bytes()
             .windows(needle.len())
@@ -712,7 +714,14 @@ fn rewritten_uri(new_path: &str) -> Result<http::Uri> {
 }
 
 /// Prepend the cluster base path, keeping the query and any URI authority.
+///
+/// The asterisk-form target of a server-wide `OPTIONS` (RFC 9112 Section
+/// 3.2.4) names no resource, so it is left as `*`, as the single-upstream
+/// path leaves it; prefixed, it would ask about a resource such as `/api*`.
 fn prefix_base_path(uri: http::Uri, base: &str) -> Result<http::Uri> {
+    if uri.path() == "*" {
+        return Ok(uri);
+    }
     let path_and_query = uri
         .path_and_query()
         .map_or_else(|| "/".to_owned(), |path| path.as_str().to_owned());
@@ -739,9 +748,18 @@ fn prefix_base_path(uri: http::Uri, base: &str) -> Result<http::Uri> {
 // Response
 // -----------------------------------------------------------------------------
 
+/// Record only a ready hedge winner as a forwarded endpoint.
+fn note_delivery_winner<T>(ctx: &mut PingoraRequestCtx, delivery: &HedgeDelivery<T>) {
+    if let HedgeDelivery::Ready { address, .. } = delivery {
+        note_winner(ctx, address);
+    }
+}
+
 /// Point passive health at the endpoint that won.
 fn note_winner(ctx: &mut PingoraRequestCtx, address: &Arc<str>) {
     ctx.upstream_contacted = true;
+    ctx.extensions
+        .insert(praxis_filter::UpstreamForwardedEndpoint(Arc::clone(address)));
     ctx.selected_endpoint_index = Some(endpoint_index(ctx, address.as_ref()));
     if let Some(reselector) = &ctx.endpoint_reselector {
         ctx.upstream = Some(reselector.build_upstream(Arc::clone(address)));
@@ -764,14 +782,11 @@ fn release_selected(ctx: &PingoraRequestCtx) {
     }
 }
 
-/// Return the cluster retry lease and stop the load balancer from releasing it again.
+/// Return the cluster admission slot now, before the response phase would.
 fn end_lease(ctx: &mut PingoraRequestCtx) {
     ctx.filter_metadata.remove("lb.selected");
-    if let Some(state) = &ctx.cluster_retry_state
-        && !ctx.cluster_retry_state_released
-    {
-        state.leave();
-        ctx.cluster_retry_state_released = true;
+    if let Some(lease) = &ctx.cluster_admission {
+        lease.release();
     }
 }
 
@@ -867,6 +882,75 @@ mod tests {
     use super::*;
 
     #[test]
+    fn accept_sse_in_later_field_stays_streaming() {
+        for values in [
+            vec!["text/event-stream", "application/json"],
+            vec!["application/json", "text/event-stream"],
+            vec!["application/json, text/event-stream"],
+            vec!["application/json", "TEXT/EVENT-STREAM"],
+        ] {
+            let mut headers = HeaderMap::new();
+            for value in values {
+                headers.append(http::header::ACCEPT, value.parse().unwrap());
+            }
+            assert!(
+                contains_header_ascii(&headers, http::header::ACCEPT, b"text/event-stream"),
+                "every Accept field must participate in the SSE gate"
+            );
+        }
+        let mut headers = HeaderMap::new();
+        headers.append(http::header::ACCEPT, "application/json".parse().unwrap());
+        headers.append(http::header::ACCEPT, "text/plain".parse().unwrap());
+        assert!(!contains_header_ascii(
+            &headers,
+            http::header::ACCEPT,
+            b"text/event-stream"
+        ));
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "compare authentic winner and failed race affinity evidence"
+    )]
+    fn successful_hedge_marks_only_winning_endpoint_for_stickiness() {
+        let mut ctx = PingoraRequestCtx::default();
+        let winner: Arc<str> = Arc::from("10.0.0.2:80");
+        note_delivery_winner(
+            &mut ctx,
+            &HedgeDelivery::Ready {
+                address: Arc::clone(&winner),
+                response: (),
+            },
+        );
+        assert_eq!(
+            ctx.extensions
+                .get::<praxis_filter::UpstreamForwardedEndpoint>()
+                .map(|marker| &marker.0),
+            Some(&winner),
+            "a real hedge winner must be eligible for header affinity"
+        );
+        drop(ctx);
+
+        let mut failed = PingoraRequestCtx::default();
+        note_delivery_winner(
+            &mut failed,
+            &HedgeDelivery::<()>::Failed {
+                status: Some(502),
+                response: None,
+            },
+        );
+        assert!(
+            failed
+                .extensions
+                .get::<praxis_filter::UpstreamForwardedEndpoint>()
+                .is_none(),
+            "a failed race cannot establish a header binding"
+        );
+        drop(failed);
+    }
+
+    #[test]
     fn preparation_rejection_reaches_the_final_error_handler() {
         let mut ctx = PingoraRequestCtx {
             pending_rejection: Some(praxis_filter::Rejection::status(413)),
@@ -950,6 +1034,27 @@ mod tests {
             "the rewrite keeps the h2 authority"
         );
         assert_eq!(uri.path(), "/users", "and still replaces the path");
+    }
+
+    #[test]
+    fn base_path_leaves_the_asterisk_target_alone() {
+        // RFC 9112 Section 3.2.4: `OPTIONS *` asks about the server as a
+        // whole; `/api*` would ask about a resource.
+        let ctx = PingoraRequestCtx {
+            upstream: Some(Upstream {
+                address: Arc::from("127.0.0.1:8080"),
+                authority: None,
+                base_path: Some(Arc::from("/api")),
+                connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
+                tls: None,
+            }),
+            ..PingoraRequestCtx::default()
+        };
+        let asterisk = request_uri(&ctx, &http::Uri::from_static("*")).unwrap();
+        let resource = request_uri(&ctx, &http::Uri::from_static("/users?page=2")).unwrap();
+        drop(ctx);
+        assert_eq!(asterisk.to_string(), "*", "the asterisk target is not prefixed");
+        assert_eq!(resource.to_string(), "/api/users?page=2", "a resource target still is");
     }
 
     #[test]

@@ -465,7 +465,7 @@ impl HttpFilter for PayloadMcpClassifier {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Required)
     }
 
     fn request_body_mode(&self) -> BodyMode {
@@ -491,8 +491,12 @@ impl HttpFilter for PayloadMcpClassifier {
         let value: serde_json::Value = serde_json::from_slice(body.as_deref().unwrap()).unwrap();
         assert_eq!(value["method"], "tools/call", "fixture must classify a tool call");
         assert_eq!(value["params"]["name"], "echo", "fixture must classify the echo tool");
-        ctx.set_metadata("mcp.method", "tools/call");
-        ctx.set_metadata("mcp.name", "echo");
+        ctx.filter_metadata
+            .insert("mcp.method", "tools/call")
+            .expect("entry must fit in the filter's metadata");
+        ctx.filter_metadata
+            .insert("mcp.name", "echo")
+            .expect("entry must fit in the filter's metadata");
         Ok(FilterAction::BodyDone)
     }
 }
@@ -730,7 +734,7 @@ impl HttpFilter for EmptyAfterPolicy {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadWrite
+        BodyAccess::ReadWrite(praxis_filter::BodyRequirement::Optional)
     }
 
     async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {

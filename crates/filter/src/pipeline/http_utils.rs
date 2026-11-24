@@ -20,7 +20,6 @@ use crate::{
     FilterError,
     actions::{FilterAction, Rejection, SelectedUpstreamBodyOutcome},
     any_filter::AnyFilter,
-    body::BodyAccess,
     condition::{SelectedUpstream, should_execute_from, should_execute_response_ref},
     context::{EffectiveHeaders, HttpFilterContext, Response},
     metrics::{
@@ -552,7 +551,7 @@ pub(super) async fn run_selected_upstream_request_body_filter(
     // undone before a fail-open swallows the error.
     let before = body.clone();
     let mut scratch = body.clone();
-    let target = if http_filter.selected_upstream_request_body_access() == BodyAccess::ReadWrite {
+    let target = if http_filter.selected_upstream_request_body_access().is_writable() {
         &mut *body
     } else {
         &mut scratch
@@ -597,7 +596,7 @@ pub(super) async fn run_bound_upstream_request_body_filter(
     // body it was promised not to; a writer that errors gets its partial edit
     // undone before a fail-open swallows the error. The flag says whether the
     // body may now differ from `before`.
-    let writer = http_filter.bound_upstream_request_body_access() == BodyAccess::ReadWrite;
+    let writer = http_filter.bound_upstream_request_body_access().is_writable();
     let before = body.clone();
     let mut scratch = body.clone();
     let target = if writer { &mut *body } else { &mut scratch };

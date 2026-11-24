@@ -23,6 +23,8 @@ use pingora_core::{Result, server::Server, services::listening::Service};
 #[cfg(feature = "pingora")]
 use pingora_proxy::http_proxy;
 #[cfg(feature = "pingora")]
+use praxis_core::server::LifecycleHandle;
+#[cfg(feature = "pingora")]
 use praxis_filter::FilterPipeline;
 #[cfg(feature = "pingora")]
 use tokio::sync::Semaphore;
@@ -36,7 +38,7 @@ use super::metrics;
 mod compression;
 /// Forward-proxy (CONNECT) request handling.
 #[cfg(feature = "forward-proxy")]
-mod connect;
+pub(in crate::http) mod connect;
 /// Upstream connection established hook.
 pub(in crate::http) mod connected_to_upstream;
 /// Structured error responses for fatal proxy errors.
@@ -129,8 +131,10 @@ pub use with_body::PingoraHttpHandler;
 ///     downstream_read_timeout_ms: None,
 ///     filter_chains: vec![],
 ///     forward_proxy: None,
+///     job_queue: None,
 ///     max_connections: None,
 ///     protocol: Default::default(),
+///     upgrade_policy: None,
 ///     tcp_session_timeout_ms: None,
 ///     tcp_max_duration_secs: None,
 ///     tls: None,
@@ -148,6 +152,10 @@ pub use with_body::PingoraHttpHandler;
 ///
 /// Returns [`ProxyError`] if the listener fails to bind.
 ///
+/// This compatibility entry point uses an isolated lifecycle and therefore
+/// does not observe runtime drain transitions. Production wiring should use
+/// [`load_http_handler_with_lifecycle`].
+///
 /// [`ProxyError`]: praxis_core::ProxyError
 #[cfg(feature = "pingora")]
 pub fn load_http_handler(
@@ -156,11 +164,36 @@ pub fn load_http_handler(
     pipeline: Arc<ArcSwap<FilterPipeline>>,
     cert_watcher_shutdowns: &mut Vec<tokio::sync::watch::Sender<bool>>,
 ) -> Result<(), praxis_core::ProxyError> {
+    load_http_handler_with_lifecycle(
+        server,
+        listener,
+        pipeline,
+        cert_watcher_shutdowns,
+        LifecycleHandle::new(),
+    )
+}
+
+/// Load an HTTP handler with the process lifecycle shared by readiness and responses.
+///
+/// Uses the default [`HttpHandlerOptions`]; see [`load_http_handler_with_options`].
+///
+/// # Errors
+///
+/// Returns the listener wiring error when the handler cannot be registered.
+#[cfg(feature = "pingora")]
+pub fn load_http_handler_with_lifecycle(
+    server: &mut Server,
+    listener: &praxis_core::config::Listener,
+    pipeline: Arc<ArcSwap<FilterPipeline>>,
+    cert_watcher_shutdowns: &mut Vec<tokio::sync::watch::Sender<bool>>,
+    lifecycle: LifecycleHandle,
+) -> Result<(), praxis_core::ProxyError> {
     load_http_handler_with_options(
         server,
         listener,
         pipeline,
         cert_watcher_shutdowns,
+        lifecycle,
         &HttpHandlerOptions::default(),
     )
 }
@@ -202,11 +235,16 @@ impl HttpHandlerOptions {
 ///
 /// [`ProxyError`]: praxis_core::ProxyError
 #[cfg(feature = "pingora")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the listener, its pipeline and shutdown list, the shared lifecycle, and the options"
+)]
 pub fn load_http_handler_with_options(
     server: &mut Server,
     listener: &praxis_core::config::Listener,
     pipeline: Arc<ArcSwap<FilterPipeline>>,
     cert_watcher_shutdowns: &mut Vec<tokio::sync::watch::Sender<bool>>,
+    lifecycle: LifecycleHandle,
     options: &HttpHandlerOptions,
 ) -> Result<(), praxis_core::ProxyError> {
     let downstream_read_timeout = listener.downstream_read_timeout_ms.map(Duration::from_millis);
@@ -246,6 +284,7 @@ pub fn load_http_handler_with_options(
         ::metrics::SharedString::from_shared(Arc::from(listener.name.as_str())),
         #[cfg(feature = "forward-proxy")]
         forward_proxy,
+        lifecycle,
     );
     wire_service(server, listener, handler, cert_watcher_shutdowns)?;
     Ok(())
@@ -307,7 +346,7 @@ mod tests {
         connectivity::{ConnectionOptions, Upstream},
         health::{ClusterHealthEntry, EndpointHealth},
     };
-    use praxis_filter::{BodyBuffer, BodyMode, RequestExtensions};
+    use praxis_filter::{BodyBuffer, BodyMode, FilterMetadata, RequestExtensions};
 
     use super::*;
     use crate::http::pingora::context::PingoraRequestCtx;
@@ -317,6 +356,24 @@ mod tests {
 
     /// Default Pingora retry body buffer limit (64 `KiB`).
     const RETRY_BODY_LIMIT: u64 = praxis_core::config::DEFAULT_RETRY_BODY_LIMIT_BYTES;
+
+    #[test]
+    fn new_context_carries_the_owning_listener_name() {
+        use pingora_proxy::ProxyHttp as _;
+
+        let pipeline = FilterPipeline::build(&mut [], &praxis_filter::FilterRegistry::with_builtins()).unwrap();
+        let handler = PingoraHttpHandler::new(
+            Arc::new(ArcSwap::from_pointee(pipeline)),
+            None,
+            None,
+            None,
+            "websocket-listener".into(),
+            #[cfg(feature = "forward-proxy")]
+            None,
+            LifecycleHandle::new(),
+        );
+        assert_eq!(handler.new_ctx().listener_name.as_ref(), "websocket-listener");
+    }
 
     #[tokio::test]
     async fn pending_local_rejection_stops_explicit_and_reused_connection_retries() {
@@ -331,6 +388,7 @@ mod tests {
             "test".into(),
             #[cfg(feature = "forward-proxy")]
             None,
+            LifecycleHandle::new(),
         );
         let (_client, stream) = tokio::io::duplex(1024);
         let mut session = pingora_proxy::Session::new_h1(Box::new(stream));
@@ -565,7 +623,8 @@ mod tests {
         let mut ctx = PingoraRequestCtx::default();
         ctx.response_phase_done = false;
         ctx.filter_metadata
-            .insert("json_rpc.method".to_owned(), "service/invoke".to_owned());
+            .insert("json_rpc.method", "service/invoke")
+            .expect("entry must fit in the filter's metadata");
         ctx.request_snapshot = Some(praxis_filter::Request {
             method: http::Method::POST,
             uri: "/api".parse().unwrap(),
@@ -573,7 +632,7 @@ mod tests {
         });
         logging_util::logging_cleanup(&pipeline, &mut ctx).await;
         assert_eq!(
-            ctx.filter_metadata.get("json_rpc.method").map(String::as_str),
+            ctx.filter_metadata.get("json_rpc.method"),
             Some("service/invoke"),
             "filter_metadata should survive logging_cleanup"
         );
@@ -1100,6 +1159,11 @@ mod tests {
         let state_val: Box<dyn std::any::Any + Send + Sync> = Box::new(99_i32);
         let filter_state = HashMap::from([(0_usize, state_val)]);
 
+        let mut filter_metadata = FilterMetadata::default();
+        filter_metadata
+            .insert("key", "val")
+            .expect("entry must fit in the filter's metadata");
+
         let output = body_util::BodyFilterOutput {
             cluster: Some(Arc::from("test-cluster")),
             upstream: Some(Upstream {
@@ -1111,7 +1175,7 @@ mod tests {
             }),
             extensions,
             attempted_endpoints: Vec::new(),
-            filter_metadata: HashMap::from([("key".to_owned(), "val".to_owned())]),
+            filter_metadata,
             filter_state,
             executed_branch_filters: vec![false, true, true],
             executed_filter_indices: vec![true, false],
@@ -1123,7 +1187,7 @@ mod tests {
         assert!(ctx.upstream.is_some(), "upstream should transfer");
         assert_eq!(ctx.upstream.as_ref().unwrap().address.as_ref(), "10.0.0.1:80");
         assert_eq!(ctx.extensions.get::<u32>(), Some(&42));
-        assert_eq!(ctx.filter_metadata.get("key").map(String::as_str), Some("val"));
+        assert_eq!(ctx.filter_metadata.get("key"), Some("val"));
         assert_eq!(ctx.filter_state.len(), 1, "filter_state should transfer");
         assert_eq!(
             ctx.filter_state.get(&0).and_then(|v| v.downcast_ref::<i32>()),
@@ -1143,7 +1207,7 @@ mod tests {
         let pipeline = access_log_pipeline();
         let mut ctx = make_fallback_ctx();
 
-        let events = capture_access_events(|| logging_util::maybe_emit_fallback_access_log(&pipeline, 502, &mut ctx));
+        let events = capture_access_events(|| logging_util::emit_completion_observers(&pipeline, 502, &mut ctx));
         assert_eq!(
             events.len(),
             1,
@@ -1157,7 +1221,7 @@ mod tests {
         let mut ctx = make_fallback_ctx();
         ctx.response_delivery_complete = true;
 
-        let events = capture_access_events(|| logging_util::maybe_emit_fallback_access_log(&pipeline, 200, &mut ctx));
+        let events = capture_access_events(|| logging_util::emit_completion_observers(&pipeline, 200, &mut ctx));
         assert!(events.is_empty(), "completed delivery already logged via the filter");
     }
 
@@ -1167,7 +1231,7 @@ mod tests {
         let mut ctx = make_fallback_ctx();
         ctx.connection_upgraded = true;
 
-        let events = capture_access_events(|| logging_util::maybe_emit_fallback_access_log(&pipeline, 101, &mut ctx));
+        let events = capture_access_events(|| logging_util::emit_completion_observers(&pipeline, 101, &mut ctx));
         assert!(events.is_empty(), "upgraded connections have no body completion");
     }
 
@@ -1177,7 +1241,7 @@ mod tests {
         let pipeline = FilterPipeline::build(&mut [], &registry).unwrap();
         let mut ctx = make_fallback_ctx();
 
-        let events = capture_access_events(|| logging_util::maybe_emit_fallback_access_log(&pipeline, 502, &mut ctx));
+        let events = capture_access_events(|| logging_util::emit_completion_observers(&pipeline, 502, &mut ctx));
         assert!(events.is_empty(), "no access_log filter means no fallback record");
     }
 
@@ -1196,8 +1260,7 @@ mod tests {
         let pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
 
         let mut excluded = make_fallback_ctx();
-        let events =
-            capture_access_events(|| logging_util::maybe_emit_fallback_access_log(&pipeline, 502, &mut excluded));
+        let events = capture_access_events(|| logging_util::emit_completion_observers(&pipeline, 502, &mut excluded));
         assert!(
             events.is_empty(),
             "requests the operator scoped out must not gain fallback records"
@@ -1207,8 +1270,7 @@ mod tests {
         if let Some(snapshot) = included.request_snapshot.as_mut() {
             snapshot.uri = "/api/users".parse().unwrap();
         }
-        let events =
-            capture_access_events(|| logging_util::maybe_emit_fallback_access_log(&pipeline, 502, &mut included));
+        let events = capture_access_events(|| logging_util::emit_completion_observers(&pipeline, 502, &mut included));
         assert_eq!(events.len(), 1, "in-scope incomplete requests still get a record");
     }
 
@@ -1222,9 +1284,9 @@ mod tests {
             let mut unbound = make_fallback_ctx();
 
             let bound_events =
-                capture_access_events(|| logging_util::maybe_emit_fallback_access_log(&pipeline, 502, &mut bound));
+                capture_access_events(|| logging_util::emit_completion_observers(&pipeline, 502, &mut bound));
             let unbound_events =
-                capture_access_events(|| logging_util::maybe_emit_fallback_access_log(&pipeline, 502, &mut unbound));
+                capture_access_events(|| logging_util::emit_completion_observers(&pipeline, 502, &mut unbound));
 
             assert_eq!(
                 bound_events.len(),

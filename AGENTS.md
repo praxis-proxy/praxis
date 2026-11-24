@@ -38,7 +38,7 @@ make lint           # clippy (several feature sets) + nightly fmt check +
 make check-features # every optional feature compiles on its own (CI runs it)
 make doc            # rustdoc with -D warnings, including private items
 make audit          # cargo audit + cargo deny check
-make coverage-check # fail if line coverage < 96%
+make coverage-check # fail if line coverage < 97%
 make container      # container image build
 make lint-fips      # clippy + fmt for the FIPS feature set
 make test-fips      # unit tests for the FIPS feature set
@@ -206,7 +206,7 @@ configured variants.
 
 ## Adding a Filter
 
-See `docs/filters/extensions.md` for the full guide.
+See `docs/developing/extensions.md` for the full guide.
 
 **Choosing a category**: HTTP filters go under `observability`,
 `payload_processing`, `security`, `traffic_management`, or `transformation`.

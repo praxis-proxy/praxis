@@ -37,6 +37,51 @@ use bytes::Bytes;
 #[derive(Clone, Copy, Debug)]
 pub struct ClientResponseHeadersCommitted;
 
+/// Marks a synthetic response-body EOF that is followed by upstream trailers.
+///
+/// Streaming filters use this marker to flush only bytes that are safe to
+/// emit before trailer filters append their final frame. The protocol layer
+/// removes it before the trailer phase begins.
+#[derive(Clone, Copy, Debug)]
+pub struct ResponseTrailersPending;
+
+/// Endpoint whose connected upstream exchange reached request forwarding.
+///
+/// Published by an HTTP adapter after a successful connection and request-head
+/// preparation. A failed dial or a local rejection before forwarding leaves
+/// it absent. A subsequent read failure remains ambiguous: the backend may
+/// already have processed the request. The endpoint identity prevents a later
+/// failed retry from claiming a session after an earlier attempt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpstreamForwardedEndpoint(pub Arc<str>);
+
+/// Trace ID of the exported root HTTP request span.
+///
+/// Published by an HTTP adapter right after it creates the root `http_request`
+/// span, when the `otel` feature is compiled in and a configured exporter gave
+/// the span a valid OpenTelemetry span context. Consumers that report
+/// correlation IDs (such as the policy filter's request metadata) prefer it, so
+/// an audit record joins the trace the collector exports instead of the
+/// filter-level [`TraceContext`] trace ID, which is minted independently.
+/// Absent when `otel` is off or no exporter is active; consumers fall back to
+/// [`TraceContext`].
+///
+/// [`TraceContext`]: crate::trace_context::TraceContext
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExportedSpanTraceId(pub Arc<str>);
+
+/// The request will not reach the cluster a router selects for it.
+///
+/// Published by an HTTP adapter before the request filters run, for a
+/// request it serves some other way. A forward-proxy `CONNECT` dials its own
+/// destination, yet its target still matches a catch-all route on a
+/// listener that also reverse-proxies. Filters that learn a cluster's health
+/// from request outcomes leave such a request uncounted: `circuit_breaker`
+/// takes no token for it, so it can neither hold the half-open probe nor
+/// close the circuit.
+#[derive(Clone, Copy, Debug)]
+pub struct ClusterNotContacted;
+
 // -----------------------------------------------------------------------------
 // AuthenticatedIdentity
 // -----------------------------------------------------------------------------

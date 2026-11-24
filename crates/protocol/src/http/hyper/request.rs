@@ -28,7 +28,7 @@ use crate::http::pingora::{
         header_mutations::apply_pre_read_mutations_to_request,
         pipeline::{PipelineResult, run_pipeline},
         request_head::run_head_filters,
-        request_utils::create_request_span_for,
+        request_utils::{create_request_span_for, record_exported_trace_id},
         stream_buffer::{PreReadMutations, PreReadPass, PreReadStop},
     },
     metrics,
@@ -68,6 +68,9 @@ pub(super) async fn run(
     }
 
     let mut request = capture_client(flight, connection, parts);
+    if let Some(phase) = reject_unsupported_upgrade(flight, &request) {
+        return phase;
+    }
     if let Err(phase) = Box::pin(head_phase(flight, &mut request)).await {
         return phase;
     }
@@ -80,6 +83,26 @@ pub(super) async fn run(
     let span = flight.ctx.request_span.clone();
     let result = Box::pin(run_pipeline(&flight.pipeline, request, &mut flight.ctx).instrument(span)).await;
     Box::pin(outcome(flight, result)).await
+}
+
+/// Refuse malformed, denied, or adapter-unsupported HTTP upgrade requests.
+fn reject_unsupported_upgrade(flight: &mut Flight, request: &Request) -> Option<RequestPhase> {
+    let refusal = match crate::http::upgrade::classify_request(
+        &request.headers,
+        &request.method,
+        flight.version,
+        flight.pipeline.permits_upgrade("websocket"),
+    ) {
+        Ok(Some(_offer)) => crate::http::upgrade::unsupported_upgrade(),
+        Ok(None) => return None,
+        Err(refusal) => refusal,
+    };
+    flight.ctx.stamp_error_type(refusal.code);
+    Some(refuse(
+        flight,
+        request,
+        Rejection::status(refusal.status).with_body(refusal.message.as_bytes()),
+    ))
 }
 
 /// Record the request for a pre-pipeline exit, so the fallback access record
@@ -103,13 +126,11 @@ fn capture_client(flight: &mut Flight, connection: &ConnectionFacts, parts: Part
     flight.ctx.client_http_version = Some(parts.version);
     flight.ctx.client_addr = Some(normalize_mapped_ipv4(connection.peer.ip()));
     flight.ctx.downstream_tls = connection.tls;
-    flight.ctx.peer_identity = None;
-    flight.ctx.request_is_idempotent = matches!(
-        parts.method,
-        http::Method::GET | http::Method::HEAD | http::Method::OPTIONS
-    );
+    flight.ctx.peer_identity.clone_from(&connection.peer_identity);
+    flight.ctx.request_is_idempotent = praxis_core::retry::replays_without_opt_in(&parts.method);
     flight.ctx.request_span =
         create_request_span_for(parts.method.as_str(), parts.uri.path(), &parts.headers, &flight.ctx);
+    record_exported_trace_id(&flight.ctx.request_span, &mut flight.ctx.extensions);
 
     let caps = flight.pipeline.body_capabilities();
     flight.ctx.request_body_mode = caps.request_body_mode;
@@ -419,15 +440,48 @@ mod tests {
     }
 
     #[test]
+    fn capture_client_keeps_verified_connection_identity_per_request() {
+        let identity = Arc::new(praxis_tls::TlsPeerIdentity {
+            cert_digest: vec![0xAB; 32],
+            organization: Some("gateway-peer".to_owned()),
+            serial_number: Some("12:34".to_owned()),
+        });
+        let mut connection = facts("127.0.0.1:40000", true);
+        connection.peer_identity = Some(Arc::clone(&identity));
+        for _request in 0..2 {
+            let mut flight = Flight::for_tests(empty_pipeline());
+            let _captured = capture_client(&mut flight, &connection, head(Method::GET, "/"));
+            assert!(
+                flight
+                    .ctx
+                    .peer_identity
+                    .as_ref()
+                    .is_some_and(|seen| Arc::ptr_eq(seen, &identity)),
+                "each request on the connection receives the authenticated identity"
+            );
+        }
+        let mut anonymous = Flight::for_tests(empty_pipeline());
+        let _captured = capture_client(&mut anonymous, &facts("127.0.0.1:40001", false), head(Method::GET, "/"));
+        assert!(
+            anonymous.ctx.peer_identity.is_none(),
+            "plain connections cannot gain an identity"
+        );
+    }
+
+    #[test]
     fn only_safe_methods_are_idempotent() {
         for (method, idempotent) in [
             (Method::GET, true),
             (Method::HEAD, true),
             (Method::OPTIONS, true),
+            (Method::QUERY, true),
             (Method::POST, false),
             (Method::PUT, false),
             (Method::DELETE, false),
             (Method::PATCH, false),
+            (Method::TRACE, false),
+            (Method::CONNECT, false),
+            (Method::from_bytes(b"CUSTOM").unwrap(), false),
         ] {
             let mut flight = Flight::for_tests(empty_pipeline());
 
@@ -840,6 +894,7 @@ mod tests {
         ConnectionFacts {
             peer: peer.parse().unwrap(),
             tls,
+            peer_identity: None,
         }
     }
 
@@ -867,6 +922,7 @@ mod tests {
             extra_headers: Vec::new(),
             headers_to_remove: Vec::new(),
             headers_to_set: Vec::new(),
+            header_mutations: Vec::new(),
         }
     }
 

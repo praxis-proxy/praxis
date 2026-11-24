@@ -48,11 +48,11 @@ filter_chains:
             endpoints:
               - "127.0.0.1:3000"
 
-# The 1 KiB buffering cap is stricter than the 2 KiB transfer limit.
-# A 1025-byte request fails the buffering cap before extraction.
+# Buffered requests require the transfer limit to fit within the buffer cap.
+# Both limits are 1 KiB; a 1025-byte request fails before extraction.
 body_limits:
   max_buffer_bytes: 1024
-  max_request_bytes: 2048
+  max_request_bytes: 1024
 
 insecure_options:
   allow_private_endpoints: true # example proxies to local backends

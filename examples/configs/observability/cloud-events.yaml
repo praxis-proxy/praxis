@@ -1,7 +1,8 @@
 # CloudEvents Publisher
 #
-# Publishes a bounded, best-effort CloudEvents 1.0 response event after the
-# upstream response completes. The local receiver below is illustrative.
+# Publishes a bounded, best-effort CloudEvents 1.0 response event after a
+# final bodyless response or response end-of-stream. Aborted responses do not
+# publish. The local receiver below is illustrative.
 #
 # ⚠️  EXPERIMENTAL: This example uses the `cloud-events-filter` experimental feature.
 # Not recommended for production use. Build with --features cloud-events-filter.

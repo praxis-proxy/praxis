@@ -4,6 +4,7 @@
 //! Readiness check utilities for integration tests.
 
 use std::{
+    io::{self, Read as _, Write as _},
     net::TcpStream,
     time::{Duration, Instant},
 };
@@ -117,11 +118,8 @@ pub fn wait_for_tcp(addr: &str) {
 ///
 /// Panics if the server does not become ready before the deadline.
 pub fn wait_for_http(addr: &str) {
-    use std::io::{Read as _, Write as _};
-
     let request = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
     let timeout = ready_timeout(DEFAULT_HTTP_TIMEOUT);
-
     let ready = poll_until_ready(timeout, || {
         let Ok(mut stream) = TcpStream::connect(addr) else {
             return false;
@@ -132,8 +130,8 @@ pub fn wait_for_http(addr: &str) {
             return false;
         }
         let mut buf = [0_u8; 16];
-        if let Ok(n) = stream.read(&mut buf)
-            && n >= 5
+        if let Ok(count) = stream.read(&mut buf)
+            && count >= 5
             && buf.starts_with(b"HTTP/")
         {
             let mut drain = [0_u8; 4096];
@@ -142,12 +140,11 @@ pub fn wait_for_http(addr: &str) {
         }
         false
     });
-
     assert!(ready, "HTTP server at {addr} did not become ready within {timeout:?}");
 }
 
-/// Block until a full HTTP/2 handshake with `addr` completes, or panic once
-/// the readiness deadline (default 5 seconds) passes.
+/// Block until `addr` returns a complete initial HTTP/2 SETTINGS frame, or
+/// panic once the readiness deadline (default 5 seconds) passes.
 ///
 /// Override the deadline with `READY_TIMEOUT_ENV_VAR`.
 ///
@@ -155,35 +152,100 @@ pub fn wait_for_http(addr: &str) {
 ///
 /// Panics if the server does not become ready before the deadline.
 pub fn wait_for_http2(addr: &str) {
-    use std::io::{Read as _, Write as _};
-
     let timeout = ready_timeout(DEFAULT_HTTP_TIMEOUT);
-
     let ready = poll_until_ready(timeout, || {
-        let Ok(mut stream) = TcpStream::connect(addr) else {
-            return false;
-        };
-        drop(stream.set_read_timeout(Some(Duration::from_secs(1))));
-        drop(stream.set_write_timeout(Some(Duration::from_secs(1))));
-        if stream.write_all(PREFACE).is_ok() && stream.write_all(SETTINGS).is_ok() {
-            let mut buf = [0_u8; 64];
-            if let Ok(n) = stream.read(&mut buf)
-                && n >= 9
-                && buf[3] == 0x04
-            {
-                let _ack = stream.write_all(SETTINGS_ACK);
-                let _goaway = stream.write_all(GOAWAY);
-                let mut drain = [0_u8; 256];
-                while stream.read(&mut drain).unwrap_or(0) > 0 {}
-                return true;
-            }
-        }
-        false
+        http2_settings_exchange(addr, Duration::from_secs(1)).is_ok()
     });
 
     assert!(ready, "HTTP/2 server at {addr} did not become ready within {timeout:?}");
 
     std::thread::sleep(Duration::from_millis(100));
+}
+
+/// Exchange connection prefaces and validate the peer's first SETTINGS frame.
+fn http2_settings_exchange(addr: &str, timeout: Duration) -> io::Result<()> {
+    http2_settings_exchange_with_read_limit(addr, timeout, usize::MAX)
+}
+
+/// Cap individual reads so tests force fragmentation independently of TCP coalescing.
+fn http2_settings_exchange_with_read_limit(addr: &str, timeout: Duration, max_read: usize) -> io::Result<()> {
+    let mut stream = TcpStream::connect(addr)?;
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "readiness deadline overflow"))?;
+    write_all_until(&mut stream, PREFACE, deadline)?;
+    write_all_until(&mut stream, SETTINGS, deadline)?;
+
+    let mut header = [0_u8; 9];
+    read_exact_until(&mut stream, &mut header, deadline, max_read)?;
+    let length = usize::try_from(u32::from_be_bytes([0, header[0], header[1], header[2]]))
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let stream_id = u32::from_be_bytes([header[5] & 0x7F, header[6], header[7], header[8]]);
+    if header[3] != 4 || header[4] & 1 != 0 || stream_id != 0 || length > 16_384 || length % 6 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid initial SETTINGS frame",
+        ));
+    }
+    let mut payload = vec![0_u8; length];
+    read_exact_until(&mut stream, &mut payload, deadline, max_read)?;
+    validate_settings(&payload)?;
+    write_all_until(&mut stream, SETTINGS_ACK, deadline)?;
+    write_all_until(&mut stream, GOAWAY, deadline)
+}
+
+/// Keep every blocking write inside the same readiness attempt deadline.
+fn write_all_until(stream: &mut TcpStream, mut bytes: &[u8], deadline: Instant) -> io::Result<()> {
+    while !bytes.is_empty() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(io::Error::new(io::ErrorKind::TimedOut, "SETTINGS write timed out"));
+        }
+        stream.set_write_timeout(Some(remaining))?;
+        let count = stream.write(bytes)?;
+        if count == 0 {
+            return Err(io::Error::from(io::ErrorKind::WriteZero));
+        }
+        bytes = &bytes[count..];
+    }
+    Ok(())
+}
+
+/// Keep every blocking read inside the same readiness attempt deadline.
+fn read_exact_until(stream: &mut TcpStream, bytes: &mut [u8], deadline: Instant, max_read: usize) -> io::Result<()> {
+    let mut remaining_bytes = bytes;
+    while !remaining_bytes.is_empty() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(io::Error::new(io::ErrorKind::TimedOut, "SETTINGS read timed out"));
+        }
+        stream.set_read_timeout(Some(remaining))?;
+        let amount = remaining_bytes.len().min(max_read);
+        let count = stream.read(&mut remaining_bytes[..amount])?;
+        if count == 0 {
+            return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
+        }
+        remaining_bytes = &mut remaining_bytes[count..];
+    }
+    Ok(())
+}
+
+/// Validate the constrained values of standard SETTINGS entries.
+fn validate_settings(payload: &[u8]) -> io::Result<()> {
+    for setting in payload.chunks_exact(6) {
+        let id = u16::from_be_bytes([setting[0], setting[1]]);
+        let value = u32::from_be_bytes([setting[2], setting[3], setting[4], setting[5]]);
+        let valid = match id {
+            2 => value <= 1,
+            4 => value <= 2_147_483_647,
+            5 => (16_384..=16_777_215).contains(&value),
+            _ => true,
+        };
+        if !valid {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid SETTINGS value"));
+        }
+    }
+    Ok(())
 }
 
 // -----------------------------------------------------------------------------
@@ -193,6 +255,52 @@ pub fn wait_for_http2(addr: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn http2_readiness_handles_fragmented_settings() {
+        let frame = [0, 0, 6, 4, 0, 0, 0, 0, 0, 0, 4, 0, 0, 255, 255];
+        for max_read in [1, 3, usize::MAX] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listen");
+            let addr = listener.local_addr().expect("address").to_string();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("accept");
+                let mut preface = [0_u8; 33];
+                stream.read_exact(&mut preface).expect("client preface and SETTINGS");
+                stream.write_all(&frame).expect("SETTINGS frame");
+                let mut ack = [0_u8; 9];
+                stream.read_exact(&mut ack).expect("SETTINGS ACK");
+                assert_eq!(ack, SETTINGS_ACK, "client must acknowledge server settings");
+                let mut goaway = [0_u8; 17];
+                stream.read_exact(&mut goaway).expect("GOAWAY");
+                assert_eq!(goaway, GOAWAY, "readiness closes the probe connection");
+            });
+            http2_settings_exchange_with_read_limit(&addr, Duration::from_secs(1), max_read)
+                .expect("fragmented SETTINGS should complete");
+            server.join().expect("server");
+        }
+    }
+
+    #[test]
+    fn http2_readiness_rejects_invalid_settings() {
+        for frame in [
+            vec![0, 0, 0, 4, 0, 0, 0, 0, 1],
+            vec![0, 0, 6, 4, 0, 0, 0, 0, 0],
+            vec![0, 0, 1, 4, 0, 0, 0, 0, 0, 0],
+            vec![0, 0, 0, 4, 1, 0, 0, 0, 0],
+        ] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listen");
+            let addr = listener.local_addr().expect("address").to_string();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("accept");
+                let mut preface = [0_u8; 33];
+                stream.read_exact(&mut preface).expect("client preface and SETTINGS");
+                stream.write_all(&frame).expect("invalid SETTINGS");
+            });
+            http2_settings_exchange(&addr, Duration::from_millis(300))
+                .expect_err("invalid or truncated initial SETTINGS must fail");
+            server.join().expect("server");
+        }
+    }
 
     #[test]
     fn resolve_ready_timeout_uses_default_when_absent() {

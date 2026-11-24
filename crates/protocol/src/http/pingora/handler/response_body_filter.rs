@@ -678,7 +678,7 @@ mod tests {
     /// Check the mode recorded by the body hook itself.
     fn assert_observed_mode(ctx: &PingoraRequestCtx, expected: &str) {
         assert_eq!(
-            ctx.filter_metadata.get("release.mode").map(String::as_str),
+            ctx.filter_metadata.get("release.mode"),
             Some(expected),
             "the body hook sees the actual delivery mode"
         );
@@ -706,7 +706,7 @@ mod tests {
         }
 
         fn response_body_access(&self) -> BodyAccess {
-            BodyAccess::ReadWrite
+            BodyAccess::ReadWrite(praxis_filter::BodyRequirement::Optional)
         }
 
         fn on_response_body(
@@ -733,7 +733,7 @@ mod tests {
         }
 
         fn response_body_access(&self) -> BodyAccess {
-            BodyAccess::ReadOnly
+            BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional)
         }
 
         fn response_body_mode(&self) -> BodyMode {
@@ -751,7 +751,7 @@ mod tests {
             } else {
                 "buffered"
             };
-            ctx.filter_metadata.insert("release.mode".to_owned(), mode.to_owned());
+            ctx.filter_metadata.insert("release.mode", mode)?;
             Ok(if self.release_at_eos && !end_of_stream {
                 FilterAction::Continue
             } else {

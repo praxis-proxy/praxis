@@ -5,7 +5,7 @@
 
 use std::pin::Pin;
 
-use crate::config::Config;
+use crate::{config::Config, server::LifecycleHandle};
 
 // -----------------------------------------------------------------------------
 // Types
@@ -47,4 +47,7 @@ pub trait ServerRuntime: Sized {
     /// For harnesses that stop the server themselves. Pingora shuts down
     /// immediately on this path and may drop active work.
     fn run_with_shutdown(self, shutdown: ShutdownFuture);
+
+    /// Return the process lifecycle handle shared with protocol adapters.
+    fn lifecycle(&self) -> LifecycleHandle;
 }

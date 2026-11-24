@@ -43,7 +43,7 @@ impl HttpFilter for AppendMarkerSelectedUpstreamFilter {
     }
 
     fn selected_upstream_request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadWrite
+        BodyAccess::ReadWrite(praxis_filter::BodyRequirement::Optional)
     }
 
     fn request_body_mode(&self) -> BodyMode {
@@ -83,7 +83,7 @@ impl HttpFilter for IdentitySelectedUpstreamFilter {
     }
 
     fn selected_upstream_request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadWrite
+        BodyAccess::ReadWrite(praxis_filter::BodyRequirement::Optional)
     }
 
     fn request_body_mode(&self) -> BodyMode {
@@ -118,7 +118,7 @@ impl HttpFilter for ExpandSelectedUpstreamFilter {
     }
 
     fn selected_upstream_request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadWrite
+        BodyAccess::ReadWrite(praxis_filter::BodyRequirement::Optional)
     }
 
     fn request_body_mode(&self) -> BodyMode {
@@ -150,7 +150,7 @@ impl HttpFilter for ReportBodyPresenceSelectedUpstreamFilter {
     }
 
     fn selected_upstream_request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadWrite
+        BodyAccess::ReadWrite(praxis_filter::BodyRequirement::Optional)
     }
 
     fn request_body_mode(&self) -> BodyMode {
@@ -182,7 +182,7 @@ impl HttpFilter for EmptySelectedUpstreamFilter {
     }
 
     fn selected_upstream_request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadWrite
+        BodyAccess::ReadWrite(praxis_filter::BodyRequirement::Optional)
     }
 
     fn request_body_mode(&self) -> BodyMode {
@@ -213,7 +213,7 @@ impl HttpFilter for RejectSelectedUpstreamFilter {
     }
 
     fn selected_upstream_request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional)
     }
 
     fn request_body_mode(&self) -> BodyMode {
@@ -797,7 +797,7 @@ mod payload_retry {
         }
 
         fn request_body_access(&self) -> BodyAccess {
-            BodyAccess::ReadWrite
+            BodyAccess::ReadWrite(praxis_filter::BodyRequirement::Optional)
         }
 
         async fn on_request_body(
@@ -825,7 +825,7 @@ mod payload_retry {
         }
 
         fn selected_upstream_request_body_access(&self) -> BodyAccess {
-            BodyAccess::ReadWrite
+            BodyAccess::ReadWrite(praxis_filter::BodyRequirement::Optional)
         }
 
         fn request_body_mode(&self) -> BodyMode {
@@ -1132,7 +1132,7 @@ mod payload_output_limits {
         }
 
         fn selected_upstream_request_body_access(&self) -> BodyAccess {
-            BodyAccess::ReadWrite
+            BodyAccess::ReadWrite(praxis_filter::BodyRequirement::Optional)
         }
 
         fn request_body_mode(&self) -> BodyMode {

@@ -87,7 +87,8 @@ impl LocalReply {
 
 /// Render a filter rejection, in gRPC's shape when the pipeline armed one.
 ///
-/// A rejection that carries its own `grpc-status` is framed as is; with a
+/// A rejection that carries its own `grpc-status` keeps its fields after
+/// header sanitization and receives an empty-body boundary; with a
 /// [`GrpcErrorMapping`] armed, an error status becomes a Trailers-Only
 /// response; anything else is a plain HTTP response. Only error statuses
 /// become gRPC statuses: a successful short-circuit is a real response.
@@ -210,21 +211,18 @@ fn append_allowed(headers: &mut HeaderMap, rejection: &Rejection) {
 fn grpc_rejection(rejection: &Rejection, version: Version) -> LocalReply {
     let mut reply = LocalReply::status(rejection.status);
     reply.keepalive = true;
-    for (name, value) in &rejection.headers {
-        // On HTTP/2, END_STREAM on the header block already says the body
-        // is empty; a content-length would be redundant.
-        if version == Version::HTTP_2 && name.eq_ignore_ascii_case("content-length") {
-            continue;
-        }
-        match (
-            HeaderName::try_from(name.as_str()),
-            HeaderValue::try_from(value.as_str()),
-        ) {
-            (Ok(name), Ok(value)) => {
-                reply.headers.append(name, value);
-            },
-            (Err(_), _) | (_, Err(_)) => debug!(name, "dropping unencodable gRPC rejection header"),
-        }
+    append_allowed(&mut reply.headers, rejection);
+    // The filter's length may be absent, stale or contradictory across its
+    // two header channels. This rejection always has an empty body.
+    reply.headers.remove(http::header::CONTENT_LENGTH);
+    if matches!(version, Version::HTTP_10 | Version::HTTP_11)
+        && reply.status.as_u16() >= 200
+        && reply.status != StatusCode::NO_CONTENT
+        && reply.status != StatusCode::NOT_MODIFIED
+    {
+        reply
+            .headers
+            .insert(http::header::CONTENT_LENGTH, HeaderValue::from_static("0"));
     }
     debug!("sending gRPC rejection as a trailers-only response");
     reply
@@ -400,6 +398,222 @@ mod tests {
             plain_rejection(Rejection::status(101)).status,
             StatusCode::INTERNAL_SERVER_ERROR,
             "a status that cannot end a response is replaced"
+        );
+    }
+
+    #[test]
+    fn grpc_rejection_filters_both_header_representations() {
+        for version in [Version::HTTP_11, Version::HTTP_2] {
+            let reply = rejection(grpc_rejection_fixture(), &PingoraRequestCtx::default(), version);
+            assert_eq!(
+                reply.status,
+                StatusCode::OK,
+                "the filter's gRPC status envelope survives"
+            );
+            assert!(reply.keepalive, "a complete gRPC rejection keeps the connection usable");
+            assert!(reply.body.is_none(), "preformatted gRPC rejection stays bodyless");
+            assert_forbidden_grpc_headers_absent(&reply.headers);
+            assert_safe_grpc_headers(&reply.headers);
+            assert_eq!(
+                reply.headers.contains_key(http::header::CONTENT_LENGTH),
+                version == Version::HTTP_11,
+                "only H1 needs explicit zero-length framing"
+            );
+            if version == Version::HTTP_11 {
+                assert_eq!(reply.headers.get(http::header::CONTENT_LENGTH).unwrap(), "0");
+            }
+            let response = reply.into_response(false);
+            assert!(
+                hyper::body::Body::is_end_stream(response.body()),
+                "the header block ends the body"
+            );
+        }
+    }
+
+    #[test]
+    fn grpc_rejection_normalizes_untrusted_lengths() {
+        for (strings, maps) in [
+            (vec![], vec![]),
+            (vec!["0"], vec![]),
+            (vec!["19"], vec![]),
+            (vec!["bogus"], vec![]),
+            (vec![""], vec![]),
+            (vec!["0, 19"], vec![]),
+            (vec!["0", "19"], vec![]),
+            (vec![], vec!["0"]),
+            (vec![], vec!["19"]),
+            (vec![], vec!["bogus"]),
+            (vec![], vec![""]),
+            (vec![], vec!["0, 19"]),
+            (vec![], vec!["0", "19"]),
+            (vec!["19"], vec!["0"]),
+        ] {
+            assert_hyper_grpc_length_case(&strings, &maps);
+        }
+    }
+
+    /// Compare one pair of untrusted header channels across H1 and H2.
+    fn assert_hyper_grpc_length_case(strings: &[&str], maps: &[&str]) {
+        let refusal = grpc_rejection_with_lengths(strings, maps);
+        for version in [Version::HTTP_10, Version::HTTP_11, Version::HTTP_2] {
+            let reply = grpc_rejection(&refusal, version);
+            let lengths = reply
+                .headers
+                .get_all(http::header::CONTENT_LENGTH)
+                .iter()
+                .collect::<Vec<_>>();
+            if version == Version::HTTP_2 {
+                assert!(lengths.is_empty(), "H2 has an END_STREAM boundary");
+            } else {
+                assert_eq!(lengths.len(), 1, "H1 needs one length");
+                assert_eq!(lengths.first().unwrap().as_bytes(), b"0", "H1 body is empty");
+            }
+            assert_safe_grpc_headers(&reply.headers);
+        }
+    }
+
+    /// Add arbitrary length fields to both channels of the safe-header fixture.
+    fn grpc_rejection_with_lengths(strings: &[&str], maps: &[&str]) -> Rejection {
+        let mut refusal = grpc_rejection_fixture();
+        refusal
+            .headers
+            .retain(|(name, _)| !name.eq_ignore_ascii_case("content-length"));
+        let mut map = refusal.header_map.take().unwrap();
+        let _removed = map.remove(http::header::CONTENT_LENGTH);
+        for length in strings {
+            refusal
+                .headers
+                .push(("Content-Length".to_owned(), (*length).to_owned()));
+        }
+        for length in maps {
+            map.append(http::header::CONTENT_LENGTH, HeaderValue::from_str(length).unwrap());
+        }
+        refusal.header_map = Some(map);
+        refusal
+    }
+
+    #[test]
+    fn body_prohibited_grpc_rejections_have_no_length() {
+        for status in [101, 204, 304] {
+            let refusal = Rejection::status(status)
+                .with_header("grpc-status", "7")
+                .with_header("content-length", "19");
+            for version in [Version::HTTP_10, Version::HTTP_11, Version::HTTP_2] {
+                let reply = grpc_rejection(&refusal, version);
+                assert_eq!(reply.status.as_u16(), status, "the rejection status is preserved");
+                assert!(!reply.headers.contains_key(http::header::CONTENT_LENGTH));
+            }
+        }
+    }
+
+    /// Supply both header representations without losing ordinary gRPC or custom fields.
+    fn grpc_rejection_fixture() -> Rejection {
+        let mut refusal = Rejection::status(200)
+            .with_header("GrPc-StAtUs", "7")
+            .with_header("grpc-message", "denied")
+            .with_header("x-safe", "kept")
+            .with_header("x-ext-custom", "kept")
+            .with_header("x-duplicate", "first")
+            .with_header("x-duplicate", "second")
+            .with_header("content-length", "0");
+        for name in [
+            "X-PrAxIs-string",
+            "X-Ext-Protocol-string",
+            "X-Ext-Agent-string",
+            "Connection",
+            "Keep-Alive",
+            "Proxy-Authenticate",
+            "TE",
+            "Trailer",
+            "Transfer-Encoding",
+            "Upgrade",
+        ] {
+            refusal.headers.push((name.to_owned(), "hidden".to_owned()));
+        }
+        refusal.header_map = Some(Box::new(grpc_rejection_header_map()));
+        refusal
+    }
+
+    /// Include opaque safe values and forbidden names in the byte-preserving channel.
+    fn grpc_rejection_header_map() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-map-safe", HeaderValue::from_static("kept"));
+        headers.insert("x-map-opaque", HeaderValue::from_bytes(b"\x80kept").unwrap());
+        headers.append("x-duplicate", HeaderValue::from_static("third"));
+        headers.append("x-duplicate", HeaderValue::from_static("fourth"));
+        headers.insert("content-length", HeaderValue::from_static("0"));
+        for name in [
+            "x-praxis-map",
+            "x-ext-protocol-map",
+            "x-ext-agent-map",
+            "connection",
+            "keep-alive",
+            "proxy-authenticate",
+            "te",
+            "trailer",
+            "transfer-encoding",
+            "upgrade",
+        ] {
+            headers.insert(name, HeaderValue::from_static("hidden"));
+        }
+        headers
+    }
+
+    /// Neither representation may emit reserved metadata or a response hop-by-hop name.
+    fn assert_forbidden_grpc_headers_absent(headers: &HeaderMap) {
+        for name in [
+            "x-praxis-string",
+            "x-ext-protocol-string",
+            "x-ext-agent-string",
+            "x-praxis-map",
+            "x-ext-protocol-map",
+            "x-ext-agent-map",
+            "connection",
+            "keep-alive",
+            "proxy-authenticate",
+            "te",
+            "trailer",
+            "transfer-encoding",
+            "upgrade",
+        ] {
+            assert!(!headers.contains_key(name), "{name} must not reach the client");
+        }
+    }
+
+    /// Preserve gRPC fields, nonreserved extensions, opaque bytes and append order.
+    fn assert_safe_grpc_headers(headers: &HeaderMap) {
+        for (name, value) in [
+            ("grpc-status", "7"),
+            ("grpc-message", "denied"),
+            ("x-safe", "kept"),
+            ("x-ext-custom", "kept"),
+            ("x-map-safe", "kept"),
+        ] {
+            assert_eq!(headers.get(name).unwrap(), value, "{name} must survive sanitization");
+        }
+        assert_eq!(
+            headers.get("x-map-opaque").unwrap().as_bytes(),
+            b"\x80kept",
+            "opaque values stay intact"
+        );
+        assert_grpc_duplicate_order(headers);
+    }
+
+    /// Repeated safe fields keep their order within and across both representations.
+    fn assert_grpc_duplicate_order(headers: &HeaderMap) {
+        assert_eq!(
+            headers
+                .get_all("x-duplicate")
+                .iter()
+                .map(HeaderValue::as_bytes)
+                .collect::<Vec<_>>(),
+            [
+                b"first".as_slice(),
+                b"second".as_slice(),
+                b"third".as_slice(),
+                b"fourth".as_slice()
+            ],
+            "the string and HeaderMap channels retain append order"
         );
     }
 

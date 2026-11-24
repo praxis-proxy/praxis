@@ -185,10 +185,18 @@ inspection limit. All applicable limits must accommodate the body.
 
 `allow_unbounded_body` permits null cumulative transfer limits for
 incremental streams. It never removes the buffering cap. Transfer
-limits may exceed the buffering cap because incremental streams do
-not retain the complete body. Reloads apply the new cap to new
-pipelines and their subrequest clients; in-flight requests keep their
-pinned pipeline's limits.
+limits may exceed the buffering cap for incremental streams, which do
+not retain the complete body. For a statically declared request `StreamBuffer`,
+a finite `body_limits.max_request_bytes` must not exceed
+`body_limits.max_buffer_bytes`, even if a filter can release early. The shared
+`configure_body_limits` entry point rejects a mismatch at startup, config
+validation, and reload, including in nested pipelines. Lower the request limit
+or raise the buffer cap to correct it. Response-only buffering and
+runtime-selected body modes retain their existing clamping behavior.
+
+Reloads apply the new cap to new pipelines and their subrequest clients;
+in-flight requests keep their
+pinned pipeline's limits. Rejected reloads keep the running configuration.
 
 This limits accumulated payload bytes, not total process memory.
 Concurrent bodies, rewritten output, parsed metadata, and transport

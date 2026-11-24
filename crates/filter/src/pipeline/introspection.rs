@@ -9,6 +9,7 @@ use praxis_core::config::{
 use serde::Serialize;
 
 use super::{
+    body::{RequestBodyPhase, effective_request_body_phase},
     branch::{RejoinTarget, ResolvedBranch, ResolvedBranchCondition},
     filter::PipelineFilter,
 };
@@ -38,7 +39,7 @@ pub struct FilterIntrospection {
     pub response_conditions: Vec<ResponseCondition>,
     /// Per-filter failure mode.
     pub failure_mode: FailureMode,
-    /// Derived phase participation.
+    /// Hooks this configured position can dispatch, subject to conditions.
     pub phases: Vec<&'static str>,
     /// HTTP request-body access/mode; omitted for TCP.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -55,6 +56,9 @@ pub struct FilterIntrospection {
 pub struct BodyAccessInfo {
     /// Access level (`none` / `read_only` / `read_write`).
     pub access: &'static str,
+    /// Processing requirement (`optional` / `required`), absent for no body access.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requirement: Option<&'static str>,
     /// Delivery mode (`stream` / `stream_buffer` / `size_limit`).
     pub mode: &'static str,
     /// Optional byte limit for buffered / size-limited modes.
@@ -101,7 +105,7 @@ pub struct BranchConditionInfo {
 impl FilterPipeline {
     /// Public introspection snapshot of the resolved filter chain.
     pub fn introspection(&self) -> Vec<FilterIntrospection> {
-        snapshot_filters(&self.filters)
+        snapshot_filters(&self.filters, Some(&self.request_head_filter_indices))
     }
 }
 
@@ -109,18 +113,25 @@ impl FilterPipeline {
 // Walkers
 // -----------------------------------------------------------------------------
 
-/// Snapshot an ordered filter list.
-fn snapshot_filters(filters: &[PipelineFilter]) -> Vec<FilterIntrospection> {
+/// Snapshot an ordered filter list with eligible top-level head hooks.
+fn snapshot_filters(filters: &[PipelineFilter], head_indices: Option<&[usize]>) -> Vec<FilterIntrospection> {
     filters
         .iter()
         .enumerate()
-        .map(|(index, pf)| snapshot_filter(index, pf, filters))
+        .map(|(index, pf)| snapshot_filter(index, pf, filters, head_indices))
         .collect()
 }
 
 /// Snapshot one filter with branch rejoin labels against `siblings`.
-fn snapshot_filter(index: usize, pf: &PipelineFilter, siblings: &[PipelineFilter]) -> FilterIntrospection {
-    let (phases, request_body, response_body) = phase_and_body_info(pf);
+fn snapshot_filter(
+    index: usize,
+    pf: &PipelineFilter,
+    siblings: &[PipelineFilter],
+    head_indices: Option<&[usize]>,
+) -> FilterIntrospection {
+    let top_level = head_indices.is_some();
+    let head = head_indices.is_some_and(|indices| indices.contains(&index));
+    let (phases, request_body, response_body) = phase_and_body_info(pf, top_level, head);
     let mut conditions = pf.conditions.clone();
     redact_condition_headers(&mut conditions);
     let mut response_conditions = pf.response_conditions.clone();
@@ -144,7 +155,11 @@ fn snapshot_filter(index: usize, pf: &PipelineFilter, siblings: &[PipelineFilter
 }
 
 /// HTTP phases + body info, or TCP `connect`/`disconnect` with no body fields.
-fn phase_and_body_info(pf: &PipelineFilter) -> (Vec<&'static str>, Option<BodyAccessInfo>, Option<BodyAccessInfo>) {
+fn phase_and_body_info(
+    pf: &PipelineFilter,
+    top_level: bool,
+    head: bool,
+) -> (Vec<&'static str>, Option<BodyAccessInfo>, Option<BodyAccessInfo>) {
     match &pf.filter {
         AnyFilter::Http(f) => {
             let req_access = HttpFilter::request_body_access(f.as_ref());
@@ -152,7 +167,7 @@ fn phase_and_body_info(pf: &PipelineFilter) -> (Vec<&'static str>, Option<BodyAc
             let req_mode = HttpFilter::request_body_mode(f.as_ref());
             let resp_mode = HttpFilter::response_body_mode(f.as_ref());
             (
-                http_phases(req_access, resp_access, &pf.response_conditions),
+                potential_http_phases(pf, f.as_ref(), top_level, head),
                 Some(body_info(req_access, req_mode)),
                 Some(body_info(resp_access, resp_mode)),
             )
@@ -161,12 +176,44 @@ fn phase_and_body_info(pf: &PipelineFilter) -> (Vec<&'static str>, Option<BodyAc
     }
 }
 
+/// Potential HTTP hooks for this filter's position and resolved body phase.
+fn potential_http_phases(
+    pf: &PipelineFilter,
+    filter: &dyn HttpFilter,
+    top_level: bool,
+    head: bool,
+) -> Vec<&'static str> {
+    let pre_read = effective_request_body_phase(pf) == RequestBodyPhase::PreRead;
+    let request_body = if top_level && pre_read {
+        filter.request_body_access()
+    } else {
+        BodyAccess::None
+    };
+    let response_body = if top_level {
+        filter.response_body_access()
+    } else {
+        BodyAccess::None
+    };
+    let mut phases = http_phases(head, request_body, response_body);
+    if top_level && filter.selected_upstream_request_body_access() != BodyAccess::None {
+        phases.push("selected_upstream_request_body");
+    }
+    #[cfg(feature = "bound-upstream-request-body")]
+    if top_level && effective_request_body_phase(pf) == RequestBodyPhase::BoundUpstream {
+        phases.push("bound_upstream_request_body");
+    }
+    if top_level && filter.response_trailer_access() {
+        phases.push("response_trailers");
+    }
+    phases
+}
+
 /// Snapshot a branch including nested filters.
 fn snapshot_branch(branch: &ResolvedBranch, parent_siblings: &[PipelineFilter]) -> BranchIntrospection {
     BranchIntrospection {
         name: branch.name.to_string(),
         condition: branch.condition.as_ref().map(branch_condition_info),
-        filters: snapshot_filters(&branch.filters),
+        filters: snapshot_filters(&branch.filters, None),
         max_iterations: branch.max_iterations,
         rejoin: rejoin_label(&branch.rejoin, parent_siblings),
     }
@@ -181,19 +228,17 @@ fn branch_condition_info(cond: &ResolvedBranchCondition) -> BranchConditionInfo 
     }
 }
 
-/// HTTP phase participation heuristic for v1.
-fn http_phases(
-    request_body: BodyAccess,
-    response_body: BodyAccess,
-    response_conditions: &[ResponseCondition],
-) -> Vec<&'static str> {
-    let mut phases = vec!["request"];
+/// Potential HTTP hook dispatch in a configured pipeline position.
+fn http_phases(request_head: bool, request_body: BodyAccess, response_body: BodyAccess) -> Vec<&'static str> {
+    let mut phases = Vec::with_capacity(5);
+    if request_head {
+        phases.push("request_head");
+    }
+    phases.push("request");
     if request_body != BodyAccess::None {
         phases.push("request_body");
     }
-    if !response_conditions.is_empty() || response_body != BodyAccess::None {
-        phases.push("response");
-    }
+    phases.push("response");
     if response_body != BodyAccess::None {
         phases.push("response_body");
     }
@@ -210,8 +255,15 @@ fn body_info(access: BodyAccess, mode: BodyMode) -> BodyAccessInfo {
     BodyAccessInfo {
         access: match access {
             BodyAccess::None => "none",
-            BodyAccess::ReadOnly => "read_only",
-            BodyAccess::ReadWrite => "read_write",
+            BodyAccess::ReadOnly(_) => "read_only",
+            BodyAccess::ReadWrite(_) => "read_write",
+        },
+        requirement: match access {
+            BodyAccess::None => None,
+            BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
+            | BodyAccess::ReadWrite(crate::BodyRequirement::Optional) => Some("optional"),
+            BodyAccess::ReadOnly(crate::BodyRequirement::Required)
+            | BodyAccess::ReadWrite(crate::BodyRequirement::Required) => Some("required"),
         },
         mode: mode_name,
         max_bytes,
@@ -247,6 +299,37 @@ mod tests {
     use super::*;
     use crate::FilterRegistry;
 
+    /// A top-level head filter and the same built-in in a branch-only position.
+    const PHASE_POSITIONS_YAML: &str = "
+- filter: headers
+  request_add:
+    - {name: X-Probe, value: ready}
+  branch_chains:
+    - name: nested_head
+      chains:
+        - name: nested
+          filters:
+            - filter: head_classifier
+              rules: [{path_prefix: /, class: nested}]
+- filter: head_classifier
+  rules: [{path_prefix: /, class: top}]
+";
+
+    /// Resolve the phase fixture with its inline branch attached.
+    fn phase_positions_snapshot() -> Vec<FilterIntrospection> {
+        let mut entries: Vec<crate::FilterEntry> =
+            serde_yaml::from_str(PHASE_POSITIONS_YAML).expect("phase fixtures parse");
+        FilterPipeline::build_with_chains(
+            &mut entries,
+            &FilterRegistry::with_builtins(),
+            &std::collections::HashMap::new(),
+            &praxis_core::config::InsecureOptions::default(),
+            &[],
+        )
+        .expect("phase fixtures build with branches")
+        .introspection()
+    }
+
     #[test]
     fn empty_pipeline_introspection() {
         let registry = FilterRegistry::with_builtins();
@@ -257,33 +340,74 @@ mod tests {
 
     #[test]
     fn body_info_maps_access_and_mode() {
-        let info = body_info(BodyAccess::ReadOnly, BodyMode::StreamBuffer { max_bytes: Some(64) });
+        let info = body_info(
+            BodyAccess::ReadOnly(crate::BodyRequirement::Optional),
+            BodyMode::StreamBuffer { max_bytes: Some(64) },
+        );
         assert_eq!(info.access, "read_only", "ReadOnly maps to read_only");
         assert_eq!(info.mode, "stream_buffer", "StreamBuffer maps to stream_buffer");
         assert_eq!(info.max_bytes, Some(64), "max_bytes should round-trip");
     }
 
     #[test]
-    fn http_phases_include_response_when_conditions_present() {
-        use praxis_core::config::{ResponseCondition, ResponseConditionMatch};
+    fn body_info_serializes_processing_requirements() {
+        for (access, expected) in [
+            (BodyAccess::None, None),
+            (BodyAccess::ReadOnly(crate::BodyRequirement::Optional), Some("optional")),
+            (
+                BodyAccess::ReadWrite(crate::BodyRequirement::Optional),
+                Some("optional"),
+            ),
+            (BodyAccess::ReadOnly(crate::BodyRequirement::Required), Some("required")),
+            (
+                BodyAccess::ReadWrite(crate::BodyRequirement::Required),
+                Some("required"),
+            ),
+        ] {
+            let json = serde_json::to_value(body_info(access, BodyMode::Stream)).expect("body access info serializes");
+            match expected {
+                None => assert!(
+                    json.get("requirement").is_none(),
+                    "no body access must omit requirement"
+                ),
+                Some(expected) => assert_eq!(
+                    json.get("requirement").and_then(serde_json::Value::as_str),
+                    Some(expected)
+                ),
+            }
+        }
+    }
 
-        let conditions = vec![ResponseCondition::When(ResponseConditionMatch {
-            status: Some(vec![500]),
-            headers: None,
-            headers_present: None,
-        })];
-        let phases = http_phases(BodyAccess::None, BodyAccess::None, &conditions);
+    #[test]
+    fn http_phases_include_response_without_conditions() {
+        let phases = http_phases(false, BodyAccess::None, BodyAccess::None);
         assert_eq!(
             phases,
             ["request", "response"],
-            "response conditions should add response phase"
+            "response hooks can run without response conditions or body access"
         );
     }
 
     #[test]
     fn http_phases_always_include_request() {
-        let phases = http_phases(BodyAccess::None, BodyAccess::None, &[]);
-        assert_eq!(phases, ["request"], "request phase is always present");
+        for (head, request_body, response_body) in [
+            (false, BodyAccess::None, BodyAccess::None),
+            (
+                true,
+                BodyAccess::ReadOnly(crate::BodyRequirement::Optional),
+                BodyAccess::ReadOnly(crate::BodyRequirement::Optional),
+            ),
+        ] {
+            let phases = http_phases(head, request_body, response_body);
+            assert!(
+                phases.contains(&"request"),
+                "request phase is always present: {phases:?}"
+            );
+            assert!(
+                phases.contains(&"response"),
+                "response phase is always possible: {phases:?}"
+            );
+        }
     }
 
     #[test]
@@ -309,19 +433,54 @@ mod tests {
     #[test]
     fn http_phases_reflect_body_access() {
         assert_eq!(
-            http_phases(BodyAccess::None, BodyAccess::None, &[]),
-            vec!["request"],
-            "no body access means request phase only"
+            http_phases(false, BodyAccess::None, BodyAccess::None),
+            vec!["request", "response"],
+            "no body access still permits response headers"
         );
         assert_eq!(
-            http_phases(BodyAccess::ReadOnly, BodyAccess::None, &[]),
-            vec!["request", "request_body"],
+            http_phases(
+                false,
+                BodyAccess::ReadOnly(crate::BodyRequirement::Optional),
+                BodyAccess::None
+            ),
+            vec!["request", "request_body", "response"],
             "request body access adds the request_body phase"
         );
         assert_eq!(
-            http_phases(BodyAccess::None, BodyAccess::ReadWrite, &[]),
+            http_phases(
+                false,
+                BodyAccess::None,
+                BodyAccess::ReadWrite(crate::BodyRequirement::Optional)
+            ),
             vec!["request", "response", "response_body"],
             "response body access adds response phases"
+        );
+    }
+
+    #[test]
+    fn introspection_reports_head_and_header_response_phases() {
+        let snapshot = phase_positions_snapshot();
+        let headers = snapshot.first().expect("headers snapshot");
+        let classifier = snapshot.get(1).expect("top-level classifier snapshot");
+        let nested = headers
+            .branches
+            .first()
+            .and_then(|branch| branch.filters.first())
+            .expect("nested classifier snapshot");
+        assert_eq!(
+            headers.phases,
+            ["request", "response"],
+            "headers can mutate response headers"
+        );
+        assert_eq!(
+            classifier.phases,
+            ["request_head", "request", "response"],
+            "top-level classifier runs head hook"
+        );
+        assert_eq!(
+            nested.phases,
+            ["request", "response"],
+            "branch-only classifier has no head hook"
         );
     }
 
@@ -332,12 +491,18 @@ mod tests {
         assert_eq!(stream.access, "none", "None access maps to its label");
         assert_eq!(stream.max_bytes, None, "Stream has no byte ceiling");
 
-        let buffered = body_info(BodyAccess::ReadOnly, BodyMode::StreamBuffer { max_bytes: Some(42) });
+        let buffered = body_info(
+            BodyAccess::ReadOnly(crate::BodyRequirement::Optional),
+            BodyMode::StreamBuffer { max_bytes: Some(42) },
+        );
         assert_eq!(buffered.mode, "stream_buffer", "StreamBuffer maps to its label");
         assert_eq!(buffered.access, "read_only", "ReadOnly access maps to its label");
         assert_eq!(buffered.max_bytes, Some(42), "the configured ceiling is exposed");
 
-        let limited = body_info(BodyAccess::ReadWrite, BodyMode::SizeLimit { max_bytes: 7 });
+        let limited = body_info(
+            BodyAccess::ReadWrite(crate::BodyRequirement::Optional),
+            BodyMode::SizeLimit { max_bytes: 7 },
+        );
         assert_eq!(limited.mode, "size_limit", "SizeLimit maps to its label");
         assert_eq!(limited.access, "read_write", "ReadWrite access maps to its label");
         assert_eq!(limited.max_bytes, Some(7), "the configured limit is exposed");

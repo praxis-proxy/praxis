@@ -472,6 +472,40 @@ mod tests {
     }
 
     #[test]
+    fn healthy_round_robin_skips_retry_exclusions_before_weighting() {
+        let rr = RoundRobin::new(vec![
+            WeightedEndpoint::simple(Arc::from("10.0.0.1:80"), 4),
+            WeightedEndpoint::simple(Arc::from("10.0.0.2:80"), 3),
+            WeightedEndpoint::simple(Arc::from("10.0.0.3:80"), 2),
+            WeightedEndpoint::simple(Arc::from("10.0.0.4:80"), 1),
+        ]);
+        let state: ClusterHealthState = Arc::new(ClusterHealthEntry::new(
+            vec![
+                EndpointHealth::new(),
+                EndpointHealth::new(),
+                EndpointHealth::new(),
+                EndpointHealth::new(),
+            ],
+            vec![
+                Arc::from("10.0.0.1:80"),
+                Arc::from("10.0.0.2:80"),
+                Arc::from("10.0.0.3:80"),
+                Arc::from("10.0.0.4:80"),
+            ],
+            None,
+            None,
+        ));
+        state.endpoints()[0].mark_unhealthy();
+        let excluded = [Arc::from("10.0.0.2:80")];
+
+        for _ in 0..2 {
+            for expected in ["10.0.0.3:80", "10.0.0.3:80", "10.0.0.4:80"] {
+                assert_eq!(rr.select(Some(&state), &excluded).as_deref(), Some(expected));
+            }
+        }
+    }
+
+    #[test]
     fn panic_mode_when_all_unhealthy() {
         let rr = RoundRobin::new(vec![
             WeightedEndpoint::simple(Arc::from("10.0.0.1:80"), 1),

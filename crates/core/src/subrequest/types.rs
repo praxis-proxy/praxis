@@ -6,11 +6,17 @@
 //! Defines [`SubRequest`] and [`SubResponse`] for buffered exchanges,
 //! [`StreamingSubResponse`] for streaming responses, and
 //! [`SubRequestError`] for execution failures. Reserved headers
-//! (`x-praxis-*`, `x-ext-*`) are automatically stripped from
-//! outbound requests; use [`FrameworkHeaders`] to inject metadata
-//! that survives sanitization.
+//! (`x-praxis-*`, `x-ext-protocol-*`, `x-ext-agent-*`) are
+//! automatically stripped from outbound requests; use
+//! [`FrameworkHeaders`] to inject metadata that survives sanitization.
 
-use std::time::Duration;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use bytes::Bytes;
 use http::HeaderMap;
@@ -19,6 +25,28 @@ use tokio::sync::OwnedSemaphorePermit;
 
 use super::internals::SubRequestConnector;
 use crate::{backend, egress::Connector};
+
+/// Per-exchange evidence that a connected transport accepted the request head.
+///
+/// Create a fresh witness for each attempt. Clones observe the same attempt,
+/// including after its future is cancelled. A true value does not prove that
+/// the backend processed the request; it preserves that possibility after a
+/// response read fails. Admission, validation and failed dials leave it false.
+#[derive(Clone, Debug, Default)]
+pub struct RequestProgress(Arc<AtomicBool>);
+
+impl RequestProgress {
+    /// Whether this attempt successfully sent its request head.
+    #[must_use]
+    pub fn forwarded(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+
+    /// Publish forwarding only after the transport's head write succeeds.
+    pub(super) fn mark_forwarded(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
 
 /// An outbound HTTP request for a sub-request exchange.
 #[derive(Clone, Debug)]
@@ -31,8 +59,9 @@ pub struct SubRequest {
 
     /// Request headers.
     ///
-    /// Reserved headers (`x-praxis-*`, `x-ext-*`) are stripped by the
-    /// executor before dispatch. Use [`FrameworkHeaders`] on
+    /// Reserved headers (`x-praxis-*`, `x-ext-protocol-*`,
+    /// `x-ext-agent-*`) are stripped by the executor before dispatch.
+    /// Use [`FrameworkHeaders`] on
     /// [`super::SubRequestClient::execute`] to inject metadata that must
     /// survive sanitisation.
     pub headers: HeaderMap,
@@ -68,9 +97,9 @@ pub const DEPTH_HEADER: &str = "x-praxis-iterative-depth";
 ///
 /// This typed struct replaces an open `HeaderMap` so that the executor
 /// controls exactly which headers survive reserved-header stripping.
-/// Each field maps to a specific header name chosen by the caller;
-/// the executor validates that the name is neither transport-level
-/// nor reserved before injection.
+/// [`FrameworkHeaders::insert`] rejects transport-level and reserved
+/// names; [`FrameworkHeaders::set_depth`] injects the trusted reserved
+/// depth header.
 #[derive(Clone, Debug, Default)]
 pub struct FrameworkHeaders {
     /// Validated (name, value) pairs to inject.
@@ -90,7 +119,8 @@ impl FrameworkHeaders {
     }
 
     /// Insert a header, returning `Err` if the name is transport-level
-    /// or uses a reserved prefix (`x-praxis-*`, `x-ext-*`).
+    /// or uses a reserved prefix (`x-praxis-*`, `x-ext-protocol-*`,
+    /// `x-ext-agent-*`).
     ///
     /// # Errors
     ///

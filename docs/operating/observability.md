@@ -46,7 +46,7 @@ The health and metrics listener exposes these endpoints:
 | Path | Purpose |
 | ----------- | ----------------------------------------- |
 | `/healthy` | Liveness probe - returns `200` once the server is accepting connections |
-| `/ready` | Readiness probe - returns cluster health status; `503` when any cluster has zero healthy endpoints |
+| `/ready` | Readiness probe - returns cluster health status; the default `readiness: serving` stays `200` through an upstream outage, while `readiness: upstreams` returns `503` when any cluster has zero healthy endpoints |
 | `/metrics` | Prometheus text exposition format |
 
 The separate `admin.address` listener exposes the management API, including
@@ -273,6 +273,24 @@ descriptors neared the process limit (see
 `runtime.shed_on_fd_pressure`). A steady rate means
 the limit is too small for the traffic.
 
+#### `praxis_cluster_overload_rejects_total` (counter)
+
+Requests shed by a cluster's `max_connections` ceiling,
+answered with `503` and `Retry-After: 1`. Separate from
+`praxis_overload_rejects_total`, which counts only the
+protections that run before any filter and carries no
+cluster label.
+
+| Label | Values |
+| --------- | --------------------------------- |
+| `cluster` | The cluster name that shed the request |
+
+A steady rate on one cluster means its ceiling is below
+what the upstream can actually serve, or that the upstream
+has slowed down and requests are occupying slots longer.
+Requests pinned by session affinity bypass the ceiling and
+so are never counted here.
+
 #### `praxis_overload_pressure` (gauge)
 
 Smoothed pressure from 0 to 1 for one resource.
@@ -394,7 +412,7 @@ Requests that reached an upstream endpoint.
 | Label | Values |
 | -------------- | ---------------------------------------- |
 | `cluster` | Cluster name or `"none"` |
-| `endpoint` | Configured upstream address (`host:port`) |
+| `endpoint` | Configured upstream address (`host:port`), or `forward_proxy` |
 | `status_class` | `1xx`, `2xx`, `3xx`, `4xx`, `5xx`, `unknown` |
 
 Counted once per request, so a request retried across
@@ -414,6 +432,16 @@ endpoints generated from pod IPs) keeps a set of
 series for every address it has ever configured, and
 `/metrics` grows with each one. Disable the `endpoint`
 dimension there (see [Metric Label Sets](#metric-label-sets)).
+
+A forward-proxy listener (`forward-proxy` builds) that
+forwards an absolute-form request
+(`GET http://host/path`) to the destination its
+target names labels it `endpoint="forward_proxy"`,
+whatever the destination: the client chooses it, so
+labeling each by address would grow one series per
+destination without bound. A request the pipeline
+routes to a cluster instead keeps that endpoint's
+configured address.
 
 ### TCP Connection Metrics
 

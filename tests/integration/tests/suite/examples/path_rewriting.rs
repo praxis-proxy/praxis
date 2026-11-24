@@ -46,6 +46,20 @@ fn path_rewriting_regex_replace() {
 }
 
 #[test]
+fn path_rewriting_add_prefix() {
+    let backend = start_uri_echo_backend();
+    let config = super::load_example_config(
+        "transformation/path-rewriting.yaml",
+        free_port(),
+        HashMap::from([("127.0.0.1:3000", backend.port())]),
+    );
+    let proxy = start_proxy(&config);
+    let (status, body) = http_get(proxy.addr(), "/items?x=1", None);
+    assert_eq!(status, 200);
+    assert_eq!(body, "/svc/items?x=1", "add_prefix must preserve query");
+}
+
+#[test]
 fn path_rewriting_no_match_passes_through() {
     let backend_port_guard = start_uri_echo_backend();
     let backend_port = backend_port_guard.port();

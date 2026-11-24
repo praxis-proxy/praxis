@@ -20,21 +20,21 @@ use crate::{FilterAction, builtins::http::traffic_management::token_bucket::Toke
 
 #[test]
 fn from_config_parses_per_ip() {
-    let yaml: serde_yaml::Value = serde_yaml::from_str("mode: per_ip\nrate: 100\nburst: 200").unwrap();
+    let yaml: serde_yaml::Value = serde_yaml::from_str("mode: per_ip\nscope: local\nrate: 100\nburst: 200").unwrap();
     let filter = RateLimitFilter::from_config(&yaml).unwrap();
     assert_eq!(filter.name(), "rate_limit", "filter name should be rate_limit");
 }
 
 #[test]
 fn from_config_parses_global() {
-    let yaml: serde_yaml::Value = serde_yaml::from_str("mode: global\nrate: 50\nburst: 100").unwrap();
+    let yaml: serde_yaml::Value = serde_yaml::from_str("mode: global\nscope: local\nrate: 50\nburst: 100").unwrap();
     let filter = RateLimitFilter::from_config(&yaml).unwrap();
     assert_eq!(filter.name(), "rate_limit", "filter name should be rate_limit");
 }
 
 #[test]
 fn from_config_rejects_zero_rate() {
-    let yaml: serde_yaml::Value = serde_yaml::from_str("mode: global\nrate: 0\nburst: 10").unwrap();
+    let yaml: serde_yaml::Value = serde_yaml::from_str("mode: global\nscope: local\nrate: 0\nburst: 10").unwrap();
     let err = RateLimitFilter::from_config(&yaml).err().expect("should error");
     assert!(
         err.to_string().contains("rate must be a finite number greater than 0"),
@@ -44,14 +44,14 @@ fn from_config_rejects_zero_rate() {
 
 #[test]
 fn from_config_rejects_nan_rate() {
-    let yaml: serde_yaml::Value = serde_yaml::from_str("mode: global\nrate: .nan\nburst: 10").unwrap();
+    let yaml: serde_yaml::Value = serde_yaml::from_str("mode: global\nscope: local\nrate: .nan\nburst: 10").unwrap();
     let err = RateLimitFilter::from_config(&yaml).err().expect("should error");
     assert!(err.to_string().contains("finite"), "should reject NaN rate, got: {err}");
 }
 
 #[test]
 fn from_config_rejects_infinity_rate() {
-    let yaml: serde_yaml::Value = serde_yaml::from_str("mode: global\nrate: .inf\nburst: 10").unwrap();
+    let yaml: serde_yaml::Value = serde_yaml::from_str("mode: global\nscope: local\nrate: .inf\nburst: 10").unwrap();
     let err = RateLimitFilter::from_config(&yaml).err().expect("should error");
     assert!(
         err.to_string().contains("finite"),
@@ -61,7 +61,7 @@ fn from_config_rejects_infinity_rate() {
 
 #[test]
 fn from_config_rejects_negative_rate() {
-    let yaml: serde_yaml::Value = serde_yaml::from_str("mode: global\nrate: -5\nburst: 10").unwrap();
+    let yaml: serde_yaml::Value = serde_yaml::from_str("mode: global\nscope: local\nrate: -5\nburst: 10").unwrap();
     let err = RateLimitFilter::from_config(&yaml).err().expect("should error");
     assert!(
         err.to_string().contains("rate must be a finite number greater than 0"),
@@ -71,7 +71,7 @@ fn from_config_rejects_negative_rate() {
 
 #[test]
 fn from_config_rejects_zero_burst() {
-    let yaml: serde_yaml::Value = serde_yaml::from_str("mode: global\nrate: 10\nburst: 0").unwrap();
+    let yaml: serde_yaml::Value = serde_yaml::from_str("mode: global\nscope: local\nrate: 10\nburst: 0").unwrap();
     let err = RateLimitFilter::from_config(&yaml).err().expect("should error");
     assert!(
         err.to_string().contains("burst must be at least 1"),
@@ -81,7 +81,7 @@ fn from_config_rejects_zero_burst() {
 
 #[test]
 fn from_config_rejects_burst_below_rate() {
-    let yaml: serde_yaml::Value = serde_yaml::from_str("mode: global\nrate: 100\nburst: 50").unwrap();
+    let yaml: serde_yaml::Value = serde_yaml::from_str("mode: global\nscope: local\nrate: 100\nburst: 50").unwrap();
     let err = RateLimitFilter::from_config(&yaml).err().expect("should error");
     assert!(
         err.to_string().contains("burst must be >= rate"),
@@ -91,7 +91,8 @@ fn from_config_rejects_burst_below_rate() {
 
 #[test]
 fn from_config_rejects_unknown_mode() {
-    let yaml: serde_yaml::Value = serde_yaml::from_str("mode: sliding_window\nrate: 10\nburst: 20").unwrap();
+    let yaml: serde_yaml::Value =
+        serde_yaml::from_str("mode: sliding_window\nscope: local\nrate: 10\nburst: 20").unwrap();
     let err = RateLimitFilter::from_config(&yaml).err().expect("should error");
     assert!(
         err.to_string().contains("rate_limit"),
@@ -105,6 +106,74 @@ fn from_config_rejects_missing_fields() {
     assert!(
         RateLimitFilter::from_config(&yaml).is_err(),
         "missing fields should error"
+    );
+}
+
+#[test]
+fn from_config_rejects_omitted_scope() {
+    for mode in ["global", "per_ip"] {
+        let yaml: serde_yaml::Value = serde_yaml::from_str(&format!("mode: {mode}\nrate: 10\nburst: 20")).unwrap();
+        let err = RateLimitFilter::from_config(&yaml)
+            .err()
+            .expect("omitted scope should error");
+        let message = err.to_string();
+        assert!(
+            message.contains("rate_limit"),
+            "error should reference the filter name in {mode} mode: {message}"
+        );
+        assert!(
+            message.contains("scope"),
+            "error should name the missing field in {mode} mode: {message}"
+        );
+    }
+}
+
+#[test]
+fn from_config_rejects_unknown_scope() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str("mode: global\nscope: valkey\nrate: 10\nburst: 20").unwrap();
+    let err = RateLimitFilter::from_config(&yaml)
+        .err()
+        .expect("unknown scope should error");
+    let message = err.to_string();
+    assert!(
+        message.contains("rate_limit"),
+        "error should reference the filter name: {message}"
+    );
+    assert!(
+        message.contains("local"),
+        "error should name the supported value: {message}"
+    );
+}
+
+#[tokio::test]
+async fn local_scope_state_is_not_shared_between_instances() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str("mode: global\nscope: local\nrate: 1\nburst: 1").unwrap();
+    let first = RateLimitFilter::from_config(&yaml).expect("first instance should build");
+    let second = RateLimitFilter::from_config(&yaml).expect("second instance should build");
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.client_addr = Some("10.0.0.1".parse().unwrap());
+    let action = first.on_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "first instance should admit its first request"
+    );
+
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.client_addr = Some("10.0.0.1".parse().unwrap());
+    let action = second.on_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "second instance should have its own bucket"
+    );
+
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.client_addr = Some("10.0.0.1".parse().unwrap());
+    let action = first.on_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(&action, FilterAction::Reject(r) if r.status == 429),
+        "first instance should reject after its burst"
     );
 }
 
@@ -537,7 +606,7 @@ fn rate_limit_headers_saturate_near_u64_max() {
 
 #[test]
 fn from_config_rejects_burst_equal_to_rate_minus_one() {
-    let yaml: serde_yaml::Value = serde_yaml::from_str("mode: global\nrate: 10\nburst: 9").unwrap();
+    let yaml: serde_yaml::Value = serde_yaml::from_str("mode: global\nscope: local\nrate: 10\nburst: 9").unwrap();
     let err = RateLimitFilter::from_config(&yaml).err().expect("should error");
     assert!(
         err.to_string().contains("burst must be >= rate"),
@@ -547,14 +616,15 @@ fn from_config_rejects_burst_equal_to_rate_minus_one() {
 
 #[test]
 fn from_config_accepts_burst_equal_to_rate() {
-    let yaml: serde_yaml::Value = serde_yaml::from_str("mode: global\nrate: 10\nburst: 10").unwrap();
+    let yaml: serde_yaml::Value = serde_yaml::from_str("mode: global\nscope: local\nrate: 10\nburst: 10").unwrap();
     let filter = RateLimitFilter::from_config(&yaml).expect("burst equal to rate should be accepted");
     assert_eq!(filter.name(), "rate_limit", "filter name should be rate_limit");
 }
 
 #[test]
 fn from_config_rejects_unknown_fields() {
-    let yaml: serde_yaml::Value = serde_yaml::from_str("mode: global\nrate: 10\nburst: 20\nextra: true").unwrap();
+    let yaml: serde_yaml::Value =
+        serde_yaml::from_str("mode: global\nscope: local\nrate: 10\nburst: 20\nextra: true").unwrap();
     let err = RateLimitFilter::from_config(&yaml)
         .err()
         .expect("should error on unknown field");
@@ -566,14 +636,14 @@ fn from_config_rejects_unknown_fields() {
 
 #[test]
 fn from_config_accepts_fractional_rate() {
-    let yaml: serde_yaml::Value = serde_yaml::from_str("mode: global\nrate: 0.5\nburst: 1").unwrap();
+    let yaml: serde_yaml::Value = serde_yaml::from_str("mode: global\nscope: local\nrate: 0.5\nburst: 1").unwrap();
     let filter = RateLimitFilter::from_config(&yaml).expect("fractional rate of 0.5 should be accepted");
     assert_eq!(filter.name(), "rate_limit", "filter name should be rate_limit");
 }
 
 #[test]
 fn from_config_rejects_negative_infinity_rate() {
-    let yaml: serde_yaml::Value = serde_yaml::from_str("mode: global\nrate: -.inf\nburst: 10").unwrap();
+    let yaml: serde_yaml::Value = serde_yaml::from_str("mode: global\nscope: local\nrate: -.inf\nburst: 10").unwrap();
     let err = RateLimitFilter::from_config(&yaml).err().expect("should error");
     assert!(
         err.to_string().contains("rate must be a finite number greater than 0"),
@@ -583,7 +653,7 @@ fn from_config_rejects_negative_infinity_rate() {
 
 #[test]
 fn ipv6_prefix_len_defaults_to_128() {
-    let cfg: RateLimitConfig = serde_yaml::from_str("mode: per_ip\nrate: 1\nburst: 1").unwrap();
+    let cfg: RateLimitConfig = serde_yaml::from_str("mode: per_ip\nscope: local\nrate: 1\nburst: 1").unwrap();
     assert_eq!(
         cfg.ipv6_prefix_len,
         Ipv6PrefixLen::try_from(128_u8).unwrap(),
@@ -594,8 +664,10 @@ fn ipv6_prefix_len_defaults_to_128() {
 #[test]
 fn ipv6_prefix_len_accepts_bounds() {
     for len in [1_u8, 60, 64, 127, 128] {
-        let yaml: serde_yaml::Value =
-            serde_yaml::from_str(&format!("mode: per_ip\nrate: 1\nburst: 1\nipv6_prefix_len: {len}")).unwrap();
+        let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+            "mode: per_ip\nscope: local\nrate: 1\nburst: 1\nipv6_prefix_len: {len}"
+        ))
+        .unwrap();
         assert!(
             RateLimitFilter::from_config(&yaml).is_ok(),
             "ipv6_prefix_len {len} should be accepted"
@@ -606,8 +678,10 @@ fn ipv6_prefix_len_accepts_bounds() {
 #[test]
 fn ipv6_prefix_len_rejects_out_of_range() {
     for len in ["0", "129"] {
-        let yaml: serde_yaml::Value =
-            serde_yaml::from_str(&format!("mode: per_ip\nrate: 1\nburst: 1\nipv6_prefix_len: {len}")).unwrap();
+        let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+            "mode: per_ip\nscope: local\nrate: 1\nburst: 1\nipv6_prefix_len: {len}"
+        ))
+        .unwrap();
         let err = RateLimitFilter::from_config(&yaml).err().expect("should error");
         assert!(
             err.to_string().contains("ipv6_prefix_len must be in 1..=128"),
@@ -619,8 +693,10 @@ fn ipv6_prefix_len_rejects_out_of_range() {
 #[test]
 fn ipv6_prefix_len_rejects_non_integer() {
     for len in ["256", "-1", "64.5", "\"64\"", "abc", "null"] {
-        let yaml: serde_yaml::Value =
-            serde_yaml::from_str(&format!("mode: per_ip\nrate: 1\nburst: 1\nipv6_prefix_len: {len}")).unwrap();
+        let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+            "mode: per_ip\nscope: local\nrate: 1\nburst: 1\nipv6_prefix_len: {len}"
+        ))
+        .unwrap();
         assert!(
             RateLimitFilter::from_config(&yaml).is_err(),
             "ipv6_prefix_len {len} should be rejected"
@@ -768,7 +844,7 @@ fn per_ip_ipv4_unaffected_by_ipv6_prefix_len() {
 #[test]
 fn global_mode_ignores_ipv6_prefix_len() {
     let yaml: serde_yaml::Value =
-        serde_yaml::from_str("mode: global\nrate: 1\nburst: 1\nipv6_prefix_len: 128").unwrap();
+        serde_yaml::from_str("mode: global\nscope: local\nrate: 1\nburst: 1\nipv6_prefix_len: 128").unwrap();
     assert!(
         RateLimitFilter::from_config(&yaml).is_ok(),
         "ipv6_prefix_len should parse in global mode"
@@ -787,19 +863,22 @@ fn global_mode_ignores_ipv6_prefix_len() {
 
 #[test]
 fn shadow_defaults_to_false() {
-    let cfg: RateLimitConfig = serde_yaml::from_str("mode: global\nrate: 1\nburst: 1").unwrap();
+    let cfg: RateLimitConfig = serde_yaml::from_str("mode: global\nscope: local\nrate: 1\nburst: 1").unwrap();
     assert!(!cfg.shadow, "omitted shadow should enforce the limit");
 }
 
 #[test]
 fn from_config_parses_shadow() {
     for (value, expected) in [("true", true), ("false", false)] {
-        let cfg: RateLimitConfig =
-            serde_yaml::from_str(&format!("mode: global\nrate: 1\nburst: 1\nshadow: {value}")).unwrap();
+        let cfg: RateLimitConfig = serde_yaml::from_str(&format!(
+            "mode: global\nscope: local\nrate: 1\nburst: 1\nshadow: {value}"
+        ))
+        .unwrap();
         assert_eq!(cfg.shadow, expected, "shadow: {value} should parse as {expected}");
     }
 
-    let yaml: serde_yaml::Value = serde_yaml::from_str("mode: per_ip\nrate: 1\nburst: 1\nshadow: true").unwrap();
+    let yaml: serde_yaml::Value =
+        serde_yaml::from_str("mode: per_ip\nscope: local\nrate: 1\nburst: 1\nshadow: true").unwrap();
     assert!(
         RateLimitFilter::from_config(&yaml).is_ok(),
         "shadow: true should build a filter"
@@ -808,7 +887,8 @@ fn from_config_parses_shadow() {
 
 #[test]
 fn from_config_rejects_non_bool_shadow() {
-    let yaml: serde_yaml::Value = serde_yaml::from_str("mode: global\nrate: 1\nburst: 1\nshadow: observe").unwrap();
+    let yaml: serde_yaml::Value =
+        serde_yaml::from_str("mode: global\nscope: local\nrate: 1\nburst: 1\nshadow: observe").unwrap();
     assert!(RateLimitFilter::from_config(&yaml).is_err(), "shadow must be a boolean");
 }
 

@@ -1,0 +1,762 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Praxis Contributors
+
+//! Forward-proxy behavior beyond the example configurations.
+//!
+//! One listener can forward-proxy `CONNECT` and reverse-proxy every other
+//! request through the same filter chain. A `CONNECT` then runs the chain's
+//! router like any request, and its authority-form target matches a
+//! catch-all route. The circuit-breaker tests check that the tunnel, which
+//! dials its own destination, leaves the routed cluster's circuit breaker
+//! alone.
+//!
+//! The access-record tests check how a tunnel's end is recorded: every
+//! record says how its tunnel closed, and one a peer broke off is written
+//! whatever the sampling, as for any response cut off midway.
+//!
+//! A forward-proxy listener also forwards absolute-form plain requests
+//! (`GET http://host/path`) to their origin. Those tests check that a
+//! client-chosen destination is resolved and bounded the way a CONNECT
+//! destination is, and that filters judge it by the canonical `Host` the
+//! target names, whatever `Host` the client sent or omitted. On a listener
+//! that also routes, the destination rules still decide every absolute-form
+//! request before any upstream is contacted, an allowed one keeps the
+//! route, and a target the proxy cannot forward to is refused rather than
+//! taking the catch-all route.
+
+use std::{
+    io::{Read as _, Write as _},
+    net::{Shutdown, TcpListener, TcpStream},
+    path::Path,
+    time::{Duration, Instant},
+};
+
+use praxis_core::config::Config;
+use praxis_test_utils::{
+    BackendGuard, ProxyGuard, RequestLog, free_port, http_get, start_full_proxy, start_recording_backend,
+    start_stateful_backend, start_tcp_echo_backend, wait_for_tcp,
+};
+
+// -----------------------------------------------------------------------------
+// Tests: mixed listener with a catch-all route and a circuit breaker
+// -----------------------------------------------------------------------------
+
+#[test]
+fn connect_does_not_close_a_half_open_circuit() {
+    // The CONNECT arrives once the recovery window has passed. Had it taken
+    // the half-open probe, the tunnel's 200 would have closed the circuit
+    // for a backend that is still failing.
+    let backend = start_stateful_backend(Vec::new()); // answers every request with 500
+    let echo_port = start_tcp_echo_backend();
+    let proxy = start_mixed_listener(&backend, echo_port);
+    open_circuit(proxy.addr());
+
+    std::thread::sleep(RECOVERY_ELAPSED);
+    tunnel_round_trip(proxy.addr(), echo_port);
+
+    let (status, _) = http_get(proxy.addr(), "/", None);
+    assert_eq!(status, 500, "the first request after the recovery window is the probe");
+    let (status, _) = http_get(proxy.addr(), "/", None);
+    assert_eq!(
+        status, 503,
+        "the failed probe must reopen the circuit; a CONNECT must not have closed it"
+    );
+}
+
+#[test]
+fn refused_connect_does_not_use_up_the_half_open_probe() {
+    // A refused CONNECT never reaches the cluster either. Had it taken the
+    // probe, releasing it unused would leave the circuit half-open with no
+    // probe in flight, refusing every request until the half-open timeout.
+    let backend = start_stateful_backend(vec![
+        (500, "down".to_owned()),
+        (500, "down".to_owned()),
+        (200, "recovered".to_owned()),
+    ]);
+    let echo_port = start_tcp_echo_backend();
+    let proxy = start_mixed_listener(&backend, echo_port);
+    open_circuit(proxy.addr());
+
+    std::thread::sleep(RECOVERY_ELAPSED);
+    let (_stream, status) = send_connect(proxy.addr(), "other.invalid:443");
+    assert_eq!(status, 403, "the destination rules refuse the CONNECT");
+
+    let (status, body) = http_get(proxy.addr(), "/", None);
+    assert_eq!(
+        (status, body.as_str()),
+        (200, "recovered"),
+        "the next request must be the probe, reach the recovered backend, and close the circuit"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Tests: how a tunnel's end is recorded
+// -----------------------------------------------------------------------------
+
+#[test]
+fn access_records_say_how_each_tunnel_closed() {
+    let echo_port = start_tcp_echo_backend();
+    let resetting_port = start_resetting_destination();
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("access.ndjson");
+    let proxy = start_logged_listener(&log, 1.0, &[echo_port, resetting_port]);
+
+    close_tunnel_cleanly(proxy.addr(), echo_port);
+    tunnel_to_resetting_destination(proxy.addr(), resetting_port);
+
+    let records = wait_for_records(&log, 2);
+    let mut reasons: Vec<&str> = records
+        .iter()
+        .map(|record| record["metadata.tunnel.close_reason"].as_str().unwrap_or("-"))
+        .collect();
+    reasons.sort_unstable();
+    assert_eq!(reasons, ["completed", "destination_error"], "records: {records:?}");
+    assert!(
+        records.iter().all(|record| record["status"] == "200"),
+        "both tunnels opened: {records:?}"
+    );
+}
+
+#[test]
+fn a_tunnel_the_destination_breaks_off_is_recorded_whatever_the_sampling() {
+    // The sample rate drops every ordinary record this test produces.
+    let echo_port = start_tcp_echo_backend();
+    let resetting_port = start_resetting_destination();
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("access.ndjson");
+    let proxy = start_logged_listener(&log, 0.000_001, &[echo_port, resetting_port]);
+
+    close_tunnel_cleanly(proxy.addr(), echo_port);
+    tunnel_to_resetting_destination(proxy.addr(), resetting_port);
+
+    let records = wait_for_records(&log, 1);
+    // A sampled-out record would have been written by now.
+    std::thread::sleep(Duration::from_millis(200));
+    let records = read_records(&log).unwrap_or(records);
+    assert_eq!(records.len(), 1, "only the broken-off tunnel's record: {records:?}");
+    assert_eq!(records[0]["metadata.tunnel.close_reason"], "destination_error");
+}
+
+// -----------------------------------------------------------------------------
+// Tests: absolute-form forwarding to a client-chosen destination
+// -----------------------------------------------------------------------------
+
+#[test]
+fn absolute_form_request_reaches_a_named_destination() {
+    // The name resolves through the bounded per-call resolver, and the
+    // checked address is dialed.
+    let origin = praxis_test_utils::start_backend_with_shutdown("from-origin");
+    let proxy = start_forward_listener(origin.port(), 120_000, true);
+
+    let (status, body) = forward_get(proxy.addr(), &format!("http://localhost:{}/", origin.port()));
+    assert_eq!(status, 200, "the request should be forwarded to its origin");
+    assert!(
+        body.ends_with("from-origin"),
+        "the origin's body should come back: {body:?}"
+    );
+}
+
+#[test]
+fn name_answering_with_a_private_address_is_refused() {
+    // `localhost` answers with loopback, which the private-address guard
+    // refuses without allow_private_upstreams, as it refuses a CONNECT to it.
+    let origin = praxis_test_utils::start_backend_with_shutdown("from-origin");
+    let proxy = start_forward_listener(origin.port(), 120_000, false);
+
+    let (status, _body) = forward_get(proxy.addr(), &format!("http://localhost:{}/", origin.port()));
+    assert_eq!(status, 502, "a private answer must not be dialed");
+}
+
+#[test]
+fn destination_that_stops_answering_is_cut_off_at_the_idle_timeout() {
+    // The origin accepts and never answers. Without a read timeout the
+    // request, and the connections it holds, would wait indefinitely.
+    let (silent, port) = praxis_test_utils::bind_unique_port();
+    let holder = std::thread::spawn(move || silent.accept().map(|(stream, _peer)| stream));
+    let proxy = start_forward_listener(port, 500, true);
+
+    let started = Instant::now();
+    let (status, _body) = forward_get(proxy.addr(), &format!("http://localhost:{port}/"));
+    let elapsed = started.elapsed();
+    assert_eq!(status, 504, "a read that times out answers 504");
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "the 500 ms idle timeout must bound the wait, took {elapsed:?}"
+    );
+    drop(holder.join());
+}
+
+#[test]
+fn server_wide_options_is_forwarded_with_the_asterisk_target() {
+    // RFC 9112 Section 3.2.4: the last proxy sends `*` for an OPTIONS whose
+    // target has an empty path and no query; `/` asks about a resource.
+    let (origin, log) = start_recording_backend(|_request| ok_response());
+    let port = origin.port();
+    let proxy = start_forward_listener(port, 120_000, true);
+
+    for (target, forwarded) in [
+        (format!("http://localhost:{port}"), "OPTIONS * HTTP/1.1"),
+        (format!("http://localhost:{port}/"), "OPTIONS / HTTP/1.1"),
+    ] {
+        let (status, response) = send_raw(
+            proxy.addr(),
+            &format!("OPTIONS {target} HTTP/1.1\r\nHost: localhost:{port}\r\nConnection: close\r\n\r\n"),
+        );
+        assert_eq!(status, 200, "OPTIONS {target} should reach the origin: {response:?}");
+        let requests = recorded(&log);
+        let seen = requests.last().map(|request| request.request_line.as_str());
+        assert_eq!(seen, Some(forwarded), "OPTIONS {target}");
+    }
+}
+
+#[test]
+fn port_out_of_range_is_refused_rather_than_defaulted() {
+    // HTTP/1.0 lets the request omit `Host`, so only the target names the
+    // port. Read as absent, port 65536 would be checked and dialed as 80.
+    let proxy = start_forward_listener(free_port(), 120_000, true);
+
+    let (status, response) = send_raw(proxy.addr(), "GET http://localhost:65536/ HTTP/1.0\r\n\r\n");
+    assert_eq!(status, 400, "an out-of-range port must be refused: {response:?}");
+}
+
+// -----------------------------------------------------------------------------
+// Tests: filters judge the destination the target names
+// -----------------------------------------------------------------------------
+
+#[test]
+fn a_host_filter_meets_every_spelling_of_its_destination() {
+    // RFC 9112 Section 3.2.2: the proxy replaces `Host` with the target's
+    // authority, in canonical form, before the filters run. A request that
+    // omits `Host` (HTTP/1.0 allows it) or pads its port must still meet a
+    // filter that refuses its destination by `Host`.
+    let (refused, refused_log) = start_recording_backend(|_request| ok_response());
+    let port = refused.port();
+    let proxy = start_host_gated_listener(port);
+
+    for request in [
+        format!("GET http://localhost:{port}/ HTTP/1.1\r\nHost: localhost:{port}\r\nConnection: close\r\n\r\n"),
+        format!("GET http://localhost:{port}/ HTTP/1.0\r\n\r\n"),
+        format!("GET http://localhost:0{port}/ HTTP/1.1\r\nHost: localhost:0{port}\r\nConnection: close\r\n\r\n"),
+        format!("GET http://localhost:00{port}/ HTTP/1.0\r\n\r\n"),
+    ] {
+        let (status, response) = send_raw(proxy.addr(), &request);
+        assert_eq!(status, 451, "the filter must refuse {request:?}: {response:?}");
+    }
+    assert!(
+        recorded(&refused_log).is_empty(),
+        "no spelling may reach the refused destination"
+    );
+
+    // HTTP/1.1 requires `Host` (RFC 9112 Section 3.2), so none is supplied.
+    let (status, response) = send_raw(proxy.addr(), &format!("GET http://localhost:{port}/ HTTP/1.1\r\n\r\n"));
+    assert_eq!(
+        status, 400,
+        "an HTTP/1.1 request without Host is malformed: {response:?}"
+    );
+}
+
+#[test]
+fn the_destination_receives_the_canonical_host() {
+    let (origin, log) = start_recording_backend(|_request| ok_response());
+    let port = origin.port();
+    let proxy = start_host_gated_listener(free_port());
+
+    for request in [
+        format!("GET http://localhost:{port}/ HTTP/1.0\r\n\r\n"),
+        format!("GET http://localhost:0{port}/ HTTP/1.1\r\nHost: localhost:0{port}\r\nConnection: close\r\n\r\n"),
+    ] {
+        let (status, response) = send_raw(proxy.addr(), &request);
+        assert_eq!(status, 200, "{request:?} should reach the destination: {response:?}");
+        let host = recorded(&log)
+            .last()
+            .and_then(|seen| seen.headers.iter().find(|(name, _value)| name == "host").cloned())
+            .map(|(_name, value)| value);
+        assert_eq!(host, Some(format!("localhost:{port}")), "{request:?}");
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Tests: absolute-form requests on a listener with a catch-all route
+// -----------------------------------------------------------------------------
+
+#[test]
+fn invalid_absolute_form_target_is_refused_instead_of_taking_the_route() {
+    // Each target is absolute-form but names no destination the proxy can
+    // forward to. Treated as origin-form, it would skip the destination rules
+    // and reach the routed cluster.
+    let (backend, log) = start_recording_backend(|_request| ok_response());
+    let proxy = start_routed_forward_listener(&[backend.port()], "", "");
+
+    for target in ["http://origin.example:0/", "http://ORIGIN.example/"] {
+        let (status, response) = forward_get(proxy.addr(), target);
+        assert_eq!(status, 400, "{target} must be refused: {response:?}");
+    }
+    assert!(recorded(&log).is_empty(), "no refused target may reach the cluster");
+
+    let (status, _body) = http_get(proxy.addr(), "/", None);
+    assert_eq!(status, 200, "an origin-form request still takes the route");
+    assert_eq!(
+        recorded(&log).len(),
+        1,
+        "only the origin-form request reached the cluster"
+    );
+}
+
+#[test]
+fn allowed_destination_keeps_the_route() {
+    // The pipeline selected an upstream, so the request goes to the cluster
+    // and the destination its target names is never dialed. That destination
+    // is a backend outside the cluster, which a request forwarded to it
+    // instead would reach.
+    let (backend, cluster_log) = start_recording_backend(|_request| ok_response());
+    let (destination, destination_log) = start_recording_backend(|_request| ok_response());
+    let proxy = start_routed_forward_listener(&[backend.port()], "", "");
+
+    let (status, response) = forward_get(proxy.addr(), &format!("http://localhost:{}/", destination.port()));
+    assert_eq!(status, 200, "an allowed destination keeps the route: {response:?}");
+    assert_eq!(recorded(&cluster_log).len(), 1, "the routed cluster must receive it");
+    assert!(
+        recorded(&destination_log).is_empty(),
+        "the destination the target names must not be dialed"
+    );
+}
+
+/// A route `hedge_policy` that starts both attempts at once.
+#[cfg(feature = "hedged-requests")]
+const HEDGE_BOTH: &str = "\n            hedge_policy:\n              initial_requests: 2\n              max_attempts: 2\n              budget_percent: 100";
+
+#[cfg(feature = "hedged-requests")]
+#[test]
+fn denied_destination_on_a_hedged_route_is_refused_before_any_attempt() {
+    let (primary, primary_log) = start_recording_backend(|_request| ok_response());
+    let (copy, copy_log) = start_recording_backend(|_request| ok_response());
+    // A backend outside the cluster, which a request forwarded to the
+    // destination it names, instead of taking the route, would reach.
+    let (destination, destination_log) = start_recording_backend(|_request| ok_response());
+    let proxy = start_routed_forward_listener(&[primary.port(), copy.port()], HEDGE_BOTH, "");
+
+    let (status, response) = forward_get(proxy.addr(), "http://denied.example/");
+    assert_eq!(status, 403, "the destination rules must refuse it: {response:?}");
+    assert!(
+        recorded(&primary_log).is_empty() && recorded(&copy_log).is_empty(),
+        "a denied destination must not start a hedged attempt"
+    );
+
+    let (status, response) = forward_get(proxy.addr(), &format!("http://localhost:{}/", destination.port()));
+    assert_eq!(
+        status, 200,
+        "an allowed destination keeps the hedged route: {response:?}"
+    );
+    let attempts = recorded(&primary_log).len() + recorded(&copy_log).len();
+    assert!(attempts >= 1, "the allowed request must reach the cluster");
+    assert!(
+        recorded(&destination_log).is_empty(),
+        "the destination the target names must not be dialed"
+    );
+}
+
+#[cfg(feature = "hedged-requests")]
+#[test]
+fn server_wide_options_on_a_hedged_route_keeps_the_asterisk_target() {
+    // RFC 9112 Section 3.2.4: `*` asks about the server as a whole. The
+    // cluster's base path is not prepended to it on a hedged attempt, as it
+    // is not on a single one; `/api*` would ask about a resource.
+    let (primary, primary_log) = start_recording_backend(|_request| ok_response());
+    let (copy, copy_log) = start_recording_backend(|_request| ok_response());
+    let base_path = "\n            http:\n              base_path: \"/api\"";
+    let proxy = start_routed_forward_listener(&[primary.port(), copy.port()], HEDGE_BOTH, base_path);
+    let port = primary.port();
+
+    for target in ["*".to_owned(), format!("http://localhost:{port}")] {
+        let (status, response) = send_raw(
+            proxy.addr(),
+            &format!("OPTIONS {target} HTTP/1.1\r\nHost: localhost:{port}\r\nConnection: close\r\n\r\n"),
+        );
+        assert_eq!(status, 200, "OPTIONS {target} should reach the cluster: {response:?}");
+    }
+    let lines: Vec<String> = recorded(&primary_log)
+        .into_iter()
+        .chain(recorded(&copy_log))
+        .map(|request| request.request_line)
+        .collect();
+    assert!(
+        lines.len() >= 2 && lines.iter().all(|line| line == "OPTIONS * HTTP/1.1"),
+        "every attempt must ask about the server as a whole: {lines:?}"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Utilities
+// -----------------------------------------------------------------------------
+
+/// Start a forward-proxy listener for tunnels to `localhost` on `ports`,
+/// writing access records with each tunnel's close reason to `log`.
+fn start_logged_listener(log: &Path, sample_rate: f64, ports: &[u16]) -> ProxyGuard {
+    let destinations: String = ports
+        .iter()
+        .map(|port| format!("        - host: localhost\n          port: {port}\n"))
+        .collect();
+    let yaml = format!(
+        r#"
+listeners:
+  - name: tunnel-close
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains: [main]
+    forward_proxy:
+      enabled: true
+      allow_destinations:
+{destinations}
+filter_chains:
+  - name: main
+    filters:
+      - filter: access_log
+        sample_rate: {sample_rate}
+        fields: [method, status, metadata.tunnel.close_reason]
+        sink:
+          type: file
+          path: "{log}"
+
+insecure_options:
+  allow_private_upstreams: true
+"#,
+        proxy_port = free_port(),
+        log = log.display(),
+    );
+    let config = Config::from_yaml(&yaml).unwrap_or_else(|e| panic!("logged listener config should parse: {e}"));
+    let proxy = start_full_proxy(&config);
+    wait_for_tcp(proxy.addr());
+    proxy
+}
+
+/// Start a destination that resets each connection once the client's first
+/// bytes arrive: closing a socket with unread bytes resets it.
+fn start_resetting_destination() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut byte = [0_u8; 1];
+            let _peeked = stream.peek(&mut byte);
+            drop(stream);
+        }
+    });
+    port
+}
+
+/// Relay one message through a tunnel to the echo destination, then close
+/// it from the client: both sides end cleanly.
+fn close_tunnel_cleanly(proxy: &str, echo_port: u16) {
+    tunnel_round_trip_on(proxy, echo_port, |stream| {
+        stream.shutdown(Shutdown::Write).unwrap();
+        let mut rest = Vec::new();
+        stream
+            .read_to_end(&mut rest)
+            .expect("the destination's half-close reaches the client");
+    });
+}
+
+/// Send one byte through a tunnel to the resetting destination and wait
+/// for the proxy to end the tunnel.
+fn tunnel_to_resetting_destination(proxy: &str, port: u16) {
+    let (mut stream, status) = send_connect(proxy, &format!("localhost:{port}"));
+    assert_eq!(status, 200, "the tunnel to the resetting destination opens");
+    stream.write_all(b"x").unwrap();
+    let mut rest = Vec::new();
+    let _ended = stream.read_to_end(&mut rest);
+}
+
+/// Poll the access log until it holds `count` records.
+fn wait_for_records(log: &Path, count: usize) -> Vec<serde_json::Value> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let records = read_records(log).unwrap_or_default();
+        if records.len() >= count || Instant::now() > deadline {
+            return records;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+/// The access records written so far, `None` before the file exists.
+fn read_records(log: &Path) -> Option<Vec<serde_json::Value>> {
+    let text = std::fs::read_to_string(log).ok()?;
+    Some(
+        text.lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect(),
+    )
+}
+
+/// Consecutive backend failures that open the circuit.
+const CONSECUTIVE_FAILURES: usize = 2;
+
+/// A wait past the breaker's one-second recovery window.
+const RECOVERY_ELAPSED: Duration = Duration::from_millis(1_100);
+
+/// Start a mixed listener: CONNECT to `localhost:echo_port` is tunneled;
+/// every other request takes a catch-all route to the `app` cluster on
+/// `backend`, guarded by a circuit breaker.
+///
+/// The half-open timeout is far beyond the test, so a probe taken and
+/// released unused keeps refusing requests rather than being replaced.
+fn start_mixed_listener(backend: &BackendGuard, echo_port: u16) -> ProxyGuard {
+    let yaml = format!(
+        r#"
+listeners:
+  - name: mixed
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains: [main]
+    forward_proxy:
+      enabled: true
+      allow_destinations:
+        - host: localhost
+          port: {echo_port}
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: app
+      - filter: circuit_breaker
+        clusters:
+          - name: app
+            consecutive_failures: {CONSECUTIVE_FAILURES}
+            recovery_window_secs: 1
+            half_open_timeout_secs: 3600
+      - filter: load_balancer
+        clusters:
+          - name: app
+            endpoints: ["127.0.0.1:{backend_port}"]
+
+insecure_options:
+  allow_private_endpoints: true
+  allow_private_upstreams: true
+"#,
+        proxy_port = free_port(),
+        backend_port = backend.port(),
+    );
+    let config = Config::from_yaml(&yaml).unwrap_or_else(|e| panic!("mixed listener config should parse: {e}"));
+    // A TCP readiness check: an HTTP one would send a request through the
+    // breaker and use up a scripted backend response.
+    let proxy = start_full_proxy(&config);
+    wait_for_tcp(proxy.addr());
+    proxy
+}
+
+/// Fail requests to the catch-all cluster until its circuit opens.
+fn open_circuit(proxy: &str) {
+    for attempt in 1..=CONSECUTIVE_FAILURES {
+        let (status, _) = http_get(proxy, "/", None);
+        assert_eq!(status, 500, "failure {attempt} must reach the backend");
+    }
+    let (status, _) = http_get(proxy, "/", None);
+    assert_eq!(status, 503, "the open circuit must refuse without forwarding");
+}
+
+/// Open a tunnel to the echo destination and relay one message through it.
+fn tunnel_round_trip(proxy: &str, echo_port: u16) {
+    tunnel_round_trip_on(proxy, echo_port, |_stream| {});
+}
+
+/// [`tunnel_round_trip`], then hand the tunnel to `finish`.
+fn tunnel_round_trip_on(proxy: &str, echo_port: u16, finish: impl FnOnce(&mut TcpStream)) {
+    let (mut stream, status) = send_connect(proxy, &format!("localhost:{echo_port}"));
+    assert_eq!(status, 200, "the allowlisted CONNECT should open a tunnel");
+    stream.write_all(b"ping").unwrap();
+    let mut echoed = [0_u8; 4];
+    stream.read_exact(&mut echoed).unwrap();
+    assert_eq!(&echoed, b"ping", "the tunnel should relay to the destination and back");
+    finish(&mut stream);
+}
+
+/// Send `CONNECT target` and read the response head, one byte at a time so
+/// no tunnel bytes are consumed. Returns the stream and the status code.
+fn send_connect(proxy: &str, target: &str) -> (TcpStream, u16) {
+    let mut stream = TcpStream::connect(proxy).expect("connect to proxy");
+    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    write!(stream, "CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n").unwrap();
+    let mut head = Vec::new();
+    let mut byte = [0_u8; 1];
+    while !head.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap_or(0) == 1 {
+        head.push(byte[0]);
+    }
+    let head = String::from_utf8_lossy(&head);
+    let status = head
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or_else(|| panic!("malformed CONNECT response head: {head:?}"));
+    (stream, status)
+}
+
+/// Start a forward-proxy listener that allows `localhost:port`, with the
+/// given idle timeout, optionally allowing private destinations.
+fn start_forward_listener(port: u16, idle_timeout_ms: u64, allow_private: bool) -> ProxyGuard {
+    let yaml = format!(
+        r#"
+listeners:
+  - name: egress
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains: [egress]
+    forward_proxy:
+      enabled: true
+      idle_timeout_ms: {idle_timeout_ms}
+      allow_destinations:
+        - host: localhost
+          port: {port}
+
+filter_chains:
+  - name: egress
+    filters:
+      - filter: request_id
+
+insecure_options:
+  allow_private_upstreams: {allow_private}
+"#,
+        proxy_port = free_port(),
+    );
+    let config = Config::from_yaml(&yaml).unwrap_or_else(|e| panic!("forward listener config should parse: {e}"));
+    let proxy = start_full_proxy(&config);
+    wait_for_tcp(proxy.addr());
+    proxy
+}
+
+/// Send `GET target` in absolute form, as an `HTTP_PROXY` client does, and
+/// return the response status and body.
+fn forward_get(proxy: &str, target: &str) -> (u16, String) {
+    let authority = target
+        .split_once("://")
+        .and_then(|(_scheme, rest)| rest.split('/').next())
+        .expect("target must be absolute-form");
+    let mut stream = TcpStream::connect(proxy).expect("connect to proxy");
+    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    write!(
+        stream,
+        "GET {target} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    let mut response = String::new();
+    drop(stream.read_to_string(&mut response));
+    let status = response
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or_else(|| panic!("malformed response: {response:?}"));
+    (status, response)
+}
+
+/// Start a forward-proxy listener that allows only `localhost` destinations
+/// and routes every request to the `app` cluster on `endpoints`.
+///
+/// `route_extra` is appended to the catch-all route (a `hedge_policy`, say)
+/// and `cluster_extra` to the cluster (an `http.base_path`). Private
+/// destinations are allowed, so a request forwarded to the `localhost`
+/// destination it names, instead of taking the route, would reach it rather
+/// than be refused by the private-address guard: a test sees that
+/// destination's backend receive it.
+fn start_routed_forward_listener(endpoints: &[u16], route_extra: &str, cluster_extra: &str) -> ProxyGuard {
+    let endpoints = endpoints
+        .iter()
+        .map(|port| format!("\"127.0.0.1:{port}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let yaml = format!(
+        r#"
+listeners:
+  - name: routed
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains: [main]
+    forward_proxy:
+      enabled: true
+      allow_destinations:
+        - host: localhost
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: app{route_extra}
+      - filter: load_balancer
+        clusters:
+          - name: app
+            load_balancer_strategy: round_robin
+            endpoints: [{endpoints}]
+            retry_policy:
+              max_retries: 0{cluster_extra}
+
+insecure_options:
+  allow_private_endpoints: true
+  allow_private_upstreams: true
+"#,
+        proxy_port = free_port(),
+    );
+    let config = Config::from_yaml(&yaml).unwrap_or_else(|e| panic!("routed listener config should parse: {e}"));
+    let proxy = start_full_proxy(&config);
+    wait_for_tcp(proxy.addr());
+    proxy
+}
+
+/// Start a forward-proxy listener for `localhost` destinations whose filter
+/// refuses one of them by `Host`: a `static_response` answers 451 to any
+/// request whose `Host` is `localhost:{refused_port}`.
+fn start_host_gated_listener(refused_port: u16) -> ProxyGuard {
+    let yaml = format!(
+        r#"
+listeners:
+  - name: gated
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains: [gate]
+    forward_proxy:
+      enabled: true
+      allow_destinations:
+        - host: localhost
+
+filter_chains:
+  - name: gate
+    filters:
+      - filter: static_response
+        status: 451
+        conditions:
+          - when:
+              headers:
+                host: "localhost:{refused_port}"
+
+insecure_options:
+  allow_private_upstreams: true
+"#,
+        proxy_port = free_port(),
+    );
+    let config = Config::from_yaml(&yaml).unwrap_or_else(|e| panic!("gated listener config should parse: {e}"));
+    let proxy = start_full_proxy(&config);
+    wait_for_tcp(proxy.addr());
+    proxy
+}
+
+/// A complete `200 OK` from a recording backend.
+fn ok_response() -> Vec<u8> {
+    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok".to_vec()
+}
+
+/// The complete requests a recording backend has received so far.
+fn recorded(log: &RequestLog) -> Vec<praxis_test_utils::RecordedRequest> {
+    log.lock().unwrap().clone()
+}
+
+/// Send a raw request and return the response status and the full response.
+fn send_raw(proxy: &str, request: &str) -> (u16, String) {
+    let mut stream = TcpStream::connect(proxy).expect("connect to proxy");
+    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    stream.write_all(request.as_bytes()).unwrap();
+    let mut response = String::new();
+    drop(stream.read_to_string(&mut response));
+    let status = response
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or_else(|| panic!("malformed response: {response:?}"));
+    (status, response)
+}

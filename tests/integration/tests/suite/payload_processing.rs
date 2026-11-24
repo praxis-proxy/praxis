@@ -1704,7 +1704,7 @@ impl praxis_filter::HttpFilter for ResponseMetadataObserver {
     }
 
     fn response_body_access(&self) -> praxis_filter::BodyAccess {
-        praxis_filter::BodyAccess::ReadOnly
+        praxis_filter::BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional)
     }
 
     fn response_body_mode(&self) -> praxis_filter::BodyMode {
@@ -1730,7 +1730,7 @@ impl praxis_filter::HttpFilter for ResponseMetadataObserver {
             return Ok(praxis_filter::FilterAction::Continue);
         }
         self.events
-            .send(ctx.get_metadata("response.secret").map(str::to_owned))
+            .send(ctx.filter_metadata.get("response.secret").map(str::to_owned))
             .unwrap();
         Ok(praxis_filter::FilterAction::BodyDone)
     }

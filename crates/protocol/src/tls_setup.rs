@@ -35,6 +35,8 @@
 //! [`CertWatcher`]: praxis_tls::watcher::CertWatcher
 
 use std::sync::Arc;
+#[cfg(all(feature = "config-reload", feature = "test-support"))]
+use std::sync::{Mutex, OnceLock};
 
 #[cfg(feature = "pingora")]
 use pingora_core::listeners::tls::TlsSettings;
@@ -160,9 +162,45 @@ fn build_reloadable_listener_tls(
     });
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    praxis_tls::watcher::CertWatcher::spawn(result.cert_handle, pair, verifier_reload, shutdown_rx);
+    let watcher = praxis_tls::watcher::CertWatcher::spawn(
+        result.cert_handle,
+        pair,
+        verifier_reload,
+        shutdown_rx,
+        result.startup_hashes,
+    );
+    retain_watcher_handle(watcher);
 
     Ok((result.config, Some(shutdown_tx)))
+}
+
+/// Retain watcher threads for lifecycle tests; detach production handles.
+#[cfg(feature = "config-reload")]
+fn retain_watcher_handle(watcher: std::thread::JoinHandle<()>) {
+    #[cfg(feature = "test-support")]
+    watcher_handles()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(watcher);
+    #[cfg(not(feature = "test-support"))]
+    drop(watcher);
+}
+
+/// Drain watcher thread handles for registration lifecycle integration tests.
+#[cfg(all(feature = "config-reload", feature = "test-support"))]
+pub fn take_test_watcher_handles() -> Vec<std::thread::JoinHandle<()>> {
+    std::mem::take(
+        &mut *watcher_handles()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    )
+}
+
+/// Test-only handles for observing whether registration stopped its watchers.
+#[cfg(all(feature = "config-reload", feature = "test-support"))]
+fn watcher_handles() -> &'static Mutex<Vec<std::thread::JoinHandle<()>>> {
+    static HANDLES: OnceLock<Mutex<Vec<std::thread::JoinHandle<()>>>> = OnceLock::new();
+    HANDLES.get_or_init(|| Mutex::new(Vec::new()))
 }
 
 // -----------------------------------------------------------------------------

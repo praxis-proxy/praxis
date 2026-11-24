@@ -6,7 +6,9 @@
 //! [RFC 7239]: https://datatracker.ietf.org/doc/html/rfc7239
 
 use praxis_core::config::Config;
-use praxis_test_utils::{free_port, http_send, parse_body, parse_status, start_header_echo_backend};
+use praxis_test_utils::{
+    free_port, free_port_v6, http_send, ipv6_available, parse_body, parse_status, start_header_echo_backend,
+};
 
 use super::test_utils::{forwarded_standard_trusted_yaml, forwarded_standard_yaml};
 
@@ -92,14 +94,32 @@ fn rfc7239_forwarded_header_format() {
 /// [RFC 7239 Section 6]: https://datatracker.ietf.org/doc/html/rfc7239#section-6
 #[test]
 fn rfc7239_ipv6_address_quoted_correctly() {
-    let ip: std::net::IpAddr = "2001:db8::1".parse().unwrap();
-    let formatted = match ip {
-        std::net::IpAddr::V6(v6) => format!("\"[{v6}]\""),
-        std::net::IpAddr::V4(v4) => format!("{v4}"),
-    };
+    if !ipv6_available() {
+        eprintln!("skipping IPv6 Forwarded conformance: IPv6 loopback unavailable");
+        return;
+    }
+    let backend = start_header_echo_backend();
+    let proxy_port = free_port_v6();
+    let yaml = forwarded_standard_yaml(proxy_port, backend.port())
+        .replace(&format!("127.0.0.1:{proxy_port}"), &format!("[::1]:{proxy_port}"));
+    let proxy = start_proxy(&Config::from_yaml(&yaml).unwrap());
+    let raw = http_send(
+        proxy.addr(),
+        "GET / HTTP/1.1\r\nHost: ipv6.example\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(parse_status(&raw), 200);
+    let body = parse_body(&raw);
+    let forwarded: Vec<_> = body
+        .lines()
+        .filter_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.trim().eq_ignore_ascii_case("forwarded").then(|| value.trim())
+        })
+        .collect();
     assert_eq!(
-        formatted, "\"[2001:db8::1]\"",
-        "IPv6 for-param must be quoted with brackets per RFC 7239 Section 6"
+        forwarded,
+        ["for=\"[::1]\";proto=http;host=\"ipv6.example\""],
+        "backend must observe exactly one complete IPv6 Forwarded field: {body}"
     );
 }
 

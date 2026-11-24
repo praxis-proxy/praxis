@@ -105,29 +105,52 @@ pub(super) fn body_filter_indices(filters: &[PipelineFilter]) -> (Vec<usize>, Ve
     (request, response)
 }
 
-/// Precompute the pipeline indices of top-level filters that run the
-/// request-head phase.
+/// Indices of top-level filters eligible to run their request-head hooks.
 ///
-/// The head loop runs each of these filters' [`on_request_head`] hook before
-/// any `StreamBuffer` request-body pre-read; walking only these indices skips
-/// non-participating filters without a per-request predicate check. A filter
-/// opts in by overriding [`runs_request_head`].
+/// Excludes admitting filters that must [admit in the request phase].
 ///
-/// Top-level only: branch filters never run the head hook, matching the
-/// body-phase precompute helpers.
-///
-/// [`on_request_head`]: crate::HttpFilter::on_request_head
-/// [`runs_request_head`]: crate::HttpFilter::runs_request_head
+/// [admit in the request phase]: admits_in_request_phase
 pub(super) fn request_head_filter_indices(filters: &[PipelineFilter]) -> Vec<usize> {
     let mut indices = Vec::new();
     for (idx, pf) in filters.iter().enumerate() {
         if let AnyFilter::Http(f) = &pf.filter
             && f.runs_request_head()
+            && !(f.admits_at_request_head() && admits_in_request_phase(filters, idx))
         {
             indices.push(idx);
         }
     }
     indices
+}
+
+/// Whether the admitting filter at `position` must wait for the request phase.
+pub(super) fn admits_in_request_phase(filters: &[PipelineFilter], position: usize) -> bool {
+    filters.get(position).is_some_and(|pf| !pf.conditions.is_empty())
+        || first_request_ender(filters, position).is_some()
+}
+
+/// Indices of top-level admitting filters whose body denials must preserve
+/// earlier request filters' precedence.
+pub(super) fn shielded_admitter_indices(filters: &[PipelineFilter]) -> Vec<usize> {
+    filters
+        .iter()
+        .enumerate()
+        .filter(|(idx, pf)| {
+            matches!(&pf.filter, AnyFilter::Http(f) if f.admits_at_request_head())
+                && first_request_ender(filters, *idx).is_some()
+        })
+        .map(|(idx, _)| idx)
+        .collect()
+}
+
+/// The first filter before `position` that can end the request in its request
+/// phase.
+pub(super) fn first_request_ender(filters: &[PipelineFilter], position: usize) -> Option<&PipelineFilter> {
+    filters
+        .get(..position)
+        .unwrap_or_default()
+        .iter()
+        .find(|pf| pf.can_end_request())
 }
 
 /// Precompute the pipeline indices of filters that declared
@@ -244,6 +267,31 @@ pub(super) fn effective_request_body_phase(pf: &PipelineFilter) -> RequestBodyPh
     }
 }
 
+/// Return the access declaration that belongs to the request-body phase this
+/// filter actually runs in, together with its diagnostic phase name.
+pub(super) fn effective_request_body_requirement(pf: &PipelineFilter) -> (BodyAccess, &'static str) {
+    let AnyFilter::Http(filter) = &pf.filter else {
+        return (BodyAccess::None, "request_body");
+    };
+    match effective_request_body_phase(pf) {
+        RequestBodyPhase::None => (BodyAccess::None, "request_body"),
+        RequestBodyPhase::PreRead => (filter.request_body_access(), "request_body"),
+        RequestBodyPhase::BoundUpstream => {
+            #[cfg(feature = "bound-upstream-request-body")]
+            {
+                (
+                    filter.bound_upstream_request_body_access(),
+                    "bound_upstream_request_body",
+                )
+            }
+            #[cfg(not(feature = "bound-upstream-request-body"))]
+            {
+                (BodyAccess::None, "bound_upstream_request_body")
+            }
+        },
+    }
+}
+
 /// Indices of filters declaring response-trailer access.
 pub(super) fn response_trailer_filter_indices(filters: &[PipelineFilter]) -> Vec<usize> {
     filters
@@ -309,7 +357,7 @@ fn accumulate_request_body(caps: &mut BodyCapabilities, filter: &dyn crate::filt
     let access = filter.request_body_access();
     if access != BodyAccess::None {
         caps.needs_request_body = true;
-        if access == BodyAccess::ReadWrite {
+        if access.is_writable() {
             caps.any_request_body_writer = true;
         }
         merge_body_mode(&mut caps.request_body_mode, filter.request_body_mode());
@@ -340,7 +388,7 @@ fn accumulate_selected_upstream_request_body(caps: &mut BodyCapabilities, filter
     }
     caps.needs_selected_upstream_request_body = true;
     caps.needs_request_body = true;
-    if access == BodyAccess::ReadWrite {
+    if access.is_writable() {
         caps.any_selected_upstream_request_body_writer = true;
         caps.any_request_body_writer = true;
     }
@@ -379,7 +427,7 @@ fn accumulate_bound_upstream_request_body(caps: &mut BodyCapabilities, filter: &
         return;
     }
     caps.needs_request_body = true;
-    if access == BodyAccess::ReadWrite {
+    if access.is_writable() {
         caps.any_request_body_writer = true;
     }
     merge_body_mode(&mut caps.request_body_mode, buffered_body_mode(filter));
@@ -413,7 +461,7 @@ fn accumulate_response_body(
         if !response_conditions.is_empty() {
             caps.any_response_body_condition = true;
         }
-        if access == BodyAccess::ReadWrite {
+        if access.is_writable() {
             caps.any_response_body_writer = true;
         }
         merge_body_mode(&mut caps.response_body_mode, filter.response_body_mode());
@@ -626,7 +674,7 @@ mod tests {
             }
 
             fn response_body_access(&self) -> BodyAccess {
-                BodyAccess::ReadOnly
+                BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
             }
         }
 
@@ -674,7 +722,7 @@ mod tests {
             }
 
             fn request_body_access(&self) -> BodyAccess {
-                BodyAccess::ReadWrite
+                BodyAccess::ReadWrite(crate::BodyRequirement::Optional)
             }
 
             fn request_body_mode(&self) -> BodyMode {
@@ -830,7 +878,7 @@ mod tests {
         let filter = PipelineFilter::new(
             0,
             AnyFilter::Http(Box::new(SelectedUpstreamCapFilter {
-                access: BodyAccess::ReadWrite,
+                access: BodyAccess::ReadWrite(crate::BodyRequirement::Optional),
                 mode: BodyMode::StreamBuffer { max_bytes: Some(4096) },
             })),
             vec![],
@@ -866,7 +914,7 @@ mod tests {
         let filter = PipelineFilter::new(
             0,
             AnyFilter::Http(Box::new(SelectedUpstreamCapFilter {
-                access: BodyAccess::ReadOnly,
+                access: BodyAccess::ReadOnly(crate::BodyRequirement::Optional),
                 mode: BodyMode::StreamBuffer { max_bytes: Some(2048) },
             })),
             vec![],
@@ -897,7 +945,7 @@ mod tests {
         let filter = PipelineFilter::new(
             0,
             AnyFilter::Http(Box::new(SelectedUpstreamCapFilter {
-                access: BodyAccess::ReadOnly,
+                access: BodyAccess::ReadOnly(crate::BodyRequirement::Optional),
                 mode: BodyMode::Stream,
             })),
             vec![],
@@ -925,7 +973,7 @@ mod tests {
             filters: vec![PipelineFilter::new(
                 100,
                 AnyFilter::Http(Box::new(SelectedUpstreamCapFilter {
-                    access: BodyAccess::ReadWrite,
+                    access: BodyAccess::ReadWrite(crate::BodyRequirement::Optional),
                     mode: BodyMode::StreamBuffer { max_bytes: Some(4096) },
                 })),
                 vec![],
@@ -968,7 +1016,7 @@ mod tests {
         let filter = PipelineFilter::new(
             0,
             AnyFilter::Http(Box::new(BoundUpstreamCapFilter {
-                access: BodyAccess::ReadWrite,
+                access: BodyAccess::ReadWrite(crate::BodyRequirement::Optional),
                 mode: BodyMode::StreamBuffer { max_bytes: Some(4096) },
             })),
             vec![],
@@ -997,7 +1045,7 @@ mod tests {
         let filter = PipelineFilter::new(
             0,
             AnyFilter::Http(Box::new(BoundUpstreamCapFilter {
-                access: BodyAccess::ReadOnly,
+                access: BodyAccess::ReadOnly(crate::BodyRequirement::Optional),
                 mode: BodyMode::StreamBuffer { max_bytes: Some(2048) },
             })),
             vec![],
@@ -1021,7 +1069,7 @@ mod tests {
         let filter = PipelineFilter::new(
             0,
             AnyFilter::Http(Box::new(BoundUpstreamCapFilter {
-                access: BodyAccess::ReadOnly,
+                access: BodyAccess::ReadOnly(crate::BodyRequirement::Optional),
                 mode: BodyMode::Stream,
             })),
             vec![],
@@ -1050,7 +1098,7 @@ mod tests {
             filters: vec![PipelineFilter::new(
                 100,
                 AnyFilter::Http(Box::new(BoundUpstreamCapFilter {
-                    access: BodyAccess::ReadWrite,
+                    access: BodyAccess::ReadWrite(crate::BodyRequirement::Optional),
                     mode: BodyMode::StreamBuffer { max_bytes: Some(4096) },
                 })),
                 vec![],
@@ -1093,7 +1141,7 @@ mod tests {
         let participant = PipelineFilter::new(
             0,
             AnyFilter::Http(Box::new(BoundUpstreamCapFilter {
-                access: BodyAccess::ReadWrite,
+                access: BodyAccess::ReadWrite(crate::BodyRequirement::Optional),
                 mode: BodyMode::StreamBuffer { max_bytes: Some(4096) },
             })),
             vec![],
@@ -1110,8 +1158,8 @@ mod tests {
         let pf = PipelineFilter::new(
             0,
             AnyFilter::Http(Box::new(DualPhaseCapFilter {
-                pre_read: BodyAccess::ReadOnly,
-                bound: BodyAccess::ReadOnly,
+                pre_read: BodyAccess::ReadOnly(crate::BodyRequirement::Optional),
+                bound: BodyAccess::ReadOnly(crate::BodyRequirement::Optional),
                 mode: BodyMode::StreamBuffer { max_bytes: Some(4096) },
             })),
             vec![],
@@ -1137,8 +1185,8 @@ mod tests {
         let pf = PipelineFilter::new(
             0,
             AnyFilter::Http(Box::new(DualPhaseCapFilter {
-                pre_read: BodyAccess::ReadOnly,
-                bound: BodyAccess::ReadOnly,
+                pre_read: BodyAccess::ReadOnly(crate::BodyRequirement::Optional),
+                bound: BodyAccess::ReadOnly(crate::BodyRequirement::Optional),
                 mode: BodyMode::StreamBuffer { max_bytes: Some(4096) },
             })),
             vec![bound_upstream_condition()],
@@ -1166,8 +1214,8 @@ mod tests {
             let filters = vec![PipelineFilter::new(
                 0,
                 AnyFilter::Http(Box::new(DualPhaseCapFilter {
-                    pre_read: BodyAccess::ReadWrite,
-                    bound: BodyAccess::ReadWrite,
+                    pre_read: BodyAccess::ReadWrite(crate::BodyRequirement::Optional),
+                    bound: BodyAccess::ReadWrite(crate::BodyRequirement::Optional),
                     mode: BodyMode::StreamBuffer { max_bytes: Some(4096) },
                 })),
                 conditions,
@@ -1195,8 +1243,8 @@ mod tests {
         let pre_read = PipelineFilter::new(
             0,
             AnyFilter::Http(Box::new(DualPhaseCapFilter {
-                pre_read: BodyAccess::ReadOnly,
-                bound: BodyAccess::ReadWrite,
+                pre_read: BodyAccess::ReadOnly(crate::BodyRequirement::Optional),
+                bound: BodyAccess::ReadWrite(crate::BodyRequirement::Optional),
                 mode: BodyMode::StreamBuffer { max_bytes: Some(4096) },
             })),
             vec![],
@@ -1215,8 +1263,8 @@ mod tests {
         let bound = PipelineFilter::new(
             0,
             AnyFilter::Http(Box::new(DualPhaseCapFilter {
-                pre_read: BodyAccess::ReadOnly,
-                bound: BodyAccess::ReadWrite,
+                pre_read: BodyAccess::ReadOnly(crate::BodyRequirement::Optional),
+                bound: BodyAccess::ReadWrite(crate::BodyRequirement::Optional),
                 mode: BodyMode::StreamBuffer { max_bytes: Some(4096) },
             })),
             vec![bound_upstream_condition()],
@@ -1227,6 +1275,94 @@ mod tests {
         assert!(
             caps.any_request_body_writer,
             "the bound phase declares ReadWrite, so capability calc must mark the body as written"
+        );
+    }
+
+    #[test]
+    fn an_admitting_head_filter_is_left_out_behind_a_filter_that_can_end_the_request() {
+        use crate::pipeline::test_filters::{admitting_head_filter, ending_filter, head_filter, noop_filter};
+
+        let indices = request_head_filter_indices(&[
+            ending_filter("ip_acl"),
+            admitting_head_filter("policy"),
+            head_filter("classifier"),
+        ]);
+        assert_eq!(
+            indices,
+            vec![2],
+            "the policy admits in the request phase; the classifier still runs"
+        );
+
+        let indices = request_head_filter_indices(&[noop_filter("static_response"), admitting_head_filter("policy")]);
+        assert!(indices.is_empty(), "an answering filter shields the policy too");
+
+        let indices = request_head_filter_indices(&[head_filter("classifier"), admitting_head_filter("policy")]);
+        assert_eq!(indices, vec![0, 1], "a fact-publishing filter ends nothing");
+
+        let mut forwarded_headers = noop_filter("forwarded_headers");
+        forwarded_headers.is_security = true;
+        let indices = request_head_filter_indices(&[forwarded_headers, admitting_head_filter("policy")]);
+        assert_eq!(
+            indices,
+            vec![1],
+            "a security filter whose request phase only continues ends nothing"
+        );
+
+        let mut gated = noop_filter("gate");
+        gated.branches.push(crate::pipeline::branch::ResolvedBranch {
+            condition: None,
+            filters: vec![noop_filter("static_response")],
+            max_iterations: None,
+            name: std::sync::Arc::from("health"),
+            rejoin: crate::pipeline::branch::RejoinTarget::Next,
+        });
+        let indices = request_head_filter_indices(&[gated, admitting_head_filter("policy")]);
+        assert!(
+            indices.is_empty(),
+            "an answering filter in a branch can end the request too"
+        );
+    }
+
+    #[test]
+    fn only_admitting_filters_behind_a_request_ender_are_shielded() {
+        use crate::pipeline::test_filters::{admitting_head_filter, ending_filter, head_filter};
+
+        let filters = [
+            admitting_head_filter("first"),
+            ending_filter("cors"),
+            head_filter("classifier"),
+            admitting_head_filter("policy"),
+        ];
+        assert_eq!(shielded_admitter_indices(&filters), vec![3]);
+    }
+
+    #[test]
+    fn a_conditional_admitting_head_filter_is_left_out() {
+        use crate::pipeline::test_filters::{admitting_head_filter, head_filter};
+
+        let conditional = |mut pf: PipelineFilter| {
+            pf.conditions = vec![praxis_core::config::Condition::When(
+                praxis_core::config::ConditionMatch {
+                    grpc: None,
+                    path: None,
+                    path_prefix: Some("/api".to_owned()),
+                    methods: None,
+                    headers: None,
+                    headers_present: None,
+                    bound_upstream: None,
+                    selected_upstream: None,
+                },
+            )];
+            pf
+        };
+        let filters = [
+            conditional(admitting_head_filter("policy")),
+            conditional(head_filter("classifier")),
+        ];
+        assert_eq!(
+            request_head_filter_indices(&filters),
+            vec![1],
+            "the conditional policy admits in the request phase"
         );
     }
 

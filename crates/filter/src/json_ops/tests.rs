@@ -88,6 +88,33 @@ fn add_existing_object_key_overwrites() {
 }
 
 #[test]
+fn add_existing_key_with_late_metadata_extract_preserves_single_original_member() {
+    let ops = JsonOps::builder()
+        .add("/a", JsonValue::metadata("m"))
+        .unwrap()
+        .extract("/b", ExtractDest::metadata("m"))
+        .unwrap()
+        .build()
+        .unwrap();
+    for (input, expected, metadata) in [
+        (r#"{"a":"old","b":"new"}"#, r#"{"a":"old","b":"new"}"#, Some("new")),
+        (r#"{"b":"new","a":"old"}"#, r#"{"b":"new","a":"new"}"#, Some("new")),
+        (r#"{"b":"new"}"#, r#"{"b":"new","a":"new"}"#, Some("new")),
+        (
+            r#"{"a":"first","a":"second","b":"new"}"#,
+            r#"{"a":"first","a":"second","b":"new"}"#,
+            Some("new"),
+        ),
+        (r#"{"a":"old"}"#, r#"{"a":"old"}"#, None),
+    ] {
+        let mut store = MapStore::new();
+        let result = ops.apply(input.as_bytes(), Some(&mut store)).unwrap();
+        assert_eq!(result.output.as_deref(), Some(expected.as_bytes()), "input: {input}");
+        assert_eq!(store.get_metadata("m"), metadata, "input: {input}");
+    }
+}
+
+#[test]
 fn missing_parent_skips_add() {
     let out = rewrite_str(r#"{"a":1}"#, &[resolved(OpKind::Add, "/x/y", Some("1"))]).unwrap();
     assert_eq!(out, r#"{"a":1}"#);

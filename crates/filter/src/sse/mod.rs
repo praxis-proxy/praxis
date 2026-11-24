@@ -59,8 +59,8 @@
 //! use async_trait::async_trait;
 //! use bytes::Bytes;
 //! use praxis_filter::{
-//!     BodyAccess, BodyMode, FilterAction, FilterError, HttpFilter, HttpFilterContext,
-//!     sse::SseDecoder,
+//!     BodyAccess, BodyMode, BodyRequirement, FilterAction, FilterError, HttpFilter,
+//!     HttpFilterContext, sse::SseDecoder,
 //! };
 //!
 //! // A private newtype keeps this decoder distinct from other filters' state.
@@ -83,7 +83,7 @@
 //!
 //!     // Receive body chunks read-only, streamed one at a time (the default).
 //!     fn response_body_access(&self) -> BodyAccess {
-//!         BodyAccess::ReadOnly
+//!         BodyAccess::ReadOnly(BodyRequirement::Optional)
 //!     }
 //!
 //!     fn response_body_mode(&self) -> BodyMode {

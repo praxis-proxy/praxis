@@ -11,6 +11,8 @@ use std::{
     },
 };
 
+#[cfg(feature = "upstream-binding")]
+use ::http::header::HeaderName;
 use ::http::{HeaderMap, Method, StatusCode};
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -22,6 +24,8 @@ use super::{
     branch::{RejoinTarget, ResolvedBranch, ResolvedBranchCondition},
     filter::PipelineFilter,
 };
+#[cfg(feature = "upstream-binding")]
+use crate::PendingHeaderResult;
 use crate::{
     FilterAction, FilterEntry, FilterError, FilterFactory, FilterRegistry, SecurityClass, StreamingResponseBody,
     StreamingTerminalResponse,
@@ -191,7 +195,7 @@ async fn execute_http_request_head_skips_hook_when_conditions_unmet() {
         "a met-condition head hook continues"
     );
     assert_eq!(
-        matched_ctx.get_metadata("head_classifier.class"),
+        matched_ctx.filter_metadata.get("head_classifier.class"),
         Some("api"),
         "a request meeting the head filter's conditions is classified"
     );
@@ -205,7 +209,7 @@ async fn execute_http_request_head_skips_hook_when_conditions_unmet() {
         "a skipped head hook continues"
     );
     assert!(
-        skipped_ctx.get_metadata("head_classifier.class").is_none(),
+        skipped_ctx.filter_metadata.get("head_classifier.class").is_none(),
         "a request failing the head filter's conditions skips the hook"
     );
 }
@@ -300,9 +304,10 @@ async fn built_binding_router_resolves_metadata_from_pipeline_catalog() {
         Some("openai"),
         "the built router must resolve the provider from the pipeline catalog"
     );
-    assert!(
-        ctx.request_headers_to_set.iter().any(|(name, _)| name == "x-bound"),
-        "the bound_upstream condition must match the catalog-resolved provider"
+    assert_eq!(
+        ctx.pending_header_value(&HeaderName::from_static("x-bound")),
+        Ok(PendingHeaderResult::Value("true".to_owned())),
+        "the bound_upstream condition must queue the catalog-matched header value"
     );
 }
 
@@ -532,12 +537,10 @@ async fn unmatched_conditional_router_publishes_no_binding_or_route_metrics() {
     drop(pipeline.execute_http_request(&mut routed_ctx).await.unwrap());
     let action = pipeline.execute_http_request(&mut ctx).await.unwrap();
 
-    assert!(
-        routed_ctx
-            .request_headers_to_set
-            .iter()
-            .any(|(name, _)| name == "x-routed"),
-        "a routed request binds the openai cluster and runs the bound-gated filter"
+    assert_eq!(
+        routed_ctx.pending_header_value(&HeaderName::from_static("x-routed")),
+        Ok(PendingHeaderResult::Value("true".to_owned())),
+        "a routed request binds the openai cluster and queues the bound-gated header value"
     );
     assert!(
         matches!(action, FilterAction::Continue),
@@ -552,9 +555,10 @@ async fn unmatched_conditional_router_publishes_no_binding_or_route_metrics() {
         ctx.metrics_route.is_none(),
         "a skipped router must not label the request with a route"
     );
-    assert!(
-        ctx.request_headers_to_set.is_empty(),
-        "the bound-gated filter must not run for an unbound request"
+    assert_eq!(
+        ctx.pending_header_value(&HeaderName::from_static("x-routed")),
+        Ok(PendingHeaderResult::Absent),
+        "the bound-gated filter must not queue its header for an unbound request"
     );
 }
 
@@ -774,6 +778,132 @@ fn terminal_branch_pipeline(branch_filter: AnyFilter, after_ran: Arc<AtomicUsize
     test_pipeline(BodyCapabilities::default(), vec![branching, after])
 }
 
+/// Distinct endpoint-selection placements around a response-less Terminal.
+#[derive(Clone, Copy, Debug)]
+enum TerminalEndpointCase {
+    ClusterOnly,
+    PriorTopLevel,
+    PriorHostBranch,
+    EarlierNextSibling,
+    TerminalLocal,
+    LaterSibling,
+    NestedTerminal,
+}
+
+/// Make a branch for the terminal endpoint-selection matrix.
+fn terminal_matrix_branch(name: &str, rejoin: RejoinTarget, filters: Vec<PipelineFilter>) -> ResolvedBranch {
+    ResolvedBranch {
+        name: Arc::from(name),
+        condition: None,
+        filters,
+        max_iterations: None,
+        rejoin,
+    }
+}
+
+/// Make a filter that actually selects a new endpoint.
+fn terminal_matrix_selector(id: usize) -> PipelineFilter {
+    PipelineFilter::new(
+        id,
+        AnyFilter::Http(Box::new(UpstreamSelectFilter("127.0.0.1:8000"))),
+        vec![],
+        vec![],
+    )
+}
+
+/// Make a no-op host for the terminal endpoint-selection matrix.
+fn terminal_matrix_host(id: usize) -> PipelineFilter {
+    PipelineFilter::new(id, AnyFilter::Http(Box::new(NamedNoopFilter("host"))), vec![], vec![])
+}
+
+/// Branches belonging to the current host in the endpoint matrix.
+fn terminal_matrix_branches(case: TerminalEndpointCase) -> Vec<ResolvedBranch> {
+    let terminal = |filters| terminal_matrix_branch("stop", RejoinTarget::Terminal, filters);
+    let next = |filters| terminal_matrix_branch("route", RejoinTarget::Next, filters);
+    match case {
+        TerminalEndpointCase::ClusterOnly => vec![terminal(vec![PipelineFilter::new(
+            20,
+            AnyFilter::Http(Box::new(ClusterSelectFilter("backend"))),
+            vec![],
+            vec![],
+        )])],
+        TerminalEndpointCase::PriorTopLevel | TerminalEndpointCase::PriorHostBranch => vec![terminal(vec![])],
+        TerminalEndpointCase::EarlierNextSibling => vec![next(vec![terminal_matrix_selector(20)]), terminal(vec![])],
+        TerminalEndpointCase::TerminalLocal => vec![terminal(vec![terminal_matrix_selector(20)])],
+        TerminalEndpointCase::LaterSibling => vec![terminal(vec![]), next(vec![terminal_matrix_selector(20)])],
+        TerminalEndpointCase::NestedTerminal => {
+            let mut nested = terminal_matrix_host(30);
+            nested.branches.push(terminal_matrix_branch(
+                "nested_stop",
+                RejoinTarget::Terminal,
+                vec![terminal_matrix_selector(20)],
+            ));
+            vec![terminal(vec![nested])]
+        },
+    }
+}
+
+/// Place endpoint selection relative to one Terminal and a later security filter.
+fn terminal_matrix_filters(case: TerminalEndpointCase) -> Vec<PipelineFilter> {
+    let mut filters = Vec::new();
+    if matches!(case, TerminalEndpointCase::PriorTopLevel) {
+        filters.push(terminal_matrix_selector(0));
+    } else if matches!(case, TerminalEndpointCase::PriorHostBranch) {
+        let mut prior = terminal_matrix_host(0);
+        prior.branches.push(terminal_matrix_branch(
+            "prior_route",
+            RejoinTarget::Next,
+            vec![terminal_matrix_selector(20)],
+        ));
+        filters.push(prior);
+    }
+    let mut host = terminal_matrix_host(10);
+    host.branches = terminal_matrix_branches(case);
+    filters.push(host);
+    let mut security = terminal_matrix_host(40);
+    security.is_security = true;
+    filters.push(security);
+    filters
+}
+
+/// Compare one validator outcome to the same pipeline's request result.
+async fn assert_terminal_endpoint_case(case: TerminalEndpointCase, forwards: bool) -> Result<(), FilterError> {
+    let filters = terminal_matrix_filters(case);
+    let mut errors = Vec::new();
+    super::checks::check_terminal_rejoin_bypasses_security(&filters, &mut errors);
+    assert_eq!(
+        !errors.is_empty(),
+        forwards,
+        "validator mismatch for {case:?}: {errors:?}"
+    );
+    let pipeline = test_pipeline(BodyCapabilities::default(), filters);
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let action = pipeline.execute_http_request(&mut ctx).await?;
+    assert_eq!(
+        matches!(action, FilterAction::Continue),
+        forwards,
+        "runtime mismatch for {case:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn terminal_endpoint_validation_matches_runtime() -> Result<(), FilterError> {
+    for (case, forwards) in [
+        (TerminalEndpointCase::ClusterOnly, false),
+        (TerminalEndpointCase::PriorTopLevel, false),
+        (TerminalEndpointCase::PriorHostBranch, false),
+        (TerminalEndpointCase::EarlierNextSibling, true),
+        (TerminalEndpointCase::TerminalLocal, true),
+        (TerminalEndpointCase::LaterSibling, false),
+        (TerminalEndpointCase::NestedTerminal, false),
+    ] {
+        assert_terminal_endpoint_case(case, forwards).await?;
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn execute_request_stops_on_first_reject() {
     let counter = Arc::new(AtomicUsize::new(0));
@@ -980,6 +1110,69 @@ async fn response_condition_when_no_match_skips_filter() {
         0,
         "filter should be skipped when response status does not match"
     );
+}
+
+/// Required response work used to exercise upgrade admission through the request pipeline.
+struct RequiredResponseFilter;
+
+#[async_trait::async_trait]
+impl HttpFilter for RequiredResponseFilter {
+    fn name(&self) -> &'static str {
+        "required_response"
+    }
+
+    fn response_body_access(&self) -> BodyAccess {
+        BodyAccess::ReadOnly(crate::BodyRequirement::Required)
+    }
+
+    async fn on_request(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Continue)
+    }
+}
+
+#[tokio::test]
+async fn upgrade_admission_checks_selected_response_conditions_at_final_status() {
+    let pipeline =
+        make_pipeline_with_response_conditions(vec![(Box::new(RequiredResponseFilter), vec![when_status(&[200])])]);
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    FilterPipeline::mark_opaque_upgrade_requested(&mut ctx.extensions);
+    let action = pipeline.execute_http_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "conditional response work must wait for headers"
+    );
+    let mut response = crate::context::Response {
+        status: StatusCode::SWITCHING_PROTOCOLS,
+        headers: HeaderMap::new(),
+    };
+    assert!(
+        FilterPipeline::required_body_processing_for_response(&ctx.extensions, &response).is_none(),
+        "a 200-only condition must allow 101"
+    );
+    response.status = StatusCode::OK;
+    let evidence = FilterPipeline::required_body_processing_for_response(&ctx.extensions, &response)
+        .expect("selected 200 response requires body processing");
+    assert_eq!(
+        (evidence.filter_id(), evidence.filter_name(), evidence.phase()),
+        (0, "required_response", "response_body"),
+        "report the selected filter and phase"
+    );
+}
+
+#[tokio::test]
+async fn upgrade_admission_rejects_unconditional_required_response_before_dispatch() {
+    let pipeline = make_pipeline_with_response_conditions(vec![(Box::new(RequiredResponseFilter), Vec::new())]);
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    FilterPipeline::mark_opaque_upgrade_requested(&mut ctx.extensions);
+    let action = pipeline.execute_http_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Reject(_)),
+        "an unconditional requirement must reject during the request phase"
+    );
+    let evidence = FilterPipeline::required_body_processing(&ctx.extensions).expect("rejection retains its cause");
+    assert_eq!(evidence.phase(), "response_body", "identify the required phase");
 }
 
 #[test]
@@ -1245,7 +1438,7 @@ async fn execute_request_body_skips_none_access_filters() {
 #[tokio::test]
 async fn execute_selected_upstream_request_body_discards_a_read_only_edit() {
     let pipeline = make_pipeline(vec![Box::new(SelectedUpstreamTamperFilter {
-        access: BodyAccess::ReadOnly,
+        access: BodyAccess::ReadOnly(crate::BodyRequirement::Optional),
         error: false,
     })]);
     let req = crate::test_utils::make_request(Method::POST, "/upload");
@@ -1271,7 +1464,7 @@ async fn execute_selected_upstream_request_body_discards_a_read_only_edit() {
 #[tokio::test]
 async fn execute_selected_upstream_request_body_undoes_a_fail_open_writer_that_errors() {
     let mut pipeline = make_pipeline(vec![Box::new(SelectedUpstreamTamperFilter {
-        access: BodyAccess::ReadWrite,
+        access: BodyAccess::ReadWrite(crate::BodyRequirement::Optional),
         error: true,
     })]);
     pipeline.filters[0].failure_mode = FailureMode::Open;
@@ -1332,7 +1525,34 @@ async fn execute_selected_upstream_request_body_read_only() {
 
 #[tokio::test]
 async fn execute_selected_upstream_request_body_mutation() {
-    let pipeline = make_pipeline(vec![Box::new(SelectedUpstreamRewriteFilter)]);
+    let pipeline = make_pipeline(vec![Box::new(SelectedUpstreamRewriteFilter(
+        crate::BodyRequirement::Optional,
+    ))]);
+    let req = crate::test_utils::make_request(Method::POST, "/upload");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let mut body = Some(Bytes::from_static(b"hello"));
+    let action = pipeline
+        .execute_http_selected_upstream_request_body(&mut ctx, &mut body)
+        .await
+        .unwrap();
+
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "rewrite filter should continue"
+    );
+    assert_eq!(
+        body,
+        Some(Bytes::from_static(b"HELLO")),
+        "read-write filter should rewrite the selected-upstream body"
+    );
+}
+
+#[tokio::test]
+async fn execute_required_selected_upstream_request_body_mutation() {
+    let pipeline = make_pipeline(vec![Box::new(SelectedUpstreamRewriteFilter(
+        crate::BodyRequirement::Required,
+    ))]);
     let req = crate::test_utils::make_request(Method::POST, "/upload");
     let mut ctx = crate::test_utils::make_filter_context(&req);
 
@@ -1440,7 +1660,9 @@ async fn execute_selected_upstream_request_body_skips_non_participants() {
 
 #[tokio::test]
 async fn execute_selected_upstream_request_body_preserves_canonical_body() {
-    let pipeline = make_pipeline(vec![Box::new(SelectedUpstreamRewriteFilter)]);
+    let pipeline = make_pipeline(vec![Box::new(SelectedUpstreamRewriteFilter(
+        crate::BodyRequirement::Optional,
+    ))]);
     let req = crate::test_utils::make_request(Method::POST, "/upload");
     let mut ctx = crate::test_utils::make_filter_context(&req);
 
@@ -2983,11 +3205,62 @@ fn apply_body_limits_cannot_override_finite_buffer_ceiling() {
 }
 
 #[test]
+fn configured_buffered_request_rejects_transfer_above_cap() {
+    let limits = praxis_core::config::BodyLimitsConfig {
+        max_buffer_bytes: 4096.try_into().unwrap(),
+        max_request_bytes: Some(8192),
+        ..praxis_core::config::BodyLimitsConfig::default()
+    };
+    for max_bytes in [None, Some(1024), Some(16_384)] {
+        for allow_unbounded in [false, true] {
+            let mut pipeline = make_pipeline(vec![Box::new(BidirectionalModeFilter {
+                mode: BodyMode::StreamBuffer { max_bytes },
+            })]);
+            let error = pipeline.configure_body_limits(&limits, allow_unbounded).unwrap_err();
+            let message = error.to_string();
+            assert!(message.contains("body_limits.max_request_bytes (8192)"), "{message}");
+            assert!(message.contains("body_limits.max_buffer_bytes (4096)"), "{message}");
+            assert_eq!(
+                pipeline.request_body_ceiling(),
+                None,
+                "invalid limits must not be applied"
+            );
+        }
+    }
+}
+
+#[test]
+fn configured_buffered_request_accepts_transfer_at_cap() {
+    let limits = praxis_core::config::BodyLimitsConfig {
+        max_buffer_bytes: 4096.try_into().unwrap(),
+        max_request_bytes: Some(4096),
+        ..praxis_core::config::BodyLimitsConfig::default()
+    };
+    let mut pipeline = make_pipeline(vec![Box::new(BoundedStreamBufferFilter { max_bytes: 8192 })]);
+    pipeline.configure_body_limits(&limits, false).unwrap();
+    assert_eq!(pipeline.selected_upstream_request_body_limit(), 4096);
+}
+
+#[test]
+fn configured_buffered_request_rejects_transfer_one_above_cap() {
+    let limits = praxis_core::config::BodyLimitsConfig {
+        max_buffer_bytes: 4096.try_into().unwrap(),
+        max_request_bytes: Some(4097),
+        ..praxis_core::config::BodyLimitsConfig::default()
+    };
+    let mut pipeline = make_pipeline(vec![Box::new(BoundedStreamBufferFilter { max_bytes: 8192 })]);
+    let error = pipeline.configure_body_limits(&limits, false).unwrap_err();
+    let message = error.to_string();
+    assert!(message.contains("body_limits.max_request_bytes (4097)"), "{message}");
+    assert!(message.contains("body_limits.max_buffer_bytes (4096)"), "{message}");
+}
+
+#[test]
 fn configured_buffer_cap_combines_with_transfer_and_filter_limits() {
     use praxis_core::config::BodyLimitsConfig;
     for cap in [1, 65_537, 67_108_865, 1_073_741_824] {
         for requested in [None, Some(1), Some(cap), Some(usize::MAX)] {
-            for transfer in [None, Some(0), Some(17), Some(usize::MAX)] {
+            for transfer in [None, Some(0), Some(17.min(cap)), Some(cap - 1), Some(cap)] {
                 let limits = BodyLimitsConfig {
                     max_buffer_bytes: cap.try_into().unwrap(),
                     max_request_bytes: transfer,
@@ -3034,6 +3307,74 @@ fn configured_buffer_cap_combines_with_transfer_and_filter_limits() {
             assert_eq!(pipeline.body_capabilities().response_body_mode, mode);
         }
     }
+}
+
+#[test]
+fn configured_streaming_requests_allow_transfer_above_cap_with_buffered_responses() {
+    let limits = praxis_core::config::BodyLimitsConfig {
+        max_buffer_bytes: 4096.try_into().unwrap(),
+        max_request_bytes: Some(8192),
+        max_response_bytes: Some(16_384),
+    };
+    for request_body_mode in [BodyMode::Stream, BodyMode::SizeLimit { max_bytes: 32_768 }] {
+        for needs_request_body in [false, true] {
+            let mut pipeline = test_pipeline(
+                BodyCapabilities {
+                    request_body_mode,
+                    needs_request_body,
+                    response_body_mode: BodyMode::StreamBuffer {
+                        max_bytes: Some(32_768),
+                    },
+                    needs_response_body: true,
+                    ..BodyCapabilities::default()
+                },
+                vec![],
+            );
+            pipeline.configure_body_limits(&limits, false).unwrap();
+            let expected = if needs_request_body && request_body_mode == BodyMode::Stream {
+                BodyMode::Stream
+            } else {
+                BodyMode::SizeLimit { max_bytes: 8192 }
+            };
+            assert_eq!(pipeline.body_capabilities().request_body_mode, expected);
+            assert_eq!(pipeline.request_body_ceiling(), Some(8192));
+            assert_eq!(
+                pipeline.body_capabilities().response_body_mode,
+                BodyMode::StreamBuffer { max_bytes: Some(4096) },
+                "response buffering must still be clamped independently"
+            );
+        }
+    }
+}
+
+#[test]
+fn configured_buffered_request_rejects_nested_transfer_above_cap() {
+    let nested = make_pipeline(vec![Box::new(BoundedStreamBufferFilter { max_bytes: 8192 })]);
+    let mut parent = make_pipeline(vec![Box::new(NestedPipelineFilter { nested })]);
+    let limits = praxis_core::config::BodyLimitsConfig {
+        max_buffer_bytes: 4096.try_into().unwrap(),
+        max_request_bytes: Some(8192),
+        ..praxis_core::config::BodyLimitsConfig::default()
+    };
+    assert_eq!(parent.body_capabilities().request_body_mode, BodyMode::Stream);
+    let error = parent.configure_body_limits(&limits, true).unwrap_err();
+    assert!(error.to_string().contains("body_limits.max_request_bytes (8192)"));
+    assert_eq!(parent.request_body_ceiling(), None);
+}
+
+#[test]
+fn configured_buffered_request_rejects_transfer_above_cap_despite_early_release() {
+    let mut pipeline = make_pipeline(vec![Box::new(StreamBufferReleaseFilter { marker: b"release" })]);
+    let limits = praxis_core::config::BodyLimitsConfig {
+        max_buffer_bytes: 4096.try_into().unwrap(),
+        max_request_bytes: Some(8192),
+        ..praxis_core::config::BodyLimitsConfig::default()
+    };
+    let error = pipeline.configure_body_limits(&limits, false).unwrap_err();
+    assert!(
+        error.to_string().contains("body_limits.max_request_bytes (8192)"),
+        "release depends on request content, so a static limit cannot assume it occurs"
+    );
 }
 
 #[test]
@@ -3245,7 +3586,9 @@ async fn skip_to_excludes_skipped_filters_from_response() {
     );
 
     let pipeline = with_body_indices(FilterPipeline {
+        upgrade_policy: None,
         body_capabilities: BodyCapabilities::default(),
+        has_request_completion_observer: false,
         compression: None,
         filters: vec![filter_a, filter_b, filter_c],
         record_filter_duration_metrics: false,
@@ -3264,6 +3607,7 @@ async fn skip_to_excludes_skipped_filters_from_response() {
         request_body_ceiling: None,
         response_body_ceiling: None,
         request_head_filter_indices: Vec::new(),
+        shielded_admitter_indices: Vec::new(),
         request_body_filter_indices: Vec::new(),
         response_body_filter_indices: Vec::new(),
         selected_upstream_request_body_filter_indices: Vec::new(),
@@ -3328,7 +3672,9 @@ async fn skip_to_excludes_skipped_filters_from_body_hooks() {
     );
 
     let pipeline = with_body_indices(FilterPipeline {
+        upgrade_policy: None,
         body_capabilities: BodyCapabilities::default(),
+        has_request_completion_observer: false,
         compression: None,
         filters: vec![filter_a, filter_b, filter_c],
         record_filter_duration_metrics: false,
@@ -3347,6 +3693,7 @@ async fn skip_to_excludes_skipped_filters_from_body_hooks() {
         request_body_ceiling: None,
         response_body_ceiling: None,
         request_head_filter_indices: Vec::new(),
+        shielded_admitter_indices: Vec::new(),
         request_body_filter_indices: Vec::new(),
         response_body_filter_indices: Vec::new(),
         selected_upstream_request_body_filter_indices: Vec::new(),
@@ -3389,7 +3736,9 @@ async fn body_hooks_run_for_every_filter_before_the_request_phase() {
     let log: Arc<std::sync::Mutex<Vec<&'static str>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
 
     let pipeline = with_body_indices(FilterPipeline {
+        upgrade_policy: None,
         body_capabilities: BodyCapabilities::default(),
+        has_request_completion_observer: false,
         compression: None,
         filters: vec![
             PipelineFilter::new(
@@ -3427,6 +3776,7 @@ async fn body_hooks_run_for_every_filter_before_the_request_phase() {
         request_body_ceiling: None,
         response_body_ceiling: None,
         request_head_filter_indices: Vec::new(),
+        shielded_admitter_indices: Vec::new(),
         request_body_filter_indices: Vec::new(),
         response_body_filter_indices: Vec::new(),
         selected_upstream_request_body_filter_indices: Vec::new(),
@@ -3463,7 +3813,9 @@ async fn all_executed_filters_run_on_response() {
     let log: Arc<std::sync::Mutex<Vec<&'static str>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
 
     let pipeline = with_body_indices(FilterPipeline {
+        upgrade_policy: None,
         body_capabilities: BodyCapabilities::default(),
+        has_request_completion_observer: false,
         compression: None,
         filters: vec![
             PipelineFilter::new(
@@ -3501,6 +3853,7 @@ async fn all_executed_filters_run_on_response() {
         request_body_ceiling: None,
         response_body_ceiling: None,
         request_head_filter_indices: Vec::new(),
+        shielded_admitter_indices: Vec::new(),
         request_body_filter_indices: Vec::new(),
         response_body_filter_indices: Vec::new(),
         selected_upstream_request_body_filter_indices: Vec::new(),
@@ -3693,7 +4046,9 @@ async fn skipped_filter_skips_its_branches() {
     parent.branches = vec![branch];
 
     let pipeline = with_body_indices(FilterPipeline {
+        upgrade_policy: None,
         body_capabilities: BodyCapabilities::default(),
+        has_request_completion_observer: false,
         compression: None,
         filters: vec![parent],
         record_filter_duration_metrics: false,
@@ -3712,6 +4067,7 @@ async fn skipped_filter_skips_its_branches() {
         request_body_ceiling: None,
         response_body_ceiling: None,
         request_head_filter_indices: Vec::new(),
+        shielded_admitter_indices: Vec::new(),
         request_body_filter_indices: Vec::new(),
         response_body_filter_indices: Vec::new(),
         selected_upstream_request_body_filter_indices: Vec::new(),
@@ -4509,6 +4865,30 @@ impl HttpFilter for NamedNoopFilter {
     }
 }
 
+/// Assert deferred dispatch establishes the selected invocation's identity.
+struct DeferredIdentityProbe {
+    /// Identity assigned to the wrapped access-log instance.
+    expected_id: usize,
+    /// Real access-log implementation, retaining its sink and field assertions.
+    inner: AnyFilter,
+}
+
+#[async_trait]
+impl HttpFilter for DeferredIdentityProbe {
+    fn name(&self) -> &'static str {
+        "access_log"
+    }
+
+    async fn on_request(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Continue)
+    }
+
+    fn emit_deferred_record(&self, ctx: &crate::HttpFilterContext<'_>, status: u16) -> bool {
+        assert_eq!(ctx.current_filter_id, Some(self.expected_id));
+        self.inner.emit_deferred_record(ctx, status)
+    }
+}
+
 /// A filter that immediately rejects all requests.
 struct RejectFilter;
 
@@ -4545,6 +4925,10 @@ struct UpstreamSelectFilter(&'static str);
 impl HttpFilter for UpstreamSelectFilter {
     fn name(&self) -> &'static str {
         "upstream_select"
+    }
+
+    fn selects_upstream_endpoint(&self) -> bool {
+        true
     }
 
     async fn on_request(&self, ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
@@ -4616,11 +5000,11 @@ impl HttpFilter for BodyLoggingFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn response_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     async fn on_request(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
@@ -4680,11 +5064,11 @@ impl HttpFilter for RequestBodyDoneWithResponseFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn response_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     async fn on_request(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
@@ -4741,7 +5125,7 @@ impl HttpFilter for BodyInspectorFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     async fn on_request_body(
@@ -4772,7 +5156,7 @@ impl HttpFilter for BodyUppercaseFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadWrite
+        BodyAccess::ReadWrite(crate::BodyRequirement::Optional)
     }
 
     async fn on_request_body(
@@ -4804,7 +5188,7 @@ impl HttpFilter for BodyRejectFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     async fn on_request_body(
@@ -4842,7 +5226,7 @@ impl HttpFilter for SelectedUpstreamRecorderFilter {
     }
 
     fn selected_upstream_request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn request_body_mode(&self) -> BodyMode {
@@ -4862,7 +5246,7 @@ impl HttpFilter for SelectedUpstreamRecorderFilter {
 
 /// A selected-upstream request-body filter that uppercases the buffered
 /// body in place (read-write).
-struct SelectedUpstreamRewriteFilter;
+struct SelectedUpstreamRewriteFilter(crate::BodyRequirement);
 
 #[async_trait]
 impl HttpFilter for SelectedUpstreamRewriteFilter {
@@ -4875,7 +5259,7 @@ impl HttpFilter for SelectedUpstreamRewriteFilter {
     }
 
     fn selected_upstream_request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadWrite
+        BodyAccess::ReadWrite(self.0)
     }
 
     fn request_body_mode(&self) -> BodyMode {
@@ -4949,7 +5333,7 @@ impl HttpFilter for SelectedUpstreamRejectFilter {
     }
 
     fn selected_upstream_request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn request_body_mode(&self) -> BodyMode {
@@ -4983,7 +5367,7 @@ impl HttpFilter for ResponseBodyInspectorFilter {
     }
 
     fn response_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn on_response_body(
@@ -5017,7 +5401,7 @@ impl HttpFilter for StreamBufferReleaseFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn request_body_mode(&self) -> BodyMode {
@@ -5060,11 +5444,11 @@ impl HttpFilter for BidirectionalModeFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn response_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn request_body_mode(&self) -> BodyMode {
@@ -5087,7 +5471,7 @@ impl HttpFilter for BoundedStreamBufferFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn request_body_mode(&self) -> BodyMode {
@@ -5142,7 +5526,7 @@ impl HttpFilter for BodyTakeFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadWrite
+        BodyAccess::ReadWrite(crate::BodyRequirement::Optional)
     }
 
     async fn on_request_body(
@@ -5173,7 +5557,7 @@ impl HttpFilter for NullableBodyInspectorFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     async fn on_request_body(
@@ -5203,7 +5587,7 @@ impl HttpFilter for BodyDoneAfterFirstFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     async fn on_request_body(
@@ -5235,7 +5619,7 @@ impl HttpFilter for ResponseBodyDoneAfterFirstFilter {
     }
 
     fn response_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn on_response_body(
@@ -5267,7 +5651,7 @@ impl HttpFilter for StreamBufferBodyDoneFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn request_body_mode(&self) -> BodyMode {
@@ -5290,7 +5674,10 @@ impl HttpFilter for StreamBufferBodyDoneFilter {
 /// Recompute the precomputed body-filter index lists for a hand-built
 /// pipeline literal, mirroring what [`FilterPipeline::build`] does.
 fn with_body_indices(mut pipeline: FilterPipeline) -> FilterPipeline {
+    pipeline.has_request_completion_observer = super::pipeline_has_request_completion_observer(&pipeline.filters);
     let (request, response) = super::body::body_filter_indices(&pipeline.filters);
+    pipeline.request_head_filter_indices = super::body::request_head_filter_indices(&pipeline.filters);
+    pipeline.shielded_admitter_indices = super::body::shielded_admitter_indices(&pipeline.filters);
     pipeline.request_body_filter_indices = request;
     pipeline.response_body_filter_indices = response;
     pipeline.selected_upstream_request_body_filter_indices =
@@ -5307,7 +5694,9 @@ fn with_body_indices(mut pipeline: FilterPipeline) -> FilterPipeline {
 /// explicit body capabilities (defaults everywhere else).
 fn test_pipeline(body_capabilities: BodyCapabilities, filters: Vec<PipelineFilter>) -> FilterPipeline {
     with_body_indices(FilterPipeline {
+        upgrade_policy: None,
         body_capabilities,
+        has_request_completion_observer: false,
         compression: None,
         filters,
         record_filter_duration_metrics: false,
@@ -5326,6 +5715,7 @@ fn test_pipeline(body_capabilities: BodyCapabilities, filters: Vec<PipelineFilte
         request_body_ceiling: None,
         response_body_ceiling: None,
         request_head_filter_indices: Vec::new(),
+        shielded_admitter_indices: Vec::new(),
         request_body_filter_indices: Vec::new(),
         response_body_filter_indices: Vec::new(),
         selected_upstream_request_body_filter_indices: Vec::new(),
@@ -5358,7 +5748,7 @@ impl HttpFilter for PromoterBodyFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn request_body_mode(&self) -> BodyMode {
@@ -5402,7 +5792,7 @@ impl HttpFilter for GatedRecordingBodyFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn request_body_mode(&self) -> BodyMode {
@@ -5750,7 +6140,9 @@ fn make_pipeline(filters: Vec<Box<dyn HttpFilter>>) -> FilterPipeline {
     let body_capabilities = compute_body_capabilities(&filters);
 
     with_body_indices(FilterPipeline {
+        upgrade_policy: None,
         body_capabilities,
+        has_request_completion_observer: false,
         compression: None,
         filters,
         record_filter_duration_metrics: false,
@@ -5769,6 +6161,7 @@ fn make_pipeline(filters: Vec<Box<dyn HttpFilter>>) -> FilterPipeline {
         request_body_ceiling: None,
         response_body_ceiling: None,
         request_head_filter_indices: Vec::new(),
+        shielded_admitter_indices: Vec::new(),
         request_body_filter_indices: Vec::new(),
         response_body_filter_indices: Vec::new(),
         selected_upstream_request_body_filter_indices: Vec::new(),
@@ -5791,7 +6184,9 @@ fn make_pipeline_with_conditions(
     let body_capabilities = compute_body_capabilities(&filters);
 
     with_body_indices(FilterPipeline {
+        upgrade_policy: None,
         body_capabilities,
+        has_request_completion_observer: false,
         compression: None,
         filters,
         record_filter_duration_metrics: false,
@@ -5810,6 +6205,7 @@ fn make_pipeline_with_conditions(
         request_body_ceiling: None,
         response_body_ceiling: None,
         request_head_filter_indices: Vec::new(),
+        shielded_admitter_indices: Vec::new(),
         request_body_filter_indices: Vec::new(),
         response_body_filter_indices: Vec::new(),
         selected_upstream_request_body_filter_indices: Vec::new(),
@@ -5832,7 +6228,9 @@ fn make_pipeline_with_response_conditions(
     let body_capabilities = compute_body_capabilities(&filters);
 
     with_body_indices(FilterPipeline {
+        upgrade_policy: None,
         body_capabilities,
+        has_request_completion_observer: false,
         compression: None,
         filters,
         record_filter_duration_metrics: false,
@@ -5851,6 +6249,7 @@ fn make_pipeline_with_response_conditions(
         request_body_ceiling: None,
         response_body_ceiling: None,
         request_head_filter_indices: Vec::new(),
+        shielded_admitter_indices: Vec::new(),
         request_body_filter_indices: Vec::new(),
         response_body_filter_indices: Vec::new(),
         selected_upstream_request_body_filter_indices: Vec::new(),
@@ -5981,11 +6380,11 @@ impl HttpFilter for StatefulFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn response_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     async fn on_request_body(
@@ -6211,11 +6610,11 @@ impl HttpFilter for AllPhaseErrorFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn response_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     async fn on_request_body(
@@ -6503,7 +6902,9 @@ fn streaming_capability_not_detected_for_normal_filter() {
 fn streaming_capability_detected_when_filter_declares_it() {
     let streaming_pf = super::test_filters::streaming_capable_filter();
     let pipeline = with_body_indices(FilterPipeline {
+        upgrade_policy: None,
         body_capabilities: BodyCapabilities::default(),
+        has_request_completion_observer: false,
         compression: None,
         filters: vec![streaming_pf],
         health_registry: None,
@@ -6522,6 +6923,7 @@ fn streaming_capability_detected_when_filter_declares_it() {
         request_body_ceiling: None,
         response_body_ceiling: None,
         request_head_filter_indices: Vec::new(),
+        shielded_admitter_indices: Vec::new(),
         request_body_filter_indices: Vec::new(),
         response_body_filter_indices: Vec::new(),
         selected_upstream_request_body_filter_indices: Vec::new(),
@@ -6746,11 +7148,11 @@ mod filter_duration_metrics_tests {
         }
 
         fn request_body_access(&self) -> BodyAccess {
-            BodyAccess::ReadOnly
+            BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
         }
 
         fn response_body_access(&self) -> BodyAccess {
-            BodyAccess::ReadOnly
+            BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
         }
 
         async fn on_request_body(
@@ -7471,7 +7873,7 @@ mod bound_upstream_body_barrier {
         }
 
         fn bound_upstream_request_body_access(&self) -> BodyAccess {
-            BodyAccess::ReadOnly
+            BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
         }
 
         fn request_body_mode(&self) -> BodyMode {
@@ -7568,7 +7970,7 @@ mod bound_upstream_body_barrier {
         }
 
         fn bound_upstream_request_body_access(&self) -> BodyAccess {
-            BodyAccess::ReadWrite
+            BodyAccess::ReadWrite(crate::BodyRequirement::Optional)
         }
 
         fn request_body_mode(&self) -> BodyMode {
@@ -7845,7 +8247,7 @@ mod bound_upstream_body_barrier {
         let pipeline = make_pipeline(vec![
             binding_router("inference"),
             Box::new(TamperingParticipant {
-                access: BodyAccess::ReadOnly,
+                access: BodyAccess::ReadOnly(crate::BodyRequirement::Optional),
                 error: false,
             }),
         ]);
@@ -7872,7 +8274,7 @@ mod bound_upstream_body_barrier {
         let mut pipeline = make_pipeline(vec![
             binding_router("inference"),
             Box::new(TamperingParticipant {
-                access: BodyAccess::ReadWrite,
+                access: BodyAccess::ReadWrite(crate::BodyRequirement::Optional),
                 error: true,
             }),
             Box::new(after),
@@ -7907,7 +8309,7 @@ mod bound_upstream_body_barrier {
         }
 
         fn bound_upstream_request_body_access(&self) -> BodyAccess {
-            BodyAccess::ReadWrite
+            BodyAccess::ReadWrite(crate::BodyRequirement::Optional)
         }
 
         fn request_body_mode(&self) -> BodyMode {
@@ -8227,7 +8629,7 @@ mod bound_upstream_body_barrier {
         }
 
         fn bound_upstream_request_body_access(&self) -> BodyAccess {
-            BodyAccess::ReadWrite
+            BodyAccess::ReadWrite(crate::BodyRequirement::Optional)
         }
 
         fn request_body_mode(&self) -> BodyMode {
@@ -8480,6 +8882,346 @@ mod bound_upstream_body_barrier {
 // filter_request_conditions_match (selection axis)
 // -----------------------------------------------------------------------------
 
+#[tokio::test]
+async fn deferred_access_record_uses_first_eligible_instance() {
+    let dir = tempfile::tempdir().unwrap();
+    let excluded = dir.path().join("excluded.ndjson");
+    let included = dir.path().join("included.ndjson");
+    let entries = format!(
+        r#"
+- filter: access_log
+  fields: [path]
+  sink: {{type: file, path: "{}"}}
+  conditions:
+    - when:
+        path_prefix: /export
+- filter: access_log
+  fields: [status]
+  sink: {{type: file, path: "{}"}}
+  conditions:
+    - when:
+        path_prefix: /private
+"#,
+        excluded.display(),
+        included.display(),
+    );
+    let mut entries: Vec<FilterEntry> = serde_yaml::from_str(&entries).unwrap();
+    let mut pipeline = FilterPipeline::build(&mut entries, &FilterRegistry::with_builtins()).unwrap();
+    let selected = pipeline.filters.get_mut(1).unwrap();
+    let inner = std::mem::replace(
+        &mut selected.filter,
+        AnyFilter::Http(Box::new(NamedNoopFilter("placeholder"))),
+    );
+    selected.filter = AnyFilter::Http(Box::new(DeferredIdentityProbe {
+        expected_id: selected.filter_id,
+        inner,
+    }));
+    let request = crate::test_utils::make_request(Method::GET, "/private");
+    let mut ctx = crate::test_utils::make_filter_context(&request);
+    let time_source = praxis_core::time::FixedTimeSource::new(std::time::Duration::from_millis(1_700_000_000_123));
+    ctx.time_source = &time_source;
+    ctx.current_filter_id = Some(99);
+    assert!(pipeline.emit_deferred_access_record(&mut ctx, 502));
+    let contents = wait_for_deferred_access_record(&included).await;
+    let record: serde_json::Value = serde_json::from_str(contents.lines().next().unwrap()).unwrap();
+    assert_eq!(
+        record
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>(),
+        ["status", "timestamp"].into_iter().collect()
+    );
+    assert_eq!(record["timestamp"], "2023-11-14T22:13:20.123Z");
+    assert_eq!(record["status"], "502");
+    assert!(!excluded.exists() || std::fs::read_to_string(&excluded).unwrap_or_default().is_empty());
+    assert_eq!(
+        ctx.current_filter_id,
+        Some(99),
+        "identity must be restored after dispatch"
+    );
+}
+
+#[cfg(feature = "cloud-events-filter")]
+#[tokio::test]
+async fn deferred_access_log_is_not_claimed_by_cloud_events() {
+    for cloud_first in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let access_path = dir.path().join("access.ndjson");
+        let cloud = "- filter: cloud_events
+  on: response_complete
+  destination: http://127.0.0.1:9/events
+  source: urn:praxis:test
+  type: test.event
+";
+        let access = format!(
+            "- filter: access_log\n  fields: [status]\n  sink: {{type: file, path: \"{}\"}}\n",
+            access_path.display()
+        );
+        let yaml = if cloud_first {
+            format!("{cloud}{access}")
+        } else {
+            format!("{access}{cloud}")
+        };
+        let mut entries: Vec<FilterEntry> = serde_yaml::from_str(&yaml).unwrap();
+        let pipeline = FilterPipeline::build(&mut entries, &FilterRegistry::with_builtins()).unwrap();
+        let request = crate::test_utils::make_request(Method::GET, "/private");
+        let mut ctx = crate::test_utils::make_filter_context(&request);
+        assert!(pipeline.emit_deferred_access_record(&mut ctx, 502));
+        let contents = wait_for_deferred_access_record(&access_path).await;
+        assert!(contents.contains("\"status\":\"502\""));
+    }
+}
+
+/// Record each terminal hook's bound invocation identity and written status.
+struct CompletionProbe(Arc<std::sync::Mutex<Vec<(usize, u16)>>>);
+
+/// Stop the response unwind before an earlier completion observer.
+struct RejectingResponseFilter;
+
+#[async_trait]
+impl HttpFilter for RejectingResponseFilter {
+    fn name(&self) -> &'static str {
+        "rejecting_response"
+    }
+
+    async fn on_request(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Continue)
+    }
+
+    async fn on_response(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Reject(crate::Rejection::status(500)))
+    }
+}
+
+#[async_trait]
+impl HttpFilter for CompletionProbe {
+    fn name(&self) -> &'static str {
+        "completion_probe"
+    }
+
+    async fn on_request(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Continue)
+    }
+
+    fn on_request_complete(&self, ctx: &mut crate::HttpFilterContext<'_>, status: u16) {
+        self.0.lock().unwrap().push((ctx.current_filter_id.unwrap(), status));
+    }
+
+    fn observes_request_completion(&self) -> bool {
+        true
+    }
+}
+
+#[test]
+fn request_completion_keeps_invocations_and_fails_closed_without_status() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut pipeline = make_pipeline(vec![
+        Box::new(CompletionProbe(Arc::clone(&seen))),
+        Box::new(CompletionProbe(Arc::clone(&seen))),
+    ]);
+    pipeline.filters[0].response_conditions = serde_yaml::from_str("- when: {status: [502]}").unwrap();
+    pipeline.filters[1].response_conditions = serde_yaml::from_str("- when: {status: [503]}").unwrap();
+    let request = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&request);
+    ctx.executed_filter_indices = vec![true, true];
+    ctx.current_filter_id = Some(99);
+
+    pipeline.emit_request_completion(&mut ctx, 0);
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "unknown status cannot match response scope"
+    );
+    pipeline.emit_request_completion(&mut ctx, 502);
+    pipeline.emit_request_completion(&mut ctx, 503);
+    assert_eq!(*seen.lock().unwrap(), [(0, 502), (1, 503)]);
+    assert_eq!(ctx.current_filter_id, Some(99));
+
+    ctx.executed_filter_indices[1] = false;
+    pipeline.emit_request_completion(&mut ctx, 503);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [(0, 502), (1, 503)],
+        "skipped request scope stays skipped"
+    );
+}
+
+#[test]
+fn unreached_response_hook_fails_closed_for_header_scope() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut pipeline = make_pipeline(vec![
+        Box::new(CompletionProbe(Arc::clone(&seen))),
+        Box::new(CompletionProbe(Arc::clone(&seen))),
+        Box::new(CompletionProbe(Arc::clone(&seen))),
+    ]);
+    pipeline.filters[0].response_conditions = serde_yaml::from_str("- when: {headers_present: [x-policy]}").unwrap();
+    pipeline.filters[1].response_conditions = serde_yaml::from_str("- unless: {headers_present: [x-policy]}").unwrap();
+    pipeline.filters[2].response_conditions = serde_yaml::from_str("- when: {status: [502]}").unwrap();
+    let request = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&request);
+    ctx.executed_filter_indices = vec![true, true, true];
+
+    pipeline.emit_request_completion(&mut ctx, 502);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [(2, 502)],
+        "unknown headers cannot satisfy either header scope"
+    );
+}
+
+#[test]
+fn pipeline_without_completion_observer_skips_terminal_dispatch() {
+    let pipeline = make_pipeline(vec![Box::new(NamedNoopFilter("ordinary"))]);
+    assert!(!pipeline.has_request_completion_observer());
+    let request = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&request);
+    ctx.executed_filter_indices = vec![true];
+    ctx.current_filter_id = Some(99);
+    pipeline.emit_request_completion(&mut ctx, 200);
+    assert_eq!(ctx.current_filter_id, Some(99));
+}
+
+#[tokio::test]
+async fn request_completion_reaches_only_executed_branch_invocations() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut pipeline = make_pipeline(vec![Box::new(NamedNoopFilter("host"))]);
+    pipeline.filters[0].branches = vec![ResolvedBranch {
+        condition: None,
+        filters: vec![PipelineFilter::new(
+            1,
+            AnyFilter::Http(Box::new(CompletionProbe(Arc::clone(&seen)))),
+            vec![],
+            vec![],
+        )],
+        max_iterations: None,
+        name: Arc::from("completion_branch"),
+        rejoin: RejoinTarget::Next,
+    }];
+    pipeline.has_request_completion_observer = super::pipeline_has_request_completion_observer(&pipeline.filters);
+    assert!(pipeline.has_request_completion_observer());
+    let request = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&request);
+    ctx.executed_filter_indices = vec![true];
+    pipeline.emit_request_completion(&mut ctx, 200);
+    assert!(seen.lock().unwrap().is_empty());
+    ctx.executed_branch_filters = vec![false, true];
+    drop(pipeline.execute_http_response(&mut ctx).await.unwrap());
+    pipeline.emit_request_completion(&mut ctx, 200);
+    assert_eq!(*seen.lock().unwrap(), [(1, 200)]);
+}
+
+#[tokio::test]
+async fn request_completion_respects_recorded_response_hook_scope() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut pipeline = make_pipeline(vec![
+        Box::new(CompletionProbe(Arc::clone(&seen))),
+        Box::new(CompletionProbe(Arc::clone(&seen))),
+    ]);
+    pipeline.filters[0].response_conditions = serde_yaml::from_str("- when: {status: [200]}").unwrap();
+    pipeline.filters[1].response_conditions = serde_yaml::from_str("- when: {status: [201]}").unwrap();
+    let request = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&request);
+    ctx.executed_filter_indices = vec![true, true];
+    let mut response = crate::test_utils::make_response();
+    ctx.response_header = Some(&mut response);
+    drop(pipeline.execute_http_response(&mut ctx).await.unwrap());
+    ctx.response_header = None;
+
+    pipeline.emit_request_completion(&mut ctx, 200);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [(0, 200)],
+        "201-scoped observer did not run its response hook"
+    );
+}
+
+#[tokio::test]
+async fn interim_response_never_authorizes_completion_scope() {
+    for (interim_scope, final_scope, expected) in [(103, 200, 1), (200, 103, 0)] {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut pipeline = make_pipeline(vec![
+            Box::new(CompletionProbe(Arc::clone(&seen))),
+            Box::new(CompletionProbe(Arc::clone(&seen))),
+        ]);
+        pipeline.filters[0].response_conditions =
+            serde_yaml::from_str(&format!("- when: {{status: [{interim_scope}]}}")).unwrap();
+        pipeline.filters[1].response_conditions =
+            serde_yaml::from_str(&format!("- when: {{status: [{final_scope}]}}")).unwrap();
+        let request = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&request);
+        ctx.executed_filter_indices = vec![true, true];
+
+        let mut interim = crate::test_utils::make_response();
+        interim.status = StatusCode::EARLY_HINTS;
+        ctx.response_header = Some(&mut interim);
+        drop(pipeline.execute_http_response(&mut ctx).await.unwrap());
+        ctx.response_header = None;
+        assert!(ctx.extensions.get::<super::CompletionResponseHooks>().is_none());
+
+        let mut final_response = crate::test_utils::make_response();
+        final_response.status = StatusCode::OK;
+        ctx.response_header = Some(&mut final_response);
+        drop(pipeline.execute_http_response(&mut ctx).await.unwrap());
+        ctx.response_header = None;
+        pipeline.emit_request_completion(&mut ctx, 200);
+        assert_eq!(*seen.lock().unwrap(), [(expected, 200)]);
+    }
+}
+
+#[tokio::test]
+async fn interim_only_failure_uses_terminal_status_scope() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut pipeline = make_pipeline(vec![Box::new(CompletionProbe(Arc::clone(&seen)))]);
+    pipeline.filters[0].response_conditions = serde_yaml::from_str("- when: {status: [502]}").unwrap();
+    let request = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&request);
+    ctx.executed_filter_indices = vec![true];
+    let mut interim = crate::test_utils::make_response();
+    interim.status = StatusCode::EARLY_HINTS;
+    ctx.response_header = Some(&mut interim);
+    drop(pipeline.execute_http_response(&mut ctx).await.unwrap());
+    ctx.response_header = None;
+    pipeline.emit_request_completion(&mut ctx, 502);
+    assert_eq!(*seen.lock().unwrap(), [(0, 502)]);
+}
+
+#[tokio::test]
+async fn response_short_circuit_still_runs_terminal_observer() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut pipeline = make_pipeline(vec![
+        Box::new(CompletionProbe(Arc::clone(&seen))),
+        Box::new(RejectingResponseFilter),
+    ]);
+    pipeline.filters[0].response_conditions = serde_yaml::from_str("- when: {status: [500]}").unwrap();
+    let request = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&request);
+    ctx.executed_filter_indices = vec![true, true];
+    let mut response = crate::test_utils::make_response();
+    ctx.response_header = Some(&mut response);
+    let result = pipeline.execute_http_response(&mut ctx).await.unwrap();
+    assert!(matches!(result, FilterAction::Reject(_)));
+    ctx.response_header = None;
+
+    pipeline.emit_request_completion(&mut ctx, 500);
+    assert_eq!(*seen.lock().unwrap(), [(0, 500)]);
+}
+
+/// Wait for exactly one deferred access record without blocking the runtime.
+async fn wait_for_deferred_access_record(path: &std::path::Path) -> String {
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let contents = std::fs::read_to_string(path).unwrap_or_default();
+            if contents.lines().count() == 1 {
+                return contents;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("exactly one deferred access record within one second")
+}
+
 /// Build a single-`access_log`-filter pipeline scoped to `provider` via a
 /// `selected_upstream` `when` condition. `build` does not enforce ordering, so
 /// no load balancer is needed to construct it for these condition-match tests.
@@ -8695,6 +9437,436 @@ async fn a_pre_read_result_for_a_skipped_filter_is_dropped() {
         ctx.filter_results.is_empty(),
         "results for a filter that never ran must not leak past the request phase"
     );
+}
+
+/// Same-type producer with optional head/body participation for staging tests.
+struct StagedProbe {
+    role: &'static str,
+    head_class: Option<&'static str>,
+    head: bool,
+    body: bool,
+    visits: Arc<AtomicUsize>,
+}
+
+/// Configure one deterministic pre-request result producer.
+fn staged_probe(
+    role: &'static str,
+    class: Option<&'static str>,
+    head: bool,
+    body: bool,
+    visits: Arc<AtomicUsize>,
+) -> StagedProbe {
+    StagedProbe {
+        role,
+        head_class: class,
+        head,
+        body,
+        visits,
+    }
+}
+
+/// Apply one body chunk's test publication or replacement.
+fn publish_staged_probe_body(
+    role: &str,
+    ctx: &mut crate::HttpFilterContext<'_>,
+    body: Option<&[u8]>,
+) -> Result<(), FilterError> {
+    match (role, body) {
+        ("first", Some(bytes)) if bytes == b"alpha" => {
+            ctx.filter_results
+                .entry("staged_probe")
+                .or_default()
+                .set("class", "first-old")?;
+        },
+        ("first", Some(bytes)) if bytes == b"beta" => {
+            ctx.filter_results.remove("staged_probe");
+            ctx.filter_results
+                .entry("staged_probe")
+                .or_default()
+                .set("class", "first-new")?;
+        },
+        ("second", Some(bytes)) if bytes == b"alpha" => {
+            ctx.filter_results
+                .entry("staged_probe")
+                .or_default()
+                .set("class", "second")?;
+        },
+        _ => {},
+    }
+    Ok(())
+}
+
+#[async_trait]
+impl HttpFilter for StagedProbe {
+    fn name(&self) -> &'static str {
+        "staged_probe"
+    }
+
+    fn runs_request_head(&self) -> bool {
+        self.head
+    }
+
+    async fn on_request_head(&self, ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        if let Some(class) = self.head_class {
+            ctx.filter_results.entry(self.name()).or_default().set("class", class)?;
+        }
+        Ok(FilterAction::Continue)
+    }
+
+    fn request_body_access(&self) -> BodyAccess {
+        if self.body {
+            BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
+        } else {
+            BodyAccess::None
+        }
+    }
+
+    fn request_body_mode(&self) -> BodyMode {
+        BodyMode::StreamBuffer { max_bytes: Some(64) }
+    }
+
+    async fn on_request_body(
+        &self,
+        ctx: &mut crate::HttpFilterContext<'_>,
+        body: &mut Option<Bytes>,
+        _end_of_stream: bool,
+    ) -> Result<FilterAction, FilterError> {
+        publish_staged_probe_body(self.role, ctx, body.as_deref())?;
+        Ok(FilterAction::Continue)
+    }
+
+    async fn on_request(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        self.visits.fetch_add(1, Ordering::SeqCst);
+        Ok(FilterAction::Continue)
+    }
+}
+
+/// Build one probe with a unique pipeline identity.
+fn staged_probe_pf(id: usize, probe: StagedProbe) -> PipelineFilter {
+    PipelineFilter::new(id, AnyFilter::Http(Box::new(probe)), vec![], vec![])
+}
+
+/// Add a branch that counts when this host sees its own staged class.
+fn add_staged_branch(pf: &mut PipelineFilter, class: &str, counter: Arc<AtomicUsize>, rejoin: RejoinTarget) {
+    pf.branches.push(ResolvedBranch {
+        name: Arc::from(format!("staged_{}", pf.filter_id)),
+        condition: Some(ResolvedBranchCondition {
+            filter_name: Arc::from("staged_probe"),
+            key: Arc::from("class"),
+            matcher: praxis_core::config::ResultMatch::Exact(class.to_owned()),
+        }),
+        filters: vec![PipelineFilter::new(
+            100 + pf.filter_id,
+            AnyFilter::Http(Box::new(CountingFilter { counter })),
+            vec![],
+            vec![],
+        )],
+        max_iterations: matches!(rejoin, RejoinTarget::ReEnter(_)).then_some(1),
+        rejoin,
+    });
+}
+
+/// Build a head producer with a branch that recognizes `expected`.
+fn staged_head_host(
+    id: usize,
+    class: Option<&'static str>,
+    expected: &str,
+    counter: Arc<AtomicUsize>,
+) -> PipelineFilter {
+    let probe = staged_probe("head", class, true, false, Arc::new(AtomicUsize::new(0)));
+    let mut pf = staged_probe_pf(id, probe);
+    add_staged_branch(&mut pf, expected, counter, RejoinTarget::Next);
+    pf
+}
+
+/// Require the staging fixture to continue to its next hook.
+fn assert_staged_continue(action: &FilterAction) {
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "staging fixture must continue"
+    );
+}
+
+/// Run both phases of a hand-built head-producer pipeline.
+async fn run_staged_head_pipeline(pipeline: &FilterPipeline, path: &str) -> Result<(), FilterError> {
+    let req = crate::test_utils::make_request(Method::GET, path);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    assert_staged_continue(&pipeline.execute_http_request_head(&mut ctx).await?);
+    assert_staged_continue(&pipeline.execute_http_request(&mut ctx).await?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn head_classifier_results_are_isolated_per_instance() -> Result<(), FilterError> {
+    for (first_class, first_fires) in [(Some("untrusted"), 1), (None, 0)] {
+        let first = Arc::new(AtomicUsize::new(0));
+        let second = Arc::new(AtomicUsize::new(0));
+        let pipeline = test_pipeline(
+            BodyCapabilities::default(),
+            vec![
+                staged_head_host(0, first_class, "untrusted", Arc::clone(&first)),
+                staged_head_host(1, Some("trusted"), "trusted", Arc::clone(&second)),
+            ],
+        );
+        run_staged_head_pipeline(&pipeline, "/private").await?;
+        assert_eq!(
+            first.load(Ordering::SeqCst),
+            first_fires,
+            "first host must see only its result"
+        );
+        assert_eq!(second.load(Ordering::SeqCst), 1, "second host must see its own result");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn staged_pre_read_results_do_not_cross_mixed_eligibility() -> Result<(), FilterError> {
+    let first = Arc::new(AtomicUsize::new(0));
+    let second = Arc::new(AtomicUsize::new(0));
+    let probe = staged_probe("unmarked", None, false, false, Arc::new(AtomicUsize::new(0)));
+    let mut unmarked = staged_probe_pf(0, probe);
+    add_staged_branch(&mut unmarked, "trusted", Arc::clone(&first), RejoinTarget::Next);
+    let marked = staged_head_host(1, Some("trusted"), "trusted", Arc::clone(&second));
+    let pipeline = test_pipeline(BodyCapabilities::default(), vec![unmarked, marked]);
+    run_staged_head_pipeline(&pipeline, "/private").await?;
+    assert_eq!(
+        first.load(Ordering::SeqCst),
+        0,
+        "unmarked same-type host must not borrow staged class"
+    );
+    assert_eq!(second.load(Ordering::SeqCst), 1, "marked host retains its class");
+    Ok(())
+}
+
+#[tokio::test]
+async fn staged_pre_read_results_are_consumed_once() -> Result<(), FilterError> {
+    let visits = Arc::new(AtomicUsize::new(0));
+    let branch = Arc::new(AtomicUsize::new(0));
+    let mut host = staged_probe_pf(0, staged_probe("head", Some("loop"), true, false, Arc::clone(&visits)));
+    add_staged_branch(&mut host, "loop", Arc::clone(&branch), RejoinTarget::ReEnter(0));
+    let pipeline = test_pipeline(BodyCapabilities::default(), vec![host]);
+    run_staged_head_pipeline(&pipeline, "/").await?;
+    assert_eq!(visits.load(Ordering::SeqCst), 2, "host re-enters once");
+    assert_eq!(branch.load(Ordering::SeqCst), 1, "staged class must not replay");
+    Ok(())
+}
+
+/// Build a body producer whose own class drives its branch.
+fn staged_body_host(id: usize, role: &'static str, class: &str, counter: Arc<AtomicUsize>) -> PipelineFilter {
+    let probe = staged_probe(role, None, false, true, Arc::new(AtomicUsize::new(0)));
+    let mut host = staged_probe_pf(id, probe);
+    add_staged_branch(&mut host, class, counter, RejoinTarget::Next);
+    host
+}
+
+/// Feed repeated chunks and EOF through the untracked pre-read path.
+async fn run_staged_body_chunks(
+    pipeline: &FilterPipeline,
+    ctx: &mut crate::HttpFilterContext<'_>,
+) -> Result<(), FilterError> {
+    for chunk in ["alpha", "beta"] {
+        assert_staged_continue(
+            &pipeline
+                .execute_http_request_body(ctx, &mut Some(Bytes::from(chunk)), false)
+                .await?,
+        );
+    }
+    assert_staged_continue(&pipeline.execute_http_request_body(ctx, &mut None, true).await?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn staged_pre_read_results_preserve_each_body_producer() -> Result<(), FilterError> {
+    let first = Arc::new(AtomicUsize::new(0));
+    let second = Arc::new(AtomicUsize::new(0));
+    let hosts = vec![
+        staged_body_host(0, "first", "first-new", Arc::clone(&first)),
+        staged_body_host(1, "second", "second", Arc::clone(&second)),
+    ];
+    let pipeline = test_pipeline(BodyCapabilities::default(), hosts);
+    let req = crate::test_utils::make_request(Method::POST, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    run_staged_body_chunks(&pipeline, &mut ctx).await?;
+    assert_staged_continue(&pipeline.execute_http_request(&mut ctx).await?);
+    assert_eq!(
+        first.load(Ordering::SeqCst),
+        1,
+        "first replacement survives later chunks"
+    );
+    assert_eq!(
+        second.load(Ordering::SeqCst),
+        1,
+        "second no-publication pass retains own class"
+    );
+    Ok(())
+}
+
+/// Head producer that uses filter-owned state and may fail after publication.
+struct StatefulStagedProbe {
+    fail: bool,
+    state_seen: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl HttpFilter for StatefulStagedProbe {
+    fn name(&self) -> &'static str {
+        "staged_probe"
+    }
+
+    fn runs_request_head(&self) -> bool {
+        true
+    }
+
+    async fn on_request_head(&self, ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        ctx.insert_filter_state(7_u32);
+        ctx.filter_results
+            .entry(self.name())
+            .or_default()
+            .set("class", "partial")?;
+        if self.fail {
+            Err("head failed after writing".into())
+        } else {
+            Ok(FilterAction::Continue)
+        }
+    }
+
+    async fn on_request(&self, ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        self.state_seen
+            .store(ctx.get_filter_state::<u32>() == Some(&7), Ordering::SeqCst);
+        Ok(FilterAction::Continue)
+    }
+}
+
+#[tokio::test]
+async fn staged_pre_read_results_keep_state_and_fail_open_writes() -> Result<(), FilterError> {
+    let state_seen = Arc::new(AtomicBool::new(false));
+    let branch = Arc::new(AtomicUsize::new(0));
+    let mut host = PipelineFilter::new(
+        0,
+        AnyFilter::Http(Box::new(StatefulStagedProbe {
+            fail: true,
+            state_seen: Arc::clone(&state_seen),
+        })),
+        vec![],
+        vec![],
+    );
+    host.failure_mode = FailureMode::Open;
+    add_staged_branch(&mut host, "partial", Arc::clone(&branch), RejoinTarget::Next);
+    let pipeline = test_pipeline(BodyCapabilities::default(), vec![host]);
+    run_staged_head_pipeline(&pipeline, "/").await?;
+    assert!(
+        state_seen.load(Ordering::SeqCst),
+        "framework staging must preserve filter-owned state"
+    );
+    assert_eq!(
+        branch.load(Ordering::SeqCst),
+        1,
+        "fail-open partial result remains owned by producer"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn staged_pre_read_results_closed_error_stops_request() {
+    let mut host = PipelineFilter::new(
+        0,
+        AnyFilter::Http(Box::new(StatefulStagedProbe {
+            fail: true,
+            state_seen: Arc::new(AtomicBool::new(false)),
+        })),
+        vec![],
+        vec![],
+    );
+    host.failure_mode = FailureMode::Closed;
+    let pipeline = test_pipeline(BodyCapabilities::default(), vec![host]);
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    assert!(
+        pipeline.execute_http_request_head(&mut ctx).await.is_err(),
+        "closed head error must stop dispatch"
+    );
+}
+
+#[tokio::test]
+async fn staged_pre_read_results_discard_request_skipped_owner() -> Result<(), FilterError> {
+    let first = Arc::new(AtomicUsize::new(0));
+    let second = Arc::new(AtomicUsize::new(0));
+    let mut first_host = staged_head_host(0, Some("untrusted"), "untrusted", Arc::clone(&first));
+    first_host.conditions = vec![when_path("/private")];
+    let second_host = staged_head_host(1, Some("trusted"), "trusted", Arc::clone(&second));
+    let pipeline = test_pipeline(BodyCapabilities::default(), vec![first_host, second_host]);
+    let head_req = crate::test_utils::make_request(Method::GET, "/private");
+    let later_req = crate::test_utils::make_request(Method::GET, "/public");
+    let mut ctx = crate::test_utils::make_filter_context(&head_req);
+    assert_staged_continue(&pipeline.execute_http_request_head(&mut ctx).await?);
+    ctx.request = &later_req;
+    assert_staged_continue(&pipeline.execute_http_request(&mut ctx).await?);
+    assert_eq!(first.load(Ordering::SeqCst), 0, "skipped host cannot fire its branch");
+    assert_eq!(
+        second.load(Ordering::SeqCst),
+        1,
+        "later host retains its own staged result"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn skipped_fail_open_head_result_cannot_feed_another_instance() -> Result<(), FilterError> {
+    let first_seen = Arc::new(AtomicBool::new(false));
+    let first_branch = Arc::new(AtomicUsize::new(0));
+    let second_branch = Arc::new(AtomicUsize::new(0));
+    let mut first = PipelineFilter::new(
+        0,
+        AnyFilter::Http(Box::new(StatefulStagedProbe {
+            fail: true,
+            state_seen: Arc::clone(&first_seen),
+        })),
+        vec![when_path("/private")],
+        vec![],
+    );
+    first.failure_mode = FailureMode::Open;
+    add_staged_branch(&mut first, "partial", Arc::clone(&first_branch), RejoinTarget::Next);
+    let second = staged_head_host(1, Some("trusted"), "trusted", Arc::clone(&second_branch));
+    let pipeline = test_pipeline(BodyCapabilities::default(), vec![first, second]);
+    let head_req = crate::test_utils::make_request(Method::GET, "/private");
+    let later_req = crate::test_utils::make_request(Method::GET, "/public");
+    let mut ctx = crate::test_utils::make_filter_context(&head_req);
+    assert_staged_continue(&pipeline.execute_http_request_head(&mut ctx).await?);
+    ctx.request = &later_req;
+    assert_staged_continue(&pipeline.execute_http_request(&mut ctx).await?);
+    assert_eq!(first_branch.load(Ordering::SeqCst), 0);
+    assert!(
+        !first_seen.load(Ordering::SeqCst),
+        "skipped producer cannot run its request hook"
+    );
+    assert_eq!(
+        second_branch.load(Ordering::SeqCst),
+        1,
+        "eligible peer keeps its own result"
+    );
+    assert!(
+        ctx.filter_results.is_empty(),
+        "no staged result may leak past its owner"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn staged_pre_read_results_head_skip_does_not_borrow() -> Result<(), FilterError> {
+    let first = Arc::new(AtomicUsize::new(0));
+    let second = Arc::new(AtomicUsize::new(0));
+    let mut first_host = staged_head_host(0, Some("untrusted"), "trusted", Arc::clone(&first));
+    first_host.conditions = vec![when_path("/other")];
+    let second_host = staged_head_host(1, Some("trusted"), "trusted", Arc::clone(&second));
+    let pipeline = test_pipeline(BodyCapabilities::default(), vec![first_host, second_host]);
+    run_staged_head_pipeline(&pipeline, "/private").await?;
+    assert_eq!(
+        first.load(Ordering::SeqCst),
+        0,
+        "skipped head owner cannot borrow later class"
+    );
+    assert_eq!(second.load(Ordering::SeqCst), 1, "executed head owner still branches");
+    Ok(())
 }
 
 #[tokio::test]
@@ -9268,4 +10440,190 @@ async fn run_request_then_response(pipeline: &FilterPipeline, log: &HookLog, pat
     drop(log.take());
     drop(pipeline.execute_http_response(&mut ctx).await.unwrap());
     log.take()
+}
+
+// -----------------------------------------------------------------------------
+// Held Pre-Read Rejection Tests
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_shielded_pre_read_rejection_waits_for_the_earlier_filter() {
+    let pipeline = held_pipeline(PipelineFilter::new(
+        0,
+        AnyFilter::Http(Box::new(RejectFilter)),
+        vec![],
+        vec![],
+    ));
+    let req = crate::test_utils::make_request(Method::POST, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let action = pre_read(&pipeline, &mut ctx).await;
+    assert!(matches!(action, FilterAction::Continue), "{action:?}");
+    let action = pipeline.execute_http_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(&action, FilterAction::Reject(rejection) if rejection.status == 403),
+        "the earlier filter rejects first: {action:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_held_rejection_is_returned_at_its_filter() {
+    let chunks = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut pipeline = held_pipeline(named_noop_pf(0, "cors"));
+    pipeline.filters.push(PipelineFilter::new(
+        2,
+        AnyFilter::Http(Box::new(BodyInspectorFilter {
+            chunks: Arc::clone(&chunks),
+        })),
+        vec![],
+        vec![],
+    ));
+    let pipeline = with_body_indices(pipeline);
+    let req = crate::test_utils::make_request(Method::POST, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let action = pre_read(&pipeline, &mut ctx).await;
+    assert!(matches!(action, FilterAction::Continue), "{action:?}");
+    assert!(chunks.lock().unwrap().is_empty(), "no later body hook sees the body");
+    let action = pipeline.execute_http_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(&action, FilterAction::Reject(rejection) if rejection.status == 401),
+        "{action:?}"
+    );
+    assert_eq!(ctx.executed_filter_indices, vec![true, true, false]);
+}
+
+#[tokio::test]
+async fn a_held_rejection_skipped_by_a_branch_still_rejects() {
+    let mut earlier = named_noop_pf(0, "cors");
+    earlier
+        .branches
+        .push(unwind_branch("skip", RejoinTarget::SkipTo(2), vec![]));
+    let mut pipeline = held_pipeline(earlier);
+    pipeline.filters.push(PipelineFilter::new(
+        2,
+        AnyFilter::Http(Box::new(RejectFilter)),
+        vec![],
+        vec![],
+    ));
+    let pipeline = with_body_indices(pipeline);
+    let req = crate::test_utils::make_request(Method::POST, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let _action = pre_read(&pipeline, &mut ctx).await;
+    let action = pipeline.execute_http_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(&action, FilterAction::Reject(rejection) if rejection.status == 401),
+        "the filter the branch skipped to must not answer instead: {action:?}"
+    );
+    assert_eq!(ctx.executed_filter_indices, vec![true, true, false]);
+}
+
+#[tokio::test]
+async fn a_held_rejection_past_the_end_of_the_walk_keeps_its_response_hook() {
+    let mut earlier = named_noop_pf(0, "cors");
+    earlier
+        .branches
+        .push(unwind_branch("skip", RejoinTarget::SkipTo(2), vec![]));
+    let pipeline = with_body_indices(held_pipeline(earlier));
+    let req = crate::test_utils::make_request(Method::POST, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let _action = pre_read(&pipeline, &mut ctx).await;
+    let action = pipeline.execute_http_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(&action, FilterAction::Reject(rejection) if rejection.status == 401),
+        "a branch rejoining at the end must not admit the request: {action:?}"
+    );
+    assert_eq!(
+        ctx.executed_filter_indices,
+        vec![true, true],
+        "the holder must stay paired with its on_response"
+    );
+}
+
+#[tokio::test]
+async fn an_unshielded_or_post_request_rejection_is_not_held() {
+    let unshielded = test_pipeline(
+        BodyCapabilities::default(),
+        vec![PipelineFilter::new(
+            0,
+            AnyFilter::Http(Box::new(AdmittingBodyRejectFilter)),
+            vec![],
+            vec![],
+        )],
+    );
+    let req = crate::test_utils::make_request(Method::POST, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let action = pre_read(&unshielded, &mut ctx).await;
+    assert!(matches!(action, FilterAction::Reject(_)), "{action:?}");
+
+    let shielded = held_pipeline(named_noop_pf(0, "cors"));
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let action = shielded.execute_http_request(&mut ctx).await.unwrap();
+    assert!(matches!(action, FilterAction::Continue), "{action:?}");
+    let action = pre_read(&shielded, &mut ctx).await;
+    assert!(
+        matches!(action, FilterAction::Reject(_)),
+        "after the request phase the body rejection stands: {action:?}"
+    );
+}
+
+/// Rejects every request body with a 401 and admits at the request head, as
+/// `policy` does.
+struct AdmittingBodyRejectFilter;
+
+#[async_trait]
+impl HttpFilter for AdmittingBodyRejectFilter {
+    fn name(&self) -> &'static str {
+        "admitting_body_reject"
+    }
+
+    fn runs_request_head(&self) -> bool {
+        true
+    }
+
+    fn admits_at_request_head(&self) -> bool {
+        true
+    }
+
+    fn request_body_access(&self) -> BodyAccess {
+        BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
+    }
+
+    async fn on_request(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Continue)
+    }
+
+    async fn on_request_body(
+        &self,
+        _ctx: &mut crate::HttpFilterContext<'_>,
+        _body: &mut Option<Bytes>,
+        _end_of_stream: bool,
+    ) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Reject(crate::Rejection::status(401)))
+    }
+}
+
+/// `earlier` followed by an [`AdmittingBodyRejectFilter`] at index 1.
+///
+/// [`AdmittingBodyRejectFilter`]: AdmittingBodyRejectFilter
+fn held_pipeline(earlier: PipelineFilter) -> FilterPipeline {
+    let admitter = PipelineFilter::new(1, AnyFilter::Http(Box::new(AdmittingBodyRejectFilter)), vec![], vec![]);
+    test_pipeline(BodyCapabilities::default(), vec![earlier, admitter])
+}
+
+/// A [`NamedNoopFilter`] entry named `name` with the given `filter_id`.
+///
+/// [`NamedNoopFilter`]: NamedNoopFilter
+fn named_noop_pf(filter_id: usize, name: &'static str) -> PipelineFilter {
+    PipelineFilter::new(
+        filter_id,
+        AnyFilter::Http(Box::new(NamedNoopFilter(name))),
+        vec![],
+        vec![],
+    )
+}
+
+/// Run one end-of-stream body pass, as a pre-read does before the request
+/// phase.
+async fn pre_read(pipeline: &FilterPipeline, ctx: &mut crate::HttpFilterContext<'_>) -> FilterAction {
+    let mut body = Some(Bytes::from_static(b"{}"));
+    pipeline.execute_http_request_body(ctx, &mut body, true).await.unwrap()
 }
