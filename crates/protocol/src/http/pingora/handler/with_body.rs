@@ -314,11 +314,14 @@ impl ProxyHttp for PingoraHttpHandler {
     async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
         ctx.lifecycle = Some(self.lifecycle.clone());
         let pipeline = ctx.pin_pipeline(&self.pipeline);
+        // An absolute-form request reaches the filters with the canonical
+        // `Host` its target names (RFC 9112 Section 3.2.2).
         #[cfg(feature = "forward-proxy")]
-        if let Some(forward_proxy) = &self.forward_proxy
-            && session.req_header().method == http::Method::CONNECT
-        {
-            return connect::handle(forward_proxy, &pipeline, session, ctx).await;
+        if let Some(forward_proxy) = &self.forward_proxy {
+            if session.req_header().method == http::Method::CONNECT {
+                return connect::handle(forward_proxy, &pipeline, session, ctx).await;
+            }
+            connect::set_forward_host(session)?;
         }
         if request_filter::execute(&pipeline, session, ctx).await? {
             return Ok(true);

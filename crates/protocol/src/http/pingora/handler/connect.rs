@@ -270,17 +270,17 @@ fn absolute_name(host: &str) -> String {
 /// rather than left as the client spelled them, so `policy` and conditions
 /// (a `headers: {host: ...}` match included) judge exactly the host the
 /// destination rules check and the proxy dials. The fork has already held
-/// `Host` equal to the target, so this changes only its spelling. `Host`
-/// is rewritten on the session too, for the request span and logs.
+/// a present `Host` equal to the target, so this changes only its spelling;
+/// an HTTP/1.0 CONNECT that omits `Host` gets one, so a `Host` condition
+/// still meets it (admission has refused an HTTP/1.1 one without `Host`).
+/// `Host` is rewritten on the session too, for the request span and logs.
 /// Returns `None` for a non-UTF-8 or unparseable target.
 fn connect_request(session: &mut Session) -> Option<(Request, ConnectDestination)> {
     let target = std::str::from_utf8(session.req_header().raw_path()).ok()?;
     let parsed = parse_destination(target)?;
     let authority = dial_address(&parsed);
     let header = session.req_header_mut();
-    if header.headers.contains_key(http::header::HOST) {
-        header.insert_header(http::header::HOST, authority.as_str()).ok()?;
-    }
+    header.insert_header(http::header::HOST, authority.as_str()).ok()?;
     let uri = http::Uri::builder().authority(authority).build().ok()?;
     Some((
         Request {
@@ -897,8 +897,8 @@ struct ForwardDestination {
     /// Whether the scheme was `https` (TLS origination with SNI).
     tls: bool,
 
-    /// `Host` header value for the upstream leg: the authority without
-    /// any userinfo.
+    /// The destination's canonical `Host` ([`canonical_host`]): what the
+    /// filters see and the upstream leg sends.
     host_header: http::HeaderValue,
 }
 
@@ -931,23 +931,38 @@ fn forward_destination(target: &str) -> Option<ForwardDestination> {
         None => wire_host,
     };
     let destination = destination(host, authority_port(authority, default_port)?)?;
-    // Filters judge this request by its `Host`, which the fork holds equal
-    // to the target's authority byte for byte. Only a host already in the
-    // canonical form the destination rules check is accepted, so no
-    // spelling (`EXAMPLE.com`, `example.com.`) can satisfy a filter and
-    // reach a destination the filter would refuse.
+    // Only a host already in the canonical form the destination rules check
+    // is accepted (`EXAMPLE.com` and `example.com.` are refused), so the
+    // target names its destination in the one spelling the filters, the
+    // rules, and the dialer read. The port is canonicalized instead: filters
+    // see it in `canonical_host`'s form, which `set_forward_host` writes to
+    // `Host` before they run.
     if destination.host != host {
         return None;
     }
-    let host_header = match authority.port() {
-        Some(port) => format!("{}:{port}", authority.host()),
-        None => authority.host().to_owned(),
-    };
+    let host_header = http::HeaderValue::try_from(canonical_host(&destination, default_port)).ok()?;
     Some(ForwardDestination {
         destination,
         tls,
-        host_header: http::HeaderValue::try_from(host_header).ok()?,
+        host_header,
     })
+}
+
+/// The canonical `Host` for a forward destination: its canonical host,
+/// bracketed when IPv6, with the port only when it is not the scheme's
+/// default.
+///
+/// RFC 3986 Section 6.2.3: an empty port and the scheme's default name the
+/// same destination as no port, and a port is a number, so
+/// `example.com:`, `example.com:80`, and `example.com:080` all become
+/// `example.com`, and `example.com:08080` becomes `example.com:8080`. A
+/// filter matching `Host` sees one spelling per destination.
+fn canonical_host(destination: &ConnectDestination, default_port: u16) -> String {
+    match (destination.port == default_port, destination.host.contains(':')) {
+        (true, true) => format!("[{}]", destination.host),
+        (true, false) => destination.host.clone(),
+        (false, _) => dial_address(destination),
+    }
 }
 
 /// The port an absolute-form authority names, or `default_port` when it
@@ -1057,16 +1072,48 @@ fn build_destination_upstream(
     })
 }
 
+/// Give an absolute-form request the canonical `Host` of the destination its
+/// target names, before any filter reads it.
+///
+/// RFC 9112 Section 3.2.2: a proxy that receives an absolute-form target
+/// ignores the `Host` it received and replaces it with the target's
+/// authority. Filters (`policy`, a `headers: {host: ...}` condition) judge
+/// the request by `Host`, since the fork keeps the target's authority off
+/// the `Uri`. Without this, an HTTP/1.0 request that omits `Host` would
+/// reach them naming no destination, and one that pads its port (`:08080`)
+/// would reach them spelled apart from the destination the rules check and
+/// the proxy dials. The value written is the one sent upstream.
+///
+/// An HTTP/1.1 request without `Host` is left without one, for admission
+/// to refuse with 400 (RFC 9112 Section 3.2). A target that names no
+/// destination is left alone: [`forward_egress`] refuses it after the
+/// pipeline, so a filter's own refusal still answers first.
+///
+/// # Errors
+///
+/// Returns the header error if `Host` cannot be replaced, so the request
+/// fails rather than reaching the filters with the client's spelling.
+pub(super) fn set_forward_host(session: &mut Session) -> pingora_core::Result<()> {
+    let ForwardTarget::Destination(parsed) = forward_target(session) else {
+        return Ok(());
+    };
+    let header = session.req_header_mut();
+    if header.version == http::Version::HTTP_11 && !header.headers.contains_key(http::header::HOST) {
+        return Ok(());
+    }
+    header.insert_header(http::header::HOST, parsed.host_header)
+}
+
 /// Gate and forward an absolute-form request (`GET http://host/path`) on a
 /// forward-proxy listener.
 ///
 /// Runs after the reverse-proxy request pipeline approved the request, so
-/// filters (`ip_acl`, `policy`, conditions) saw it first. The destination
-/// rules then decide the egress: a host or port that is not allowlisted is
-/// answered with 403. A pipeline-selected upstream (`router`,
-/// `load_balancer`) keeps control; otherwise the URI's destination becomes
-/// the upstream and the request is rewritten to origin-form for the
-/// upstream leg. An absolute-form target that names no destination the
+/// filters (`ip_acl`, `policy`, conditions) saw it first, with the `Host`
+/// [`set_forward_host`] wrote. The destination rules then decide the
+/// egress: a host or port that is not allowlisted is answered with 403. A
+/// pipeline-selected upstream (`router`, `load_balancer`) keeps control;
+/// otherwise the URI's destination becomes the upstream and the request is
+/// rewritten to origin-form for the upstream leg. An absolute-form target that names no destination the
 /// proxy can forward to (a port of 0, a scheme other than `http`/`https`, a
 /// host in a non-canonical spelling) is answered with 400, whatever the
 /// pipeline selected, so it never takes a reverse-proxy route instead.
@@ -1747,6 +1794,14 @@ allow_destinations:
                 "{target}: the condition must match: {response}"
             );
         }
+        // HTTP/1.0 lets the client omit `Host`; the condition still meets
+        // the destination the target names.
+        let response = Box::pin(handle_raw(&pipeline, "CONNECT ALLOWED.invalid:443 HTTP/1.0\r\n\r\n")).await;
+        assert_eq!(
+            status_of(&response),
+            451,
+            "an HTTP/1.0 CONNECT without Host must meet the condition: {response}"
+        );
     }
 
     #[tokio::test]
@@ -2542,6 +2597,74 @@ allow_destinations:
         assert_eq!(forwarded("https://origin.example:/").destination.port, 443);
         assert_eq!(forwarded("http://user@origin.example:8080/").destination.port, 8080);
         assert_eq!(forwarded("http://[::1]:8080/").destination.port, 8080);
+    }
+
+    #[test]
+    fn forward_destination_spells_the_port_one_way_in_its_host_header() {
+        // RFC 3986 Section 6.2.3: each spelling names the same socket, so a
+        // filter matching `Host` must see it one way.
+        for (target, host) in [
+            ("http://origin.example:08080/", "origin.example:8080"),
+            ("http://origin.example:/", "origin.example"),
+            ("http://origin.example:80/", "origin.example"),
+            ("http://origin.example:080/", "origin.example"),
+            ("https://origin.example:443/", "origin.example"),
+            ("https://origin.example:80/", "origin.example:80"),
+            ("http://[::1]:0080/", "[::1]"),
+            ("https://[2001:db8::1]:08443/", "[2001:db8::1]:8443"),
+        ] {
+            assert_eq!(forwarded(target).host_header.to_str().unwrap(), host, "{target}");
+        }
+    }
+
+    /// The `Host` a raw HTTP/1 request carries once [`set_forward_host`] has
+    /// run on it, `None` when it carries none.
+    async fn host_after_set_forward_host(raw: &str) -> Option<String> {
+        use tokio::io::AsyncWriteExt as _;
+
+        let (mut client, server) = tokio::io::duplex(65_536);
+        client.write_all(raw.as_bytes()).await.unwrap();
+        let mut session = Session::new_h1(Box::new(server));
+        assert!(session.read_request().await.unwrap(), "the request head must parse");
+        set_forward_host(&mut session).unwrap();
+        session
+            .req_header()
+            .headers
+            .get(http::header::HOST)
+            .map(|host| host.to_str().unwrap().to_owned())
+    }
+
+    #[tokio::test]
+    async fn filters_see_the_canonical_host_an_absolute_form_target_names() {
+        for (raw, host) in [
+            // HTTP/1.0 lets the client omit `Host`; the target still names it.
+            (
+                "GET http://origin.example:8080/ HTTP/1.0\r\n\r\n",
+                Some("origin.example:8080"),
+            ),
+            // A padded or default port reaches the filters spelled one way.
+            (
+                "GET http://origin.example:08080/ HTTP/1.1\r\nHost: origin.example:08080\r\n\r\n",
+                Some("origin.example:8080"),
+            ),
+            (
+                "GET http://origin.example:80/ HTTP/1.0\r\nHost: origin.example:80\r\n\r\n",
+                Some("origin.example"),
+            ),
+            // HTTP/1.1 requires `Host`: admission refuses the request without one.
+            ("GET http://origin.example/ HTTP/1.1\r\n\r\n", None),
+            // Origin-form and invalid targets keep the client's `Host`.
+            (
+                "GET / HTTP/1.1\r\nHost: origin.example:08080\r\n\r\n",
+                Some("origin.example:08080"),
+            ),
+            (
+                "GET http://ORIGIN.example/ HTTP/1.1\r\nHost: ORIGIN.example\r\n\r\n",
+                Some("ORIGIN.example"),
+            ),
+        ] {
+            assert_eq!(host_after_set_forward_host(raw).await.as_deref(), host, "{raw:?}");
+        }
     }
 
     #[test]
