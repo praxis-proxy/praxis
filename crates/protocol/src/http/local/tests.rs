@@ -489,17 +489,19 @@ async fn generated_512_mib_stream_is_bounded_and_ignores_global_buffer_ceilings(
     let inner = state.inner.lock().unwrap();
     assert_eq!(inner.max_chunk, 65_536);
     assert_eq!(inner.completions, 1);
-    let mut reads = inner
+    let body_events = inner
         .events
         .iter()
-        .enumerate()
-        .filter_map(|(index, event)| (event == "read").then_some(index));
-    let first_read = reads.next().unwrap();
-    let second_read = reads.next().unwrap();
-    let first_handoff = inner.events.iter().position(|event| event == "request-chunk").unwrap();
+        .map(String::as_str)
+        .filter(|event| *event == "read" || *event == "request-chunk")
+        .collect::<Vec<_>>();
+    assert_eq!(body_events.first(), Some(&"read"));
+    assert_eq!(body_events.last(), Some(&"read"));
     assert!(
-        first_read < first_handoff && first_handoff < second_read,
-        "the handler must receive the first chunk before the transport reads the second"
+        body_events
+            .windows(2)
+            .all(|pair| { pair == ["read", "request-chunk"] || pair == ["request-chunk", "read"] }),
+        "the handler must receive each chunk before the transport reads the next"
     );
 }
 
