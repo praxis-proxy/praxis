@@ -173,6 +173,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Correct PPE documentation links in the security guides, policy filter
+  reference, and rustdoc to follow the reorganized pages. Preserve the
+  claim-mapping, use-case, and Vault recipe anchors.
+
 - Reject explicit listener `upgrade_policy` settings until protocol admission
   enforcement is available, rather than silently accepting unenforced denials.
 
