@@ -32,7 +32,7 @@ use praxis_test_utils::start_request_counting_backend;
 use praxis_test_utils::{
     TestCertificates, free_port, http_get, https_get, registry_with, start_backend_with_shutdown, start_full_proxy,
     start_mtls_backend, start_proxy, start_tcp_echo_backend, start_tls_backend, start_tls_proxy,
-    start_tls_proxy_no_wait, start_tls_proxy_no_wait_with_registry, tls_negative_probe, tls_send_recv, wait_for_https,
+    start_tls_proxy_no_wait, start_tls_proxy_no_wait_with_registry, tls_handshake_probe, tls_send_recv, wait_for_https,
     wait_for_tls,
 };
 
@@ -1402,10 +1402,18 @@ listeners:
     let addr = format!("127.0.0.1:{proxy_port}");
     wait_for_tls(&addr, &mtls_config);
 
-    let outcome = tls_negative_probe(&addr, "localhost", b"should not echo", &no_cert_config);
+    let outcome = tls_handshake_probe(&addr, "localhost", &no_cert_config);
     assert!(
         outcome.is_client_auth_alert(),
         "TCP mTLS require without client cert must send a peer authentication alert: {outcome:?}"
+    );
+    let exchange = praxis_test_utils::tls_negative_probe(&addr, "localhost", b"should not echo", &no_cert_config);
+    assert!(
+        matches!(
+            exchange,
+            praxis_test_utils::TlsProbeOutcome::PeerAlert(_) | praxis_test_utils::TlsProbeOutcome::OtherFailure(_)
+        ),
+        "the anonymous client's payload must fail before an application exchange: {exchange:?}"
     );
 }
 
@@ -3852,12 +3860,7 @@ fn hyper_verified_identity_isolated_across_h1_keepalive_and_h2_streams() {
     let wrong_ca = TestCertificates::generate_for_san("untrusted-client-ca.test");
     let wrong_cert = wrong_ca.generate_client_cert_with_org("Alpha");
     let wrong_config = build_cross_ca_client_config(&certs, &wrong_ca, &wrong_cert);
-    let failed = tls_negative_probe(
-        proxy.addr(),
-        "localhost",
-        b"GET /alpha HTTP/1.1\r\nHost: localhost\r\n\r\n",
-        &wrong_config,
-    );
+    let failed = tls_handshake_probe(proxy.addr(), "localhost", &wrong_config);
     assert!(
         failed.is_client_auth_alert(),
         "a presented wrong-CA cert must fail during TLS: {failed:?}"
@@ -3868,6 +3871,10 @@ fn hyper_verified_identity_isolated_across_h1_keepalive_and_h2_streams() {
             praxis_test_utils::TlsProbeOutcome::PeerAlert(rustls::AlertDescription::UnknownCA)
         ),
         "a distinct untrusted issuer must produce UnknownCA: {failed:?}"
+    );
+    assert!(
+        praxis_test_utils::https_get_attempt(proxy.addr(), "/alpha", &wrong_config).is_err(),
+        "wrong-CA client must also fail a real HTTPS request"
     );
     assert_eq!(
         hits.load(Ordering::SeqCst),

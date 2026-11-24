@@ -205,6 +205,33 @@ insecure_options:
     assert_eq!(parse_status(&raw), 200, "CORS + CSRF with trusted origin should allow");
 }
 
+#[test]
+fn csrf_query_requires_origin_unless_explicitly_configured_safe() {
+    let backend = start_backend_with_shutdown("ok");
+    for (safe, origin, expected) in [
+        (false, "", 403),
+        (false, "Origin: https://app.example.com\r\n", 200),
+        (false, "Origin: https://evil.example\r\n", 403),
+        (true, "", 200),
+    ] {
+        let mut block = default_csrf_block();
+        if safe {
+            block.push_str("        safe_methods: [GET, HEAD, OPTIONS, QUERY]\n");
+        }
+        let config = Config::from_yaml(&csrf_yaml(free_port(), backend.port(), &block)).unwrap();
+        let proxy = start_proxy(&config);
+
+        let raw = http_send(
+            proxy.addr(),
+            &format!(
+                "QUERY /products HTTP/1.1\r\nHost: localhost\r\n{origin}Content-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+            ),
+        );
+
+        assert_eq!(parse_status(&raw), expected, "safe={safe}, origin={origin:?}: {raw}");
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------

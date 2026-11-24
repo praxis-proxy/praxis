@@ -10,13 +10,11 @@
 
 # WebSocket and other upgrades: the hyper adapter strips the upgrade headers
 # instead of tunnelling them.
-adversarial::header_smuggling::hop_by_hop_upgrade_header_preserved_for_upgrade_requests
 examples::websocket::websocket_example_config_proxies_upgrade
 rfcs::rfc6455::rfc6455_101_response_forwarded
 rfcs::rfc6455::rfc6455_connection_upgrade_forwarded
 rfcs::rfc6455::rfc6455_sec_websocket_accept_forwarded_unchanged
 rfcs::rfc6455::rfc6455_upgrade_header_forwarded
-websocket::upgrade_request_preserves_upgrade_headers
 websocket::websocket_binary_messages
 websocket::websocket_close_with_status_code
 websocket::websocket_large_message

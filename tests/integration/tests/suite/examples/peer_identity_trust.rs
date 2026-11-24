@@ -9,7 +9,7 @@ use openssl::{hash::MessageDigest, x509::X509};
 use praxis_core::config::Config;
 use praxis_test_utils::{
     TestCertificates, free_port, https_get, start_request_counting_backend, start_tls_proxy_no_wait,
-    tls_negative_probe, wait_for_tls,
+    tls_handshake_probe, wait_for_tls,
 };
 
 use super::load_example_config;
@@ -91,15 +91,14 @@ fn peer_identity_trust_example_completed_config_authorizes_peers() {
         "digest mismatch must not reach backend"
     );
 
-    let no_cert = tls_negative_probe(
-        proxy.addr(),
-        "localhost",
-        b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n",
-        &anonymous_client,
-    );
+    let no_cert = tls_handshake_probe(proxy.addr(), "localhost", &anonymous_client);
     assert!(
         no_cert.is_client_auth_alert(),
         "missing client certificate must receive peer authentication alert: {no_cert:?}"
+    );
+    assert!(
+        praxis_test_utils::https_get_attempt(proxy.addr(), "/", &anonymous_client).is_err(),
+        "anonymous peer must also fail a real HTTPS request"
     );
     assert_eq!(
         hits.load(Ordering::SeqCst),

@@ -27,6 +27,7 @@ mod filters;
 mod forward_proxy;
 mod hedge_policy;
 mod insecure_options;
+mod jobs;
 mod listener;
 mod logging;
 mod metrics;
@@ -61,7 +62,8 @@ pub use filters::{FailureMode, FilterChainConfig, FilterEntry};
 pub use forward_proxy::{DestinationRule, ForwardProxyConfig};
 pub use hedge_policy::{HedgePolicy, MAX_HEDGE_ATTEMPTS};
 pub use insecure_options::{InsecureFlag, InsecureOptions, SkipPipelineChecks};
-pub use listener::{Listener, ListenerTls, ProtocolKind};
+pub use jobs::{JobQueueSize, JobQueuedBytes, JobTimeoutSecs, JobWorkers, JobsConfig};
+pub use listener::{Listener, ListenerTls, ProtocolKind, UpgradeAction, UpgradePolicy};
 pub use logging::{DEFAULT_BUFFER_SIZE_LINES, LogOutput, LoggingConfig};
 pub use metrics::{MetricLabel, MetricLabelsConfig, MetricsConfig, RouteTemplates};
 use parse::check_yaml_safety;
@@ -126,6 +128,15 @@ pub struct Config {
     /// Consolidated security overrides. All default to `false`.
     #[serde(default)]
     pub insecure_options: InsecureOptions,
+
+    /// Background job queue settings. Absent means no job runtime is started.
+    ///
+    /// Requires the `jobs-config` Cargo feature, which is off by default:
+    /// without it the key is unknown, and a build that enables the feature
+    /// warns at startup because nothing reads the section yet.
+    #[cfg_attr(not(feature = "jobs-config"), serde(skip))]
+    #[serde(default)]
+    pub jobs: Option<JobsConfig>,
 
     /// Proxy listeners to bind.
     pub listeners: Vec<Listener>,
@@ -679,6 +690,13 @@ filter_chains:
             }
             #[cfg(not(feature = "slow-start"))]
             if entry.file_name().is_some_and(|n| n == "slow-start.yaml") {
+                continue;
+            }
+            #[cfg(not(feature = "forward-proxy"))]
+            if entry
+                .file_name()
+                .is_some_and(|n| n == "forward-proxy.yaml" || n == "forward-proxy-ip-acl.yaml")
+            {
                 continue;
             }
             Config::from_file(&entry).unwrap_or_else(|err| panic!("{}: {err}", entry.display()));

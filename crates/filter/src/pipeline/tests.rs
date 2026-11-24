@@ -1112,6 +1112,69 @@ async fn response_condition_when_no_match_skips_filter() {
     );
 }
 
+/// Required response work used to exercise upgrade admission through the request pipeline.
+struct RequiredResponseFilter;
+
+#[async_trait::async_trait]
+impl HttpFilter for RequiredResponseFilter {
+    fn name(&self) -> &'static str {
+        "required_response"
+    }
+
+    fn response_body_access(&self) -> BodyAccess {
+        BodyAccess::ReadOnly(crate::BodyRequirement::Required)
+    }
+
+    async fn on_request(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Continue)
+    }
+}
+
+#[tokio::test]
+async fn upgrade_admission_checks_selected_response_conditions_at_final_status() {
+    let pipeline =
+        make_pipeline_with_response_conditions(vec![(Box::new(RequiredResponseFilter), vec![when_status(&[200])])]);
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    FilterPipeline::mark_opaque_upgrade_requested(&mut ctx.extensions);
+    let action = pipeline.execute_http_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "conditional response work must wait for headers"
+    );
+    let mut response = crate::context::Response {
+        status: StatusCode::SWITCHING_PROTOCOLS,
+        headers: HeaderMap::new(),
+    };
+    assert!(
+        FilterPipeline::required_body_processing_for_response(&ctx.extensions, &response).is_none(),
+        "a 200-only condition must allow 101"
+    );
+    response.status = StatusCode::OK;
+    let evidence = FilterPipeline::required_body_processing_for_response(&ctx.extensions, &response)
+        .expect("selected 200 response requires body processing");
+    assert_eq!(
+        (evidence.filter_id(), evidence.filter_name(), evidence.phase()),
+        (0, "required_response", "response_body"),
+        "report the selected filter and phase"
+    );
+}
+
+#[tokio::test]
+async fn upgrade_admission_rejects_unconditional_required_response_before_dispatch() {
+    let pipeline = make_pipeline_with_response_conditions(vec![(Box::new(RequiredResponseFilter), Vec::new())]);
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    FilterPipeline::mark_opaque_upgrade_requested(&mut ctx.extensions);
+    let action = pipeline.execute_http_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Reject(_)),
+        "an unconditional requirement must reject during the request phase"
+    );
+    let evidence = FilterPipeline::required_body_processing(&ctx.extensions).expect("rejection retains its cause");
+    assert_eq!(evidence.phase(), "response_body", "identify the required phase");
+}
+
 #[test]
 fn response_body_condition_when_no_match_skips_filter_with_ctx_header() {
     let chunks = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -3523,6 +3586,7 @@ async fn skip_to_excludes_skipped_filters_from_response() {
     );
 
     let pipeline = with_body_indices(FilterPipeline {
+        upgrade_policy: None,
         body_capabilities: BodyCapabilities::default(),
         has_request_completion_observer: false,
         compression: None,
@@ -3543,6 +3607,7 @@ async fn skip_to_excludes_skipped_filters_from_response() {
         request_body_ceiling: None,
         response_body_ceiling: None,
         request_head_filter_indices: Vec::new(),
+        shielded_admitter_indices: Vec::new(),
         request_body_filter_indices: Vec::new(),
         response_body_filter_indices: Vec::new(),
         selected_upstream_request_body_filter_indices: Vec::new(),
@@ -3607,6 +3672,7 @@ async fn skip_to_excludes_skipped_filters_from_body_hooks() {
     );
 
     let pipeline = with_body_indices(FilterPipeline {
+        upgrade_policy: None,
         body_capabilities: BodyCapabilities::default(),
         has_request_completion_observer: false,
         compression: None,
@@ -3627,6 +3693,7 @@ async fn skip_to_excludes_skipped_filters_from_body_hooks() {
         request_body_ceiling: None,
         response_body_ceiling: None,
         request_head_filter_indices: Vec::new(),
+        shielded_admitter_indices: Vec::new(),
         request_body_filter_indices: Vec::new(),
         response_body_filter_indices: Vec::new(),
         selected_upstream_request_body_filter_indices: Vec::new(),
@@ -3669,6 +3736,7 @@ async fn body_hooks_run_for_every_filter_before_the_request_phase() {
     let log: Arc<std::sync::Mutex<Vec<&'static str>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
 
     let pipeline = with_body_indices(FilterPipeline {
+        upgrade_policy: None,
         body_capabilities: BodyCapabilities::default(),
         has_request_completion_observer: false,
         compression: None,
@@ -3708,6 +3776,7 @@ async fn body_hooks_run_for_every_filter_before_the_request_phase() {
         request_body_ceiling: None,
         response_body_ceiling: None,
         request_head_filter_indices: Vec::new(),
+        shielded_admitter_indices: Vec::new(),
         request_body_filter_indices: Vec::new(),
         response_body_filter_indices: Vec::new(),
         selected_upstream_request_body_filter_indices: Vec::new(),
@@ -3744,6 +3813,7 @@ async fn all_executed_filters_run_on_response() {
     let log: Arc<std::sync::Mutex<Vec<&'static str>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
 
     let pipeline = with_body_indices(FilterPipeline {
+        upgrade_policy: None,
         body_capabilities: BodyCapabilities::default(),
         has_request_completion_observer: false,
         compression: None,
@@ -3783,6 +3853,7 @@ async fn all_executed_filters_run_on_response() {
         request_body_ceiling: None,
         response_body_ceiling: None,
         request_head_filter_indices: Vec::new(),
+        shielded_admitter_indices: Vec::new(),
         request_body_filter_indices: Vec::new(),
         response_body_filter_indices: Vec::new(),
         selected_upstream_request_body_filter_indices: Vec::new(),
@@ -3975,6 +4046,7 @@ async fn skipped_filter_skips_its_branches() {
     parent.branches = vec![branch];
 
     let pipeline = with_body_indices(FilterPipeline {
+        upgrade_policy: None,
         body_capabilities: BodyCapabilities::default(),
         has_request_completion_observer: false,
         compression: None,
@@ -3995,6 +4067,7 @@ async fn skipped_filter_skips_its_branches() {
         request_body_ceiling: None,
         response_body_ceiling: None,
         request_head_filter_indices: Vec::new(),
+        shielded_admitter_indices: Vec::new(),
         request_body_filter_indices: Vec::new(),
         response_body_filter_indices: Vec::new(),
         selected_upstream_request_body_filter_indices: Vec::new(),
@@ -5604,6 +5677,7 @@ fn with_body_indices(mut pipeline: FilterPipeline) -> FilterPipeline {
     pipeline.has_request_completion_observer = super::pipeline_has_request_completion_observer(&pipeline.filters);
     let (request, response) = super::body::body_filter_indices(&pipeline.filters);
     pipeline.request_head_filter_indices = super::body::request_head_filter_indices(&pipeline.filters);
+    pipeline.shielded_admitter_indices = super::body::shielded_admitter_indices(&pipeline.filters);
     pipeline.request_body_filter_indices = request;
     pipeline.response_body_filter_indices = response;
     pipeline.selected_upstream_request_body_filter_indices =
@@ -5620,6 +5694,7 @@ fn with_body_indices(mut pipeline: FilterPipeline) -> FilterPipeline {
 /// explicit body capabilities (defaults everywhere else).
 fn test_pipeline(body_capabilities: BodyCapabilities, filters: Vec<PipelineFilter>) -> FilterPipeline {
     with_body_indices(FilterPipeline {
+        upgrade_policy: None,
         body_capabilities,
         has_request_completion_observer: false,
         compression: None,
@@ -5640,6 +5715,7 @@ fn test_pipeline(body_capabilities: BodyCapabilities, filters: Vec<PipelineFilte
         request_body_ceiling: None,
         response_body_ceiling: None,
         request_head_filter_indices: Vec::new(),
+        shielded_admitter_indices: Vec::new(),
         request_body_filter_indices: Vec::new(),
         response_body_filter_indices: Vec::new(),
         selected_upstream_request_body_filter_indices: Vec::new(),
@@ -6064,6 +6140,7 @@ fn make_pipeline(filters: Vec<Box<dyn HttpFilter>>) -> FilterPipeline {
     let body_capabilities = compute_body_capabilities(&filters);
 
     with_body_indices(FilterPipeline {
+        upgrade_policy: None,
         body_capabilities,
         has_request_completion_observer: false,
         compression: None,
@@ -6084,6 +6161,7 @@ fn make_pipeline(filters: Vec<Box<dyn HttpFilter>>) -> FilterPipeline {
         request_body_ceiling: None,
         response_body_ceiling: None,
         request_head_filter_indices: Vec::new(),
+        shielded_admitter_indices: Vec::new(),
         request_body_filter_indices: Vec::new(),
         response_body_filter_indices: Vec::new(),
         selected_upstream_request_body_filter_indices: Vec::new(),
@@ -6106,6 +6184,7 @@ fn make_pipeline_with_conditions(
     let body_capabilities = compute_body_capabilities(&filters);
 
     with_body_indices(FilterPipeline {
+        upgrade_policy: None,
         body_capabilities,
         has_request_completion_observer: false,
         compression: None,
@@ -6126,6 +6205,7 @@ fn make_pipeline_with_conditions(
         request_body_ceiling: None,
         response_body_ceiling: None,
         request_head_filter_indices: Vec::new(),
+        shielded_admitter_indices: Vec::new(),
         request_body_filter_indices: Vec::new(),
         response_body_filter_indices: Vec::new(),
         selected_upstream_request_body_filter_indices: Vec::new(),
@@ -6148,6 +6228,7 @@ fn make_pipeline_with_response_conditions(
     let body_capabilities = compute_body_capabilities(&filters);
 
     with_body_indices(FilterPipeline {
+        upgrade_policy: None,
         body_capabilities,
         has_request_completion_observer: false,
         compression: None,
@@ -6168,6 +6249,7 @@ fn make_pipeline_with_response_conditions(
         request_body_ceiling: None,
         response_body_ceiling: None,
         request_head_filter_indices: Vec::new(),
+        shielded_admitter_indices: Vec::new(),
         request_body_filter_indices: Vec::new(),
         response_body_filter_indices: Vec::new(),
         selected_upstream_request_body_filter_indices: Vec::new(),
@@ -6820,6 +6902,7 @@ fn streaming_capability_not_detected_for_normal_filter() {
 fn streaming_capability_detected_when_filter_declares_it() {
     let streaming_pf = super::test_filters::streaming_capable_filter();
     let pipeline = with_body_indices(FilterPipeline {
+        upgrade_policy: None,
         body_capabilities: BodyCapabilities::default(),
         has_request_completion_observer: false,
         compression: None,
@@ -6840,6 +6923,7 @@ fn streaming_capability_detected_when_filter_declares_it() {
         request_body_ceiling: None,
         response_body_ceiling: None,
         request_head_filter_indices: Vec::new(),
+        shielded_admitter_indices: Vec::new(),
         request_body_filter_indices: Vec::new(),
         response_body_filter_indices: Vec::new(),
         selected_upstream_request_body_filter_indices: Vec::new(),
@@ -10356,4 +10440,190 @@ async fn run_request_then_response(pipeline: &FilterPipeline, log: &HookLog, pat
     drop(log.take());
     drop(pipeline.execute_http_response(&mut ctx).await.unwrap());
     log.take()
+}
+
+// -----------------------------------------------------------------------------
+// Held Pre-Read Rejection Tests
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_shielded_pre_read_rejection_waits_for_the_earlier_filter() {
+    let pipeline = held_pipeline(PipelineFilter::new(
+        0,
+        AnyFilter::Http(Box::new(RejectFilter)),
+        vec![],
+        vec![],
+    ));
+    let req = crate::test_utils::make_request(Method::POST, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let action = pre_read(&pipeline, &mut ctx).await;
+    assert!(matches!(action, FilterAction::Continue), "{action:?}");
+    let action = pipeline.execute_http_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(&action, FilterAction::Reject(rejection) if rejection.status == 403),
+        "the earlier filter rejects first: {action:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_held_rejection_is_returned_at_its_filter() {
+    let chunks = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut pipeline = held_pipeline(named_noop_pf(0, "cors"));
+    pipeline.filters.push(PipelineFilter::new(
+        2,
+        AnyFilter::Http(Box::new(BodyInspectorFilter {
+            chunks: Arc::clone(&chunks),
+        })),
+        vec![],
+        vec![],
+    ));
+    let pipeline = with_body_indices(pipeline);
+    let req = crate::test_utils::make_request(Method::POST, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let action = pre_read(&pipeline, &mut ctx).await;
+    assert!(matches!(action, FilterAction::Continue), "{action:?}");
+    assert!(chunks.lock().unwrap().is_empty(), "no later body hook sees the body");
+    let action = pipeline.execute_http_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(&action, FilterAction::Reject(rejection) if rejection.status == 401),
+        "{action:?}"
+    );
+    assert_eq!(ctx.executed_filter_indices, vec![true, true, false]);
+}
+
+#[tokio::test]
+async fn a_held_rejection_skipped_by_a_branch_still_rejects() {
+    let mut earlier = named_noop_pf(0, "cors");
+    earlier
+        .branches
+        .push(unwind_branch("skip", RejoinTarget::SkipTo(2), vec![]));
+    let mut pipeline = held_pipeline(earlier);
+    pipeline.filters.push(PipelineFilter::new(
+        2,
+        AnyFilter::Http(Box::new(RejectFilter)),
+        vec![],
+        vec![],
+    ));
+    let pipeline = with_body_indices(pipeline);
+    let req = crate::test_utils::make_request(Method::POST, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let _action = pre_read(&pipeline, &mut ctx).await;
+    let action = pipeline.execute_http_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(&action, FilterAction::Reject(rejection) if rejection.status == 401),
+        "the filter the branch skipped to must not answer instead: {action:?}"
+    );
+    assert_eq!(ctx.executed_filter_indices, vec![true, true, false]);
+}
+
+#[tokio::test]
+async fn a_held_rejection_past_the_end_of_the_walk_keeps_its_response_hook() {
+    let mut earlier = named_noop_pf(0, "cors");
+    earlier
+        .branches
+        .push(unwind_branch("skip", RejoinTarget::SkipTo(2), vec![]));
+    let pipeline = with_body_indices(held_pipeline(earlier));
+    let req = crate::test_utils::make_request(Method::POST, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let _action = pre_read(&pipeline, &mut ctx).await;
+    let action = pipeline.execute_http_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(&action, FilterAction::Reject(rejection) if rejection.status == 401),
+        "a branch rejoining at the end must not admit the request: {action:?}"
+    );
+    assert_eq!(
+        ctx.executed_filter_indices,
+        vec![true, true],
+        "the holder must stay paired with its on_response"
+    );
+}
+
+#[tokio::test]
+async fn an_unshielded_or_post_request_rejection_is_not_held() {
+    let unshielded = test_pipeline(
+        BodyCapabilities::default(),
+        vec![PipelineFilter::new(
+            0,
+            AnyFilter::Http(Box::new(AdmittingBodyRejectFilter)),
+            vec![],
+            vec![],
+        )],
+    );
+    let req = crate::test_utils::make_request(Method::POST, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let action = pre_read(&unshielded, &mut ctx).await;
+    assert!(matches!(action, FilterAction::Reject(_)), "{action:?}");
+
+    let shielded = held_pipeline(named_noop_pf(0, "cors"));
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let action = shielded.execute_http_request(&mut ctx).await.unwrap();
+    assert!(matches!(action, FilterAction::Continue), "{action:?}");
+    let action = pre_read(&shielded, &mut ctx).await;
+    assert!(
+        matches!(action, FilterAction::Reject(_)),
+        "after the request phase the body rejection stands: {action:?}"
+    );
+}
+
+/// Rejects every request body with a 401 and admits at the request head, as
+/// `policy` does.
+struct AdmittingBodyRejectFilter;
+
+#[async_trait]
+impl HttpFilter for AdmittingBodyRejectFilter {
+    fn name(&self) -> &'static str {
+        "admitting_body_reject"
+    }
+
+    fn runs_request_head(&self) -> bool {
+        true
+    }
+
+    fn admits_at_request_head(&self) -> bool {
+        true
+    }
+
+    fn request_body_access(&self) -> BodyAccess {
+        BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
+    }
+
+    async fn on_request(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Continue)
+    }
+
+    async fn on_request_body(
+        &self,
+        _ctx: &mut crate::HttpFilterContext<'_>,
+        _body: &mut Option<Bytes>,
+        _end_of_stream: bool,
+    ) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Reject(crate::Rejection::status(401)))
+    }
+}
+
+/// `earlier` followed by an [`AdmittingBodyRejectFilter`] at index 1.
+///
+/// [`AdmittingBodyRejectFilter`]: AdmittingBodyRejectFilter
+fn held_pipeline(earlier: PipelineFilter) -> FilterPipeline {
+    let admitter = PipelineFilter::new(1, AnyFilter::Http(Box::new(AdmittingBodyRejectFilter)), vec![], vec![]);
+    test_pipeline(BodyCapabilities::default(), vec![earlier, admitter])
+}
+
+/// A [`NamedNoopFilter`] entry named `name` with the given `filter_id`.
+///
+/// [`NamedNoopFilter`]: NamedNoopFilter
+fn named_noop_pf(filter_id: usize, name: &'static str) -> PipelineFilter {
+    PipelineFilter::new(
+        filter_id,
+        AnyFilter::Http(Box::new(NamedNoopFilter(name))),
+        vec![],
+        vec![],
+    )
+}
+
+/// Run one end-of-stream body pass, as a pre-read does before the request
+/// phase.
+async fn pre_read(pipeline: &FilterPipeline, ctx: &mut crate::HttpFilterContext<'_>) -> FilterAction {
+    let mut body = Some(Bytes::from_static(b"{}"));
+    pipeline.execute_http_request_body(ctx, &mut body, true).await.unwrap()
 }

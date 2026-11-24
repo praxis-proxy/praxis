@@ -23,6 +23,8 @@ pub mod hyper;
 /// Pingora-backed HTTP implementation, plus the backend-neutral health,
 /// metrics and admin modules it grew up around.
 pub mod pingora;
+#[cfg(any(feature = "hyper", feature = "pingora"))]
+pub(crate) mod upgrade;
 
 #[cfg(feature = "hyper")]
 pub use hyper::HyperHttp;
@@ -31,5 +33,8 @@ pub use pingora::health::PingoraHealthService;
 #[cfg(feature = "admin-api")]
 pub use pingora::kv;
 #[cfg(feature = "pingora")]
-pub use pingora::{PingoraHttp, handler::load_http_handler};
+pub use pingora::{
+    PingoraHttp,
+    handler::{HttpHandlerOptions, load_http_handler, load_http_handler_with_options},
+};
 pub use pingora::{health, metrics};

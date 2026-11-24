@@ -348,10 +348,13 @@ container-run: | require-container-engine ## run the container image (host netwo
 #                          point podman at Red Hat's signature store; needed
 #                          once on Debian/Ubuntu hosts, a no-op elsewhere
 #
-# The report, the image verification and the signature-store setup are
-# `cargo xtask fips` commands (xtask/src/fips/). XTASK_FIPS builds xtask
-# without its default features, so these targets never compile the standard
-# proxy build to run.
+# The report, the image verification, the signature-store setup and the host
+# attestation are `cargo fips-check` commands, from
+# https://github.com/praxis-proxy/cargo-fips-check; fips-check.toml tells it
+# what is specific to this tree. The targets install it at FIPS_CHECK_REV on
+# first use (point FIPS_CHECK at another build to use that one instead). Only
+# the runtime probe is still `cargo xtask fips`; XTASK_FIPS builds xtask
+# without its default features, so it never compiles the standard proxy build.
 #
 # See docs/developing/fips.md and docs/developing/getting-started.md.
 
@@ -431,6 +434,16 @@ FIPS_BUILD_ARGS         := --build-arg UBI9_DIGEST=$(FIPS_UBI9_DIGEST) \
 	$(if $(FIPS_POLICY_FEATURES),--build-arg CARGO_FEATURES=$(FIPS_FEATURES))
 FIPS_IMAGE_TAG          := $(VERSION)-fips$(if $(FIPS_POLICY_FEATURES),-policy-$(FIPS_POLICY_PROFILE))
 XTASK_FIPS              := cargo run -q -p xtask --no-default-features --
+# cargo-fips-check at a pinned commit, installed under target/fips on first
+# use. The stamp names the revision, so moving FIPS_CHECK_REV reinstalls.
+# Containerfile.fips installs the same revision (fips-deps checks they match).
+FIPS_CHECK_REPO         := https://github.com/praxis-proxy/cargo-fips-check
+FIPS_CHECK_REV          := a8dae23f90eb77e6890cc86df5ec6cf6da4e2e79
+FIPS_TOOLS_DIR          := $(FIPS_TARGET_DIR)/tools
+FIPS_CHECK_INSTALLED    := $(FIPS_TOOLS_DIR)/bin/cargo-fips-check
+FIPS_CHECK              ?= $(FIPS_CHECK_INSTALLED)
+FIPS_CHECK_STAMP        := $(FIPS_TOOLS_DIR)/.cargo-fips-check-$(FIPS_CHECK_REV)
+_FIPS_CHECK_DEP         := $(if $(filter $(FIPS_CHECK_INSTALLED),$(FIPS_CHECK)),$(FIPS_CHECK_STAMP))
 # Red Hat's scanner, openshift/check-payload, at the revision that added Rust
 # support (the head of its PR #360, fetched by commit so a rewrite of the PR
 # cannot break the build). `make fips-scanner` builds it into target/fips;
@@ -455,6 +468,11 @@ require-go:
 
 require-oc:
 	@command -v oc >/dev/null || { echo "oc (the OpenShift CLI) is required: check-payload refuses to scan without it on PATH"; exit 1; }
+
+$(FIPS_CHECK_STAMP):
+	cargo install --locked --git $(FIPS_CHECK_REPO) --rev $(FIPS_CHECK_REV) \
+		--root $(FIPS_TOOLS_DIR) cargo-fips-check
+	@touch $@
 
 ##@ FIPS (Policy off unless FIPS_POLICY_PROFILE names one)
 # The debug build is the edit-compile loop; only the release build carries
@@ -644,12 +662,20 @@ fips-host-facts: ## print the FIPS state the test process sees
 # every Red Hat image looks unsigned. This installs the bundled entry for the
 # current user when the registries.d podman reads names none, and does
 # nothing otherwise. CI runs it before fips-verify-image.
-fips-signature-store: ## point podman at Red Hat's signature store (once, Debian/Ubuntu)
-	$(XTASK_FIPS) fips signature-store --install
+fips-signature-store: $(_FIPS_CHECK_DEP) ## point podman at Red Hat's signature store (once, Debian/Ubuntu)
+	$(FIPS_CHECK) signature-store --install
 
-fips-verify-image: | require-podman ## verify the pinned UBI 9 base images (digest + signature)
-	$(XTASK_FIPS) fips verify-image --pinned-in Containerfile.fips $(FIPS_UBI9_IMAGE)
-	$(XTASK_FIPS) fips verify-image --pinned-in Containerfile.fips $(FIPS_UBI9_MINIMAL_IMAGE)
+fips-verify-image: $(_FIPS_CHECK_DEP) | require-podman ## verify the pinned UBI 9 base images (digest + signature)
+	$(FIPS_CHECK) verify-image --pinned-in Containerfile.fips $(FIPS_UBI9_IMAGE)
+	$(FIPS_CHECK) verify-image --pinned-in Containerfile.fips $(FIPS_UBI9_MINIMAL_IMAGE)
+
+# The two base images, one per line: what the FIPS workflow hands the
+# cargo-fips-check action, so the digests live only here and in
+# Containerfile.fips.
+.PHONY: fips-base-images
+fips-base-images: ## print the pinned UBI 9 base image references
+	@echo $(FIPS_UBI9_IMAGE)
+	@echo $(FIPS_UBI9_MINIMAL_IMAGE)
 
 container-fips: fips-verify-image ## FIPS runtime image on UBI 9
 	podman build -f Containerfile.fips --target runtime $(FIPS_BUILD_ARGS) \
@@ -677,17 +703,19 @@ fips-check-ubi: fips-verify-image ## same as fips-check
 		-t $(FIPS_CHECK_IMAGE) .
 	podman run --rm $(FIPS_CHECK_IMAGE)
 
-fips-report: ## compliance report against the local FIPS build (FIPS_BIN)
-	$(XTASK_FIPS) fips report --features $(FIPS_FEATURES) $(FIPS_BIN)
+fips-report: $(_FIPS_CHECK_DEP) ## compliance report against the local FIPS build (FIPS_BIN)
+	$(FIPS_CHECK) report --features $(FIPS_FEATURES) $(FIPS_BIN)
 
-# The graph check is `cargo xtask fips report` (cargo tree scoped to the
+# The graph check is `cargo fips-check report` (cargo tree scoped to the
 # binary and its feature set) rather than cargo-deny: cargo-deny resolves features
 # workspace-wide, and the test crates always enable the policy engine on
 # the binary, so it cannot see the FIPS build's real graph.
-fips-deps: ## FIPS dependency graph check (seconds, no build)
+fips-deps: $(_FIPS_CHECK_DEP) ## FIPS dependency graph check (seconds, no build)
 	@grep -qx 'ARG CARGO_FEATURES="$(FIPS_BASE_FEATURES)"' Containerfile.fips || { \
 		echo "Containerfile.fips CARGO_FEATURES default differs from FIPS_BASE_FEATURES ($(FIPS_BASE_FEATURES))"; exit 1; }
-	$(XTASK_FIPS) fips report --deps-only --features $(FIPS_FEATURES)
+	@grep -qx 'ARG CARGO_FIPS_CHECK_REV=$(FIPS_CHECK_REV)' Containerfile.fips || { \
+		echo "Containerfile.fips CARGO_FIPS_CHECK_REV differs from FIPS_CHECK_REV ($(FIPS_CHECK_REV))"; exit 1; }
+	$(FIPS_CHECK) report --deps-only --features $(FIPS_FEATURES)
 
 # --fail-on-warnings makes an inconclusive verdict (for example a binary
 # without a crate manifest) fail, as Red Hat's gated scans do. Needs a Linux
@@ -716,14 +744,14 @@ fips-scanner: | require-go ## build check-payload at the pinned revision (needs 
 # The FIPS-host attestation: kernel flag, boot parameter, crypto policy and
 # the module the host's OpenSSL loads, then the same questions of the FIPS
 # image (the crypto policy podman propagates into it, and the build of
-# fips.so it carries, looked up in xtask/assets/fips/certified-modules.json).
+# fips.so it carries, looked up in the list cargo-fips-check carries).
 # Exit 1 on any unmet requirement; a module build still in validation is a
 # warning unless FIPS_HOST_CHECK_ARGS adds --require-certified. Writes the
 # attestation to target/fips/ for CI to keep.
 FIPS_HOST_CHECK_ARGS    ?=
-fips-host-check: | require-podman ## attest the FIPS host and the FIPS image
+fips-host-check: $(_FIPS_CHECK_DEP) | require-podman ## attest the FIPS host and the FIPS image
 	@mkdir -p $(FIPS_TARGET_DIR)
-	$(XTASK_FIPS) fips host-check --image $(FIPS_IMAGE_REF) \
+	$(FIPS_CHECK) host-check --image $(FIPS_IMAGE_REF) \
 		--out $(FIPS_TARGET_DIR)/host-attestation.txt \
 		--json $(FIPS_TARGET_DIR)/host-attestation.json $(FIPS_HOST_CHECK_ARGS)
 
@@ -791,9 +819,10 @@ HYPER_CARGO_ARGS        := -p praxis-proxy --no-default-features --features $(HY
 # $(call hyper-suite-features,pkg1 pkg2 ...): compatible features of those suite
 # crates, from the same `cargo xtask features` listing the standard targets
 # use (see "Feature lists" below), excluding Pingora-only features.
-# TLS health probes select Pingora's transport and cannot join a hyper build.
+# TLS health probes and the forward-proxy runtime select Pingora's transport
+# and cannot join a hyper build.
 hyper-suite-features = $(shell $(XTASK_FIPS) features --except pingora --except tls-health-check \
-	$(POLICY_FIPS_EXCEPT) $(foreach pkg,$(1),-p $(pkg)))
+	--except forward-proxy $(POLICY_FIPS_EXCEPT) $(foreach pkg,$(1),-p $(pkg)))
 HYPER_BIN               := PRAXIS_BIN=$(abspath $(HYPER_TARGET_DIR))/debug/praxis
 # The parity record: tests that do not pass on hyper yet, one per line with
 # its bucket in a comment, skipped by name so the suites stay untouched. A

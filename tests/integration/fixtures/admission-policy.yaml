@@ -1,0 +1,49 @@
+# Policy fixture for the `security/policy-admission.yaml` example
+# integration test. The test rewrites the example's `config_path` to this
+# file.
+#
+# Shape: a per-client pre-identity limit, one HS256 JWT identity plugin
+# (fail-closed), and a `global` rule requiring an authenticated caller. No
+# entity routes, so the policy admits at the request head: the limit and the
+# JWT check run before any filter reads the body.
+
+engine_settings:
+  dispatch: policy
+
+plugins:
+  - name: edge-limits
+    kind: ratelimit/limitador
+    hooks: [ratelimit.pre_identity]
+    capabilities: [read_headers]
+    config:
+      namespace: edge
+      bindings:
+        client: http.client_address
+      limits:
+        - max: 3
+          seconds: 60
+          variables: [client]
+
+  - name: jwt-user
+    kind: identity/jwt
+    hooks: [identity.resolve]
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "https://idp.example.com"
+          audiences: ["praxis-policy-example"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "REPLACE-WITH-A-PROPERLY-RANDOM-SHARED-SECRET-DO-NOT-COMMIT"
+      claim_mapper: standard
+
+global:
+  authentication:
+    - jwt-user
+  rate_limits:
+    - edge-limits
+  authorization:
+    pre_invocation:
+      - "require(authenticated)"

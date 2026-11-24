@@ -12,6 +12,9 @@ use crate::payload::PayloadSpec;
 /// Maximum generated chunk size accepted by the H2 sender.
 const MAX_H2_CHUNK: usize = 65_536; // 64 KiB
 
+/// Bytes submitted before waiting for the counting backend to observe the upload.
+const STAGED_PREFIX_BYTES: u16 = 16_384; // 16 KiB
+
 /// Outcome of streaming a request body to an HTTP/2 send stream.
 #[derive(Debug, Default)]
 pub struct H2Upload {
@@ -389,16 +392,16 @@ mod tests {
     }
 }
 
-/// A group of HTTP/2 uploads paused immediately before their final byte.
+/// A group of HTTP/2 uploads paused at a fixture-defined body boundary.
 ///
 /// The worker owns and drives one HTTP/2 connection. Dropping the handle
 /// cancels pending flow-control waits and joins the worker.
 pub struct H2PausedUploads {
-    /// All prefix bytes have been queued to the H2 library, or setup failed.
+    /// Bytes queued at the pause boundary, or a setup/transport failure.
     pub ready: std::sync::mpsc::Receiver<Result<u64, String>>,
     /// Completed response observations, or a transport/setup error.
     pub result: std::sync::mpsc::Receiver<Result<H2PausedResult, String>>,
-    /// Releases the final content byte and `END_STREAM` for every upload.
+    /// Releases the paused upload worker.
     resume: Option<tokio::sync::oneshot::Sender<()>>,
     /// Interrupts any pending network or flow-control operation on drop.
     cancel: Option<tokio::sync::oneshot::Sender<()>>,
@@ -407,7 +410,7 @@ pub struct H2PausedUploads {
 }
 
 impl H2PausedUploads {
-    /// Release all pending final bytes. Subsequent calls are harmless.
+    /// Release the paused upload worker. Subsequent calls are harmless.
     pub fn resume(&mut self) {
         if let Some(sender) = self.resume.take() {
             let _sent = sender.send(());
@@ -440,6 +443,18 @@ pub struct H2PausedResult {
     pub empty_data_frames: u64,
 }
 
+/// Body boundary at which the test coordinates with its backend.
+#[derive(Clone, Copy)]
+enum PausePoint {
+    /// Queue all but the last byte, then pause.
+    FinalByte {
+        /// Pace small writes so the peer can consume them as they arrive.
+        pace_small: bool,
+    },
+    /// Queue one ordinary DATA chunk and wait for the backend to observe it.
+    FirstChunk,
+}
+
 /// Start multiple bounded HTTP/2 uploads on one connection, with alternating
 /// `x-resource-tenant` values. The ready notification reports queued bytes,
 /// which are not evidence of backend receipt. Each stream also emits a legal
@@ -456,6 +471,32 @@ pub fn start_h2_paused_uploads(
     chunk_size: usize,
     pace_small: bool,
 ) -> H2PausedUploads {
+    start_h2_uploads(addr, spec, streams, chunk_size, PausePoint::FinalByte { pace_small })
+}
+
+/// Stage a 16 KiB prefix in an ordinary DATA chunk so the test can prove backend
+/// delivery before releasing the remaining unpaced 128-byte writes.
+///
+/// # Panics
+///
+/// Panics if the staged prefix would leave fewer than two bytes (the remaining
+/// workload and its final end-of-stream byte).
+pub fn start_h2_upload_paused_after_prefix(addr: &str, spec: PayloadSpec) -> H2PausedUploads {
+    assert!(
+        spec.len() > u64::from(STAGED_PREFIX_BYTES) + 1,
+        "staged flood requires content after its 16 KiB prefix"
+    );
+    start_h2_uploads(addr, spec, 1, 128, PausePoint::FirstChunk)
+}
+
+/// Spawn the shared upload fixture at the requested pause boundary.
+fn start_h2_uploads(
+    addr: &str,
+    spec: PayloadSpec,
+    streams: usize,
+    chunk_size: usize,
+    pause_point: PausePoint,
+) -> H2PausedUploads {
     assert!(streams > 0 && chunk_size > 0 && !spec.is_empty());
     let addr = addr.to_owned();
     let (ready_tx, ready) = std::sync::mpsc::channel();
@@ -469,7 +510,7 @@ pub fn start_h2_paused_uploads(
             .expect("H2 test runtime");
         let outcome = runtime.block_on(async {
             tokio::select! {
-                result = Box::pin(paused_uploads(&addr, &spec, streams, chunk_size, pace_small, &ready_tx, resume_rx)) => result,
+                result = Box::pin(paused_uploads(&addr, &spec, streams, chunk_size, pause_point, &ready_tx, resume_rx)) => result,
                 _ = cancel_rx => Err("H2 campaign cancelled".to_owned()),
             }
         });
@@ -499,9 +540,9 @@ async fn paused_uploads(
     spec: &PayloadSpec,
     streams: usize,
     chunk_size: usize,
-    pace_small: bool,
+    pause_point: PausePoint,
     ready: &std::sync::mpsc::Sender<Result<u64, String>>,
-    resume: tokio::sync::oneshot::Receiver<()>,
+    mut resume: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<H2PausedResult, String> {
     let tcp = tokio::net::TcpStream::connect(addr)
         .await
@@ -527,7 +568,17 @@ async fn paused_uploads(
         upload
             .send_data(Bytes::new(), false)
             .map_err(|error| error.to_string())?;
-        if let Err(error) = queue_prefix(&mut upload, spec, chunk_size, pace_small).await {
+        let (offset, pace_small) = match pause_point {
+            PausePoint::FirstChunk => {
+                let queued = u64::from(STAGED_PREFIX_BYTES);
+                queue_prefix(&mut upload, spec, usize::from(STAGED_PREFIX_BYTES), false, 0..queued).await?;
+                ready.send(Ok(queued)).map_err(|error| error.to_string())?;
+                (&mut resume).await.map_err(|error| error.to_string())?;
+                (queued, false)
+            },
+            PausePoint::FinalByte { pace_small } => (0, pace_small),
+        };
+        if let Err(error) = queue_prefix(&mut upload, spec, chunk_size, pace_small, offset..spec.len() - 1).await {
             let response = tokio::time::timeout(std::time::Duration::from_secs(2), response).await;
             let driver = tokio::time::timeout(std::time::Duration::from_secs(2), &mut driver).await;
             return Err(format!("{error}; response={response:?}; driver={driver:?}"));
@@ -547,9 +598,11 @@ async fn paused_uploads(
     if probe.status != Some(200) || !probe.end_stream || probe.abort.is_some() {
         return Err(format!("independent H2 probe failed: {probe:?}"));
     }
-    let queued = (spec.len() - 1).saturating_mul(u64::try_from(streams).map_err(|error| error.to_string())?);
-    ready.send(Ok(queued)).map_err(|error| error.to_string())?;
-    resume.await.map_err(|error| error.to_string())?;
+    if matches!(pause_point, PausePoint::FinalByte { .. }) {
+        let queued = (spec.len() - 1).saturating_mul(u64::try_from(streams).map_err(|error| error.to_string())?);
+        ready.send(Ok(queued)).map_err(|error| error.to_string())?;
+        resume.await.map_err(|error| error.to_string())?;
+    }
     for (_, upload) in &mut pending {
         let capacity = available_capacity(upload, 1).await?;
         if capacity == 0 {
@@ -679,17 +732,17 @@ impl<T: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for CountH2Frames<T
     }
 }
 
-/// Queue all but the final byte, respecting per-stream H2 flow control.
+/// Queue a bounded prefix, respecting per-stream H2 flow control.
 async fn queue_prefix(
     stream: &mut h2::SendStream<Bytes>,
     spec: &PayloadSpec,
     chunk_size: usize,
     pace_small: bool,
+    range: std::ops::Range<u64>,
 ) -> Result<(), String> {
-    let target = spec.len() - 1;
-    let mut offset = 0;
-    while offset < target {
-        let desired = usize::try_from(target - offset)
+    let mut offset = range.start;
+    while offset < range.end {
+        let desired = usize::try_from(range.end - offset)
             .unwrap_or(usize::MAX)
             .min(chunk_size)
             .min(MAX_H2_CHUNK);

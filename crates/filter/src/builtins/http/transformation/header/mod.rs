@@ -178,6 +178,10 @@ impl HttpFilter for HeaderFilter {
         "headers"
     }
 
+    fn may_end_request(&self) -> bool {
+        false
+    }
+
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         for name in &self.request_remove {
             trace!(header = %name, "removing request header");

@@ -6,12 +6,13 @@
 #
 # Four stages, all driven by the Makefile:
 #
-#   toolchain Red Hat's own Rust toolchain and OpenSSL on ubi9/ubi, no
-#             sources; also the image the test suites run in on a FIPS host,
-#             against a bind-mounted checkout (make test-fips-host)
+#   toolchain Red Hat's own Rust toolchain and OpenSSL on ubi9/ubi, with
+#             cargo-auditable and cargo-fips-check, no sources; also the
+#             image the test suites run in on a FIPS host, against a
+#             bind-mounted checkout (make test-fips-host)
 #   builder   builds the FIPS feature set of praxis in that toolchain
 #             (make container-fips, make fips-check)
-#   report    runs `cargo xtask fips report` on that binary and keeps the
+#   report    runs `cargo fips-check report` on that binary and keeps the
 #             result (make fips-check)
 #   runtime   the shippable image on ubi9/ubi-minimal (make container-fips)
 #
@@ -25,7 +26,7 @@
 #
 # Both base images are pinned by digest and their Red Hat signatures are
 # verified by `make fips-verify-image` before any build. Update the digests
-# here and in the Makefile together, after `cargo xtask fips verify-image`
+# here and in the Makefile together, after `cargo fips-check verify-image`
 # has accepted the new ones.
 
 ARG UBI9_DIGEST=sha256:a4b9ec09b1e790a53ef25b7777c539976abe519248264298e5194dcbceac8c31
@@ -68,6 +69,16 @@ ARG CARGO_AUDITABLE_VERSION=0.7.6
 RUN --mount=type=cache,id=praxis-fips-registry,target=/cargo/registry \
     cargo install cargo-auditable --version "${CARGO_AUDITABLE_VERSION}" --locked
 
+# cargo-fips-check writes the compliance report of the report stage. The same
+# commit the Makefile installs on the host (FIPS_CHECK_REV; make fips-deps
+# checks the two match), built here with Red Hat's toolchain. Installed under
+# /usr/local so it is on PATH for whichever user runs the image.
+ARG CARGO_FIPS_CHECK_REV=a8dae23f90eb77e6890cc86df5ec6cf6da4e2e79
+RUN --mount=type=cache,id=praxis-fips-registry,target=/cargo/registry \
+    --mount=type=cache,id=praxis-fips-git,target=/cargo/git \
+    cargo install --locked --git https://github.com/praxis-proxy/cargo-fips-check \
+        --rev "${CARGO_FIPS_CHECK_REV}" --root /usr/local cargo-fips-check
+
 WORKDIR /src
 
 # ------------------------------------------------------------------------------
@@ -77,8 +88,8 @@ WORKDIR /src
 FROM toolchain AS builder
 
 # The whole workspace, so the build resolves the committed lockfile as is
-# (--locked) and the report stage can run `cargo xtask fips`.
-COPY Cargo.toml Cargo.lock ./
+# (--locked), and what `cargo fips-check report` reads in the report stage.
+COPY Cargo.toml Cargo.lock fips-check.toml ./
 COPY crates crates
 COPY tests tests
 COPY xtask xtask
@@ -118,22 +129,17 @@ RUN --mount=type=cache,id=praxis-fips-registry,target=/cargo/registry \
 # ------------------------------------------------------------------------------
 
 # Only built when this stage is the target (make fips-check), so publishing
-# the runtime image never compiles xtask. The report runs at build time,
-# while the cargo cache is mounted, so `cargo tree` can resolve the graph
-# offline. xtask is built without its default features, which keeps the
-# standard proxy build (and its non-FIPS dependencies) out of this image.
+# the runtime image never runs it. The report runs at build time, while the
+# cargo cache is mounted, so `cargo tree` can resolve the graph offline.
 # The exit status is kept so the image can be run to print the report and
-# fail accordingly. A run that wrote no report (a build or fetch failure)
-# fails the build instead, so the failure is not cached and replayed.
+# fail accordingly. A run that wrote no report (a fetch failure) fails the
+# build instead, so the failure is not cached and replayed.
 FROM builder AS report
 
 ARG CARGO_FEATURES
-ARG CARGO_ARGS
 
 RUN --mount=type=cache,id=praxis-fips-registry,target=/cargo/registry \
-    --mount=type=cache,id=praxis-fips-target,target=/src/target \
-    cargo run --quiet --locked -p xtask --no-default-features ${CARGO_ARGS} -- \
-        fips report /fips/praxis --features "${CARGO_FEATURES}" --offline --out /fips/report.txt; \
+    cargo fips-check report /fips/praxis --features "${CARGO_FEATURES}" --offline --out /fips/report.txt; \
     status=$?; \
     [ -f /fips/report.txt ] || exit "$status"; \
     echo "$status" > /fips/status

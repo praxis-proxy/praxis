@@ -11,6 +11,9 @@ use praxis_filter::{BodyBuffer, BodyMode, FilterPipeline, Request, Response, Tru
 use tokio::sync::OwnedSemaphorePermit;
 use tracing::Span;
 
+#[cfg(feature = "pingora")]
+use crate::http::upgrade::WebSocketOffer;
+
 // -----------------------------------------------------------------------------
 // PingoraRequestCtx
 // -----------------------------------------------------------------------------
@@ -38,6 +41,14 @@ use tracing::Span;
 pub struct PingoraRequestCtx {
     /// Process lifecycle used by direct response writers during drain.
     pub lifecycle: Option<LifecycleHandle>,
+
+    /// Listener that owns this request's pinned pipeline generation.
+    #[cfg(feature = "pingora")]
+    pub(crate) listener_name: ::metrics::SharedString,
+
+    /// Valid client WebSocket handshake admitted by this request's pinned pipeline.
+    #[cfg(feature = "pingora")]
+    pub(crate) admitted_websocket: Option<WebSocketOffer>,
 
     /// Connection permit from the per-listener semaphore.
     ///
@@ -265,7 +276,7 @@ pub struct PingoraRequestCtx {
     /// Once true, remaining chunks bypass buffering and stream through.
     pub request_body_released: bool,
 
-    /// Whether the request method is idempotent (GET, HEAD, OPTIONS).
+    /// Whether the method permits automatic replay (GET, HEAD, OPTIONS, QUERY).
     pub request_is_idempotent: bool,
 
     /// Snapshot of the original request for body/response body phases.
@@ -374,11 +385,12 @@ pub struct PingoraRequestCtx {
     /// Per-route hedge policy copied from the filter context.
     pub hedge_policy: Option<Arc<praxis_core::config::HedgePolicy>>,
 
-    /// Shared cluster retry state (budget + active requests).
-    pub cluster_retry_state: Option<Arc<praxis_core::retry::ClusterRetryState>>,
-
-    /// Whether `cluster_retry_state.leave()` has already been called.
-    pub cluster_retry_state_released: bool,
+    /// This request's claim on the cluster's in-flight count, carrying the
+    /// cluster's retry budget with it.
+    ///
+    /// Shared with the filter contexts the phases run on rather than copied,
+    /// so a cancelled phase cannot strand the slot or release it twice.
+    pub cluster_admission: Option<Arc<praxis_core::retry::AdmissionLease>>,
 
     /// Reselector for alternate-host selection on retry.
     pub endpoint_reselector: Option<Arc<praxis_filter::EndpointReselector>>,
@@ -483,8 +495,7 @@ macro_rules! filter_context {
             retry_policy: $ctx.retry_policy.clone(),
             route_retry_policy: $ctx.route_retry_policy.clone(),
             hedge_policy: $ctx.hedge_policy.clone(),
-            cluster_retry_state: $ctx.cluster_retry_state.clone(),
-            cluster_retry_state_released: $ctx.cluster_retry_state_released,
+            cluster_admission: $ctx.cluster_admission.clone(),
             endpoint_reselector: $ctx.endpoint_reselector.clone(),
             pinned_endpoint_address: None,
             time_source: $pipeline.time_source(),
@@ -628,6 +639,10 @@ impl Default for PingoraRequestCtx {
     )]
     fn default() -> Self {
         Self {
+            #[cfg(feature = "pingora")]
+            admitted_websocket: None,
+            #[cfg(feature = "pingora")]
+            listener_name: ::metrics::SharedString::const_str("unknown"),
             _connection_permit: None,
             _global_connection_permit: None,
             cached_body_done_indices: Vec::new(),
@@ -691,8 +706,7 @@ impl Default for PingoraRequestCtx {
             retry_policy: None,
             route_retry_policy: None,
             hedge_policy: None,
-            cluster_retry_state: None,
-            cluster_retry_state_released: false,
+            cluster_admission: None,
             endpoint_reselector: None,
             pending_backoff: None,
             prior_attempt_sni: None,

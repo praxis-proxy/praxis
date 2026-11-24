@@ -34,7 +34,7 @@ use crate::{
     pipeline::{
         body::{RequestBodyPhase, effective_request_body_phase},
         branch::{RejoinTarget, ResolvedBranch},
-        filter::PipelineFilter,
+        filter::{ANSWERING_FILTERS, PipelineFilter},
     },
 };
 
@@ -42,11 +42,6 @@ use crate::{
 // Constants
 // -----------------------------------------------------------------------------
 
-/// Built-in filters that always answer the request themselves, so a bound
-/// request that reaches one needs no load balancer and nothing after them
-/// runs. Any other filter that declares terminal responses is modeled as one
-/// that may also continue.
-const ANSWERING_FILTERS: &[&str] = &["iterative_request_router", "redirect", "static_response"];
 
 // -----------------------------------------------------------------------------
 // Error Checks

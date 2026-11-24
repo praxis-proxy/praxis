@@ -27,6 +27,8 @@ use praxis_filter::{BodyMode, CompressionConfig, FilterPipeline};
 use tokio::sync::Semaphore;
 use tracing::{Instrument as _, debug};
 
+#[cfg(feature = "forward-proxy")]
+use super::connect;
 use super::{
     compression::{adjust_compression, configure_compression},
     connected_to_upstream, fail_to_proxy,
@@ -102,6 +104,10 @@ pub struct PingoraHttpHandler {
     /// Listener name for connection metrics.
     listener_name: ::metrics::SharedString,
 
+    /// Forward-proxy (CONNECT) runtime, when the listener enables it.
+    #[cfg(feature = "forward-proxy")]
+    forward_proxy: Option<connect::ForwardProxyRuntime>,
+
     /// Swappable filter pipeline.
     pipeline: Arc<ArcSwap<FilterPipeline>>,
 
@@ -121,6 +127,7 @@ impl PingoraHttpHandler {
         downstream_keepalive_timeout_secs: Option<u64>,
         connection_semaphore: Option<Arc<Semaphore>>,
         listener_name: ::metrics::SharedString,
+        #[cfg(feature = "forward-proxy")] forward_proxy: Option<connect::ForwardProxyRuntime>,
         lifecycle: LifecycleHandle,
     ) -> Self {
         let compression = pipeline.load().compression_config().cloned();
@@ -130,6 +137,8 @@ impl PingoraHttpHandler {
             downstream_keepalive_timeout_secs,
             downstream_read_timeout,
             listener_name,
+            #[cfg(feature = "forward-proxy")]
+            forward_proxy,
             pipeline,
             lifecycle,
         }
@@ -199,7 +208,10 @@ impl ProxyHttp for PingoraHttpHandler {
     type CTX = PingoraRequestCtx;
 
     fn new_ctx(&self) -> Self::CTX {
-        PingoraRequestCtx::default()
+        PingoraRequestCtx {
+            listener_name: self.listener_name.clone(),
+            ..PingoraRequestCtx::default()
+        }
     }
 
     /// Registers Pingora's compression module when compression is
@@ -295,9 +307,22 @@ impl ProxyHttp for PingoraHttpHandler {
         Ok(())
     }
 
+    #[cfg_attr(
+        feature = "forward-proxy",
+        expect(
+            clippy::large_stack_frames,
+            reason = "session and pinned pipeline state across the pipeline await"
+        )
+    )]
     async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
         ctx.lifecycle = Some(self.lifecycle.clone());
         let pipeline = ctx.pin_pipeline(&self.pipeline);
+        #[cfg(feature = "forward-proxy")]
+        if let Some(forward_proxy) = &self.forward_proxy
+            && session.req_header().method == http::Method::CONNECT
+        {
+            return connect::handle(forward_proxy, &pipeline, session, ctx).await;
+        }
         request_filter::execute(&pipeline, session, ctx).await
     }
 
@@ -545,6 +570,7 @@ impl ProxyHttp for PingoraHttpHandler {
             ctx.extensions
                 .insert(praxis_filter::UpstreamForwardedEndpoint(Arc::clone(&upstream.address)));
         }
+        upstream_request::validate_admitted_upgrade(upstream_request, ctx)?;
         Ok(())
     }
 
@@ -814,6 +840,8 @@ mod replay_tests {
             None,
             None,
             "test".into(),
+            #[cfg(feature = "forward-proxy")]
+            None,
             LifecycleHandle::new(),
         );
         let (_client, stream) = tokio::io::duplex(1024);
@@ -843,6 +871,8 @@ mod replay_tests {
             None,
             None,
             "test".into(),
+            #[cfg(feature = "forward-proxy")]
+            None,
             LifecycleHandle::new(),
         );
         let (_client, stream) = tokio::io::duplex(1024);

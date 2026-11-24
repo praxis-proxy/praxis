@@ -138,6 +138,10 @@ impl HttpFilter for JsonRpcFilter {
         "json_rpc"
     }
 
+    fn may_end_request(&self) -> bool {
+        false
+    }
+
     fn request_body_access(&self) -> BodyAccess {
         BodyAccess::ReadOnly(crate::BodyRequirement::Required)
     }

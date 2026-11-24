@@ -3,8 +3,10 @@
 # HTTP listener that transparently proxies WebSocket upgrade
 # requests. Pingora detects the Upgrade handshake and switches
 # to bidirectional byte forwarding after the 101 response.
-# No special configuration is needed; any HTTP listener that
-# routes to a WebSocket-capable upstream will proxy upgrades.
+# Praxis validates the HTTP/1.1 handshake before request filters
+# and rejects upgrades that would skip selected required body processing.
+# No special configuration is needed for Pingora; Hyper does not
+# support WebSocket passthrough.
 #
 #   Client -> WS -> Praxis :8080 -> WS -> Backend :3000
 #

@@ -204,6 +204,10 @@ impl HttpFilter for CompressionFilter {
         "compression"
     }
 
+    fn may_end_request(&self) -> bool {
+        false
+    }
+
     fn compression_config(&self) -> Option<&CompressionConfig> {
         Some(&self.config)
     }

@@ -18,7 +18,7 @@ use std::sync::{Arc, atomic::Ordering};
 use praxis_core::config::Config;
 use praxis_test_utils::{
     TestCertificates, TlsProbeOutcome, free_port, http_get, https_get, start_backend, start_proxy,
-    start_request_counting_backend, start_tls_backend, start_tls_proxy, start_tls_proxy_no_wait, tls_negative_probe,
+    start_request_counting_backend, start_tls_backend, start_tls_proxy, start_tls_proxy_no_wait, tls_handshake_probe,
     tls_probe::{self, ClientHello, Offer, Reply},
     wait_for_https,
 };
@@ -175,15 +175,14 @@ fn rfc8446_invalid_client_cert_rejected_with_mtls() {
     ] {
         let client_cert = issuer.generate_client_cert();
         let client_config = server_certs.client_config_with_cert(&client_cert);
-        let outcome = tls_negative_probe(
-            proxy.addr(),
-            "localhost",
-            b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n",
-            &client_config,
-        );
+        let outcome = tls_handshake_probe(proxy.addr(), "localhost", &client_config);
         assert!(
             matches!(&outcome, TlsProbeOutcome::PeerAlert(alert) if *alert == expected_alert),
             "untrusted client certificate must receive {expected_alert:?} before application data: {outcome:?}"
+        );
+        assert!(
+            praxis_test_utils::https_get_attempt(proxy.addr(), "/", &client_config).is_err(),
+            "untrusted client certificate must also fail a real HTTPS request"
         );
         assert_eq!(
             hits.load(Ordering::SeqCst),

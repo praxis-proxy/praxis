@@ -333,6 +333,46 @@ impl ClusterHealthEntry {
         }
     }
 
+    /// Record one passive health observation for the endpoint at `idx`.
+    ///
+    /// A failure counts toward `passive_unhealthy_threshold` and a success
+    /// toward `passive_healthy_threshold`; either is ignored when its
+    /// threshold is not configured or `idx` is out of range. Returns the
+    /// transition this observation caused, if any, so the caller can log it
+    /// and record metrics.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    ///
+    /// use praxis_core::health::{ClusterHealthEntry, EndpointHealth, PassiveTransition};
+    ///
+    /// let entry = ClusterHealthEntry::new(
+    ///     vec![EndpointHealth::new()],
+    ///     vec![Arc::from("a:80")],
+    ///     Some(1),
+    ///     None,
+    /// );
+    /// assert_eq!(
+    ///     entry.observe_passive(0, true),
+    ///     Some(PassiveTransition::Unhealthy { threshold: 1 })
+    /// );
+    /// ```
+    #[must_use]
+    pub fn observe_passive(&self, idx: usize, is_failure: bool) -> Option<PassiveTransition> {
+        let endpoint = self.endpoints.get(idx)?;
+        if is_failure {
+            let threshold = self.passive_unhealthy_threshold?;
+            endpoint
+                .record_failure(threshold)
+                .then_some(PassiveTransition::Unhealthy { threshold })
+        } else {
+            let threshold = self.passive_healthy_threshold?;
+            endpoint
+                .record_success(threshold)
+                .then_some(PassiveTransition::Recovered { threshold })
+        }
+    }
+
     /// Look up the endpoint index for an address.
     pub fn endpoint_index(&self, addr: &str) -> Option<usize> {
         self.index.get(addr).copied()
@@ -391,6 +431,21 @@ impl ClusterHealthEntry {
 // ClusterHealthState
 // -----------------------------------------------------------------------------
 
+/// An endpoint health change caused by a passive observation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PassiveTransition {
+    /// The endpoint crossed the failure threshold and is now unhealthy.
+    Unhealthy {
+        /// Consecutive failures that triggered the transition.
+        threshold: u32,
+    },
+    /// The endpoint crossed the success threshold and is healthy again.
+    Recovered {
+        /// Consecutive successes that triggered the transition.
+        threshold: u32,
+    },
+}
+
 /// Shared health state for all endpoints in a cluster.
 ///
 /// ```
@@ -431,6 +486,54 @@ mod tests {
     use std::thread;
 
     use super::*;
+
+    // A two-endpoint entry with the given passive thresholds.
+    fn passive_entry(unhealthy: Option<u32>, healthy: Option<u32>) -> ClusterHealthEntry {
+        ClusterHealthEntry::new(
+            vec![EndpointHealth::new(), EndpointHealth::new()],
+            vec![Arc::from("a:80"), Arc::from("b:80")],
+            unhealthy,
+            healthy,
+        )
+    }
+
+    #[test]
+    fn observe_passive_reports_unhealthy_at_threshold() {
+        let entry = passive_entry(Some(2), None);
+        assert_eq!(entry.observe_passive(1, true), None, "1/2 failures keeps it healthy");
+        assert_eq!(
+            entry.observe_passive(1, true),
+            Some(PassiveTransition::Unhealthy { threshold: 2 }),
+            "the threshold-th failure ejects the endpoint"
+        );
+        assert!(!entry.endpoints()[1].is_healthy(), "endpoint marked unhealthy");
+        assert!(entry.endpoints()[0].is_healthy(), "other endpoints untouched");
+    }
+
+    #[test]
+    fn observe_passive_reports_recovery_at_threshold() {
+        let entry = passive_entry(Some(1), Some(2));
+        entry.endpoints()[0].mark_unhealthy();
+        assert_eq!(entry.observe_passive(0, false), None, "1/2 successes keeps it down");
+        assert_eq!(
+            entry.observe_passive(0, false),
+            Some(PassiveTransition::Recovered { threshold: 2 }),
+            "the threshold-th success restores the endpoint"
+        );
+    }
+
+    #[test]
+    fn observe_passive_ignores_unconfigured_and_unknown() {
+        let entry = passive_entry(None, None);
+        assert_eq!(entry.observe_passive(0, true), None, "no passive thresholds configured");
+        assert!(entry.endpoints()[0].is_healthy(), "no threshold, no ejection");
+        let configured = passive_entry(Some(1), Some(1));
+        assert_eq!(
+            configured.observe_passive(9, true),
+            None,
+            "out-of-range index is ignored"
+        );
+    }
 
     #[test]
     fn is_address_healthy_keys_by_address() {

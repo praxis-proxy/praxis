@@ -47,6 +47,16 @@ pub(crate) fn strip_hop_by_hop(req: &mut RequestHeader, is_upgrade: bool) {
     );
 }
 
+/// Check the actual upstream head after hop-by-hop stripping and adapter mutations.
+#[cfg(feature = "pingora")]
+pub(crate) fn validate_admitted_upgrade(req: &RequestHeader, ctx: &PingoraRequestCtx) -> pingora_core::Result<()> {
+    let Some(offer) = &ctx.admitted_websocket else {
+        return Ok(());
+    };
+    crate::http::upgrade::validate_forwarded_request(offer, &req.method, &req.headers, req.version)
+        .map_err(|reason| pingora_core::Error::explain(pingora_core::ErrorType::InternalError, reason).into_down())
+}
+
 /// Re-add `te: trailers` to an HTTP/2 upstream request when the downstream
 /// request asked for it.
 ///
@@ -1009,6 +1019,33 @@ mod tests {
         apply_rewritten_path(&mut req, &ctx).unwrap();
 
         assert_eq!(req.uri.path(), "/", "root path should be accepted");
+    }
+
+    #[test]
+    fn final_forwarded_offer_is_checked_after_hop_by_hop_stripping() {
+        let mut request = make_request(&[
+            ("upgrade", "websocket"),
+            ("connection", "Upgrade, Sec-WebSocket-Key"),
+            ("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ=="),
+            ("sec-websocket-version", "13"),
+        ]);
+        let offer = crate::http::upgrade::classify_request(&request.headers, &request.method, request.version, true)
+            .unwrap()
+            .unwrap();
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.admitted_websocket = Some(offer);
+        validate_admitted_upgrade(&request, &ctx).unwrap();
+        strip_hop_by_hop(&mut request, true);
+        let error = validate_admitted_upgrade(&request, &ctx).unwrap_err();
+        assert_eq!(
+            error.esource(),
+            &pingora_core::ErrorSource::Downstream,
+            "local mutations must not penalize backend health"
+        );
+        assert!(
+            request.headers.get("sec-websocket-key").is_none(),
+            "Connection-nominated key must be stripped"
+        );
     }
 
     #[test]

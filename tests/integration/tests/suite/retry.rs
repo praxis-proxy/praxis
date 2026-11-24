@@ -389,7 +389,12 @@ fn status_5xx_without_policy_is_forwarded() {
 
 #[test]
 fn reused_connection_failure_retries_replayable_post() {
-    assert_reused_connection_retries_post(&reset_retry_policy(true));
+    assert_reused_connection_retries_body("POST", &reset_retry_policy(true));
+}
+
+#[test]
+fn reused_connection_failure_retries_query_without_non_idempotent_opt_in() {
+    assert_reused_connection_retries_body("QUERY", &reset_retry_policy(false));
 }
 
 #[test]
@@ -400,7 +405,13 @@ fn reused_connection_failure_retries_idempotent_get() {
 #[cfg(feature = "pingora")]
 #[test]
 fn reused_connection_failure_retries_replayable_post_with_pingora_default_policy() {
-    assert_reused_connection_retries_post("");
+    assert_reused_connection_retries_body("POST", "");
+}
+
+#[cfg(feature = "pingora")]
+#[test]
+fn reused_connection_failure_retries_query_with_pingora_default_policy() {
+    assert_reused_connection_retries_body("QUERY", "");
 }
 
 #[cfg(feature = "pingora")]
@@ -508,9 +519,9 @@ fn reset_retry_policy(allow_non_idempotent: bool) -> String {
     )
 }
 
-/// Exercise pooled POST replay under an explicit policy or Pingora's default.
+/// Exercise body replay under an explicit policy or Pingora's default.
 /// The fixture fully reads the request before closing without a response.
-fn assert_reused_connection_retries_post(retry_policy: &str) {
+fn assert_reused_connection_retries_body(method: &str, retry_policy: &str) {
     let (backend, log) = start_reused_connection_kill_backend();
     let proxy_port = free_port();
     let yaml = cluster_yaml(
@@ -532,37 +543,41 @@ fn assert_reused_connection_retries_post(retry_policy: &str) {
         let logged_before = log.lock().unwrap().len();
         let raw = http_send(
             proxy.addr(),
-            "POST /probe HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\nConnection: close\r\n\r\ntest",
+            &format!(
+                "{method} /probe HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+            ),
         );
         let last_status = parse_status(&raw);
         let attempt = log.lock().unwrap()[logged_before..].to_vec();
 
-        let probe_hit_reused = attempt
-            .iter()
-            .any(|(_, request_num, method, path)| *request_num > 0 && method == "POST" && path == "/probe");
+        let probe_hit_reused = attempt.iter().any(|(_, request_num, received_method, path)| {
+            *request_num > 0 && received_method == method && path == "/probe"
+        });
 
         if probe_hit_reused {
             assert_eq!(
                 last_status, 200,
-                "a replayable POST whose reused upstream connection dies before responding must be \
+                "a replayable {method} whose reused upstream connection dies before responding must be \
                  retried on a fresh connection, got {last_status} (attempt: {attempt:?})"
             );
             assert!(
                 attempt
                     .iter()
-                    .any(|(_, request_num, method, path)| *request_num == 0 && method == "POST" && path == "/probe"),
+                    .any(|(_, request_num, received_method, path)| *request_num == 0
+                        && received_method == method
+                        && path == "/probe"),
                 "the replay must reach a fresh connection (attempt: {attempt:?})"
             );
             assert!(
                 raw.contains("pooled-ok"),
-                "the retried POST should return the pooled backend body, got: {raw:?}"
+                "the retried {method} should return the pooled backend body, got: {raw:?}"
             );
             return;
         }
 
         assert!(
             Instant::now() < deadline,
-            "a replayable POST on a reused, killed connection should be retried on a fresh \
+            "a replayable {method} on a reused, killed connection should be retried on a fresh \
              connection within the retry window (last status {last_status}, attempt: {attempt:?})"
         );
         std::thread::sleep(Duration::from_millis(100));

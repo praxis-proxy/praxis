@@ -79,20 +79,7 @@ pub(super) fn apply_pending_header_mutations(
 /// Replay an ordered trusted mutation sequence on a header map.
 fn apply_pre_read_mutations_to_headers(headers: &mut http::HeaderMap, mutations: &[TrustedHeaderMutation]) {
     for mutation in mutations {
-        match mutation {
-            TrustedHeaderMutation::Remove(name) => {
-                headers.remove(name);
-            },
-            TrustedHeaderMutation::Set(name, value) => {
-                headers.insert(name.clone(), value.clone());
-            },
-            TrustedHeaderMutation::Add(name, value) => match http::header::HeaderValue::from_str(value) {
-                Ok(value) => {
-                    headers.append(name.clone(), value);
-                },
-                Err(error) => warn!(header = %name, %error, "skipping invalid trusted add mutation"),
-            },
-        }
+        mutation.apply_to(headers);
     }
 }
 
@@ -104,28 +91,7 @@ pub(super) fn apply_request_mutations_to_session(session: &mut Session, mutation
 
 /// Apply pre-read mutations to the Praxis [`Request`] struct.
 pub(in crate::http) fn apply_pre_read_mutations_to_request(request: &mut Request, mutations: &[TrustedHeaderMutation]) {
-    for mutation in mutations {
-        match mutation {
-            TrustedHeaderMutation::Remove(name) => {
-                request.headers.remove(name);
-            },
-            TrustedHeaderMutation::Set(name, value) => {
-                request.headers.insert(name.clone(), value.clone());
-            },
-            TrustedHeaderMutation::Add(name, value) => match http::header::HeaderValue::from_str(value) {
-                Ok(hval) => {
-                    request.headers.append(name.clone(), hval);
-                },
-                Err(err) => {
-                    warn!(
-                        header = %name,
-                        error = %err,
-                        "skipping invalid trusted pre-read add mutation for request"
-                    );
-                },
-            },
-        }
-    }
+    apply_pre_read_mutations_to_headers(&mut request.headers, mutations);
 }
 
 /// Apply pre-read mutations to the Pingora session headers.

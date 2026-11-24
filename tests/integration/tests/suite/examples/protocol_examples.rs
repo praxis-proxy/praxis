@@ -13,7 +13,7 @@ use std::{
 use praxis_core::config::Config;
 use praxis_test_utils::{
     ProxyGuard, TestCertificates, example_config_path, free_port, http_get, https_get, patch_yaml,
-    start_backend_with_shutdown, start_full_proxy, start_proxy, start_tcp_tagged_backend, tls_negative_probe,
+    start_backend_with_shutdown, start_full_proxy, start_proxy, start_tcp_tagged_backend, tls_handshake_probe,
     tls_send_recv, wait_for_tcp, wait_for_tls,
 };
 
@@ -191,10 +191,18 @@ fn tcp_tls_mtls_example_requires_client_cert() {
 
     // A client without a certificate is rejected at the TLS layer.
     let without_cert = certs.raw_tls_client_config();
-    let outcome = tls_negative_probe(&addr, "localhost", b"query", &without_cert);
+    let outcome = tls_handshake_probe(&addr, "localhost", &without_cert);
     assert!(
         outcome.is_client_auth_alert(),
         "a client without a certificate must receive a peer authentication alert: {outcome:?}"
+    );
+    let exchange = praxis_test_utils::tls_negative_probe(&addr, "localhost", b"query", &without_cert);
+    assert!(
+        matches!(
+            exchange,
+            praxis_test_utils::TlsProbeOutcome::PeerAlert(_) | praxis_test_utils::TlsProbeOutcome::OtherFailure(_)
+        ),
+        "the anonymous client's query must fail before an application exchange: {exchange:?}"
     );
 }
 

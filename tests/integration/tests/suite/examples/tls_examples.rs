@@ -9,7 +9,7 @@ use praxis_core::config::Config;
 use praxis_test_utils::{
     ClientCert, TestCertificates, example_config_path, free_port, http_get, https_get, https_get_attempt, patch_yaml,
     start_backend_with_shutdown, start_full_proxy, start_mtls_backend, start_tls_backend, start_tls_proxy,
-    tls_negative_probe, wait_for_tcp,
+    tls_handshake_probe, wait_for_tcp,
 };
 
 // -----------------------------------------------------------------------------
@@ -196,10 +196,14 @@ fn listener_mtls_examples_enforce_required_and_optional_modes() {
             "a CA-signed client must pass either listener mode"
         );
         if required {
-            let outcome = tls_negative_probe(proxy.addr(), "localhost", b"GET / HTTP/1.1\r\n\r\n", &anonymous);
+            let outcome = tls_handshake_probe(proxy.addr(), "localhost", &anonymous);
             assert!(
                 outcome.is_client_auth_alert(),
                 "required mode must reject anonymous clients: {outcome:?}"
+            );
+            assert!(
+                https_get_attempt(proxy.addr(), "/", &anonymous).is_err(),
+                "required mode must reject the anonymous request"
             );
         } else {
             assert_eq!(
@@ -234,10 +238,14 @@ fn both_directions_mtls_example_authenticates_each_peer() {
         "both handshakes must use the configured client identities"
     );
     let anonymous = certs.client_config();
-    let outcome = tls_negative_probe(proxy.addr(), "localhost", b"GET / HTTP/1.1\r\n\r\n", &anonymous);
+    let outcome = tls_handshake_probe(proxy.addr(), "localhost", &anonymous);
     assert!(
         outcome.is_client_auth_alert(),
         "the listener must reject missing client identity: {outcome:?}"
+    );
+    assert!(
+        https_get_attempt(proxy.addr(), "/", &anonymous).is_err(),
+        "the anonymous request must fail"
     );
 }
 
@@ -265,13 +273,17 @@ fn spiffe_example_checks_the_configured_allowlist() {
         "allowlisted SVID must pass"
     );
     let denied_client = certs.client_config_with_cert(&denied);
-    let outcome = tls_negative_probe(proxy.addr(), "localhost", b"GET / HTTP/1.1\r\n\r\n", &denied_client);
+    let outcome = tls_handshake_probe(proxy.addr(), "localhost", &denied_client);
     assert!(
         matches!(
             &outcome,
             praxis_test_utils::TlsProbeOutcome::PeerAlert(rustls::AlertDescription::AccessDenied)
         ),
         "unlisted SVID must fail at the handshake: {outcome:?}"
+    );
+    assert!(
+        https_get_attempt(proxy.addr(), "/", &denied_client).is_err(),
+        "unlisted SVID must also fail a real HTTPS request"
     );
 }
 

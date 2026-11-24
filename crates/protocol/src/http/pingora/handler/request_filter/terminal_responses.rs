@@ -30,7 +30,7 @@ use super::super::{
 
 /// Run response filters on a buffered terminal response and send it downstream.
 #[cfg(feature = "pingora")]
-pub(super) async fn run_terminal_response(
+pub(in crate::http) async fn run_terminal_response(
     pipeline: &FilterPipeline,
     session: &mut Session,
     ctx: &mut PingoraRequestCtx,
@@ -133,7 +133,7 @@ pub(in crate::http) async fn prepare_terminal_response(
     ctx.response_body_mode =
         clamp_body_mode_to_ceiling(response_body_mode, baseline_response_body_mode, pipeline.buffer_cap());
 
-    match result {
+    let outcome = match result {
         Ok(FilterAction::Reject(rejection)) => {
             warn!(status = rejection.status, "response filter rejected terminal response");
             Err(rejection)
@@ -143,7 +143,10 @@ pub(in crate::http) async fn prepare_terminal_response(
             Err(Rejection::status(500))
         },
         _ => Ok(resp),
-    }
+    };
+    #[cfg(feature = "forward-proxy")]
+    let outcome = super::super::connect::refuse_unopened_tunnel(ctx, outcome);
+    outcome
 }
 
 /// Run one parent response-body filter invocation and persist its state.
@@ -233,7 +236,7 @@ pub(in crate::http) fn run_parent_terminal_body_filters(
     clippy::large_stack_frames,
     reason = "streaming lifecycle with body filter writeback"
 )]
-pub(super) async fn run_streaming_terminal_response(
+pub(in crate::http) async fn run_streaming_terminal_response(
     pipeline: &FilterPipeline,
     session: &mut Session,
     ctx: &mut PingoraRequestCtx,

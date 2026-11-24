@@ -36,7 +36,7 @@ Built-in filters organized by protocol and category.
 | [`guardrails`](http/security/guardrails.md) | - | Rejects requests matching string, regex, or PII rules against headers and/or body content. |
 | [`ip_acl`](http/security/ip_acl.md) | - | IP-based access control filter. |
 | [`peer_identity_trust`](http/security/peer_identity_trust.md) | `spiffe` | Validates that the downstream mTLS peer identity matches a configured trusted peer before allowing the request to continue. |
-| [`policy`](http/security/policy.md) | `policy-engine` | The `policy` filter embeds the [Praxis Policy Engine (PPE)](https://github.com/praxis-proxy/policy) for JWT and API-key authentication, authorization, identity delegation, rate limiting and data protection across HTTP APIs, MCP tools, prompts and resources, and AI inference requests. |
+| [`policy`](http/security/policy.md) | `policy-engine` | The `policy` filter embeds the Praxis Policy Engine (PPE) for JWT and API-key authentication, authorization, identity delegation, rate limiting and data protection across HTTP APIs, MCP tools, prompts and resources, and AI inference requests. |
 
 ## HTTP / Traffic Management
 

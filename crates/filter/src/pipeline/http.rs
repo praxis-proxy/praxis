@@ -50,6 +50,14 @@ use crate::{actions::BoundUpstreamBodyOutcome, condition::SelectedUpstream, exte
 // FilterPipeline HTTP
 // -----------------------------------------------------------------------------
 
+/// A body denial deferred to preserve earlier request filters' precedence.
+struct HeldRejection {
+    /// Pipeline index of the rejecting filter.
+    index: usize,
+    /// The rejection to send.
+    rejection: Rejection,
+}
+
 /// Pre-request results and participation owned by resolved filter instances.
 #[derive(Default)]
 struct PreRequestResults {
@@ -166,6 +174,9 @@ impl FilterPipeline {
                 continue;
             }
             restore_pre_request_results(ctx, pf);
+            if let Some(rejection) = super::upgrade::select_filter_requirements(ctx, pf) {
+                return Ok(FilterAction::Reject(rejection));
+            }
             ctx.current_filter_id = Some(pf.filter_id);
             let outcome = run_request_head_filter(
                 http_filter.as_ref(),
@@ -193,12 +204,37 @@ impl FilterPipeline {
     /// response fails closed with a 500 rather than forwarding
     /// upstream.
     ///
+    /// Earlier request filters retain precedence over deferred body denials.
+    /// Skipping a rejecting filter does not bypass its denial.
+    ///
     /// # Errors
     ///
     /// Returns [`FilterError`] if any filter fails.
+    ///
+    /// [`FilterError`]: crate::FilterError
+    pub async fn execute_http_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        let mut held = ctx.extensions.remove::<HeldRejection>();
+        let action = self.run_request_filters(ctx, &mut held).await?;
+        // A branch that skipped past the holder must not admit the request.
+        Ok(match held {
+            Some(held) if matches!(action, FilterAction::Continue) => {
+                if let Some(executed) = ctx.executed_filter_indices.get_mut(held.index) {
+                    *executed = true;
+                }
+                FilterAction::Reject(held.rejection)
+            },
+            _ => action,
+        })
+    }
+
+    /// Run request filters in order, enforcing any deferred body denial.
     #[expect(clippy::indexing_slicing, reason = "while loop bounds idx")]
     #[expect(clippy::too_many_lines, reason = "filter identity tracking adds lines per branch")]
-    pub async fn execute_http_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+    async fn run_request_filters(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+        held: &mut Option<HeldRejection>,
+    ) -> Result<FilterAction, FilterError> {
         if self.enables_trace_propagation(ctx.request) {
             ensure_trace_context(ctx);
         }
@@ -212,6 +248,10 @@ impl FilterPipeline {
         let (mut staged_results, mut pre_read_results) = take_pre_request_results(ctx);
         let mut idx = 0;
         while idx < self.filters.len() {
+            if let Some(held) = held.take_if(|held| held.index <= idx) {
+                ctx.executed_filter_indices[held.index] = true;
+                return Ok(FilterAction::Reject(held.rejection));
+            }
             let pf = &self.filters[idx];
             let http_filter = match &pf.filter {
                 AnyFilter::Http(f) => f.as_ref(),
@@ -241,6 +281,9 @@ impl FilterPipeline {
                 }
             } else if let Some(results) = pre_read_results.remove(http_filter.name()) {
                 ctx.filter_results.insert(http_filter.name(), results);
+            }
+            if let Some(rejection) = super::upgrade::select_filter_requirements(ctx, pf) {
+                return Ok(FilterAction::Reject(rejection));
             }
             ctx.current_filter_id = Some(pf.filter_id);
             let outcome =
@@ -322,12 +365,18 @@ impl FilterPipeline {
     /// that ran `on_request` unwind in reverse just before their host
     /// filter.
     ///
+    /// Final responses return cluster admission and the selected endpoint
+    /// before any conditional hooks run. Callers must decide against retrying
+    /// an upstream response before passing it to this phase.
+    ///
     /// # Errors
     ///
     /// Returns [`FilterError`] if any filter fails.
     ///
     /// [`executed_filter_indices`]: HttpFilterContext::executed_filter_indices
     pub async fn execute_http_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        // Admission cleanup must not depend on conditions or a preceding hook completing.
+        ctx.finish_upstream_response();
         // Reset body-done tracking at the request -> response boundary. The
         // request-body and response-body loops share body_done_indices, so a
         // filter with both request- and response-body access that returned
@@ -469,13 +518,15 @@ impl FilterPipeline {
 
     /// Run all HTTP request body filters in order.
     ///
-    /// Filters that previously returned [`BodyDone`] are skipped.
+    /// Skips filters that previously returned [`BodyDone`]. Body denials preserve
+    /// earlier request filters' precedence and prevent later body hooks from running.
     ///
     /// # Errors
     ///
     /// Returns [`FilterError`] if any body filter fails.
     ///
     /// [`BodyDone`]: FilterAction::BodyDone
+    /// [`FilterError`]: crate::FilterError
     #[expect(clippy::too_many_lines, reason = "body hook loop with metrics dispatch")]
     pub async fn execute_http_request_body(
         &self,
@@ -486,6 +537,9 @@ impl FilterPipeline {
         ensure_body_done_indices(ctx, self.filters.len());
         accumulate_body_bytes(&mut ctx.request_body_bytes, body.as_ref());
         let request_phase_tracked = request_phase_tracked(ctx, self.filters.len());
+        if !request_phase_tracked && ctx.extensions.get::<HeldRejection>().is_some() {
+            return Ok(FilterAction::Continue);
+        }
         let mut released = false;
         // Walk only filters that declared request-body access; declared
         // access is a per-filter constant, so non-body filters cost
@@ -517,6 +571,9 @@ impl FilterPipeline {
             if !request_phase_tracked {
                 restore_pre_request_results(ctx, pf);
             }
+            if let Some(rejection) = super::upgrade::select_request_body_requirement(ctx, pf.filter_id, http_filter) {
+                return Ok(FilterAction::Reject(rejection));
+            }
             ctx.current_filter_id = Some(pf.filter_id);
             let outcome = run_request_body_filter(
                 http_filter,
@@ -538,6 +595,12 @@ impl FilterPipeline {
                     if let Some(done) = ctx.body_done_indices.get_mut(idx) {
                         *done = true;
                     }
+                },
+                BodyFilterOutcome::Rejected(rejection)
+                    if !request_phase_tracked && self.shielded_admitter_indices.contains(&idx) =>
+                {
+                    ctx.extensions.insert(HeldRejection { index: idx, rejection });
+                    return Ok(FilterAction::Continue);
                 },
                 BodyFilterOutcome::Rejected(r) => return Ok(FilterAction::Reject(r)),
             }
@@ -616,6 +679,11 @@ impl FilterPipeline {
             let AnyFilter::Http(http_filter) = &pf.filter else {
                 continue;
             };
+            if let Some(rejection) =
+                super::upgrade::select_selected_upstream_requirement(ctx, pf.filter_id, http_filter.as_ref())
+            {
+                return Ok(FilterAction::Reject(rejection));
+            }
             ctx.current_filter_id = Some(pf.filter_id);
             let outcome = run_selected_upstream_request_body_filter(
                 http_filter.as_ref(),
@@ -730,6 +798,12 @@ impl FilterPipeline {
             let AnyFilter::Http(http_filter) = &pf.filter else {
                 continue;
             };
+            if let Some(rejection) =
+                super::upgrade::select_bound_upstream_requirement(ctx, pf.filter_id, http_filter.as_ref())
+            {
+                result = Ok(FilterAction::Reject(rejection));
+                break;
+            }
             ctx.current_filter_id = Some(pf.filter_id);
             body = body.filter(|bytes| !bytes.is_empty());
             let outcome = super::http_utils::run_bound_upstream_request_body_filter(
