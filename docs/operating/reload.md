@@ -67,11 +67,13 @@ such as the candidate does not trigger a reload. Keeping the candidate next to
 
 Copy the config with its permissions first, then write the change into the
 copy. Overwriting an existing file keeps its mode, so a config that holds
-credentials never becomes readable by other users. This change only edits the
-response body:
+credentials never becomes readable by other users. `chmod u+w` lets you write
+the copy even when `config.yaml` is read-only; it adds write access for you
+only. This change only edits the response body:
 
 ```console
 cp -p config/config.yaml config/candidate.yaml
+chmod u+w config/candidate.yaml
 sed 's/before reload/after reload/' config/config.yaml > config/candidate.yaml
 ```
 
