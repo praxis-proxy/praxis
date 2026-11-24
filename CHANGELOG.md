@@ -176,6 +176,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Reject explicit listener `upgrade_policy` settings until protocol admission
   enforcement is available, rather than silently accepting unenforced denials.
 
+- Send a server-wide `OPTIONS *` unchanged on a hedged route whose cluster
+  sets `http.base_path`, as a single attempt does, instead of prefixing it
+  into a resource request (`OPTIONS /api*`).
 - Return gRPC `DEADLINE_EXCEEDED` when Pingora's rounded upstream timeout fires just before the call's exact deadline, while preserving earlier transport timeouts.
 - Strip reserved and hop-by-hop headers from preformatted gRPC rejections while retaining safe gRPC fields, and frame empty HTTP/1 responses with one correct zero length even when filters supply stale or conflicting lengths.
 - Preserve final body-filter bytes with forwarded trailers on Hyper; abort Pingora delivery when both outputs cannot be represented or EOF filtering fails, while retaining ordinary trailers and deliberate conversion.

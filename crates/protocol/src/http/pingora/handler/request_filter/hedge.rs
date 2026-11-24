@@ -714,7 +714,14 @@ fn rewritten_uri(new_path: &str) -> Result<http::Uri> {
 }
 
 /// Prepend the cluster base path, keeping the query and any URI authority.
+///
+/// The asterisk-form target of a server-wide `OPTIONS` (RFC 9112 Section
+/// 3.2.4) names no resource, so it is left as `*`, as the single-upstream
+/// path leaves it; prefixed, it would ask about a resource such as `/api*`.
 fn prefix_base_path(uri: http::Uri, base: &str) -> Result<http::Uri> {
+    if uri.path() == "*" {
+        return Ok(uri);
+    }
     let path_and_query = uri
         .path_and_query()
         .map_or_else(|| "/".to_owned(), |path| path.as_str().to_owned());
@@ -1027,6 +1034,27 @@ mod tests {
             "the rewrite keeps the h2 authority"
         );
         assert_eq!(uri.path(), "/users", "and still replaces the path");
+    }
+
+    #[test]
+    fn base_path_leaves_the_asterisk_target_alone() {
+        // RFC 9112 Section 3.2.4: `OPTIONS *` asks about the server as a
+        // whole; `/api*` would ask about a resource.
+        let ctx = PingoraRequestCtx {
+            upstream: Some(Upstream {
+                address: Arc::from("127.0.0.1:8080"),
+                authority: None,
+                base_path: Some(Arc::from("/api")),
+                connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
+                tls: None,
+            }),
+            ..PingoraRequestCtx::default()
+        };
+        let asterisk = request_uri(&ctx, &http::Uri::from_static("*")).unwrap();
+        let resource = request_uri(&ctx, &http::Uri::from_static("/users?page=2")).unwrap();
+        drop(ctx);
+        assert_eq!(asterisk.to_string(), "*", "the asterisk target is not prefixed");
+        assert_eq!(resource.to_string(), "/api/users?page=2", "a resource target still is");
     }
 
     #[test]
