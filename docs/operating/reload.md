@@ -60,12 +60,18 @@ before reload
 
 ## Validate a candidate
 
-Write the change to a separate file in the same directory. Praxis reloads only
-when `config.yaml` itself changes, and keeping the candidate next to it lets
-the final rename stay within one directory. This change only edits the
+Write the change to a separate file in the same directory. Praxis reloads
+when `config.yaml` or a document a configured filter reads changes; a new file
+such as the candidate does not trigger a reload. Keeping the candidate next to
+`config.yaml` lets the final rename stay within one directory.
+
+Copy the config with its permissions first, then write the change into the
+copy. Overwriting an existing file keeps its mode, so a config that holds
+credentials never becomes readable by other users. This change only edits the
 response body:
 
 ```console
+cp -p config/config.yaml config/candidate.yaml
 sed 's/before reload/after reload/' config/config.yaml > config/candidate.yaml
 ```
 
@@ -82,25 +88,29 @@ is valid; review any warnings it prints before you continue.
 
 ## Apply the change
 
-Move the validated file over the watched one. A rename replaces the file in
-one step, so the watcher never reads a half-written config:
+Note the time, then move the validated file over the watched one. A rename
+replaces the file in one step, so the watcher never reads a half-written
+config:
 
 ```console
+since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 mv config/candidate.yaml config/config.yaml
 ```
 
-Check the log for the reload:
+Check the log written since then, so an earlier reload cannot answer for this
+one:
 
 ```console
-docker logs praxis 2>&1 | grep -F 'config reload complete'
+docker logs --since "$since" praxis 2>&1 |
+  grep -E 'config reload (complete|failed)|failed to read config file'
 ```
 
 The watcher waits briefly for edits to settle, so repeat the command if it
 prints nothing at first. With Podman on macOS, file changes made on the host
 may not reach the Podman machine, and no reload happens; run the walkthrough
-inside `podman machine ssh` instead. A `config reload failed` line means Praxis
-rejected the file and kept serving the previous config; read the error before
-you try again.
+inside `podman machine ssh` instead. A `config reload failed` or `failed to
+read config file` line means Praxis rejected the file and kept serving the
+previous config; read the error before you try again.
 
 Send a new request:
 
