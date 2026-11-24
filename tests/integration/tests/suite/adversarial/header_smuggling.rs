@@ -122,6 +122,10 @@ fn hop_by_hop_upgrade_header_preserved_for_upgrade_requests() {
          Sec-WebSocket-Version: 13\r\n\
          \r\n";
     let raw = http_send(proxy.addr(), request);
+    if cfg!(feature = "hyper") {
+        assert_eq!(parse_status(&raw), 403, "Hyper refuses WebSocket passthrough");
+        return;
+    }
     let body = parse_body(&raw);
     let body_lower = body.to_lowercase();
 

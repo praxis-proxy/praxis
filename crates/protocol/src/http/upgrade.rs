@@ -3,6 +3,8 @@
 
 //! HTTP/1.1 Upgrade admission and WebSocket handshake validation.
 
+use std::collections::HashSet;
+
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use http::{HeaderMap, Method, Version};
 
@@ -37,11 +39,11 @@ pub(crate) fn classify_request(
     version: Version,
     websocket_permitted: bool,
 ) -> Result<Option<WebSocketOffer>, UpgradeRefusal> {
-    if version != Version::HTTP_11
-        || !contains_list_token(headers, "connection", "upgrade")
-        || !contains_list_token(headers, "upgrade", "websocket")
-    {
+    if version != Version::HTTP_11 || !contains_list_token(headers, "upgrade", "websocket") {
         return Ok(None);
+    }
+    if !contains_list_token(headers, "connection", "upgrade") {
+        return Err(malformed_handshake());
     }
     validate_connection_tokens(headers)?;
     let offered_protocols = parse_upgrade_offers(headers)?;
@@ -158,6 +160,7 @@ fn validate_websocket_version(headers: &HeaderMap) -> Result<(), UpgradeRefusal>
 /// [RFC 6455 Section 4.1]: https://datatracker.ietf.org/doc/html/rfc6455#section-4.1
 fn parse_subprotocols(headers: &HeaderMap) -> Result<Vec<String>, UpgradeRefusal> {
     let mut protocols = Vec::new();
+    let mut seen = HashSet::new();
     for value in headers.get_all("sec-websocket-protocol") {
         let value = value.to_str().map_err(|_header_error| malformed_handshake())?;
         for protocol in value.split(',') {
@@ -165,7 +168,7 @@ fn parse_subprotocols(headers: &HeaderMap) -> Result<Vec<String>, UpgradeRefusal
             if protocol.is_empty() {
                 continue;
             }
-            if !is_token(protocol) || protocols.iter().any(|offered| offered == protocol) {
+            if !is_token(protocol) || !seen.insert(protocol) {
                 return Err(malformed_handshake());
             }
             protocols.push(protocol.to_owned());
@@ -295,10 +298,12 @@ mod tests {
 
         headers = valid_request();
         headers.remove("connection");
-        assert_eq!(
-            classify_request(&headers, &Method::GET, Version::HTTP_11, true).unwrap(),
-            None
-        );
+        let refusal = classify_request(&headers, &Method::GET, Version::HTTP_11, true).unwrap_err();
+        assert_eq!(refusal.status, 400);
+
+        headers.insert("connection", "keep-alive".parse().unwrap());
+        let refusal = classify_request(&headers, &Method::GET, Version::HTTP_11, true).unwrap_err();
+        assert_eq!(refusal.status, 400);
         assert_eq!(
             classify_request(&valid_request(), &Method::GET, Version::HTTP_2, true).unwrap(),
             None

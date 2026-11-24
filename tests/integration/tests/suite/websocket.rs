@@ -147,6 +147,10 @@ fn upgrade_request_preserves_upgrade_headers() {
          \r\n"
     );
     let raw = http_send(proxy.addr(), &request);
+    if cfg!(feature = "hyper") {
+        assert_eq!(parse_status(&raw), 403, "Hyper refuses WebSocket passthrough");
+        return;
+    }
     let body = parse_body(&raw);
     let body_lower = body.to_lowercase();
 
