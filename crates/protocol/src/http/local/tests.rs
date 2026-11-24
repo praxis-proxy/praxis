@@ -1724,7 +1724,9 @@ async fn cors_and_configured_security_headers_cover_success_denial_and_handler_e
 #[tokio::test]
 async fn allowed_options_preflight_keeps_permissions_through_local_exchange() {
     let state = State::default();
-    let registry = registry(vec![Fixture::owner(state.clone())]);
+    let mut admitter = Fixture::policy("admitter", state.clone());
+    admitter.head_admission = Some(429);
+    let registry = registry(vec![admitter, Fixture::owner(state.clone())]);
     let mut entries: Vec<praxis_filter::FilterEntry> = serde_yaml::from_str(
         r#"
 - filter: cors
@@ -1734,6 +1736,7 @@ async fn allowed_options_preflight_keeps_permissions_through_local_exchange() {
   allow_credentials: true
   max_age: 600
   allow_private_network: true
+- filter: admitter
 - filter: owner
 "#,
     )
@@ -1777,6 +1780,7 @@ async fn allowed_options_preflight_keeps_permissions_through_local_exchange() {
 
     assert_eq!(result.status, 204);
     assert_eq!(result.outcome, LocalOutcome::PolicyDenied);
+    assert!(!state.events().iter().any(|event| event.contains("admitter")));
     let inner = state.inner.lock().unwrap();
     let (status, headers) = inner.head.as_ref().unwrap();
     assert_eq!(*status, 204);

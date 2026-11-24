@@ -77,6 +77,9 @@ impl FilterPipeline {
         ctx.body_done_indices = vec![false; self.filters.len()];
         for phase in [Phase::Head, Phase::Request] {
             for (index, filter) in self.filters.iter().enumerate() {
+                if matches!(phase, Phase::Head) && !self.request_head_filter_indices.contains(&index) {
+                    continue;
+                }
                 match local_request_eligible(filter, ctx, phase) {
                     Ok(false) => continue,
                     Err(_) => return Some(LocalResponse::internal_error()),

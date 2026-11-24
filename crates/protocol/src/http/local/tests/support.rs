@@ -107,6 +107,7 @@ pub(super) struct Fixture {
     pub(super) routes: Vec<LocalRoute>,
     pub(super) state: State,
     pub(super) behavior: Behavior,
+    pub(super) head_admission: Option<u16>,
     pub(super) handler: HandlerKind,
     pub(super) rejection_headers: http::HeaderMap,
     pub(super) response_bytes: u64,
@@ -126,6 +127,7 @@ impl Fixture {
             routes: vec![],
             state,
             behavior: Behavior::Pass,
+            head_admission: None,
             handler: HandlerKind::Consume,
             rejection_headers: http::HeaderMap::new(),
             response_bytes: 4,
@@ -193,6 +195,10 @@ impl HttpFilter for Fixture {
         true
     }
 
+    fn admits_at_request_head(&self) -> bool {
+        self.head_admission.is_some()
+    }
+
     fn create_local_http_handler(&self, _route: &str) -> Result<Box<dyn LocalHttpHandler>, FilterError> {
         self.state.event("factory");
         if self.handler == HandlerKind::FactoryError {
@@ -217,6 +223,9 @@ impl HttpFilter for Fixture {
                 http::HeaderValue::from_static("yes"),
             ));
         }
+        if let Some(status) = self.head_admission {
+            return Ok(FilterAction::Reject(praxis_filter::Rejection::status(status)));
+        }
         Ok(if matches!(self.behavior, Behavior::RejectHead) {
             FilterAction::Reject(praxis_filter::Rejection::status(403))
         } else {
@@ -233,6 +242,9 @@ impl HttpFilter for Fixture {
             let mut inner = self.state.inner.lock().unwrap();
             inner.upstream_connections += 1;
             inner.forwarded_bytes += 4;
+        }
+        if let Some(status) = self.head_admission {
+            return Ok(FilterAction::Reject(praxis_filter::Rejection::status(status)));
         }
         match self.behavior {
             Behavior::RejectRequest => Ok(FilterAction::Reject(praxis_filter::Rejection::status(403))),
