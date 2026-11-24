@@ -4,7 +4,9 @@ Start here to run Praxis for the first time. Read the pages in this order:
 
 1. [Quickstart](quickstart.md): run the published container image as a
    reverse proxy in front of a backend, send a request, and clean up.
-2. [Build from source](build-from-source.md): build the `praxis` binary from
+2. [Route requests](route-requests.md): send two paths to two backends
+   through one listener.
+3. [Build from source](build-from-source.md): build the `praxis` binary from
    a checkout and run the same kind of proxy locally, plus the built-in
    default responder and the `cargo xtask` test servers.
 

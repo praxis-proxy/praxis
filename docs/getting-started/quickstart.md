@@ -172,6 +172,8 @@ See [diagnostics](../operating/diagnostics.md) for config checks and logs.
 
 ## Next steps
 
+- [Route requests](route-requests.md): add a second backend and send each
+  path to the right one.
 - [Configuration](../operating/configuration.md): listeners, filter chains,
   routing, load balancing, and runtime settings.
 - [TLS](../operating/tls.md): certificates and upstream verification.

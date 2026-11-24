@@ -188,8 +188,10 @@ start with [policy enforcement with the Praxis Policy Engine (PPE)](security/pol
   on the dedicated health/metrics listener configured with
   `admin.metrics_address`. `/ready` returns
   per-cluster health status with healthy/unhealthy/total
-  counts when active health checks are configured, and
-  returns 503 when any cluster has zero healthy
+  counts when active health checks are configured and
+  `503` while the replica is initializing, draining or
+  stopped. With `admin.readiness: upstreams`, it also
+  returns `503` when any cluster has zero healthy
   endpoints
 
 ## Request/Response Transformation

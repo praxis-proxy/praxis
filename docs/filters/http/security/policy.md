@@ -41,6 +41,10 @@ The JWT plugin maps verified OIDC claims into identity attributes through `claim
 
 Header assertions project verified identity and mapped claims onto the wire. `assertions.request` sets upstream headers; `assertions.response` controls headers sent to the client. Incoming values for asserted names are removed before injection, even when the source is absent. `strip:` removes additional header names or prefix patterns. Response contracts must be declared at `global`, `global.defaults.http` or an `http:` route; other placements fail to load. See [Header assertions].
 
+Request correlation is captured at this filter's first head, request, or body callback and reused in response hooks. `request.trace_id` prefers the exported root HTTP request span's trace ID, published when the `otel` feature is compiled in and an exporter is configured, so an audit record joins the trace a collector exports; the span-level and filter-level IDs agree whenever an inbound trace was joined. Without an active exporter the matching `trace_context` filter supplies it. `request.request_id` always comes from that context, and `request.timestamp` is the capture time from the request clock, in RFC 3339 UTC with millisecond precision, or absent if the clock value cannot be represented. The pipeline initializes matching top-level trace filters before executing the chain. Missing trace context logs at debug and leaves the request slot absent, or environment-only when `environment` is configured. `request.span_id` is unset: no exported span ID is carried. Head admission and body pre-read can run before ordinary request filters. ID changes after the first policy callback do not update its snapshot.
+
+Both IDs can originate from inbound client headers, depending on how the `trace_context` and `request_id` filters are configured, so they are client-influenced. Policy authors should use `request.request_id` and `request.trace_id` for correlation and audit only, and base authorization decisions on verified identity fields from the identity plugins.
+
 On the body phase, the filter consumes protocol classifier filter metadata (from the `praxis-ai` package) to dispatch the matching CMF hook chain. Policy routes (declared in the policy document) gate the tool/prompt/resource call by role, attribute, or Cedar PDP decision. `delegate(...)` steps mint audience-scoped tokens (RFC 8693) that the allow path attaches as upstream headers.
 
 Policies with `llm:` routes authorize the top-level request `model` through `cmf.llm_input`, without classifier metadata. Missing, unlisted, and ambiguous models fail closed by default.
@@ -101,6 +105,7 @@ The referenced YAML is the policy document — plugins, routes, and identity-sou
 |-------|------|---------|-------------|
 | `body_access` | `read_only` \| `read_write` | no | Body-access tier. `ReadOnly` (default) lets policy inspect request bodies for routing and policy decisions but discards mutations. Ordinary response-content hooks require `ReadWrite`; a trusted host may still supply metadata-only inference response context. `ReadWrite` enables the CMF → JSON-RPC re-serialization round-trip so policy field mutators (e.g. `args.ssn: redact(!perm.view_ssn)`) rewrite the upstream body and response. Pay the round-trip cost only when needed. |
 | `config_path` | string | yes | Filesystem path to the policy document. |
+| `environment` | string | no | Operator-supplied deployment label exposed as `request.environment`. Available even when no `trace_context` filter matches the request. |
 | `init_timeout_secs` | integer | no | Maximum time, in seconds, to wait for `PolicyEngine::initialize` at filter construction. Identity plugins fetch JWKS over HTTPS during init; a reachable-but-unresponsive identity provider would otherwise hang startup or hot-reload indefinitely. On expiry, filter construction returns an error and the server fails fast. 30s is generous for legitimate cold-cache JWKS fetches over the public internet, while short enough that misbehavior is noticed during the deploy. |
 | `max_buffer_bytes` | integer | no | Maximum request or response body size in `ReadWrite` mode. Also used as the default inference request limit. Also sets the request buffer limit for a `ReadOnly` policy that defers identity to the route; inference policies use `llm.max_request_bytes`. Other filters can raise the limit within `body_limits.max_buffer_bytes` and `body_limits.max_request_bytes`. Larger bodies receive HTTP 413. |
 | `allow_private_idp` | bool | no | Permit every policy endpoint a private or loopback address. By default, private DNS answers are skipped and calls with no public answer are rejected, so a private destination needs one of two opt-ins: `trusted_private_endpoints` to relax a specific host to the RFC 1918 and unique-local ranges, or this flag to relax every callout globally. Proxy upstreams use cluster `trusted_private_endpoints` or `allow_private_upstreams`. |
@@ -134,11 +139,11 @@ llm:
   provider: openai
 ```
 
-[Header assertions]: https://github.com/praxis-proxy/policy/blob/main/docs/content/assertions.md
+[Header assertions]: https://github.com/praxis-proxy/policy/blob/main/docs/content/reference/assertions.md
 [Identity configuration]: https://github.com/praxis-proxy/policy/blob/main/docs/content/apl/identity.md
-[OIDC claim mapping]: https://github.com/praxis-proxy/policy/blob/main/docs/content/identity-delegation.md#reading-claims-the-way-your-idp-writes-them
+[OIDC claim mapping]: https://github.com/praxis-proxy/policy/blob/main/docs/content/guides/identity-delegation.md#reading-claims-the-way-your-idp-writes-them
 [PPE documentation]: https://github.com/praxis-proxy/policy/blob/main/docs/content/index.md
 [Policy enforcement with PPE]: https://github.com/praxis-proxy/praxis/blob/main/docs/security/policy-enforcement.md
 [Structured request input]: https://github.com/praxis-proxy/policy/blob/main/docs/content/apl/pdp.md#structured-request-input
-[Vault delegation recipes]: https://github.com/praxis-proxy/policy/blob/main/docs/content/identity-delegation.md#recipe-8-a-users-vault-stored-credential
+[Vault delegation recipes]: https://github.com/praxis-proxy/policy/blob/main/docs/content/guides/identity-delegation.md#recipe-8-a-users-vault-stored-credential
 [normalized LLM input example]: https://github.com/praxis-proxy/praxis/blob/main/examples/configs/security/policy-llm-input.yaml

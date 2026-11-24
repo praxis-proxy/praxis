@@ -208,7 +208,10 @@ impl ProxyHttp for PingoraHttpHandler {
     type CTX = PingoraRequestCtx;
 
     fn new_ctx(&self) -> Self::CTX {
-        PingoraRequestCtx::default()
+        PingoraRequestCtx {
+            listener_name: self.listener_name.clone(),
+            ..PingoraRequestCtx::default()
+        }
     }
 
     /// Registers Pingora's compression module when compression is
@@ -587,6 +590,7 @@ impl ProxyHttp for PingoraHttpHandler {
             ctx.extensions
                 .insert(praxis_filter::UpstreamForwardedEndpoint(Arc::clone(&upstream.address)));
         }
+        upstream_request::validate_admitted_upgrade(upstream_request, ctx)?;
         Ok(())
     }
 

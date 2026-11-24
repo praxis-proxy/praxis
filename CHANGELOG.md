@@ -19,6 +19,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Config loading warns when a deprecated filter or field is configured, naming
+  its location, affected listener, and replacement when one is available.
+  This includes `basic_auth` and explicitly supplied
+  `credential_injection.clusters[].strip_client_credential` settings. The scan
+  warns if its work or warning limits prevent it from reporting every setting.
 - Add the `jobs:` config section behind the off-by-default `jobs-config`
   feature: bounded queue capacity, worker count, per-job timeout, and a
   queued-payload byte ceiling for the coming background job runtime, each
@@ -30,10 +35,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   opt into job submission independently. The reference is validated at config
   load: it must name a configured queue (today the built-in `default`) and
   requires the `jobs` section to be present.
+
+- Validate HTTP/1.1 WebSocket offers before request filters and upstream
+  dispatch. Malformed handshakes receive 400, selected required body processing
+  receives 403, and filter-mutated offers receive 502. Other upgrade protocols
+  continue as ordinary HTTP with their hop-by-hop headers stripped.
+
 - Core policy-enforcement guide with PPE use cases, integration conditions,
   and links from onboarding, architecture, and security documentation.
 - Expose compact JSON sizing and capped serialization utilities in
   `praxis_filter::json_size` for built-in and external filters.
+- Policy request metadata now carries the exported root HTTP request span's
+  trace ID when the `otel` feature is compiled in and an exporter is
+  configured, so PPE audit records join the trace a collector exports. The
+  `trace_context` filter's trace ID remains the source when no exporter is
+  active, and still supplies the request ID either way.
 
 - Add `shutdown_drain_delay_secs` for readiness-first SIGTERM handoff. The
   process becomes unready, waits for the configured delay, then begins
@@ -53,6 +69,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Add a Kubernetes rollout acceptance harness covering pod loss,
   rollouts, config reloads, TLS rotation, node drain, and upstream failure
   under continuous HTTP/1.1, HTTP/2, and HTTPS traffic.
+- Policy rules and hooks receive request and trace IDs and a stable request
+  timestamp when trace context is available. The optional policy `environment`
+  field supplies `request.environment`, including without tracing; blank labels
+  are rejected at startup. Unrepresentable clock values leave the timestamp unset.
+
 
 ### Changed
 
@@ -172,6 +193,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   CORS/CSRF settings.
 
 ### Fixed
+
+- Deprecation warnings describe settings in the candidate configuration without
+  implying that the configuration is already active.
+- Correct PPE documentation links in the security guides, policy filter
+  reference, and rustdoc to follow the reorganized pages. Preserve the
+  claim-mapping, use-case, and Vault recipe anchors.
 
 - Reject explicit listener `upgrade_policy` settings until protocol admission
   enforcement is available, rather than silently accepting unenforced denials.

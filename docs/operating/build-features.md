@@ -191,8 +191,8 @@ production` at startup. Do not run an experimental build in production.
   WebSocket upgrades, hedging, the graceful drain sequence); see
   [hyper backend](../architecture/hyper-backend.md).
 - **`basic-auth-filter`** (deprecated): the `basic_auth` filter. Credentials
-  live in plaintext config, so it is for development and testing only. Prefer
-  the policy engine for authentication.
+  live in plaintext config, so it is for development and testing only. Praxis
+  warns when a config uses it; prefer the policy engine for authentication.
 - **`cloud-events-filter`**: the `cloud_events` filter, which serializes a
   request into a CloudEvent and ships it to a configured HTTP receiver.
   Delivery is best-effort and never changes the client response; review its

@@ -19,14 +19,14 @@ use praxis_core::connectivity::normalize_mapped_ipv4;
 use praxis_filter::{BodyMode, Rejection};
 use praxis_filter::{FilterAction, FilterError, FilterPipeline, Request, TrustedHeaderMutation};
 #[cfg(feature = "pingora")]
-use tracing::{Instrument as _, error};
+use tracing::{Instrument as _, error, warn};
 
 #[cfg(feature = "pingora")]
 use super::{
     super::super::convert::{request_header_from_session, send_rejection_for},
     error_handling::handle_pre_read_io_error,
     header_mutations::{apply_pre_read_mutations, apply_request_mutations_to_session},
-    request_utils::{create_request_span, snapshot_for_early_exit},
+    request_utils::{create_request_span, record_exported_trace_id, snapshot_for_early_exit},
     stream_buffer::PreReadError,
     terminal_responses::{run_streaming_terminal_response, run_terminal_response},
 };
@@ -112,25 +112,20 @@ pub(in crate::http) async fn execute(
     session: &mut Session,
     ctx: &mut PingoraRequestCtx,
 ) -> pingora_core::Result<bool> {
+    ctx.admitted_websocket = None;
     // Stale upstream-contact state from a prior keep-alive request is cleared in
     // early_request_filter (the first per-request hook), before any rejection
     // path, so it cannot leak into this request's passive-health attribution.
-    if let Some(rejection) = super::super::inbound_admission::admit_inbound_session(session) {
-        snapshot_for_early_exit(session, ctx);
-        send_rejection_for(session, rejection, ctx).await;
+    if run_early_http_admission(session, ctx).await? {
         return Ok(true);
-    }
-
-    if let Some(handled) = super::validation::handle_max_forwards(session, ctx).await {
-        if handled {
-            snapshot_for_early_exit(session, ctx);
-        }
-        return Ok(handled);
     }
 
     ctx.client_http_version = Some(session.req_header().version);
 
     let mut request = request_header_from_session(session);
+    if admit_websocket_upgrade(pipeline, session, &request, ctx).await? {
+        return Ok(true);
+    }
     ctx.client_addr = session
         .client_addr()
         .and_then(|a| a.as_inet())
@@ -153,6 +148,7 @@ pub(in crate::http) async fn execute(
     ctx.request_is_idempotent = praxis_core::retry::replays_without_opt_in(&session.req_header().method);
 
     ctx.request_span = create_request_span(session, ctx);
+    record_exported_trace_id(&ctx.request_span, &mut ctx.extensions);
 
     let caps = pipeline.body_capabilities();
     ctx.request_body_mode = caps.request_body_mode;
@@ -183,7 +179,7 @@ pub(in crate::http) async fn execute(
                 // counterpart in request_body_filter::execute, which stamps
                 // FILTER_REJECT. Stamp it here too so buffered filters do not
                 // silently drop the request from praxis_errors_total.
-                ctx.stamp_error_type(crate::http::pingora::metrics::ERROR_TYPE_FILTER_REJECT);
+                stamp_body_rejection(ctx);
                 ctx.request_snapshot = Some(request);
                 send_rejection_for(session, rejection, ctx).await;
                 return Ok(true);
@@ -213,6 +209,13 @@ pub(in crate::http) async fn execute(
             headers_to_set,
             header_mutations,
         }) => {
+            if ctx.admitted_websocket.is_some() && FilterPipeline::required_body_processing(&ctx.extensions).is_some() {
+                stamp_body_rejection(ctx);
+                let rejection = Rejection::status(403)
+                    .with_body(b"requested upgrade conflicts with required HTTP body processing".as_slice());
+                send_rejection_for(session, rejection, ctx).await;
+                return Ok(true);
+            }
             // Mirror `apply_pending_header_mutations` on the request snapshot:
             // generic removals and sets, ordered header-filter mutations,
             // then extra headers. Keep the two in step.
@@ -235,13 +238,16 @@ pub(in crate::http) async fn execute(
                     Cow::Owned(name) => req_headers.insert_header(name, value),
                 };
             }
+            if reject_mutated_websocket(session, ctx).await {
+                return Ok(true);
+            }
             Ok(false)
         },
         Ok(PipelineResult {
             action: FilterAction::Reject(rejection),
             ..
         }) => {
-            ctx.stamp_error_type(crate::http::pingora::metrics::ERROR_TYPE_FILTER_REJECT);
+            stamp_body_rejection(ctx);
             send_rejection_for(session, rejection, ctx).await;
             Ok(true)
         },
@@ -263,6 +269,92 @@ pub(in crate::http) async fn execute(
             error!(error = %e, "filter pipeline error");
             ctx.stamp_error_type(crate::http::pingora::metrics::ERROR_TYPE_INTERNAL);
             send_rejection_for(session, Rejection::status(500), ctx).await;
+            Ok(true)
+        },
+    }
+}
+
+/// Refuse filter-mutated handshakes before either normal or hedged dispatch.
+#[cfg(feature = "pingora")]
+async fn reject_mutated_websocket(session: &mut Session, ctx: &mut PingoraRequestCtx) -> bool {
+    let Some(offer) = &ctx.admitted_websocket else {
+        return false;
+    };
+    let request = session.req_header();
+    let Err(reason) =
+        crate::http::upgrade::validate_forwarded_request(offer, &request.method, &request.headers, request.version)
+    else {
+        return false;
+    };
+    warn!(listener = %ctx.listener_name, reason, "HTTP upgrade refused after request filters changed the offer");
+    ctx.stamp_error_type("upgrade_request_mutated");
+    send_rejection_for(session, Rejection::status(502).with_body(reason.as_bytes()), ctx).await;
+    true
+}
+
+/// Handle session-wide refusals and `Max-Forwards` before request processing.
+#[cfg(feature = "pingora")]
+async fn run_early_http_admission(session: &mut Session, ctx: &mut PingoraRequestCtx) -> pingora_core::Result<bool> {
+    if let Some(rejection) = super::super::inbound_admission::admit_inbound_session(session) {
+        snapshot_for_early_exit(session, ctx);
+        send_rejection_for(session, rejection, ctx).await;
+        return Ok(true);
+    }
+    if let Some(handled) = super::validation::handle_max_forwards(session, ctx).await {
+        if handled {
+            snapshot_for_early_exit(session, ctx);
+        }
+        return Ok(handled);
+    }
+    Ok(false)
+}
+
+/// Stamp the specialized upgrade diagnostic when pre-read selects required body work.
+#[cfg(feature = "pingora")]
+pub(super) fn stamp_body_rejection(ctx: &mut PingoraRequestCtx) {
+    if let Some(required) = FilterPipeline::required_body_processing(&ctx.extensions)
+        && ctx.admitted_websocket.is_some()
+    {
+        warn!(
+            listener = %ctx.listener_name,
+            filter = required.filter_name(),
+            filter_id = required.filter_id(),
+            phase = required.phase(),
+            "HTTP upgrade refused because selected filter requires body processing"
+        );
+        ctx.stamp_error_type("upgrade_requires_body_processing");
+    } else {
+        ctx.stamp_error_type(crate::http::pingora::metrics::ERROR_TYPE_FILTER_REJECT);
+    }
+}
+
+/// Apply listener and adapter admission before any filter or upstream runs.
+#[cfg(feature = "pingora")]
+async fn admit_websocket_upgrade(
+    pipeline: &FilterPipeline,
+    session: &mut Session,
+    request: &Request,
+    ctx: &mut PingoraRequestCtx,
+) -> pingora_core::Result<bool> {
+    match crate::http::upgrade::classify_request(
+        &request.headers,
+        &request.method,
+        session.req_header().version,
+        pipeline.permits_upgrade("websocket"),
+    ) {
+        Ok(offer) => {
+            ctx.admitted_websocket = offer;
+            if ctx.admitted_websocket.is_some() {
+                FilterPipeline::mark_opaque_upgrade_requested(&mut ctx.extensions);
+            }
+            Ok(false)
+        },
+        Err(refusal) => {
+            warn!(listener = %ctx.listener_name, error_code = refusal.code, "HTTP upgrade refused before filter execution");
+            ctx.stamp_error_type(refusal.code);
+            snapshot_for_early_exit(session, ctx);
+            let rejection = Rejection::status(refusal.status).with_body(refusal.message.as_bytes());
+            send_rejection_for(session, rejection, ctx).await;
             Ok(true)
         },
     }

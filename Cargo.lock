@@ -3345,6 +3345,7 @@ dependencies = [
  "praxis-proxy-protocol",
  "praxis-proxy-tls",
  "serde",
+ "serde_json",
  "tempfile",
  "tikv-jemallocator",
  "tokio",
@@ -3464,6 +3465,7 @@ version = "0.8.0"
 dependencies = [
  "arc-swap",
  "async-trait",
+ "base64 0.23.1",
  "bytes",
  "futures",
  "h2",
@@ -3473,6 +3475,7 @@ dependencies = [
  "hyper-util",
  "metrics",
  "metrics-exporter-prometheus",
+ "opentelemetry",
  "praxis-proxy-core",
  "praxis-proxy-filter",
  "praxis-proxy-tls",
