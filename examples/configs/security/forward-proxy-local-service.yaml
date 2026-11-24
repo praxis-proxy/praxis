@@ -1,0 +1,48 @@
+# Forward Proxy (Local Service)
+#
+# Forward proxy that also reaches one service on the proxy's own host, such
+# as an Ollama server on 127.0.0.1:11434, by listing its address and port as
+# a destination. An IP-literal rule matches only that address on that port.
+# The listed address skips the runtime private-address guard, so loopback
+# needs only insecure_options.allow_private_endpoints, the config-time flag
+# cluster endpoints use; every other private address, including a name that
+# resolves to one, stays refused.
+#
+#   Client -- GET http://127.0.0.1:11434/api/tags --> Praxis :8080 --> 127.0.0.1:11434
+#   Client -- CONNECT api.example.com:443 ----------> Praxis :8080 --> api.example.com:443
+#   Client -- CONNECT 127.0.0.1:22 -----------------> Praxis :8080 --> 403
+#
+# Requires the experimental `forward-proxy` cargo feature.
+#
+# Usage:
+#   cargo run -p praxis-proxy --features forward-proxy -- \
+#     -c examples/configs/security/forward-proxy-local-service.yaml
+#
+# Exercise:
+#   curl -x http://127.0.0.1:8080 http://127.0.0.1:11434/api/tags
+#   curl -x http://127.0.0.1:8080 https://api.example.com/
+
+listeners:
+  - name: egress
+    address: "127.0.0.1:8080"
+    filter_chains: [egress]
+    forward_proxy:
+      enabled: true
+      allow_destinations:
+        # A public API, by name.
+        - host: api.example.com
+          port: 443
+        # One local service, by address. An IP-literal rule needs a port.
+        - host: 127.0.0.1
+          port: 11434
+
+filter_chains:
+  - name: egress
+    filters:
+      - filter: request_id
+      - filter: access_log
+
+insecure_options:
+  # Lets the rules list a loopback address. allow_private_upstreams stays
+  # off, so destinations a client chooses keep the private-address guard.
+  allow_private_endpoints: true
