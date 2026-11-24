@@ -343,7 +343,7 @@ async fn admit_websocket_upgrade(
         pipeline.permits_upgrade("websocket"),
     ) {
         Ok(offer) => {
-            ctx.admitted_websocket = offer;
+            ctx.admitted_websocket = offer.map(Box::new);
             if ctx.admitted_websocket.is_some() {
                 FilterPipeline::mark_opaque_upgrade_requested(&mut ctx.extensions);
             }

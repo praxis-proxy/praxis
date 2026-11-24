@@ -115,6 +115,9 @@ pub(crate) fn validate_switch_headers(headers: &HeaderMap) -> Result<(), &'stati
     if !contains_list_token(headers, "connection", "upgrade") || validate_connection_tokens(headers).is_err() {
         return Err("invalid WebSocket upgrade response headers");
     }
+    if connection_nominates_negotiation(headers) {
+        return Err("Connection removes WebSocket negotiation headers");
+    }
     let websocket =
         is_single_websocket_offer(headers).map_err(|_parse_error| "WebSocket response has malformed Upgrade syntax")?;
     if !websocket {
@@ -125,10 +128,14 @@ pub(crate) fn validate_switch_headers(headers: &HeaderMap) -> Result<(), &'stati
 
 /// Refuse selections that hop-by-hop stripping would remove before forwarding.
 #[cfg(feature = "pingora")]
-pub(crate) fn connection_nominates_negotiation(headers: &HeaderMap) -> bool {
-    ["sec-websocket-extensions", "sec-websocket-protocol"]
-        .into_iter()
-        .any(|name| headers.contains_key(name) && contains_list_token(headers, "connection", name))
+fn connection_nominates_negotiation(headers: &HeaderMap) -> bool {
+    [
+        "sec-websocket-accept",
+        "sec-websocket-extensions",
+        "sec-websocket-protocol",
+    ]
+    .into_iter()
+    .any(|name| headers.contains_key(name) && contains_list_token(headers, "connection", name))
 }
 
 /// Check selected extension names against the offer. Extension-specific parameter
@@ -141,27 +148,70 @@ fn validate_selected_extensions(offer: &WebSocketOffer, headers: &HeaderMap) -> 
     }
     let mut offered = HashSet::new();
     for field in &offer.extensions {
-        offered.extend(extension_names(field)?);
+        for name in extension_names(field)? {
+            offered.insert(name?);
+        }
     }
+    let mut has_selection = false;
     for field in selected {
         for name in extension_names(field)? {
-            if !is_token(name) || !offered.contains(name) {
+            has_selection = true;
+            if !offered.contains(name?) {
                 return Err("WebSocket response selected an unoffered extension");
             }
         }
     }
-    Ok(())
+    has_selection.then_some(()).ok_or("empty WebSocket extension selection")
 }
 
 /// Extract each extension token before its optional semicolon-separated parameters.
 /// RFC 6455 restricts even unescaped quoted parameter values to the token grammar.
 #[cfg(feature = "pingora")]
-fn extension_names(field: &http::HeaderValue) -> Result<impl Iterator<Item = &str>, &'static str> {
+fn extension_names(
+    field: &http::HeaderValue,
+) -> Result<impl Iterator<Item = Result<&str, &'static str>>, &'static str> {
     let value = field.to_str().map_err(|_error| "non-ASCII WebSocket extension")?;
     Ok(value
         .split(',')
-        .filter_map(|extension| extension.split(';').next())
-        .map(trim_ows))
+        .map(trim_ows)
+        .filter(|item| !item.is_empty())
+        .map(parse_extension_name))
+}
+
+/// Parse the generic RFC 6455 extension grammar before comparing the selected name.
+#[cfg(feature = "pingora")]
+fn parse_extension_name(item: &str) -> Result<&str, &'static str> {
+    let mut parts = item.split(';').map(trim_ows);
+    let name = parts
+        .next()
+        .filter(|name| is_token(name))
+        .ok_or("malformed WebSocket extension name")?;
+    for parameter in parts {
+        let valid = parameter.split_once('=').map_or_else(
+            || is_token(parameter),
+            |(key, value)| is_token(trim_ows(key)) && valid_extension_value(trim_ows(value)),
+        );
+        if !valid {
+            return Err("malformed WebSocket extension parameter");
+        }
+    }
+    Ok(name)
+}
+
+/// A quoted parameter must unescape to a nonempty token (RFC 6455 section 9.1).
+#[cfg(feature = "pingora")]
+fn valid_extension_value(value: &str) -> bool {
+    let Some(inner) = value.strip_prefix('"').and_then(|rest| rest.strip_suffix('"')) else {
+        return is_token(value);
+    };
+    let mut bytes = inner.bytes();
+    while let Some(byte) = bytes.next() {
+        let unescaped = if byte == b'\\' { bytes.next() } else { Some(byte) };
+        if !unescaped.is_some_and(is_token_byte) {
+            return false;
+        }
+    }
+    !inner.is_empty()
 }
 
 /// Verify an upstream-selected subprotocol was offered exactly once.
@@ -320,10 +370,12 @@ fn trim_ows(value: &str) -> &str {
 
 /// Whether a string contains only HTTP token characters.
 fn is_token(value: &str) -> bool {
-    !value.is_empty()
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
+    !value.is_empty() && value.bytes().all(is_token_byte)
+}
+
+/// Whether one byte belongs to the HTTP token alphabet.
+fn is_token_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
 }
 
 /// Malformed handshake response shared by request-header validation paths.
@@ -563,6 +615,9 @@ mod tests {
             .unwrap()
             .unwrap();
         validate_response(&offer, &valid_response()).unwrap();
+        let mut nominated = valid_response();
+        nominated.insert("connection", "Upgrade, Sec-WebSocket-Accept".parse().unwrap());
+        assert!(validate_response(&offer, &nominated).is_err());
 
         let mut response = valid_response();
         response.insert("sec-websocket-accept", "incorrect".parse().unwrap());
@@ -591,6 +646,22 @@ mod tests {
         assert!(validate_response(&offer, &response).is_err());
         request.remove("sec-websocket-extensions");
         assert!(validate_forwarded_request(&offer, &Method::GET, &request, Version::HTTP_11).is_err());
+    }
+
+    #[cfg(feature = "pingora")]
+    #[test]
+    fn extension_parameters_follow_the_websocket_token_grammar() {
+        for valid in [r#"sample; mode="a\bc""#, "sample; flag; mode=fast"] {
+            assert_eq!(parse_extension_name(valid), Ok("sample"));
+        }
+        for invalid in [
+            r#"sample; mode="""#,
+            r#"sample; mode="a b""#,
+            "sample; =fast",
+            "sample; mode=",
+        ] {
+            assert!(parse_extension_name(invalid).is_err());
+        }
     }
 
     #[test]

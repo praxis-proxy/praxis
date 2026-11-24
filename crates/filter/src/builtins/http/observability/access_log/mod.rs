@@ -1869,7 +1869,7 @@ impl HttpFilter for AccessLogFilter {
         // Failed upgrades use the normal incomplete-request fallback.
         if let Some(state) = ctx.get_filter_state_mut::<AccessLogState>()
             && state.pending_upgrade
-            && state.status == status
+            && (state.status == status || matches!(status, 204 | 304))
         {
             let headers = state.response_headers.take();
             self.maybe_emit(ctx, status, headers.as_ref());

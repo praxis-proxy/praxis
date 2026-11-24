@@ -19,7 +19,7 @@ use tracing::{error, warn};
 use super::{super::context::PingoraRequestCtx, body_util::clamp_body_mode_to_ceiling};
 #[cfg(feature = "pingora")]
 use super::{
-    super::convert::response_header_from_pingora,
+    super::{context::UpgradeFailure, convert::response_header_from_pingora},
     hop_by_hop::{self, RemoveHeader as _},
     retry_util::maybe_retry_response,
 };
@@ -47,18 +47,20 @@ pub(super) async fn execute(
     ctx.connection_upgraded = false;
     if upstream_response.status == 101 && ctx.admitted_websocket.is_none() {
         error!("upstream sent unsolicited 101 without matching request Upgrade header");
-        ctx.stamp_error_type("upgrade_unsolicited_101");
-        return Err(invalid_upgrade_response("unsolicited 101 response from upstream"));
+        return Err(invalid_upgrade_response(
+            ctx,
+            UpgradeFailure::Upstream,
+            "upgrade_unsolicited_101",
+            "unsolicited 101 response from upstream",
+        ));
     }
     let is_upgrade_response = upstream_response.status == 101;
     if is_upgrade_response && upstream_response.version != http::Version::HTTP_11 {
-        ctx.stamp_error_type("upgrade_response_invalid");
-        return Err(invalid_upgrade_response("WebSocket switching requires HTTP/1.1"));
-    }
-    if is_upgrade_response && crate::http::upgrade::connection_nominates_negotiation(&upstream_response.headers) {
-        ctx.stamp_error_type("upgrade_response_invalid");
         return Err(invalid_upgrade_response(
-            "Connection removes WebSocket negotiation headers",
+            ctx,
+            UpgradeFailure::Upstream,
+            "upgrade_response_invalid",
+            "WebSocket switching requires HTTP/1.1",
         ));
     }
     let upstream_handshake = ctx
@@ -112,21 +114,29 @@ pub(super) async fn execute(
         hop_by_hop::strip_reserved_internal_header_map(&mut resp.headers);
     }
     if is_upgrade_response && resp.status != http::StatusCode::SWITCHING_PROTOCOLS {
-        ctx.stamp_error_type("upgrade_response_status_modified");
         return Err(invalid_upgrade_response(
+            ctx,
+            UpgradeFailure::Local,
+            "upgrade_response_status_modified",
             "a response filter changed the WebSocket switching status",
         ));
     }
     if resp.status == http::StatusCode::SWITCHING_PROTOCOLS {
         if !is_upgrade_response {
-            ctx.stamp_error_type("upgrade_synthesized_101");
             return Err(invalid_upgrade_response(
+                ctx,
+                UpgradeFailure::Local,
+                "upgrade_synthesized_101",
                 "101 response was not accepted from the upstream",
             ));
         }
         if let Some(Err(reason)) = upstream_handshake {
-            ctx.stamp_error_type("upgrade_response_invalid");
-            return Err(invalid_upgrade_response(reason));
+            return Err(invalid_upgrade_response(
+                ctx,
+                UpgradeFailure::Upstream,
+                "upgrade_response_invalid",
+                reason,
+            ));
         }
         if [
             "sec-websocket-accept",
@@ -136,8 +146,10 @@ pub(super) async fn execute(
         .iter()
         .any(|name| upstream_response.headers.get_all(*name) != resp.headers.get_all(*name))
         {
-            ctx.stamp_error_type("upgrade_response_invalid");
             return Err(invalid_upgrade_response(
+                ctx,
+                UpgradeFailure::Local,
+                "upgrade_response_invalid",
                 "a response filter changed WebSocket negotiation",
             ));
         }
@@ -149,20 +161,26 @@ pub(super) async fn execute(
                 phase = required.phase(),
                 "WebSocket 101 refused because it would bypass required body processing"
             );
-            ctx.stamp_error_type("upgrade_requires_body_processing");
             return Err(invalid_upgrade_response(
+                ctx,
+                UpgradeFailure::Local,
+                "upgrade_requires_body_processing",
                 "WebSocket 101 conflicts with required HTTP body processing",
             ));
         }
         let Some(offer) = ctx.admitted_websocket.as_ref() else {
-            ctx.stamp_error_type("upgrade_admission_missing");
             return Err(invalid_upgrade_response(
+                ctx,
+                UpgradeFailure::Local,
+                "upgrade_admission_missing",
                 "101 response has no admitted WebSocket request",
             ));
         };
         let Some(request) = ctx.request_snapshot.as_ref() else {
-            ctx.stamp_error_type("upgrade_admission_missing");
             return Err(invalid_upgrade_response(
+                ctx,
+                UpgradeFailure::Local,
+                "upgrade_admission_missing",
                 "101 response has no forwarded request snapshot",
             ));
         };
@@ -173,16 +191,24 @@ pub(super) async fn execute(
             ctx.client_http_version.unwrap_or(http::Version::HTTP_11),
         ) {
             warn!(error = reason, "forwarded WebSocket offer no longer matches admission");
-            ctx.stamp_error_type("upgrade_request_modified");
-            return Err(invalid_upgrade_response(reason));
+            return Err(invalid_upgrade_response(
+                ctx,
+                UpgradeFailure::Local,
+                "upgrade_request_modified",
+                reason,
+            ));
         }
         if let Err(reason) = crate::http::upgrade::validate_switch_headers(&resp.headers) {
             warn!(
                 error = reason,
                 "upstream WebSocket response failed handshake validation"
             );
-            ctx.stamp_error_type("upgrade_response_invalid");
-            return Err(invalid_upgrade_response(reason));
+            return Err(invalid_upgrade_response(
+                ctx,
+                UpgradeFailure::Local,
+                "upgrade_response_invalid",
+                reason,
+            ));
         }
     }
     let rewritten_is_bodyless = ctx
@@ -530,7 +556,14 @@ fn header_name_fingerprint(headers: &http::HeaderMap) -> u64 {
 
 /// Fail a malformed or otherwise inadmissible upstream upgrade with a 502.
 #[cfg(feature = "pingora")]
-fn invalid_upgrade_response(reason: &'static str) -> Box<pingora_core::Error> {
+fn invalid_upgrade_response(
+    ctx: &mut PingoraRequestCtx,
+    source: UpgradeFailure,
+    code: &'static str,
+    reason: &'static str,
+) -> Box<pingora_core::Error> {
+    ctx.upgrade_failure = Some(source);
+    ctx.stamp_error_type(code);
     let mut error = pingora_core::Error::explain(pingora_core::ErrorType::HTTPStatus(502), reason);
     error.set_retry(false);
     error
@@ -1074,11 +1107,11 @@ mod tests {
         headers.insert("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==".parse().unwrap());
         headers.insert("sec-websocket-version", "13".parse().unwrap());
         let mut ctx = PingoraRequestCtx::default();
-        ctx.admitted_websocket = Some(crate::http::upgrade::WebSocketOffer {
+        ctx.admitted_websocket = Some(Box::new(crate::http::upgrade::WebSocketOffer {
             key: "dGhlIHNhbXBsZSBub25jZQ==".to_owned(),
             subprotocols: Vec::new(),
             extensions: Vec::new(),
-        });
+        }));
         ctx.request_snapshot = Some(Request {
             method: http::Method::GET,
             uri: http::Uri::from_static("/"),

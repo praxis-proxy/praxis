@@ -203,13 +203,6 @@ fn record_streaming_writer(pipeline: &FilterPipeline, body: Option<&Bytes>, end:
     }
 }
 
-/// Prevent invalid upgrade responses from entering the generic retry policy.
-fn is_upgrade_error(ctx: &PingoraRequestCtx) -> bool {
-    ctx.error_type
-        .as_ref()
-        .is_some_and(|error_type| error_type.starts_with("upgrade_"))
-}
-
 #[async_trait]
 impl ProxyHttp for PingoraHttpHandler {
     type CTX = PingoraRequestCtx;
@@ -478,7 +471,7 @@ impl ProxyHttp for PingoraHttpHandler {
         // can be just a phase marker when its output exceeded the buffer cap.
         // Invalid upgrades also remain final because Pingora may already have
         // switched the downstream to opaque tunnel mode after a 101.
-        if is_upgrade_error(ctx)
+        if ctx.upgrade_failure.is_some()
             || ctx.pending_rejection.is_some()
             || super::retry::streaming_writer_cannot_replay(ctx)
             || super::retry::replay_body_size(ctx) > praxis_core::config::MAX_RETRY_BODY_LIMIT_BYTES

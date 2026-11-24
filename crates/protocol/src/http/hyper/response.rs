@@ -32,7 +32,7 @@ use super::{
     upstream::{Outcome, after_failure, record_attempt_failure, release},
 };
 use crate::http::pingora::{
-    context::PingoraRequestCtx,
+    context::{PingoraRequestCtx, UpgradeFailure},
     handler::{
         health_util::ErrorOrigin,
         hop_by_hop::{RESPONSE_HOP_BY_HOP, strip_hop_by_hop_header_map, strip_reserved_internal_header_map},
@@ -292,10 +292,10 @@ fn finish_response(listener: &ListenerShared, flight: &mut Flight, session: Hype
         return Outcome::Answered(Box::new(answer(flight, session, head)));
     }
     error!("response filter attempted an unsupported protocol upgrade");
+    flight.ctx.upgrade_failure = Some(UpgradeFailure::Local);
     flight.ctx.stamp_error_type("upgrade_synthesized_101");
     release(&listener.connector, session, false);
     let failure = Failure::status(502, "response filter synthesized unsupported 101");
-    record_attempt_failure(&failure, &mut flight.ctx);
     Outcome::Failed(failure)
 }
 

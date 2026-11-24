@@ -75,7 +75,7 @@ pub(in crate::http) fn record_passive_health_outcome(
     // after endpoint selection, which would otherwise record a spurious
     // observation against the untouched endpoint and skew a real failure
     // streak.
-    if !ctx.upstream_contacted {
+    if !ctx.upstream_contacted || ctx.upgrade_failure == Some(crate::http::pingora::context::UpgradeFailure::Local) {
         return;
     }
 

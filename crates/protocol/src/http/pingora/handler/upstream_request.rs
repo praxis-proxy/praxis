@@ -1033,7 +1033,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let mut ctx = PingoraRequestCtx::default();
-        ctx.admitted_websocket = Some(offer);
+        ctx.admitted_websocket = Some(Box::new(offer));
         validate_admitted_upgrade(&request, &ctx).unwrap();
         strip_hop_by_hop(&mut request, true);
         let error = validate_admitted_upgrade(&request, &ctx).unwrap_err();
