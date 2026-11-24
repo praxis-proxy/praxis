@@ -85,6 +85,53 @@ fn parse_request<'head>(
     Ok(Some(BorrowedOffer { key, subprotocols }))
 }
 
+/// Check the final, post-filter response before a 101 can reach the client.
+#[cfg(feature = "pingora")]
+pub(crate) fn validate_response(offer: &WebSocketOffer, headers: &HeaderMap) -> Result<(), &'static str> {
+    if !contains_list_token(headers, "connection", "upgrade") || validate_connection_tokens(headers).is_err() {
+        return Err("invalid WebSocket upgrade response headers");
+    }
+    let websocket =
+        is_single_websocket_offer(headers).map_err(|_parse_error| "WebSocket response has malformed Upgrade syntax")?;
+    if !websocket {
+        return Err("WebSocket response selected multiple or unsupported Upgrade protocols");
+    }
+    let Some(accept) = single_header(headers, "sec-websocket-accept") else {
+        return Err("WebSocket response omitted Sec-WebSocket-Accept");
+    };
+    if accept.is_empty() {
+        return Err("WebSocket response supplied an empty Sec-WebSocket-Accept");
+    }
+    let challenge = format!("{}258EAFA5-E914-47DA-95CA-C5AB0DC85B11", offer.key);
+    let digest = openssl::hash::hash(openssl::hash::MessageDigest::sha1(), challenge.as_bytes())
+        .map_err(|_digest_error| "failed to calculate the WebSocket handshake digest")?;
+    let expected = STANDARD.encode(digest);
+    if accept != expected {
+        return Err("WebSocket response supplied an invalid Sec-WebSocket-Accept");
+    }
+    validate_selected_subprotocol(offer, headers)
+}
+
+/// Verify an upstream-selected subprotocol was offered exactly once.
+#[cfg(feature = "pingora")]
+fn validate_selected_subprotocol(offer: &WebSocketOffer, headers: &HeaderMap) -> Result<(), &'static str> {
+    let mut selected = headers.get_all("sec-websocket-protocol").iter();
+    let Some(value) = selected.next() else {
+        return Ok(());
+    };
+    if selected.next().is_some() {
+        return Err("WebSocket response selected multiple subprotocols");
+    }
+    let Ok(value) = value.to_str() else {
+        return Err("WebSocket response selected a malformed subprotocol");
+    };
+    let value = trim_ows(value);
+    if value.contains(',') || !offer.subprotocols.iter().any(|offered| offered == value) {
+        return Err("WebSocket response selected an unoffered subprotocol");
+    }
+    Ok(())
+}
+
 /// Ensure filters preserved the client offer that authorized this upgrade.
 #[cfg(feature = "pingora")]
 pub(crate) fn validate_forwarded_request(
@@ -441,6 +488,57 @@ mod tests {
         assert_eq!(
             classify_request(&ordinary, &Method::GET, Version::HTTP_11, false).unwrap(),
             None
+        );
+    }
+    #[cfg(feature = "pingora")]
+    const ACCEPT: &str = "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=";
+    #[cfg(feature = "pingora")]
+    fn valid_response() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("connection", "Upgrade".parse().unwrap());
+        headers.insert("upgrade", "WebSocket".parse().unwrap());
+        headers.insert("sec-websocket-accept", ACCEPT.parse().unwrap());
+        headers
+    }
+
+    #[test]
+    #[cfg(feature = "pingora")]
+    fn response_requires_the_matching_accept_and_offered_subprotocol() {
+        let mut request = valid_request();
+        request.insert("sec-websocket-protocol", "chat, superchat".parse().unwrap());
+        let offer = classify_request(&request, &Method::GET, Version::HTTP_11, true)
+            .unwrap()
+            .unwrap();
+        validate_response(&offer, &valid_response()).unwrap();
+
+        let mut response = valid_response();
+        response.insert("sec-websocket-accept", "incorrect".parse().unwrap());
+        assert!(validate_response(&offer, &response).is_err());
+
+        response = valid_response();
+        response.insert("sec-websocket-protocol", "other".parse().unwrap());
+        assert!(validate_response(&offer, &response).is_err());
+    }
+
+    #[test]
+    #[cfg(feature = "pingora")]
+    fn response_distinguishes_multiple_protocols_from_malformed_upgrade_syntax() {
+        let offer = classify_request(&valid_request(), &Method::GET, Version::HTTP_11, true)
+            .unwrap()
+            .unwrap();
+        let mut response = valid_response();
+        response.insert("upgrade", "websocket, permessage-deflate".parse().unwrap());
+        assert_eq!(
+            validate_response(&offer, &response),
+            Err("WebSocket response selected multiple or unsupported Upgrade protocols"),
+            "a syntactically valid list of unsupported protocols is not malformed"
+        );
+
+        response.insert("upgrade", "websocket, bad protocol".parse().unwrap());
+        assert_eq!(
+            validate_response(&offer, &response),
+            Err("WebSocket response has malformed Upgrade syntax"),
+            "invalid token syntax should be classified separately"
         );
     }
 }

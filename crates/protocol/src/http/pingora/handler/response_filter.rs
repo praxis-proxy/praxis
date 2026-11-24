@@ -50,7 +50,11 @@ pub(super) async fn execute(
         ctx.stamp_error_type("upgrade_unsolicited_101");
         return Err(invalid_upgrade_response("unsolicited 101 response from upstream"));
     }
-    let is_upgrade_response = upstream_response.status == 101 && ctx.admitted_websocket.is_some();
+    let is_upgrade_response = upstream_response.status == 101;
+    if is_upgrade_response && upstream_response.version != http::Version::HTTP_11 {
+        ctx.stamp_error_type("upgrade_response_invalid");
+        return Err(invalid_upgrade_response("WebSocket switching requires HTTP/1.1"));
+    }
     super::upstream_response::strip_hop_by_hop_response(upstream_response, is_upgrade_response);
     upstream_response.strip_reserved_internal();
     let mut resp = response_header_from_pingora(upstream_response);
@@ -99,7 +103,16 @@ pub(super) async fn execute(
                 "101 response was not accepted from the upstream",
             ));
         }
-        if let Some(required) = FilterPipeline::required_body_processing(&ctx.extensions) {
+        if ["sec-websocket-protocol", "sec-websocket-extensions"]
+            .iter()
+            .any(|name| upstream_response.headers.get_all(*name) != resp.headers.get_all(*name))
+        {
+            ctx.stamp_error_type("upgrade_response_invalid");
+            return Err(invalid_upgrade_response(
+                "a response filter changed WebSocket negotiation",
+            ));
+        }
+        if let Some(required) = FilterPipeline::required_body_processing_for_response(&ctx.extensions, &resp) {
             warn!(
                 listener = %ctx.listener_name,
                 filter = required.filter_name(),
@@ -142,7 +155,6 @@ pub(super) async fn execute(
             ctx.stamp_error_type("upgrade_response_invalid");
             return Err(invalid_upgrade_response(reason));
         }
-        ctx.connection_upgraded = true;
     }
     let rewritten_is_bodyless = ctx
         .request_snapshot
@@ -377,6 +389,7 @@ fn handle_response_result(
             {
                 ctx.response_delivery_complete = true;
             }
+            ctx.connection_upgraded = resp.status == http::StatusCode::SWITCHING_PROTOCOLS;
             write_back_response(upstream_response, &mut resp, headers_modified);
             Ok(())
         },

@@ -260,13 +260,16 @@ fn settle(
         release(&listener.connector, session, false);
         return Outcome::Failed(Failure::internal("request snapshot not set during response phase"));
     };
-    if head.response.status == StatusCode::SWITCHING_PROTOCOLS {
-        return refuse_synthesized_101(listener, flight, session);
-    }
     strip_inherited_bodyless_length(&flight.ctx, &session, &mut head);
     reframe(flight, &mut head, &result);
     close_connection_on_drain(flight, &mut head.response);
     match result {
+        Ok(action)
+            if head.response.status == StatusCode::SWITCHING_PROTOCOLS
+                && !matches!(action, FilterAction::Reject(_)) =>
+        {
+            refuse_synthesized_101(listener, flight, session)
+        },
         Ok(
             FilterAction::Continue
             | FilterAction::Release

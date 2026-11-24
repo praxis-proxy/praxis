@@ -15,8 +15,6 @@ examples::protocol_examples::websocket_example_proxies_plain_http
 rfcs::rfc6455::rfc6455_101_response_forwarded
 rfcs::rfc6455::rfc6455_connection_upgrade_forwarded
 rfcs::rfc6455::rfc6455_sec_websocket_accept_forwarded_unchanged
-rfcs::rfc6455::rfc6455_sec_websocket_key_forwarded_unchanged
-rfcs::rfc6455::rfc6455_sec_websocket_version_forwarded
 rfcs::rfc6455::rfc6455_upgrade_header_forwarded
 websocket::websocket_binary_messages
 websocket::websocket_close_with_status_code

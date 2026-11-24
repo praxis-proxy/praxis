@@ -1005,6 +1005,9 @@ mod tests {
             None,
             None,
             ::metrics::SharedString::const_str("review"),
+            #[cfg(feature = "forward-proxy")]
+            None,
+            LifecycleHandle::new(),
         );
         let request = b"GET / HTTP/1.1\r\nHost: example.test\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n";
         let mut session = Session::new_h1(Box::new(std::io::Cursor::new(request.to_vec())));

@@ -404,29 +404,21 @@ async fn required_http_body_filter_still_runs_for_ordinary_requests() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn selected_required_response_body_processing_blocks_websocket() {
-    let ws_backend = start_websocket_echo_backend().await;
-    let proxy_port = free_port();
-    let yaml = custom_filter_yaml(proxy_port, ws_backend.port(), "required_response_body").replace(
-        "      - filter: required_response_body\n",
-        "      - filter: required_response_body\n        response_conditions:\n          - when:\n              status: [200]\n",
-    );
-    let config = Config::from_yaml(&yaml).unwrap();
-    let registry = registry_with("required_response_body", || Box::new(RequiredResponseBodyFilter));
-    let _proxy = start_proxy_with_registry(&config, &registry);
-    let backend_connections_after_readiness = ws_backend.connection_count();
-
-    let raw = http_send(&format!("127.0.0.1:{proxy_port}"), &websocket_request("/"));
-
-    assert_eq!(
-        parse_status(&raw),
-        403,
-        "required response processing blocks an opaque tunnel: {raw}"
-    );
-    assert_eq!(
-        ws_backend.connection_count(),
-        backend_connections_after_readiness,
-        "required response processing must reject before upstream dispatch"
-    );
+    for (condition, expected) in [(101, 502), (200, 101)] {
+        let backend = start_websocket_echo_backend().await;
+        let yaml = custom_filter_yaml(free_port(), backend.port(), "required_response_body").replace(
+            "      - filter: required_response_body\n",
+            &format!("      - filter: required_response_body\n        response_conditions:\n          - when:\n              status: [{condition}]\n"),
+        );
+        let config = Config::from_yaml(&yaml).unwrap();
+        let registry = registry_with("required_response_body", || Box::new(RequiredResponseBodyFilter));
+        let proxy = start_proxy_with_registry(&config, &registry);
+        assert_eq!(
+            websocket_status(proxy.addr()),
+            expected,
+            "response condition {condition} must be evaluated against the final 101"
+        );
+    }
 }
 
 #[cfg(feature = "bound-upstream-request-body")]
@@ -952,30 +944,6 @@ async fn response_filter_cannot_synthesize_an_unsolicited_101() {
 }
 
 #[test]
-fn h2c_upgrade_is_rejected_as_unsupported() {
-    let backend_guard = start_header_echo_backend();
-    let proxy_port = free_port();
-    let yaml = simple_proxy_yaml(proxy_port, backend_guard.port());
-    let config = Config::from_yaml(&yaml).unwrap();
-    let proxy = start_proxy(&config);
-
-    let request = format!(
-        "GET / HTTP/1.1\r\n\
-         Host: localhost\r\n\
-         Upgrade: h2c\r\n\
-         Connection: Upgrade, HTTP2-Settings\r\n\
-         HTTP2-Settings: AAMAAABkAAQCAAAAAAIAAAAA\r\n\
-         \r\n"
-    );
-    let raw = http_send(proxy.addr(), &request);
-    assert_eq!(
-        parse_status(&raw),
-        403,
-        "unsupported h2c upgrades must be rejected before header forwarding: {raw}"
-    );
-}
-
-#[test]
 fn unknown_upgrade_and_http10_offers_remain_ordinary_http() {
     let backend = start_header_echo_backend();
     let config = Config::from_yaml(&simple_proxy_yaml(free_port(), backend.port())).unwrap();
@@ -1114,7 +1082,7 @@ async fn websocket_close_with_status_code() {
     };
     ws.send(Message::Close(Some(close_frame))).await.unwrap();
 
-    let close_result = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
+    let close_result = tokio::time::timeout(Duration::from_secs(5), ws.next())
         .await
         .expect("timed out waiting for close-frame outcome");
     let received = close_result
@@ -1444,7 +1412,7 @@ fn websocket_status(addr: &str) -> u16 {
 
 /// Receive a required exchange frame within a bounded interval.
 async fn recv_ws(ws: &mut WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>, expected: &str) -> Message {
-    match tokio::time::timeout(std::time::Duration::from_secs(5), ws.next()).await {
+    match tokio::time::timeout(Duration::from_secs(5), ws.next()).await {
         Ok(Some(Ok(msg))) => msg,
         Ok(Some(Err(error))) => panic!("expected {expected}, received WebSocket error: {error}"),
         Ok(None) => panic!("expected {expected}, WebSocket stream ended"),

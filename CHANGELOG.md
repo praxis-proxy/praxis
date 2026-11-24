@@ -17,11 +17,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
-### Fixed
-
-- Validate the final WebSocket handshake after response filters and reject
-  invalid or synthesized HTTP 101 responses before opening a tunnel.
-
 ### Added
 
 - Config loading warns when a deprecated filter or field is configured, naming
@@ -201,6 +196,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - Deprecation warnings describe settings in the candidate configuration without
   implying that the configuration is already active.
+- Validate the final WebSocket handshake after response filters and reject
+  invalid or synthesized HTTP 101 responses before opening a tunnel.
 - Correct PPE documentation links in the security guides, policy filter
   reference, and rustdoc to follow the reorganized pages. Preserve the
   claim-mapping, use-case, and Vault recipe anchors.

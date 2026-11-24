@@ -8,8 +8,8 @@ WebSocket frames.
 ## Listener admission policy
 
 An omitted `upgrade_policy` preserves the existing Pingora behavior for a
-valid WebSocket handshake. Other Upgrade protocols are refused because the
-adapter does not support them. To make that choice explicit, configure a
+valid WebSocket handshake. Offers containing only other protocols continue as ordinary HTTP requests
+with the upgrade headers stripped. To make that choice explicit, configure a
 listener policy:
 
 ```yaml
@@ -30,7 +30,7 @@ Pingora; a passthrough rule for another protocol is a configuration error.
 Protocol names are case-insensitive, and duplicate names after normalization
 are rejected. HTTP upgrade policy is not valid on a TCP listener.
 
-The Hyper backend does not support upgrades. It rejects upgrade requests, and
+The Hyper backend does not support upgrades. It rejects WebSocket handshake requests, and
 startup fails if its listener policy permits WebSocket passthrough. An
 explicit deny policy is valid on Hyper.
 
@@ -48,10 +48,12 @@ fn request_body_access(&self) -> BodyAccess {
 Use `Required` when the filter's configured responsibility cannot be skipped.
 Use `Optional` for best-effort body observation. The declaration applies to the
 filter's selected request path, including the body phases it declares. An
-inactive condition or branch does not block an upgrade. A selected required
-body declaration makes an otherwise permitted WebSocket request receive a
+inactive condition or branch does not block an upgrade. An unconditional required
+body declaration on the selected path makes an otherwise permitted WebSocket request receive a
 local `403` before Praxis contacts the upstream. Listener permission cannot
-override this requirement.
+override this requirement. Required response-body work with a response condition
+is evaluated against the filtered response. A matching condition on a final
+101 fails the handshake with 502.
 
 When migrating filters, audit their request conditions as well as their body
 requirements. A WebSocket handshake is a `GET`, so a filter conditioned on
@@ -76,7 +78,7 @@ body-access declaration. `BodyAccess::None` remains the default.
 Praxis accepts one valid HTTP/1.1 `websocket` offer using WebSocket version 13.
 It validates the client key, the upstream `Sec-WebSocket-Accept` response, and
 any selected subprotocol before committing the upgrade. Malformed handshakes
-receive `400`; denied or unsupported upgrades receive `403`; unsolicited or
+receive `400`; denied WebSocket offers or mixed WebSocket protocol offers receive `403`; unsolicited or
 invalid upstream `101` responses fail as `502`.
 
 General `CONNECT`, HTTP/2 extended CONNECT, multiple Upgrade protocols, and
