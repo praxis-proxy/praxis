@@ -60,7 +60,7 @@ use super::{
     request_facts::{RequestFacts, RequestView},
     request_headers,
     request_state::{InferenceResponseKind, MetadataResponseDispatch, RequestState, state, state_mut},
-    response_rules::{ensure_supported_entity_results, metadata_only_policy},
+    response_rules::metadata_only_policy,
     transport::PolicyHttpTransport,
 };
 use crate::{
