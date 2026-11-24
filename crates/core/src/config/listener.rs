@@ -10,8 +10,13 @@
 //! creates one Pingora service per listener at startup; filter
 //! chains are resolved into a pipeline by the build step.
 
+use std::{collections::BTreeMap, fmt};
+
 pub use praxis_tls::ListenerTls;
-use serde::Deserialize;
+use serde::{
+    Deserialize,
+    de::{MapAccess, Visitor},
+};
 
 use super::forward_proxy::ForwardProxyConfig;
 
@@ -122,6 +127,42 @@ pub struct Listener {
     #[serde(default)]
     pub forward_proxy: Option<ForwardProxyConfig>,
 
+    /// Name of the background job queue this listener may submit to.
+    ///
+    /// Job submission is opt-in per listener: two listeners sharing one
+    /// filter chain can differ in whether they may enqueue work, and a
+    /// listener without this field cannot submit jobs at all. The name
+    /// leaves room to isolate listeners onto separate queues later without
+    /// changing existing configs; the built-in queue is `default`.
+    ///
+    /// Requires the `jobs-config` Cargo feature, which is off by default:
+    /// without it the key is unknown. The reference is validated at config
+    /// load — it must name a configured queue, today the built-in `default`,
+    /// and the `jobs` section must be present. Nothing executes it yet: the
+    /// job runtime that consumes it is still pending, so a validated
+    /// `job_queue` has no effect today.
+    ///
+    /// ```
+    /// use praxis_core::config::Listener;
+    ///
+    /// let parsed = serde_yaml::from_str::<Listener>(
+    ///     r#"
+    /// name: internal
+    /// address: "127.0.0.1:8081"
+    /// filter_chains: [main]
+    /// job_queue: default
+    /// "#,
+    /// );
+    /// if cfg!(feature = "jobs-config") {
+    ///     assert_eq!(parsed.unwrap().job_queue.as_deref(), Some("default"));
+    /// } else {
+    ///     assert!(parsed.is_err(), "the key is unknown without the feature");
+    /// }
+    /// ```
+    #[cfg_attr(not(feature = "jobs-config"), serde(skip))]
+    #[serde(default)]
+    pub job_queue: Option<String>,
+
     /// Maximum concurrent connections for this listener.
     ///
     /// When set, new connections beyond this limit are
@@ -147,6 +188,13 @@ pub struct Listener {
     /// Protocol this listener handles. Default: `http`.
     #[serde(default)]
     pub protocol: ProtocolKind,
+
+    /// Allowed HTTP/1.1 protocol upgrades.
+    ///
+    /// When omitted, Pingora preserves its existing WebSocket passthrough
+    /// behavior. An explicit policy defaults to denying upgrades.
+    #[serde(default)]
+    pub upgrade_policy: Option<UpgradePolicy>,
 
     /// Session timeout in milliseconds for TCP forwarding sessions.
     ///
@@ -177,6 +225,140 @@ pub struct Listener {
     /// exclusive with `cluster`.
     #[serde(default)]
     pub upstream: Option<String>,
+}
+
+/// Per-listener policy for HTTP `Upgrade` requests.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpgradePolicy {
+    /// Action for protocols without an explicit rule. Defaults to `deny`.
+    #[serde(default)]
+    pub default: UpgradeAction,
+
+    /// Protocol-specific actions. Protocol names are case-insensitive.
+    #[serde(default, deserialize_with = "deserialize_upgrade_protocols")]
+    pub protocols: BTreeMap<String, UpgradeAction>,
+}
+
+/// Deserialize protocol rules without silently overwriting duplicate YAML keys.
+fn deserialize_upgrade_protocols<'de, D>(deserializer: D) -> Result<BTreeMap<String, UpgradeAction>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserializer.deserialize_map(UpgradeProtocolsVisitor)
+}
+
+/// Map visitor that rejects duplicate protocol identifiers before normalization.
+struct UpgradeProtocolsVisitor;
+
+impl<'de> Visitor<'de> for UpgradeProtocolsVisitor {
+    type Value = BTreeMap<String, UpgradeAction>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a map of upgrade protocol names to actions")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut protocols = BTreeMap::new();
+        while let Some((protocol, action)) = map.next_entry::<String, UpgradeAction>()? {
+            if protocols.insert(protocol.clone(), action).is_some() {
+                return Err(serde::de::Error::custom(format!(
+                    "duplicate upgrade protocol rule '{protocol}'"
+                )));
+            }
+        }
+        Ok(protocols)
+    }
+}
+
+impl UpgradePolicy {
+    /// Return the configured action for `protocol`, applying the default.
+    pub fn action_for(&self, protocol: &str) -> UpgradeAction {
+        self.protocols
+            .iter()
+            .find(|(configured, _)| upgrade_protocols_equal(configured, protocol))
+            .map_or(self.default, |(_, action)| *action)
+    }
+
+    /// Whether this policy can permit WebSocket passthrough.
+    pub fn permits_websocket(&self) -> bool {
+        self.action_for("websocket") == UpgradeAction::Passthrough
+    }
+
+    /// Normalize protocol identifiers and reject invalid or unsupported rules.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a protocol identifier is invalid, a passthrough
+    /// action is configured for an unsupported protocol, or normalized rules
+    /// contain duplicate identifiers.
+    pub fn validate(&mut self) -> Result<(), String> {
+        let mut normalized = BTreeMap::new();
+        for (protocol, &action) in &self.protocols {
+            let Some(protocol) = normalize_upgrade_protocol(protocol) else {
+                return Err(format!("invalid upgrade protocol identifier '{protocol}'"));
+            };
+            if action == UpgradeAction::Passthrough && protocol != "websocket" {
+                return Err(format!(
+                    "passthrough is not supported for upgrade protocol '{protocol}'"
+                ));
+            }
+            if normalized.insert(protocol.clone(), action).is_some() {
+                return Err(format!(
+                    "duplicate upgrade protocol rule '{protocol}' after normalization"
+                ));
+            }
+        }
+        self.protocols = normalized;
+        Ok(())
+    }
+}
+
+/// Action the listener applies to a protocol upgrade.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UpgradeAction {
+    /// Refuse the protocol upgrade.
+    #[default]
+    Deny,
+
+    /// Allow the adapter to transparently forward the upgraded connection.
+    Passthrough,
+}
+
+/// Normalize an HTTP Upgrade protocol identifier as an RFC token or token/version.
+fn normalize_upgrade_protocol(protocol: &str) -> Option<String> {
+    let mut parts = protocol.split('/');
+    let name = parts.next()?;
+    let version = parts.next();
+    if parts.next().is_some()
+        || !is_upgrade_token(name)
+        || version.is_some_and(|version_part| !is_upgrade_token(version_part))
+    {
+        return None;
+    }
+    Some(version.map_or_else(
+        || name.to_ascii_lowercase(),
+        |version_part| format!("{name_lower}/{version_part}", name_lower = name.to_ascii_lowercase()),
+    ))
+}
+
+/// Match protocol names without folding an optional version identifier.
+fn upgrade_protocols_equal(left: &str, right: &str) -> bool {
+    normalize_upgrade_protocol(left)
+        .zip(normalize_upgrade_protocol(right))
+        .is_some_and(|(left, right)| left == right)
+}
+
+/// Whether a string contains only HTTP token characters.
+fn is_upgrade_token(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
 }
 
 // -----------------------------------------------------------------------------

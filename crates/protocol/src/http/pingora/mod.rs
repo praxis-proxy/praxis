@@ -149,6 +149,7 @@ mod tests {
             clusters: vec![],
             filter_chains: vec![],
             insecure_options: InsecureOptions::default(),
+            jobs: None,
             listeners,
             metrics: MetricsConfig::default(),
             runtime: RuntimeConfig::default(),
@@ -161,6 +162,7 @@ mod tests {
     /// Build a Listener with the given name and protocol.
     fn make_listener(name: &str, protocol: ProtocolKind) -> Listener {
         Listener {
+            upgrade_policy: None,
             name: name.to_owned(),
             address: "127.0.0.1:8080".to_owned(),
             protocol,
@@ -169,6 +171,7 @@ mod tests {
             downstream_read_timeout_ms: None,
             filter_chains: vec![],
             forward_proxy: None,
+            job_queue: None,
             max_connections: None,
             tcp_max_duration_secs: None,
             tcp_session_timeout_ms: None,

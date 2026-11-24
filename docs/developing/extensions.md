@@ -408,7 +408,7 @@ headers or an earlier body prefix has reached the upstream.
 Custom filters participate identically to built-ins: same
 ordering, context access, and short-circuit capability.
 
-See the [filter system documentation](README.md) for the
+See the [filter system documentation](../filters/README.md) for the
 full API reference.
 
 ## Best Practices
@@ -665,6 +665,6 @@ enqueues nothing.
 from `praxis_filter` for external filter crates.
 
 See the
-[`iterative_request_router` reference](http/traffic_management/iterative_request_router.md)
+[`iterative_request_router` reference](../filters/http/traffic_management/iterative_request_router.md)
 and [proposal 00786](https://github.com/praxis-proxy/enhancements/blob/main/proposals/00786_iterative-request-router.md)
 for the full design.

@@ -24,6 +24,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   This includes `basic_auth` and explicitly supplied
   `credential_injection.clusters[].strip_client_credential` settings. The scan
   warns if its work or warning limits prevent it from reporting every setting.
+- Add the `jobs:` config section behind the off-by-default `jobs-config`
+  feature: bounded queue capacity, worker count, per-job timeout, and a
+  queued-payload byte ceiling for the coming background job runtime, each
+  validated at config load with a message naming the field and its accepted
+  range. The settings are not read yet; a build with the feature enabled
+  warns at startup when the section is configured, and without the feature
+  the section is an unknown key. Listeners gain an optional `job_queue`
+  naming the queue they may submit to, so listeners sharing a filter chain
+  opt into job submission independently. The reference is validated at config
+  load: it must name a configured queue (today the built-in `default`) and
+  requires the `jobs` section to be present.
 - Core policy-enforcement guide with PPE use cases, integration conditions,
   and links from onboarding, architecture, and security documentation.
 - Expose compact JSON sizing and capped serialization utilities in
@@ -169,6 +180,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - Deprecation warnings describe settings in the candidate configuration without
   implying that the configuration is already active.
+- Correct PPE documentation links in the security guides, policy filter
+  reference, and rustdoc to follow the reorganized pages. Preserve the
+  claim-mapping, use-case, and Vault recipe anchors.
+
+- Reject explicit listener `upgrade_policy` settings until protocol admission
+  enforcement is available, rather than silently accepting unenforced denials.
+
 - Return gRPC `DEADLINE_EXCEEDED` when Pingora's rounded upstream timeout fires just before the call's exact deadline, while preserving earlier transport timeouts.
 - Strip reserved and hop-by-hop headers from preformatted gRPC rejections while retaining safe gRPC fields, and frame empty HTTP/1 responses with one correct zero length even when filters supply stale or conflicting lengths.
 - Preserve final body-filter bytes with forwarded trailers on Hyper; abort Pingora delivery when both outputs cannot be represented or EOF filtering fails, while retaining ordinary trailers and deliberate conversion.
@@ -255,6 +273,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   and `ring_hash` instead of silently hashing by request path.
 - **Breaking:** Reject HTTP-only downstream read and keepalive timeouts on TCP
   listeners instead of silently ignoring them.
+
 - **Breaking:** statically buffered request pipelines now reject a finite
   `body_limits.max_request_bytes` above `body_limits.max_buffer_bytes` at
   startup, config validation, and reload, naming both fields and byte values.

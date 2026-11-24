@@ -1,8 +1,11 @@
-# Quickstart: run a local reverse proxy
+# Build from source and run a local proxy
+
+To run the published container image without a Rust toolchain, use the
+[quickstart](quickstart.md) instead.
 
 This source-build walkthrough starts a local backend, then forwards an HTTP
 request through Praxis to it. You need Git, Make, curl, and the build
-prerequisites in [contributor setup](developing/getting-started.md#requirements).
+prerequisites in [contributor setup](../developing/getting-started.md#requirements).
 Use a non-root account and leave ports 3000 and 8080 free.
 
 Clone the repository and run all commands from its root. Open a second
@@ -77,10 +80,10 @@ filter_chains:
 
 The literal loopback backend requires `allow_private_endpoints` for this local
 fixture. Remove that development exception before deploying and review
-[security hardening](operating/security-hardening.md), including runtime DNS
+[security hardening](../operating/security-hardening.md), including runtime DNS
 checks and scoped trust for private upstream hostnames. The literal IP in
 this example does not need `allow_private_upstreams`. See the
-[configuration reference](operating/configuration.md) for other settings.
+[configuration reference](../operating/configuration.md) for other settings.
 
 In the first terminal, start Praxis and leave it running:
 
@@ -121,13 +124,13 @@ instead. Keep the sample's development exception out of production configs.
   server's logged address. Both processes must stay running.
 - **Wrong response or route:** confirm you started Praxis with `-c praxis.yaml`
   and that the router's `cluster: backend` matches the load balancer's cluster
-  name. See [configuration](operating/configuration.md).
+  name. See [configuration](../operating/configuration.md).
 - **Private endpoint rejection:** the literal loopback fixture needs the
   shown exception. For DNS names and real deployments, follow
-  [security hardening](operating/security-hardening.md) instead of adding
+  [security hardening](../operating/security-hardening.md) instead of adding
   broad bypass flags.
 
-See [diagnostics](operating/diagnostics.md) for config checks and logs.
+See [diagnostics](../operating/diagnostics.md) for config checks and logs.
 
 ## Optional: built-in responder
 
@@ -177,13 +180,13 @@ Run one server at a time when they use the same listener port.
 
 ## Next steps
 
-- [Configuration](operating/configuration.md): filter
+- [Configuration](../operating/configuration.md): filter
   chains, routing, load balancing, TLS, and all options.
-- [TLS](operating/tls.md): certificates and upstream verification.
-- [Contributor setup](developing/getting-started.md): build, test, and lint.
-- [Example configs](../examples/configs/): working YAML
+- [TLS](../operating/tls.md): certificates and upstream verification.
+- [Contributor setup](../developing/getting-started.md): build, test, and lint.
+- [Example configs](../../examples/configs/): working YAML
   for every feature.
-- [Filters](filters/README.md): built-in filters and
+- [Filters](../filters/README.md): built-in filters and
   how to write your own.
-- [HTTP Filter Tutorial](filters/http-filter-tutorial.md):
+- [HTTP Filter Tutorial](../developing/http-filter-tutorial.md):
   build and run a custom filter from scratch.

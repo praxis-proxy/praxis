@@ -12,6 +12,10 @@ readme.workspace = true
 [lib]
 name = "praxis_filter"
 
+[[test]]
+name = "json_size_heap"
+harness = false
+
 [features]
 default = ["policy-builtins"]
 # The `policy` filter and the Policy engine, with no builtin plugin and no
