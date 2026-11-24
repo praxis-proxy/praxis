@@ -26,7 +26,7 @@ use super::{
     super::super::convert::{request_header_from_session, send_rejection_for},
     error_handling::handle_pre_read_io_error,
     header_mutations::{apply_pre_read_mutations, apply_request_mutations_to_session},
-    request_utils::{create_request_span, snapshot_for_early_exit},
+    request_utils::{create_request_span, record_exported_trace_id, snapshot_for_early_exit},
     stream_buffer::PreReadError,
     terminal_responses::{run_streaming_terminal_response, run_terminal_response},
 };
@@ -144,6 +144,7 @@ pub(in crate::http) async fn execute(
     ctx.request_is_idempotent = praxis_core::retry::replays_without_opt_in(&session.req_header().method);
 
     ctx.request_span = create_request_span(session, ctx);
+    record_exported_trace_id(&ctx.request_span, &mut ctx.extensions);
 
     let caps = pipeline.body_capabilities();
     ctx.request_body_mode = caps.request_body_mode;

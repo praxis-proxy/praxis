@@ -40,6 +40,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   and links from onboarding, architecture, and security documentation.
 - Expose compact JSON sizing and capped serialization utilities in
   `praxis_filter::json_size` for built-in and external filters.
+- Policy request metadata now carries the exported root HTTP request span's
+  trace ID when the `otel` feature is compiled in and an exporter is
+  configured, so PPE audit records join the trace a collector exports. The
+  `trace_context` filter's trace ID remains the source when no exporter is
+  active, and still supplies the request ID either way.
 
 - Add `shutdown_drain_delay_secs` for readiness-first SIGTERM handoff. The
   process becomes unready, waits for the configured delay, then begins
@@ -59,6 +64,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Add a Kubernetes rollout acceptance harness covering pod loss,
   rollouts, config reloads, TLS rotation, node drain, and upstream failure
   under continuous HTTP/1.1, HTTP/2, and HTTPS traffic.
+- Policy rules and hooks receive request and trace IDs and a stable request
+  timestamp when trace context is available. The optional policy `environment`
+  field supplies `request.environment`, including without tracing; blank labels
+  are rejected at startup. Unrepresentable clock values leave the timestamp unset.
+
 
 ### Changed
 

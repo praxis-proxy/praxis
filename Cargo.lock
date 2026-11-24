@@ -3474,6 +3474,7 @@ dependencies = [
  "hyper-util",
  "metrics",
  "metrics-exporter-prometheus",
+ "opentelemetry",
  "praxis-proxy-core",
  "praxis-proxy-filter",
  "praxis-proxy-tls",
