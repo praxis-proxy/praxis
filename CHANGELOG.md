@@ -19,6 +19,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Config loading warns when a deprecated filter or field is configured, naming
+  its location, affected listener, and replacement when one is available.
+  This includes `basic_auth` and explicitly supplied
+  `credential_injection.clusters[].strip_client_credential` settings. The scan
+  warns if its work or warning limits prevent it from reporting every setting.
 - Add the `jobs:` config section behind the off-by-default `jobs-config`
   feature: bounded queue capacity, worker count, per-job timeout, and a
   queued-payload byte ceiling for the coming background job runtime, each
@@ -189,6 +194,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Deprecation warnings describe settings in the candidate configuration without
+  implying that the configuration is already active.
 - Correct PPE documentation links in the security guides, policy filter
   reference, and rustdoc to follow the reorganized pages. Preserve the
   claim-mapping, use-case, and Vault recipe anchors.

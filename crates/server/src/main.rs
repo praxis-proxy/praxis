@@ -23,7 +23,7 @@ mod dump;
 use std::process::ExitCode;
 
 use clap::Parser;
-use praxis_core::config::{Config, ConfigFile};
+use praxis_core::config::{Config, ConfigFile, DeprecationWarnings};
 use tracing::info;
 
 // -----------------------------------------------------------------------------
@@ -91,8 +91,9 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    let (config, config_file) = load_serving_config(explicit.as_deref());
+    let (config, config_file, warnings) = load_serving_config(explicit.as_deref());
     let tracing_guard = praxis::init_tracing(&config).unwrap_or_else(|error| praxis::fatal(&error));
+    warnings.emit();
     let log_level = Some(tracing_guard.log_level_state());
     let log_output = config.runtime.logging.output;
     info!(version = env!("PRAXIS_VERSION"), "starting server");
@@ -107,7 +108,7 @@ fn main() -> ExitCode {
 /// that runs, the file the reload watcher watches, and the baseline it
 /// compares against are all the same bytes. Exits on failure: tracing is not
 /// up yet, so there is nothing to flush.
-fn load_serving_config(explicit: Option<&str>) -> (Config, Option<ConfigFile>) {
+fn load_serving_config(explicit: Option<&str>) -> (Config, Option<ConfigFile>, DeprecationWarnings) {
     let config_path = praxis::resolve_config_path(explicit);
     let config_file = config_path
         .as_deref()
@@ -115,11 +116,14 @@ fn load_serving_config(explicit: Option<&str>) -> (Config, Option<ConfigFile>) {
         .transpose()
         .unwrap_or_else(|error| praxis::fatal(&error));
     // Validation warns before the configured subscriber can exist.
-    let config = praxis::with_bootstrap_logging(|| {
-        Config::from_config_file_or(config_file.as_ref(), praxis_core::config::DEFAULT_CONFIG)
+    let (config, warnings) = praxis::with_bootstrap_logging(|| {
+        let yaml = config_file
+            .as_ref()
+            .map_or(praxis_core::config::DEFAULT_CONFIG, |file| file.content.as_str());
+        Config::from_yaml_with_deprecations(yaml)
     })
     .unwrap_or_else(|error| praxis::fatal(&error));
-    (config, config_file)
+    (config, config_file, warnings)
 }
 
 // -----------------------------------------------------------------------------
