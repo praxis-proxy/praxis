@@ -1631,9 +1631,25 @@ async fn compiled_minimal_example_runs_through_the_contract() {
 
 #[tokio::test]
 async fn cors_and_configured_security_headers_cover_success_denial_and_handler_error() {
-    for behavior in [Behavior::Pass, Behavior::RejectRequest, Behavior::ErrorRequest] {
+    for (behavior, handler, status, outcome) in [
+        (Behavior::Pass, HandlerKind::Consume, 200, LocalOutcome::Completed),
+        (
+            Behavior::RejectRequest,
+            HandlerKind::Consume,
+            403,
+            LocalOutcome::PolicyDenied,
+        ),
+        (
+            Behavior::ErrorRequest,
+            HandlerKind::Consume,
+            500,
+            LocalOutcome::PolicyDenied,
+        ),
+        (Behavior::Pass, HandlerKind::Error, 500, LocalOutcome::Failed),
+    ] {
         let state = State::default();
-        let owner = Fixture::owner(state.clone());
+        let mut owner = Fixture::owner(state.clone());
+        owner.handler = handler;
         let mut later = Fixture::policy("later", state.clone());
         later.behavior = behavior;
         let registry = registry(vec![owner, later]);
@@ -1666,7 +1682,7 @@ async fn cors_and_configured_security_headers_cover_success_denial_and_handler_e
         let mut ctx = context::context(&request, &pipeline);
         ctx.response_header = Some(&mut head);
         let exchange = LocalExchange::claim(&pipeline, &mut ctx).unwrap();
-        exchange
+        let result = exchange
             .run(
                 &mut ctx,
                 &mut Transport {
@@ -1675,6 +1691,12 @@ async fn cors_and_configured_security_headers_cover_success_denial_and_handler_e
                 },
             )
             .await;
+        assert_eq!(result.status, status);
+        assert_eq!(result.outcome, outcome);
+        assert_eq!(
+            state.events().contains(&"handler".into()),
+            matches!(behavior, Behavior::Pass)
+        );
         let inner = state.inner.lock().unwrap();
         let (_, headers) = inner.head.as_ref().unwrap();
         assert_eq!(
