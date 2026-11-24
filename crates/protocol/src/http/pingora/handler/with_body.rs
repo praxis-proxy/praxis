@@ -604,6 +604,9 @@ impl ProxyHttp for PingoraHttpHandler {
             // the header.
             via::append_response_via(upstream_response, upstream_ver);
             adjust_compression(session, upstream_response, pipeline.compression_config());
+            if ctx.connection_upgraded {
+                super::logging_util::log_accepted_upgrade(&pipeline, ctx);
+            }
         }
         result
     }

@@ -1025,7 +1025,7 @@ mod tests {
     fn final_forwarded_offer_is_checked_after_hop_by_hop_stripping() {
         let mut request = make_request(&[
             ("upgrade", "websocket"),
-            ("connection", "Upgrade, Sec-WebSocket-Key"),
+            ("connection", "Upgrade"),
             ("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ=="),
             ("sec-websocket-version", "13"),
         ]);
@@ -1035,6 +1035,13 @@ mod tests {
         let mut ctx = PingoraRequestCtx::default();
         ctx.admitted_websocket = Some(Box::new(offer));
         validate_admitted_upgrade(&request, &ctx).unwrap();
+        request
+            .insert_header("sec-websocket-key", "YWJjZGVmZ2hpamtsbW5vcA==")
+            .unwrap();
+        validate_admitted_upgrade(&request, &ctx).unwrap_err();
+        request
+            .insert_header("connection", "Upgrade, Sec-WebSocket-Key")
+            .unwrap();
         strip_hop_by_hop(&mut request, true);
         let error = validate_admitted_upgrade(&request, &ctx).unwrap_err();
         assert_eq!(

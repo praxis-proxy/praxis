@@ -496,7 +496,7 @@ mod tests {
         FilterPipeline {
             upgrade_policy: None,
             body_capabilities: BodyCapabilities::default(),
-            completion_observers: crate::pipeline::CompletionObservers::default(),
+            has_request_completion_observer: false,
             compression: None,
             filters,
             record_filter_duration_metrics: false,

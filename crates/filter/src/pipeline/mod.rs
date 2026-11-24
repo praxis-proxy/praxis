@@ -116,7 +116,7 @@ pub struct FilterPipeline {
     body_capabilities: BodyCapabilities,
 
     /// Whether any top-level or branch HTTP filter requests terminal observation.
-    completion_observers: CompletionObservers,
+    has_request_completion_observer: bool,
 
     /// Compression configuration, if a compression filter is present.
     compression: Option<CompressionConfig>,
@@ -656,6 +656,18 @@ impl FilterPipeline {
         false
     }
 
+    /// Whether a listener access log saw a bodyless response that still needs its final status.
+    pub fn has_pending_bodyless_access_log(extensions: &RequestExtensions) -> bool {
+        extensions.get::<PendingBodylessAccessLog>().is_some()
+    }
+
+    /// Emit eligible bodyless records after the adapter accepts or refuses the final head.
+    pub fn finish_bodyless_access_logs(&self, ctx: &mut crate::HttpFilterContext<'_>, status: u16) {
+        if ctx.extensions.remove::<PendingBodylessAccessLog>().is_some() {
+            finish_access_logs(&self.filters, ctx, status);
+        }
+    }
+
     /// Notify executed HTTP filter invocations that the request has ended.
     ///
     /// Branch filters retain their own invocation IDs and execution bits.
@@ -663,45 +675,27 @@ impl FilterPipeline {
     /// If no final hook reached an observer, only status-only response scope
     /// can be checked from the written status. Header-dependent scope and
     /// unknown status fail closed without final response evidence.
-    pub fn emit_request_completion<'pipeline>(&'pipeline self, ctx: &mut crate::HttpFilterContext<'_>, status: u16) {
-        if !self.has_request_completion_observer() {
+    pub fn emit_request_completion(&self, ctx: &mut crate::HttpFilterContext<'_>, status: u16) {
+        if !self.has_request_completion_observer {
             return;
         }
-        // Matching access logs share one emitted-record marker. Give them the
-        // same precedence as the response hooks, including nested branches.
-        let mut logs = smallvec::SmallVec::<[&PipelineFilter; 2]>::new();
-        let mut complete = |entry: &'pipeline PipelineFilter, ctx: &mut crate::HttpFilterContext<'_>| {
-            if entry.filter.name() == "access_log" {
-                logs.push(entry);
-            } else {
-                emit_completion_entry(entry, ctx, status);
-            }
-        };
         for (index, entry) in self.filters.iter().enumerate() {
             if ctx.executed_filter_indices.get(index) == Some(&true) {
-                complete(entry, ctx);
+                emit_completion_entry(entry, ctx, status);
             }
             for branch in &entry.branches {
                 for_each_pipeline_filter(&branch.filters, &mut |child| {
                     if branch::branch_filter_executed(&ctx.executed_branch_filters, child.filter_id) {
-                        complete(child, ctx);
+                        emit_completion_entry(child, ctx, status);
                     }
                 });
             }
-        }
-        for entry in logs.into_iter().rev() {
-            emit_completion_entry(entry, ctx, status);
         }
     }
 
     /// Whether this pipeline needs terminal request-completion dispatch.
     pub fn has_request_completion_observer(&self) -> bool {
-        self.completion_observers.present
-    }
-
-    /// Whether a filter requires a listener's terminal hook to function.
-    pub fn requires_listener_completion(&self) -> bool {
-        self.completion_observers.required
+        self.has_request_completion_observer
     }
 
     /// Whether any filter in this pipeline rewrites response trailers.
@@ -996,10 +990,7 @@ fn bind_pipeline_slow_start(filters: &[PipelineFilter], registry: &Arc<crate::Sl
 /// detection, terminal-filter detection, referenced-file discovery, insecure
 /// option application) so a filter buried in a branch is treated exactly like a
 /// top-level one rather than silently skipped.
-fn for_each_pipeline_filter<'pipeline>(
-    filters: &'pipeline [PipelineFilter],
-    visit: &mut dyn FnMut(&'pipeline PipelineFilter),
-) {
+fn for_each_pipeline_filter(filters: &[PipelineFilter], visit: &mut dyn FnMut(&PipelineFilter)) {
     for pf in filters {
         visit(pf);
         for branch in &pf.branches {
@@ -1008,25 +999,32 @@ fn for_each_pipeline_filter<'pipeline>(
     }
 }
 
-/// Terminal hooks present in a pipeline and whether subrequests can run it.
-#[derive(Clone, Copy, Debug, Default)]
-struct CompletionObservers {
-    /// A filter consumes the terminal callback when the adapter provides it.
-    present: bool,
-    /// A filter cannot run without the terminal callback.
-    required: bool,
+/// Set while a listener-managed bodyless access record awaits the final head.
+pub(crate) struct PendingBodylessAccessLog;
+
+/// Visit pending access logs in the same order as response hooks.
+fn finish_access_logs(entries: &[PipelineFilter], ctx: &mut crate::HttpFilterContext<'_>, status: u16) {
+    for entry in entries.iter().rev() {
+        for branch in entry.branches.iter().rev() {
+            finish_access_logs(&branch.filters, ctx, status);
+        }
+        if let AnyFilter::Http(filter) = &entry.filter
+            && filter.name() == "access_log"
+        {
+            let previous = ctx.current_filter_id.replace(entry.filter_id);
+            filter.finish_bodyless_access_record(ctx, status);
+            ctx.current_filter_id = previous;
+        }
+    }
 }
 
-/// Inspect completion contracts once, including filters in branch chains.
-fn completion_observers(filters: &[PipelineFilter]) -> CompletionObservers {
-    let mut observers = CompletionObservers::default();
+/// Cache whether any resolved filter, including branch filters, needs completion.
+fn pipeline_has_request_completion_observer(filters: &[PipelineFilter]) -> bool {
+    let mut has_observer = false;
     for_each_pipeline_filter(filters, &mut |entry| {
-        if let AnyFilter::Http(filter) = &entry.filter {
-            observers.present |= filter.observes_request_completion();
-            observers.required |= filter.requires_listener_completion();
-        }
+        has_observer |= entry.filter.observes_request_completion();
     });
-    observers
+    has_observer
 }
 
 /// Deliver one terminal hook with the entry's invocation identity bound.

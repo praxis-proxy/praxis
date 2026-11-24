@@ -66,7 +66,7 @@ async fn assert_upgrade_remains_final(filter: &AccessLogFilter) {
     );
     assert!(!access_record_already_emitted(&ctx));
     ctx.response_delivery_complete = Some(true);
-    filter.on_request_complete(&mut ctx, 101);
+    filter.finish_bodyless_access_record(&mut ctx, 101);
     assert!(access_record_already_emitted(&ctx));
 }
 
@@ -118,7 +118,7 @@ async fn bodyless_access_record_uses_written_status() {
     drop(filter.on_response_body(&mut ctx, &mut None, true).unwrap());
     assert!(!access_record_already_emitted(&ctx));
     ctx.response_delivery_complete = Some(true);
-    filter.on_request_complete(&mut ctx, 202);
+    filter.finish_bodyless_access_record(&mut ctx, 202);
     assert_eq!(read_single_record(&path).await["status"], "202");
 }
 

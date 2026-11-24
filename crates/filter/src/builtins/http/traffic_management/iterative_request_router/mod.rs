@@ -343,7 +343,7 @@ impl IterativeRequestRouterFilter {
                 )
                 .into());
             }
-            if pipeline.requires_listener_completion() {
+            if pipeline.has_request_completion_observer() {
                 return Err(format!(
                     "iterative_request_router: step '{}' contains a request-completion observer; \
                      terminal completion runs only for listener requests, not iterative steps",

@@ -1859,23 +1859,22 @@ impl HttpFilter for AccessLogFilter {
         true
     }
 
-    fn observes_request_completion(&self) -> bool {
-        true
-    }
-
-    fn requires_listener_completion(&self) -> bool {
-        false
-    }
-
-    fn on_request_complete(&self, ctx: &mut HttpFilterContext<'_>, status: u16) {
-        // Only a delivered head completes a bodyless response. The adapter's
-        // fallback records failed delivery using the status written to the client.
-        if ctx.response_delivery_complete == Some(true)
-            && let Some(state) = ctx.get_filter_state_mut::<AccessLogState>()
-            && state.bodyless
-        {
-            let headers = state.response_headers.take();
+    fn finish_bodyless_access_record(&self, ctx: &mut HttpFilterContext<'_>, status: u16) {
+        if access_record_already_emitted(ctx) {
+            return;
+        }
+        let Some(state) = ctx
+            .get_filter_state_mut::<AccessLogState>()
+            .filter(|state| state.bodyless)
+        else {
+            return;
+        };
+        let headers = state.response_headers.take();
+        if ctx.response_delivery_complete == Some(true) {
             self.maybe_emit(ctx, status, headers.as_ref());
+        } else if self.emit_deferred_record(ctx, status) {
+            // Incomplete delivery uses the eligible sink's unsampled fallback.
+            mark_access_record_emitted(ctx);
         }
     }
 
@@ -1893,8 +1892,12 @@ impl HttpFilter for AccessLogFilter {
         let response_headers = self.needs_response_headers.then(|| resp.headers.clone());
 
         // Filtered subrequests have no protocol completion callback.
-        if bodyless && ctx.response_delivery_complete.is_none() {
-            self.maybe_emit(ctx, status, response_headers.as_ref());
+        if bodyless {
+            if ctx.response_delivery_complete.is_some() {
+                ctx.extensions.insert(crate::pipeline::PendingBodylessAccessLog);
+            } else {
+                self.maybe_emit(ctx, status, response_headers.as_ref());
+            }
         }
         ctx.insert_filter_state(AccessLogState {
             bodyless,

@@ -168,36 +168,8 @@ pub(super) async fn execute(
                 "WebSocket 101 conflicts with required HTTP body processing",
             ));
         }
-        let Some(offer) = ctx.admitted_websocket.as_ref() else {
-            return Err(invalid_upgrade_response(
-                ctx,
-                UpgradeFailure::Local,
-                "upgrade_admission_missing",
-                "101 response has no admitted WebSocket request",
-            ));
-        };
-        let Some(request) = ctx.request_snapshot.as_ref() else {
-            return Err(invalid_upgrade_response(
-                ctx,
-                UpgradeFailure::Local,
-                "upgrade_admission_missing",
-                "101 response has no forwarded request snapshot",
-            ));
-        };
-        if let Err(reason) = crate::http::upgrade::validate_forwarded_request(
-            offer,
-            &request.method,
-            &request.headers,
-            ctx.client_http_version.unwrap_or(http::Version::HTTP_11),
-        ) {
-            warn!(error = reason, "forwarded WebSocket offer no longer matches admission");
-            return Err(invalid_upgrade_response(
-                ctx,
-                UpgradeFailure::Local,
-                "upgrade_request_modified",
-                reason,
-            ));
-        }
+        // The upstream request hook verified the transmitted offer. The response
+        // hooks can change only the response, whose negotiation must still match.
         if let Err(reason) = crate::http::upgrade::validate_switch_headers(&resp.headers) {
             warn!(
                 error = reason,
@@ -822,29 +794,6 @@ mod tests {
         assert!(execute(&make_pipeline(), &mut response, &mut ctx).await.is_err());
         assert!(!ctx.connection_upgraded);
         assert_eq!(ctx.error_type, Some("upgrade_response_invalid"));
-    }
-
-    #[tokio::test]
-    async fn websocket_101_rejects_a_filter_modified_client_offer() {
-        let pipeline = make_pipeline();
-        let mut resp = pingora_http::ResponseHeader::build(101, None).unwrap();
-        drop(resp.insert_header("upgrade", "websocket"));
-        drop(resp.insert_header("connection", "Upgrade"));
-        drop(resp.insert_header("sec-websocket-accept", "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="));
-        let mut ctx = make_upgrade_ctx();
-        if let Some(request) = ctx.request_snapshot.as_mut() {
-            drop(
-                request
-                    .headers
-                    .insert("sec-websocket-key", "YWJjZGVmZ2hpamtsbW5vcA==".parse().unwrap()),
-            );
-        }
-
-        assert!(execute(&pipeline, &mut resp, &mut ctx).await.is_err());
-        assert!(
-            !ctx.connection_upgraded,
-            "a response for a request that no longer matches admission must not open a tunnel"
-        );
     }
 
     #[tokio::test]

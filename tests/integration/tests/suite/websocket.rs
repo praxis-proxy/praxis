@@ -281,7 +281,13 @@ impl HttpFilter for UpgradeBodyProbe {
 async fn websocket_upgrade_succeeds() {
     let ws_backend = start_websocket_echo_backend().await;
     let proxy_port = free_port();
-    let yaml = simple_proxy_yaml(proxy_port, ws_backend.port());
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("handshake.ndjson");
+    let access_log = format!(
+        "access_log\n        fields: [status]\n        sink: {{type: file, path: '{}'}}",
+        log.display()
+    );
+    let yaml = custom_filter_yaml(proxy_port, ws_backend.port(), &access_log);
     let config = Config::from_yaml(&yaml).unwrap();
     let _proxy = start_proxy(&config);
 
@@ -302,6 +308,16 @@ async fn websocket_upgrade_succeeds() {
     let echo = recv_ws(&mut ws, "world echo").await;
     assert_eq!(echo, Message::Text("world".into()), "multiple messages should work");
 
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .contains(r#""status":"101""#)
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the handshake access record must be visible while the tunnel is open");
     drop(ws.close(None).await);
 }
 
@@ -1330,6 +1346,10 @@ fn assert_invalid_upgrade_response_with_mutation(
     assert_eq!(
         status, 502,
         "{case}: invalid final 101 must fail closed without a tunnel"
+    );
+    assert!(
+        observed_body.lock().unwrap().is_empty(),
+        "{case}: no opaque bytes enter HTTP body hooks"
     );
 }
 

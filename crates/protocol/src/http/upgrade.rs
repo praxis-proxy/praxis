@@ -84,6 +84,17 @@ fn parse_request<'head>(
         return Err(malformed_handshake());
     }
     validate_connection_tokens(headers)?;
+    if [
+        "sec-websocket-key",
+        "sec-websocket-version",
+        "sec-websocket-protocol",
+        "sec-websocket-extensions",
+    ]
+    .iter()
+    .any(|name| headers.contains_key(*name) && contains_list_token(headers, "connection", name))
+    {
+        return Err(malformed_handshake());
+    }
     let single_websocket = is_single_websocket_offer(headers)?;
     if method != Method::GET {
         return Err(malformed_handshake());
@@ -584,6 +595,17 @@ mod tests {
                 .unwrap()
                 .subprotocols,
             ["chat", "Chat"]
+        );
+    }
+
+    #[test]
+    fn connection_cannot_nominate_fields_of_the_admitted_offer() {
+        let mut request = valid_request();
+        request.insert("sec-websocket-extensions", "sample".parse().unwrap());
+        request.insert("connection", "upgrade, sec-websocket-extensions".parse().unwrap());
+        assert_eq!(
+            classify_request(&request, &Method::GET, Version::HTTP_11, true),
+            Err(malformed_handshake())
         );
     }
 
