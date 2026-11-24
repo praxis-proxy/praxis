@@ -9,7 +9,7 @@
 //! driven through a `static_response` chain so no backend is required.
 
 use std::{
-    io::{Read as _, Write as _},
+    io::{BufReader, Read as _, Write as _},
     net::TcpStream,
     time::Duration,
 };
@@ -65,7 +65,7 @@ fn stdout_sink_records_client_ip_for_early_upgrade_refusal() {
     let mut stream = TcpStream::connect(addr(port)).expect("connect to proxy");
     stream
         .write_all(
-            b"GET /health HTTP/1.1\r\n\
+            b"GET /refused-upgrade HTTP/1.1\r\n\
               Host: test\r\n\
               Connection: Upgrade\r\n\
               Upgrade: websocket\r\n\
@@ -73,32 +73,34 @@ fn stdout_sink_records_client_ip_for_early_upgrade_refusal() {
               Sec-WebSocket-Version: 13\r\n\r\n",
         )
         .expect("write WebSocket handshake");
-    let mut response = Vec::new();
-    let _read = stream.read_to_end(&mut response);
+    stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    let head = praxis_test_utils::read_h1_response(&mut BufReader::new(stream), true, 0, |_| Ok(()));
+    assert_eq!(head.status, Some(403), "{head:?}");
+    assert!(head.abort.is_none(), "{head:?}");
 
     let mut logs = String::new();
     for _ in 0..100 {
         logs = proxy.logs();
-        if logs.contains(r#""status":"403""#) {
+        if refused_record(&logs).is_some() {
             break;
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-
     proxy.terminate();
-    assert!(
-        logs.contains(r#""status":"403""#),
-        "the refused handshake must produce a 403 access record:\n{logs}"
-    );
-    assert!(
-        logs.contains(r#""client_ip":"127.0.0.1""#),
-        "the fallback record must retain the downstream peer address:\n{logs}"
-    );
+    let record = refused_record(&logs).unwrap_or_else(|| panic!("missing refused handshake access record: {logs}"));
+    assert_eq!(record["client_ip"], "127.0.0.1", "{record}");
 }
 
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
+
+/// Find the NDJSON record for this request among the proxy's other output.
+fn refused_record(logs: &str) -> Option<serde_json::Value> {
+    logs.lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|record| record["status"] == "403" && record["path"] == "/refused-upgrade")
+}
 
 /// Proxy config on `port`: a stdout access-log sink in front of a static 200.
 fn config(port: u16) -> String {

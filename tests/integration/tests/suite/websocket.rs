@@ -49,6 +49,10 @@ impl HttpFilter for RequiredBodyFilter {
         BodyAccess::ReadOnly(BodyRequirement::Required)
     }
 
+    fn request_body_mode(&self) -> BodyMode {
+        BodyMode::StreamBuffer { max_bytes: Some(1024) }
+    }
+
     async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         Ok(FilterAction::Continue)
     }
@@ -57,9 +61,9 @@ impl HttpFilter for RequiredBodyFilter {
         &self,
         _ctx: &mut HttpFilterContext<'_>,
         body: &mut Option<Bytes>,
-        _end_of_stream: bool,
+        end_of_stream: bool,
     ) -> Result<FilterAction, FilterError> {
-        if body.as_ref().is_some_and(|chunk| chunk.as_ref() == b"deny") {
+        if end_of_stream && body.as_ref().is_some_and(|entity| entity.as_ref() == b"deny") {
             return Ok(FilterAction::Reject(Rejection::status(403)));
         }
         Ok(FilterAction::Continue)
@@ -188,10 +192,19 @@ enum UpgradeResponseMutation {
     SynthesizeWebSocket101,
 }
 
+/// What the response mutation and HTTP body hooks observed for one test.
+#[derive(Default)]
+struct ProbeObservations {
+    /// Whether the requested response header mutation ran.
+    mutated: bool,
+    /// Bytes delivered to either HTTP body hook.
+    body: Vec<u8>,
+}
+
 /// Captures any HTTP body chunks and can mutate the final response handshake.
 struct UpgradeBodyProbe {
-    /// Bytes delivered to either HTTP body hook.
-    observed_body: Arc<Mutex<Vec<u8>>>,
+    /// Observations shared with the test.
+    observed: Arc<Mutex<ProbeObservations>>,
     /// Optional response mutation under test.
     mutation: UpgradeResponseMutation,
 }
@@ -226,6 +239,7 @@ impl HttpFilter for UpgradeBodyProbe {
                         .insert("sec-websocket-accept", http::HeaderValue::from_static("invalid")),
                 );
                 ctx.response_headers_modified = true;
+                self.observed.lock().unwrap().mutated = true;
             },
             UpgradeResponseMutation::SynthesizeWebSocket101 if response.status == http::StatusCode::OK => {
                 response.status = http::StatusCode::SWITCHING_PROTOCOLS;
@@ -244,6 +258,7 @@ impl HttpFilter for UpgradeBodyProbe {
                     http::HeaderValue::from_static("s3pPLMBiTxaQ9kYGzzhZRbK+xOo="),
                 ));
                 ctx.response_headers_modified = true;
+                self.observed.lock().unwrap().mutated = true;
             },
             UpgradeResponseMutation::None
             | UpgradeResponseMutation::CorruptAccept
@@ -259,7 +274,7 @@ impl HttpFilter for UpgradeBodyProbe {
         _end_of_stream: bool,
     ) -> Result<FilterAction, FilterError> {
         if let Some(body) = body {
-            self.observed_body.lock().unwrap().extend_from_slice(body);
+            self.observed.lock().unwrap().body.extend_from_slice(body);
         }
         Ok(FilterAction::Continue)
     }
@@ -271,7 +286,7 @@ impl HttpFilter for UpgradeBodyProbe {
         _end_of_stream: bool,
     ) -> Result<FilterAction, FilterError> {
         if let Some(body) = body {
-            self.observed_body.lock().unwrap().extend_from_slice(body);
+            self.observed.lock().unwrap().body.extend_from_slice(body);
         }
         Ok(FilterAction::Continue)
     }
@@ -367,9 +382,17 @@ async fn websocket_rejected_before_upstream_when_selected_filter_requires_body()
         403,
         "required body processing blocks the tunnel: {raw}"
     );
+    // The direct handshake is an accept-loop barrier. Any TCP connection
+    // opened before the 403 must have been accepted before this one.
+    let url = format!("ws://127.0.0.1:{}/", ws_backend.port());
+    let (mut probe, _) = tokio::time::timeout(Duration::from_secs(2), connect_async(&url))
+        .await
+        .expect("accept-loop deadline")
+        .expect("direct backend handshake");
+    probe.close(None).await.unwrap();
     assert_eq!(
         ws_backend.connection_count(),
-        backend_connections_after_readiness,
+        backend_connections_after_readiness.saturating_add(1),
         "the rejected handshake must not add an upstream connection"
     );
 }
@@ -391,7 +414,7 @@ async fn required_http_body_filter_still_runs_for_ordinary_requests() {
 
     let denied = http_send(
         &format!("127.0.0.1:{proxy_port}"),
-        "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\nConnection: close\r\n\r\ndeny",
+        "POST / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n2\r\nde\r\n2\r\nny\r\n0\r\n\r\n",
     );
     assert_eq!(
         parse_status(&denied),
@@ -506,7 +529,7 @@ async fn optional_body_observer_allows_websocket_message_exchange() {
     let proxy_port = free_port();
     let yaml = custom_filter_yaml(proxy_port, ws_backend.port(), "upgrade_body_probe");
     let config = Config::from_yaml(&yaml).unwrap();
-    let observed = Arc::new(Mutex::new(Vec::new()));
+    let observed = Arc::new(Mutex::new(ProbeObservations::default()));
     let registry = upgrade_probe_registry(Arc::clone(&observed), UpgradeResponseMutation::None);
     let _proxy = start_proxy_with_registry(&config, &registry);
     let backend_connections_after_readiness = ws_backend.connection_count();
@@ -523,7 +546,7 @@ async fn optional_body_observer_allows_websocket_message_exchange() {
     );
     drop(ws.close(None).await);
     assert!(
-        observed.lock().unwrap().is_empty(),
+        observed.lock().unwrap().body.is_empty(),
         "HTTP body hooks must not receive tunnel bytes"
     );
 }
@@ -930,13 +953,25 @@ async fn malformed_or_unsupported_upstream_101_never_opens_a_tunnel() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn response_filter_cannot_mutate_a_valid_101_into_an_invalid_handshake() {
-    let ws_backend = start_websocket_echo_backend().await;
+    // A valid WebSocket peer sends a greeting as soon as the handshake
+    // completes upstream. A response filter then refuses the downstream head.
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let sent = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut websocket = tokio_tungstenite::accept_async(stream).await.unwrap();
+        websocket.send(Message::Text("upstream greeting".into())).await.unwrap();
+    });
     assert_invalid_upgrade_response_with_mutation(
-        ws_backend.port(),
+        port,
         &websocket_request("/"),
         UpgradeResponseMutation::CorruptAccept,
         "mutated accept",
     );
+    tokio::time::timeout(Duration::from_secs(2), sent)
+        .await
+        .expect("greeting deadline")
+        .expect("upstream sent the greeting");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -947,6 +982,13 @@ async fn response_filter_cannot_synthesize_an_unsolicited_101() {
         "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
         UpgradeResponseMutation::SynthesizeWebSocket101,
         "synthesized 101",
+    );
+    #[cfg(feature = "pingora")]
+    assert_invalid_upgrade_response_with_mutation(
+        backend.port(),
+        &websocket_request("/"),
+        UpgradeResponseMutation::SynthesizeWebSocket101,
+        "admitted offer with an ordinary upstream response",
     );
 }
 
@@ -1228,14 +1270,17 @@ insecure_options:
 // ---------------------------------------------------------------------------
 
 /// Register the body-hook probe with its requested response mutation.
-fn upgrade_probe_registry(observed_body: Arc<Mutex<Vec<u8>>>, mutation: UpgradeResponseMutation) -> FilterRegistry {
+fn upgrade_probe_registry(
+    observed: Arc<Mutex<ProbeObservations>>,
+    mutation: UpgradeResponseMutation,
+) -> FilterRegistry {
     let mut registry = FilterRegistry::with_builtins();
     registry
         .register(
             "upgrade_body_probe",
             FilterFactory::Http(Arc::new(move |_| {
                 Ok(Box::new(UpgradeBodyProbe {
-                    observed_body: Arc::clone(&observed_body),
+                    observed: Arc::clone(&observed),
                     mutation,
                 }))
             })),
@@ -1244,13 +1289,9 @@ fn upgrade_probe_registry(observed_body: Arc<Mutex<Vec<u8>>>, mutation: UpgradeR
     registry
 }
 
-/// Start a one-connection backend that writes a raw HTTP 101 and echoes a
-/// later frame, making an accidentally committed tunnel observable.
+/// Start a one-connection backend that returns the specified upgrade response head.
 async fn start_raw_upgrade_backend(response_headers: &str) -> (u16, tokio::sync::oneshot::Receiver<()>) {
-    use tokio::{
-        io::{AsyncReadExt as _, AsyncWriteExt as _},
-        net::TcpListener,
-    };
+    use tokio::{io::AsyncWriteExt as _, net::TcpListener};
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -1267,12 +1308,6 @@ async fn start_raw_upgrade_backend(response_headers: &str) -> (u16, tokio::sync:
             return;
         }
         sent.send(()).unwrap();
-        let mut frame = [0_u8; 256];
-        if let Ok(Ok(size)) = tokio::time::timeout(Duration::from_millis(500), stream.read(&mut frame)).await
-            && size > 0
-        {
-            let _echo_result = stream.write_all(&frame[..size]).await;
-        }
     });
     (port, received)
 }
@@ -1297,30 +1332,7 @@ async fn read_request_headers(stream: &mut tokio::net::TcpStream) -> bool {
     }
 }
 
-/// Read the response head without waiting for a tunnel to close.
-fn read_response_headers(stream: &mut TcpStream) -> String {
-    let mut response = Vec::new();
-    let mut buffer = [0_u8; 1024];
-    while !response.windows(4).any(|window| window == b"\r\n\r\n") {
-        match stream.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(size) => response.extend_from_slice(&buffer[..size]),
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) =>
-            {
-                break;
-            },
-            Err(error) => panic!("failed reading response headers: {error}"),
-        }
-    }
-    String::from_utf8_lossy(&response).into_owned()
-}
-
-/// Require the final upstream response to fail closed without exposing a
-/// frame to request or response HTTP body hooks.
+/// Require a malformed upstream response head to produce a complete HTTP 502.
 fn assert_invalid_upgrade_response(backend_port: u16, request: &str, case: &str) {
     assert_invalid_upgrade_response_with_mutation(backend_port, request, UpgradeResponseMutation::None, case);
 }
@@ -1335,20 +1347,48 @@ fn assert_invalid_upgrade_response_with_mutation(
     let proxy_port = free_port();
     let yaml = custom_filter_yaml(proxy_port, backend_port, "upgrade_body_probe");
     let config = Config::from_yaml(&yaml).unwrap();
-    let observed_body = Arc::new(Mutex::new(Vec::new()));
-    let registry = upgrade_probe_registry(Arc::clone(&observed_body), mutation);
+    let observed = Arc::new(Mutex::new(ProbeObservations::default()));
+    let registry = upgrade_probe_registry(Arc::clone(&observed), mutation);
     let proxy = praxis_test_utils::start_tls_proxy_no_wait_with_registry(&config, &registry);
     praxis_test_utils::wait_for_tcp(proxy.addr());
     let mut stream = TcpStream::connect(proxy.addr()).unwrap();
     stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
     stream.write_all(request.as_bytes()).unwrap();
-    let status = parse_status(&read_response_headers(&mut stream));
+    let mut body = Vec::new();
+    let mut reader = std::io::BufReader::new(stream);
+    let response = praxis_test_utils::read_h1_response(&mut reader, false, 65_536, |chunk| {
+        body.extend_from_slice(chunk);
+        Ok(())
+    });
     assert_eq!(
-        status, 502,
+        response.status,
+        Some(502),
         "{case}: invalid final 101 must fail closed without a tunnel"
     );
+    assert!(response.completion.is_some(), "{case}: {response:?}");
+    let sent_payload: &[u8] = match mutation {
+        UpgradeResponseMutation::CorruptAccept => b"upstream greeting",
+        UpgradeResponseMutation::SynthesizeWebSocket101 => b"ordinary response",
+        UpgradeResponseMutation::None => return, // This fixture sends only an invalid head.
+    };
+    let mut trailing = [0_u8; 1];
+    assert_eq!(
+        reader.read(&mut trailing).unwrap(),
+        0,
+        "{case}: trailing bytes after the 502"
+    );
+    drop(proxy);
+    let observed = observed.lock().unwrap();
     assert!(
-        observed_body.lock().unwrap().is_empty(),
+        observed.mutated,
+        "{case}: expected the response filter to change the upstream head"
+    );
+    assert!(
+        !body.windows(sent_payload.len()).any(|part| part == sent_payload),
+        "{case}: client received upstream bytes after refusal"
+    );
+    assert!(
+        observed.body.is_empty(),
         "{case}: no opaque bytes enter HTTP body hooks"
     );
 }

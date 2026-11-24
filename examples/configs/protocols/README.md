@@ -18,7 +18,11 @@ Protocol-specific configurations for HTTP/1.1, HTTP/2, gRPC, WebSocket, TCP, and
 
 **gRPC-Web**: Protocol translation between browser-based gRPC-Web clients and backend gRPC services.
 
-**WebSocket**: Pingora can transparently pass through an explicitly permitted WebSocket handshake. Selected filters that declare required HTTP body processing cause the handshake to be rejected before upstream dispatch. After upgrade, frames bypass HTTP request/response filters; message inspection remains separate work.
+**WebSocket.** Pingora can pass through an explicitly permitted handshake.
+Required body processing known from the request blocks upstream dispatch. If a
+response condition selects required processing on the upstream 101, Praxis
+returns 502 before opening the tunnel. After upgrade, WebSocket frames bypass
+HTTP body filters.
 
 **TCP**: Raw TCP proxying for non-HTTP protocols with connection metrics and access logging.
 

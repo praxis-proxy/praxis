@@ -1,9 +1,9 @@
 # WebSocket Proxy
 #
 # HTTP listener that explicitly permits opaque WebSocket passthrough.
-# Pingora switches to bidirectional byte forwarding after a valid
-# 101 response. Selected filters that require HTTP body processing
-# cause the handshake to be rejected before the upstream is contacted.
+# Required body processing known from the request blocks upstream dispatch.
+# A requirement selected by the upstream 101 blocks the tunnel with a 502.
+# After an accepted 101, Pingora forwards frames outside the HTTP body filters.
 #
 #   Client -> WS -> Praxis :8080 -> WS -> Backend :3000
 #
