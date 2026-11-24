@@ -2506,7 +2506,7 @@ async fn downstream_backpressure_prevents_a_second_source_pull() {
         tokio::join!(exchange.run(&mut ctx, &mut transport), observe)
     })
     .await
-    .expect("backpressure cancellation must complete");
+    .unwrap();
     assert_eq!(result.outcome, LocalOutcome::Cancelled);
     assert_complete(&state, 1);
 }
