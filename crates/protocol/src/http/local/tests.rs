@@ -2488,7 +2488,11 @@ async fn downstream_backpressure_prevents_a_second_source_pull() {
         state: state.clone(),
         input: Input::bytes(1),
     };
-    let (result, ()) = tokio::join!(exchange.run(&mut ctx, &mut transport), observe);
+    let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        tokio::join!(exchange.run(&mut ctx, &mut transport), observe)
+    })
+    .await
+    .expect("backpressure cancellation must complete");
     assert_eq!(result.outcome, LocalOutcome::Cancelled);
     assert_complete(&state, 1);
 }
