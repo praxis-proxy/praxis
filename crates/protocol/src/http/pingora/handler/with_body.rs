@@ -591,12 +591,8 @@ impl ProxyHttp for PingoraHttpHandler {
         let client_span = ctx.upstream_client_span.clone();
         let exchange_span = ctx.upstream_exchange_span.clone();
         let upstream_ver = upstream_response.version;
-        let result = response_filter::execute(&pipeline, upstream_response, ctx)
-            .instrument(exchange_span)
-            .instrument(client_span)
-            .instrument(span)
-            .await;
-        if result.is_ok() {
+        async {
+            response_filter::execute(&pipeline, upstream_response, ctx).await?;
             add_drain_connection_close(session, upstream_response, ctx, &self.lifecycle)?;
             // RFC 9110 §7.6.3: the response Via received-protocol is the leg this
             // proxy received the response on — the upstream connection — not the
@@ -607,8 +603,12 @@ impl ProxyHttp for PingoraHttpHandler {
             if ctx.connection_upgraded {
                 super::logging_util::log_accepted_upgrade(&pipeline, ctx);
             }
+            Ok(())
         }
-        result
+        .instrument(exchange_span)
+        .instrument(client_span)
+        .instrument(span)
+        .await
     }
 
     async fn upstream_peer(&self, _session: &mut Session, ctx: &mut Self::CTX) -> Result<Box<HttpPeer>> {
