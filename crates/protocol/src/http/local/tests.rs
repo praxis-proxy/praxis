@@ -1296,9 +1296,8 @@ async fn discarded_response_cleanup_is_bounded_and_cancellable() {
             };
             let cancel = async {
                 if external_cancel {
-                    while state.inner.lock().unwrap().source_cancels == 0 {
-                        tokio::task::yield_now().await;
-                    }
+                    state.source_cancel_started.notified().await;
+                    assert_eq!(state.inner.lock().unwrap().source_cancels, 1);
                     signal.cancel();
                 }
             };
@@ -1399,9 +1398,8 @@ async fn invalid_streamed_status_cleanup_is_bounded_and_recovers_extensions() {
             };
             let cancel = async {
                 if disconnect {
-                    while state.inner.lock().unwrap().source_cancels == 0 {
-                        tokio::task::yield_now().await;
-                    }
+                    state.source_cancel_started.notified().await;
+                    assert_eq!(state.inner.lock().unwrap().source_cancels, 1);
                     cancellation.cancel();
                 }
             };

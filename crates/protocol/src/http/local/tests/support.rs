@@ -18,6 +18,7 @@ use super::super::{LocalCompletion, LocalExchange, LocalTransport};
 #[derive(Clone, Default)]
 pub(super) struct State {
     pub(super) inner: Arc<Mutex<Observations>>,
+    pub(super) source_cancel_started: Arc<tokio::sync::Notify>,
 }
 #[derive(Clone, Copy, Default, Eq, PartialEq)]
 pub(super) enum WriteMode {
@@ -460,6 +461,7 @@ impl StreamingResponseBody for Source {
             inner.source_cancels += 1;
             inner.block_source_cancel
         };
+        self.state.source_cancel_started.notify_one();
         if blocked {
             std::future::pending::<()>().await;
         }
