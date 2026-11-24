@@ -3,9 +3,12 @@
 
 //! Isolated admission and hook state for each request and policy filter.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{Arc, OnceLock},
+};
 
-use ppe::praxis_policy_core::{context::PluginContextTable, identity::IdentityPayload};
+use ppe::praxis_policy_core::{context::PluginContextTable, extensions::RequestExtension, identity::IdentityPayload};
 
 use super::request_facts::RequestFacts;
 use crate::filter::HttpFilterContext;
@@ -20,6 +23,8 @@ use crate::filter::HttpFilterContext;
 /// context tables. New and child requests start with fresh state.
 #[derive(Default)]
 pub(super) struct RequestState {
+    /// Correlation at head admission, independent of later header mutations.
+    pub(super) head_request: OnceLock<Option<Arc<RequestExtension>>>,
     /// The request as this instance's first callback saw it.
     pub(super) facts: Option<Arc<RequestFacts>>,
     /// How far admission has progressed.

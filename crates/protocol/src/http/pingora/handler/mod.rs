@@ -134,6 +134,7 @@ pub use with_body::PingoraHttpHandler;
 ///     job_queue: None,
 ///     max_connections: None,
 ///     protocol: Default::default(),
+///     upgrade_policy: None,
 ///     tcp_session_timeout_ms: None,
 ///     tcp_max_duration_secs: None,
 ///     tls: None,
@@ -355,6 +356,24 @@ mod tests {
 
     /// Default Pingora retry body buffer limit (64 `KiB`).
     const RETRY_BODY_LIMIT: u64 = praxis_core::config::DEFAULT_RETRY_BODY_LIMIT_BYTES;
+
+    #[test]
+    fn new_context_carries_the_owning_listener_name() {
+        use pingora_proxy::ProxyHttp as _;
+
+        let pipeline = FilterPipeline::build(&mut [], &praxis_filter::FilterRegistry::with_builtins()).unwrap();
+        let handler = PingoraHttpHandler::new(
+            Arc::new(ArcSwap::from_pointee(pipeline)),
+            None,
+            None,
+            None,
+            "websocket-listener".into(),
+            #[cfg(feature = "forward-proxy")]
+            None,
+            LifecycleHandle::new(),
+        );
+        assert_eq!(handler.new_ctx().listener_name.as_ref(), "websocket-listener");
+    }
 
     #[tokio::test]
     async fn pending_local_rejection_stops_explicit_and_reused_connection_retries() {

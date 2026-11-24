@@ -22,6 +22,7 @@ mod branch_chain;
 mod chain_ref;
 mod cluster;
 mod condition;
+mod deprecation;
 mod expanded_chains;
 mod filters;
 mod forward_proxy;
@@ -57,6 +58,7 @@ pub use cluster::{
 pub use condition::{
     ApplicationMatch, Condition, ConditionMatch, ResponseCondition, ResponseConditionMatch, SelectedUpstreamMatch,
 };
+pub use deprecation::{DeprecationWarnings, InlineChainDeprecations};
 pub use expanded_chains::ExpandedFilterChains;
 pub use filters::{FailureMode, FilterChainConfig, FilterEntry};
 pub use forward_proxy::{DestinationRule, ForwardProxyConfig};
@@ -198,6 +200,17 @@ impl Config {
     ///
     /// [`ProxyError::Config`]: crate::errors::ProxyError::Config
     pub fn from_yaml(yaml: &str) -> Result<Self, crate::errors::ProxyError> {
+        let (config, warnings) = Self::from_yaml_with_deprecations(yaml)?;
+        warnings.emit();
+        Ok(config)
+    }
+
+    /// Parse a candidate and retain its deprecation warnings until logging is configured.
+    ///
+    /// # Errors
+    ///
+    /// Returns a configuration error for invalid YAML or invalid settings.
+    pub fn from_yaml_with_deprecations(yaml: &str) -> Result<(Self, DeprecationWarnings), crate::errors::ProxyError> {
         check_yaml_safety(yaml)?;
 
         let mut config: Config = serde_yaml::from_str(yaml)
@@ -205,7 +218,8 @@ impl Config {
 
         config.validate()?;
 
-        Ok(config)
+        let warnings = deprecation::collect(&config, yaml);
+        Ok((config, warnings))
     }
 
     /// Load and validate config from a YAML file.

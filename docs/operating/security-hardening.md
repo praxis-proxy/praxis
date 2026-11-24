@@ -370,14 +370,14 @@ in development:
   https://github.com/praxis-proxy/policy/blob/main/docs/content/apl/pdp.md
 [basic-auth]: ../filters/http/security/basic_auth.md
 [policy-delegation]:
-  https://github.com/praxis-proxy/policy/blob/main/docs/content/identity-delegation.md
+  https://github.com/praxis-proxy/policy/blob/main/docs/content/guides/identity-delegation.md
 [policy-vault]:
-  https://github.com/praxis-proxy/policy/blob/main/docs/content/identity-delegation.md#recipe-9-a-caller-workloads-vault-stored-credential
+  https://github.com/praxis-proxy/policy/blob/main/docs/content/guides/identity-delegation.md#recipe-9-a-caller-workloads-vault-stored-credential
 [policy-approval]:
   https://github.com/praxis-proxy/policy/blob/main/docs/content/apl/elicitation.md
 [policy-headers]:
-  https://github.com/praxis-proxy/policy/blob/main/docs/content/assertions.md
+  https://github.com/praxis-proxy/policy/blob/main/docs/content/reference/assertions.md
 [policy-limits]:
-  https://github.com/praxis-proxy/policy/blob/main/docs/content/rate-limiting.md
+  https://github.com/praxis-proxy/policy/blob/main/docs/content/guides/rate-limiting.md
 [policy-audit]:
-  https://github.com/praxis-proxy/policy/blob/main/docs/content/auditing.md
+  https://github.com/praxis-proxy/policy/blob/main/docs/content/guides/auditing.md
