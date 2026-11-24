@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use chrono::{DateTime, Datelike, SecondsFormat, Utc};
+use chrono::{DateTime, Datelike as _, SecondsFormat, Utc};
 use ppe::praxis_policy_core::extensions::RequestExtension;
 
 use crate::{ExportedSpanTraceId, filter::HttpFilterContext, trace_context::TraceContext};
