@@ -357,6 +357,10 @@ fn upgrade_with_transfer_encoding_chunked_handled_safely() {
          0\r\n\
          \r\n";
     let raw = http_send(proxy.addr(), request);
+    if cfg!(feature = "hyper") {
+        assert_eq!(parse_status(&raw), 403, "Hyper refuses WebSocket passthrough");
+        return;
+    }
     let status = parse_status(&raw);
 
     assert!(
@@ -387,6 +391,10 @@ fn upgrade_request_with_body_handled_safely() {
         body.len()
     );
     let raw = http_send(proxy.addr(), &request);
+    if cfg!(feature = "hyper") {
+        assert_eq!(parse_status(&raw), 403, "Hyper refuses WebSocket passthrough");
+        return;
+    }
     let status = parse_status(&raw);
 
     assert!(

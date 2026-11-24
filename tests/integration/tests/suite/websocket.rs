@@ -182,6 +182,10 @@ fn upgrade_rejected_by_upstream_returns_normal_response() {
          \r\n"
     );
     let raw = http_send(proxy.addr(), &request);
+    if cfg!(feature = "hyper") {
+        assert_eq!(parse_status(&raw), 403, "Hyper refuses WebSocket passthrough");
+        return;
+    }
     let status = parse_status(&raw);
 
     assert_eq!(status, 200, "non-websocket backend should return normal 200, not 101");
