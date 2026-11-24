@@ -73,7 +73,9 @@ pub(super) fn record_attempt_failure(error: &pingora_core::Error, ctx: &mut Ping
         return;
     }
 
-    if *error.esource() != pingora_core::ErrorSource::Downstream {
+    if *error.esource() != pingora_core::ErrorSource::Downstream
+        && ctx.upgrade_failure != Some(crate::http::pingora::context::UpgradeFailure::Local)
+    {
         let error_type = bounded_upstream_error_type(error.etype());
         for span in [&ctx.upstream_exchange_span, &ctx.upstream_client_span] {
             span.record("otel.status_code", "ERROR");

@@ -15,6 +15,8 @@ pub(crate) struct WebSocketOffer {
     pub(crate) key: String,
     /// Client-offered subprotocol tokens.
     pub(crate) subprotocols: Vec<String>,
+    /// Validated extension names available for the upstream to select.
+    extension_names: HashSet<String>,
     /// Original extension offers, including parameters, in wire order.
     pub(crate) extensions: Vec<http::HeaderValue>,
 }
@@ -49,13 +51,19 @@ pub(crate) fn classify_request(
     version: Version,
     websocket_permitted: bool,
 ) -> Result<Option<WebSocketOffer>, UpgradeRefusal> {
-    Ok(
-        parse_request(headers, method, version, websocket_permitted)?.map(|offer| WebSocketOffer {
-            key: offer.key.to_owned(),
-            extensions: headers.get_all("sec-websocket-extensions").iter().cloned().collect(),
-            subprotocols: offer.subprotocols.into_iter().map(str::to_owned).collect(),
-        }),
-    )
+    let Some(offer) = parse_request(headers, method, version)? else {
+        return Ok(None);
+    };
+    let names = offered_extension_names(headers).map_err(|_reason| malformed_handshake())?;
+    if !websocket_permitted {
+        return Err(denied_upgrade());
+    }
+    Ok(Some(WebSocketOffer {
+        key: offer.key.to_owned(),
+        extension_names: names,
+        extensions: headers.get_all("sec-websocket-extensions").iter().cloned().collect(),
+        subprotocols: offer.subprotocols.into_iter().map(str::to_owned).collect(),
+    }))
 }
 
 /// Parse and validate a client offer without copying header strings.
@@ -63,7 +71,6 @@ fn parse_request<'head>(
     headers: &'head HeaderMap,
     method: &Method,
     version: Version,
-    websocket_permitted: bool,
 ) -> Result<Option<BorrowedOffer<'head>>, UpgradeRefusal> {
     if version != Version::HTTP_11 || !contains_list_token(headers, "upgrade", "websocket") {
         return Ok(None);
@@ -82,9 +89,6 @@ fn parse_request<'head>(
     let key = websocket_key(headers)?;
     validate_websocket_version(headers)?;
     let subprotocols = parse_subprotocols(headers)?;
-    if !websocket_permitted {
-        return Err(denied_upgrade());
-    }
     Ok(Some(BorrowedOffer { key, subprotocols }))
 }
 
@@ -147,27 +151,34 @@ fn validate_selected_extensions(offer: &WebSocketOffer, headers: &HeaderMap) -> 
     if fields.next().is_some() {
         return Err("multiple Sec-WebSocket-Extensions response fields");
     }
-    let mut offered = HashSet::new();
-    for field in &offer.extensions {
-        for name in extension_names(field)? {
-            offered.insert(name?);
-        }
-    }
     let mut names = extension_names(selected)?.peekable();
     if names.peek().is_none() {
         return Err("empty WebSocket extension selection");
     }
     for name in names {
-        if !offered.contains(name?) {
+        if !offer.extension_names.contains(name?) {
             return Err("WebSocket response selected an unoffered extension");
         }
     }
     Ok(())
 }
 
+/// Parse the client extension fields before contacting an endpoint.
+fn offered_extension_names(headers: &HeaderMap) -> Result<HashSet<String>, &'static str> {
+    let mut names = HashSet::new();
+    for field in headers.get_all("sec-websocket-extensions") {
+        for name in extension_names(field)? {
+            names.insert(name?.to_owned());
+        }
+    }
+    if names.is_empty() && headers.contains_key("sec-websocket-extensions") {
+        return Err("empty WebSocket extension offer");
+    }
+    Ok(names)
+}
+
 /// Extract each extension token before its optional semicolon-separated parameters.
 /// RFC 6455 restricts even unescaped quoted parameter values to the token grammar.
-#[cfg(feature = "pingora")]
 fn extension_names(
     field: &http::HeaderValue,
 ) -> Result<impl Iterator<Item = Result<&str, &'static str>>, &'static str> {
@@ -180,7 +191,6 @@ fn extension_names(
 }
 
 /// Parse the generic RFC 6455 extension grammar before comparing the selected name.
-#[cfg(feature = "pingora")]
 fn parse_extension_name(item: &str) -> Result<&str, &'static str> {
     let mut parts = item.split(';').map(trim_ows);
     let name = parts
@@ -200,7 +210,6 @@ fn parse_extension_name(item: &str) -> Result<&str, &'static str> {
 }
 
 /// A quoted parameter must unescape to a nonempty token (RFC 6455 section 9.1).
-#[cfg(feature = "pingora")]
 fn valid_extension_value(value: &str) -> bool {
     let Some(inner) = value.strip_prefix('"').and_then(|rest| rest.strip_suffix('"')) else {
         return is_token(value);
@@ -243,7 +252,7 @@ pub(crate) fn validate_forwarded_request(
     headers: &HeaderMap,
     version: Version,
 ) -> Result<(), &'static str> {
-    let Ok(Some(forwarded)) = parse_request(headers, method, version, true) else {
+    let Ok(Some(forwarded)) = parse_request(headers, method, version) else {
         return Err("forwarded request no longer contains a valid WebSocket offer");
     };
     if headers.get_all("sec-websocket-extensions").iter().ne(&offer.extensions)
@@ -560,6 +569,16 @@ mod tests {
                 .subprotocols,
             ["chat", "Chat"]
         );
+    }
+
+    #[test]
+    fn malformed_client_extension_offer_is_refused_during_admission() {
+        let mut request = valid_request();
+        for value in ["sample; mode=", ", ,"] {
+            request.insert("sec-websocket-extensions", value.parse().unwrap());
+            let refusal = classify_request(&request, &Method::GET, Version::HTTP_11, true).unwrap_err();
+            assert_eq!(refusal, malformed_handshake());
+        }
     }
 
     #[test]

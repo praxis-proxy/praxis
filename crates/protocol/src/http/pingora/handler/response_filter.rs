@@ -1114,11 +1114,10 @@ mod tests {
         headers.insert("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==".parse().unwrap());
         headers.insert("sec-websocket-version", "13".parse().unwrap());
         let mut ctx = PingoraRequestCtx::default();
-        ctx.admitted_websocket = Some(Box::new(crate::http::upgrade::WebSocketOffer {
-            key: "dGhlIHNhbXBsZSBub25jZQ==".to_owned(),
-            subprotocols: Vec::new(),
-            extensions: Vec::new(),
-        }));
+        ctx.admitted_websocket =
+            crate::http::upgrade::classify_request(&headers, &http::Method::GET, http::Version::HTTP_11, true)
+                .unwrap()
+                .map(Box::new);
         ctx.request_snapshot = Some(Request {
             method: http::Method::GET,
             uri: http::Uri::from_static("/"),
