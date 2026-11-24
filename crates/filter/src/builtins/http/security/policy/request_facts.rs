@@ -63,7 +63,10 @@ impl RequestFacts {
     /// The facts of `request` on `ctx`'s connection.
     fn of(ctx: &HttpFilterContext<'_>, request: &Request, trusted_proxies: &[CidrRange]) -> Self {
         Self {
-            request: super::request_context::get_request_context(ctx),
+            request: super::request_state::state(ctx)
+                .and_then(|state| state.head_request.get())
+                .cloned()
+                .unwrap_or_else(|| super::request_context::get_request_context(ctx)),
             method: request.method.as_str().to_owned(),
             path: request.uri.path().to_owned(),
             query: request.uri.query().map(str::to_owned),

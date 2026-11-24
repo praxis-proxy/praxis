@@ -175,6 +175,7 @@ impl FilterPipeline {
             }
             restore_pre_request_results(ctx, pf);
             ctx.current_filter_id = Some(pf.filter_id);
+            self.ensure_matching_trace_context(ctx);
             let outcome = run_request_head_filter(
                 http_filter.as_ref(),
                 ctx,
@@ -604,7 +605,7 @@ impl FilterPipeline {
 
     /// Initialize correlation when a trace filter matches the evolving pre-read headers.
     ///
-    /// Only for a `StreamBuffer` pre-read, which runs before the request phase.
+    /// Used during head admission and a `StreamBuffer` pre-read, before the request phase.
     /// Once the request phase has run, it decided whether `trace_context` ran,
     /// and re-matching against the rewritten request would start a context for
     /// a request whose trace filter was skipped.

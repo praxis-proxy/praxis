@@ -162,7 +162,7 @@ pub(super) enum ResponseCustomState {
 /// `global.defaults.http` or an `http:` route; other placements fail to load.
 /// See [Header assertions].
 ///
-/// Request correlation is captured at this filter's first request or body
+/// Request correlation is captured at this filter's first head, request, or body
 /// callback and reused in response hooks. `request.trace_id` prefers the
 /// exported root HTTP request span's trace ID, published when the `otel`
 /// feature is compiled in and an exporter is configured, so an audit record
@@ -176,10 +176,8 @@ pub(super) enum ResponseCustomState {
 /// Missing trace context logs at debug and leaves the
 /// request slot absent, or environment-only when `environment` is configured.
 /// `request.span_id` is unset: no exported span ID is carried.
-/// Establish the final request ID before this filter's first callback: in a
-/// normal header-first chain, place `request_id` and ID-rewriting filters before
-/// `policy`. Later ID changes are not reflected in the snapshot, and body
-/// pre-read callbacks can precede header filters even in that order.
+/// Head admission and body pre-read can run before ordinary request filters.
+/// ID changes after the first policy callback do not update its snapshot.
 ///
 /// Both IDs can originate from inbound client headers, depending on how the
 /// `trace_context` and `request_id` filters are configured, so they are
@@ -1758,7 +1756,9 @@ impl PolicyFilter {
     }
 
     /// Request view including trusted header mutations from earlier head filters.
-    fn head_view(&self, ctx: &HttpFilterContext<'_>) -> RequestView {
+    fn head_view(&self, ctx: &mut HttpFilterContext<'_>) -> RequestView {
+        let request = super::request_context::get_request_context(ctx);
+        state_mut(ctx).head_request.get_or_init(|| request);
         let facts = RequestFacts::capture_head(ctx, &self.trusted_proxies);
         let headers = facts.headers();
         RequestView::new(Arc::new(facts), headers, SecretHeaderProvenance::default())

@@ -3,6 +3,8 @@
 # Supplies request and trace identifiers, a timestamp, and the deployment environment to policy rules in both request and response phases.
 #
 # Usage:
+#   sudo install -d /etc/praxis
+#   sudo install -m 0644 tests/integration/fixtures/request-context-policy.yaml /etc/praxis/request-context-policy.yaml
 #   cargo run -p praxis-proxy -- -c examples/configs/security/policy-request-context.yaml
 
 listeners:

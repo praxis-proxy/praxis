@@ -297,6 +297,12 @@ async fn request_context_survives_all_hooks_and_body_first_admission() {
             let mut ctx = make_filter_context(&req);
             let clock = FixedTimeSource::new(std::time::Duration::from_millis(1_700_000_000_123));
             ctx.time_source = &clock;
+            assert!(matches!(
+                pipeline.execute_http_request_head(&mut ctx).await.unwrap(),
+                FilterAction::Continue
+            ));
+            let later = FixedTimeSource::new(std::time::Duration::from_secs(1_800_000_000));
+            ctx.time_source = &later;
             if body_first {
                 let action = pipeline
                     .execute_http_request_body(&mut ctx, &mut None, true)
@@ -308,8 +314,6 @@ async fn request_context_survives_all_hooks_and_body_first_admission() {
                 pipeline.execute_http_request(&mut ctx).await.unwrap(),
                 FilterAction::Continue
             ));
-            let later = FixedTimeSource::new(std::time::Duration::from_secs(1_800_000_000));
-            ctx.time_source = &later;
             ctx.extensions
                 .get_mut::<crate::trace_context::TraceContext>()
                 .unwrap()

@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, Datelike, SecondsFormat, Utc};
 use ppe::praxis_policy_core::extensions::RequestExtension;
 
 use crate::{ExportedSpanTraceId, filter::HttpFilterContext, trace_context::TraceContext};
@@ -34,6 +34,7 @@ pub(super) fn get_request_context(ctx: &HttpFilterContext<'_>) -> Option<Arc<Req
     let timestamp = i64::try_from(now.as_secs())
         .ok()
         .and_then(|seconds| DateTime::<Utc>::from_timestamp(seconds, now.subsec_nanos()))
+        .filter(|time| time.year() <= 9999)
         .map(|time| time.to_rfc3339_opts(SecondsFormat::Millis, true));
     let request_id = trace.map(|trace| trace.request_id().to_owned());
     let trace_id = exported.or_else(|| trace.map(|trace| trace.trace_id().to_owned()));
@@ -109,6 +110,7 @@ mod tests {
     fn request_ids_are_preserved_when_the_clock_cannot_be_formatted() {
         let req = make_request(Method::GET, "/");
         for duration in [
+            Duration::from_secs(253_402_300_800), // 10000-01-01 UTC
             Duration::MAX,
             Duration::from_secs(u64::try_from(i64::MAX).expect("positive seconds")),
         ] {
