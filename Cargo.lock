@@ -3464,6 +3464,7 @@ version = "0.8.0"
 dependencies = [
  "arc-swap",
  "async-trait",
+ "base64 0.23.1",
  "bytes",
  "futures",
  "h2",

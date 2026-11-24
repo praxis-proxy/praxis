@@ -68,6 +68,9 @@ pub(super) async fn run(
     }
 
     let mut request = capture_client(flight, connection, parts);
+    if let Some(phase) = reject_unsupported_upgrade(flight, &request) {
+        return phase;
+    }
     if let Err(phase) = Box::pin(head_phase(flight, &mut request)).await {
         return phase;
     }
@@ -80,6 +83,26 @@ pub(super) async fn run(
     let span = flight.ctx.request_span.clone();
     let result = Box::pin(run_pipeline(&flight.pipeline, request, &mut flight.ctx).instrument(span)).await;
     Box::pin(outcome(flight, result)).await
+}
+
+/// Refuse malformed, denied, or adapter-unsupported HTTP upgrade requests.
+fn reject_unsupported_upgrade(flight: &mut Flight, request: &Request) -> Option<RequestPhase> {
+    let refusal = match crate::http::upgrade::classify_request(
+        &request.headers,
+        &request.method,
+        flight.version,
+        flight.pipeline.permits_upgrade("websocket"),
+    ) {
+        Ok(Some(_offer)) => crate::http::upgrade::unsupported_upgrade(),
+        Ok(None) => return None,
+        Err(refusal) => refusal,
+    };
+    flight.ctx.stamp_error_type(refusal.code);
+    Some(refuse(
+        flight,
+        request,
+        Rejection::status(refusal.status).with_body(refusal.message.as_bytes()),
+    ))
 }
 
 /// Record the request for a pre-pipeline exit, so the fallback access record
