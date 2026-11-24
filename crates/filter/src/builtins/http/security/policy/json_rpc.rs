@@ -515,10 +515,7 @@ fn rewrite_resource_result(
 /// later messages' text comes from `PromptResult.messages` (see
 /// [`build_prompt_result`]). Removed text is sent as empty text, never the
 /// original. `result.description` follows the vetted value.
-fn rewrite_prompt_result(
-    result_obj: &mut serde_json::Map<String, serde_json::Value>,
-    message: &Message,
-) -> Option<()> {
+fn rewrite_prompt_result(result_obj: &mut serde_json::Map<String, serde_json::Value>, message: &Message) -> Option<()> {
     let prompt = message.content.iter().find_map(|part| match part {
         ContentPart::PromptResult { content } => Some(content),
         _ => None,

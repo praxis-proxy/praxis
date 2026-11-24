@@ -3314,9 +3314,10 @@ impl HttpFilter for PolicyFilter {
         // fails closed when that entity has a response hook.
         if content.is_empty() {
             if self.inspects_mcp_response(&method) && !body_bytes.is_empty() && !parsed.is_json_rpc_error() {
-                return Err(
-                    format!("policy: JSON-RPC {entity_type} response has no inspectable result or valid error").into(),
-                );
+                return Err(format!(
+                    "policy: JSON-RPC {entity_type} response has no inspectable result or valid error"
+                )
+                .into());
             }
             // A tool error has nothing for a tool hook to read. Prompt and
             // resource hooks still run, with an empty payload, so their

@@ -475,14 +475,15 @@ invalid_html_tags = "deny"
 missing_crate_level_docs = "deny"
 private_doc_tests = "allow"
 
-# BRANCH DEV: resolve the PPE crates from the policy feature branch so this
-# branch builds against the unreleased resource/prompt projection (issue 75).
-# Remove once PPE 0.7.0 ships with these fields and this branch merges to main.
+# BRANCH DEV: pin the PPE crates to a commit on the policy feature branch
+# (feat/apl-resource-prompt-projection) so this branch builds against the
+# unreleased resource/prompt projection (issue 75). Remove before merging,
+# once PPE is released with these changes.
 [patch.crates-io]
-praxis-policy = { git = "https://github.com/monshri/policy.git", branch = "feat/apl-resource-prompt-projection" }
-praxis-policy-core = { git = "https://github.com/monshri/policy.git", branch = "feat/apl-resource-prompt-projection" }
-praxis-policy-orchestration = { git = "https://github.com/monshri/policy.git", branch = "feat/apl-resource-prompt-projection" }
-praxis-policy-apl-core = { git = "https://github.com/monshri/policy.git", branch = "feat/apl-resource-prompt-projection" }
-praxis-policy-apl-cmf = { git = "https://github.com/monshri/policy.git", branch = "feat/apl-resource-prompt-projection" }
-praxis-policy-apl-runtime = { git = "https://github.com/monshri/policy.git", branch = "feat/apl-resource-prompt-projection" }
-praxis-policy-builtins = { git = "https://github.com/monshri/policy.git", branch = "feat/apl-resource-prompt-projection" }
+praxis-policy = { git = "https://github.com/monshri/policy.git", rev = "80dd6564f77a9d9ad5089a79a5df756b6ad7b7bb" }
+praxis-policy-core = { git = "https://github.com/monshri/policy.git", rev = "80dd6564f77a9d9ad5089a79a5df756b6ad7b7bb" }
+praxis-policy-orchestration = { git = "https://github.com/monshri/policy.git", rev = "80dd6564f77a9d9ad5089a79a5df756b6ad7b7bb" }
+praxis-policy-apl-core = { git = "https://github.com/monshri/policy.git", rev = "80dd6564f77a9d9ad5089a79a5df756b6ad7b7bb" }
+praxis-policy-apl-cmf = { git = "https://github.com/monshri/policy.git", rev = "80dd6564f77a9d9ad5089a79a5df756b6ad7b7bb" }
+praxis-policy-apl-runtime = { git = "https://github.com/monshri/policy.git", rev = "80dd6564f77a9d9ad5089a79a5df756b6ad7b7bb" }
+praxis-policy-builtins = { git = "https://github.com/monshri/policy.git", rev = "80dd6564f77a9d9ad5089a79a5df756b6ad7b7bb" }

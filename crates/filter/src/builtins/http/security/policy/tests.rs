@@ -3235,7 +3235,11 @@ fn build_resource_result_makes_one_part_per_entry_without_joining() {
     );
     let parts = build_response_content_for_method("resources/read", "hr://a", "corr-1", &ParsedEnvelope::parse(&body));
     let resources = resource_parts(&parts);
-    assert_eq!(resources.len(), 2, "one part per entry, blob entries included; got {parts:?}");
+    assert_eq!(
+        resources.len(),
+        2,
+        "one part per entry, blob entries included; got {parts:?}"
+    );
     assert_eq!(resources[0].uri, "hr://a");
     assert_eq!(resources[0].mime_type.as_deref(), Some("application/json"));
     assert_eq!(
@@ -3265,18 +3269,19 @@ fn build_resource_result_keeps_an_empty_read_inspectable() {
     );
 }
 
+/// `prompts/get` result with a text message and a mixed image/text message.
+const PROMPT_RESULT_BODY: &[u8] = br#"{"jsonrpc":"2.0","id":1,"result":{"description":"a report","messages":[
+     {"role":"user","content":{"type":"text","text":"first SSN 123-45-6789"}},
+     {"role":"assistant","content":[{"type":"image","data":"QUJD","mimeType":"image/png"},
+                                    {"type":"text","text":"second"}]}]}}"#;
+
 #[test]
 fn build_prompt_result_reads_the_first_message_and_carries_every_message() {
     use ppe::praxis_policy_core::cmf::{ContentPart, Role};
 
     use super::json_rpc::{ParsedEnvelope, build_response_content_for_method};
 
-    let body = bytes::Bytes::from_static(
-        br#"{"jsonrpc":"2.0","id":1,"result":{"description":"a report","messages":[
-             {"role":"user","content":{"type":"text","text":"first SSN 123-45-6789"}},
-             {"role":"assistant","content":[{"type":"image","data":"QUJD","mimeType":"image/png"},
-                                            {"type":"text","text":"second"}]}]}}"#,
-    );
+    let body = bytes::Bytes::from_static(PROMPT_RESULT_BODY);
     let parts = build_response_content_for_method("prompts/get", "summarize", "corr-1", &ParsedEnvelope::parse(&body));
     let [ContentPart::PromptResult { content: prompt }] = parts.as_slice() else {
         panic!("expected one PromptResult; got {parts:?}");
@@ -3288,7 +3293,11 @@ fn build_prompt_result_reads_the_first_message_and_carries_every_message() {
         Some("first SSN 123-45-6789"),
         "`content` is the first message's text only, never joined"
     );
-    assert_eq!(prompt.messages.len(), 2, "every message is carried for per-message projection");
+    assert_eq!(
+        prompt.messages.len(),
+        2,
+        "every message is carried for per-message projection"
+    );
     assert_eq!(prompt.messages[0].role, Role::User);
     assert_eq!(prompt.messages[1].role, Role::Assistant);
     assert!(
@@ -3298,31 +3307,38 @@ fn build_prompt_result_reads_the_first_message_and_carries_every_message() {
     );
 }
 
-#[test]
-fn reserialize_resource_writes_each_part_back_to_its_entry() {
-    use ppe::praxis_policy_core::cmf::{ContentPart, Message, Resource, Role};
+/// `resources/read` result with a text entry, a blob entry, and an entry policy empties.
+const RESOURCE_RESULT_BODY: &[u8] = br#"{"jsonrpc":"2.0","id":1,"result":{"contents":[
+     {"uri":"hr://a","mimeType":"application/json","text":"SSN 123-45-6789"},
+     {"uri":"hr://b","mimeType":"image/png","blob":"QUJD"},
+     {"uri":"hr://c","text":"removed by policy"}]}}"#;
 
-    use super::json_rpc::reserialize_json_rpc_response_body;
+/// A `Resource` content part for `uri` carrying optional text `content`.
+fn resource_part(uri: &str, content: Option<&str>) -> ppe::praxis_policy_core::cmf::ContentPart {
+    use ppe::praxis_policy_core::cmf::{ContentPart, Resource};
 
-    let original = bytes::Bytes::from_static(
-        br#"{"jsonrpc":"2.0","id":1,"result":{"contents":[
-             {"uri":"hr://a","mimeType":"application/json","text":"SSN 123-45-6789"},
-             {"uri":"hr://b","mimeType":"image/png","blob":"QUJD"},
-             {"uri":"hr://c","text":"removed by policy"}]}}"#,
-    );
-    let resource = |uri: &str, content: Option<&str>| ContentPart::Resource {
+    ContentPart::Resource {
         content: Resource {
             uri: uri.to_owned(),
             content: content.map(str::to_owned),
             ..Resource::default()
         },
-    };
+    }
+}
+
+#[test]
+fn reserialize_resource_writes_each_part_back_to_its_entry() {
+    use ppe::praxis_policy_core::cmf::{Message, Role};
+
+    use super::json_rpc::reserialize_json_rpc_response_body;
+
+    let original = bytes::Bytes::from_static(RESOURCE_RESULT_BODY);
     let message = Message::with_content(
         Role::Assistant,
         vec![
-            resource("hr://a", Some("[REDACTED]")),
-            resource("hr://b", None),
-            resource("hr://c", None),
+            resource_part("hr://a", Some("[REDACTED]")),
+            resource_part("hr://b", None),
+            resource_part("hr://c", None),
         ],
     );
     let out = reserialize_json_rpc_response_body(parse_dom(&original), "resources/read", &message).expect("Some");
@@ -3340,49 +3356,67 @@ fn reserialize_resource_writes_each_part_back_to_its_entry() {
     assert!(!String::from_utf8_lossy(&out).contains("123-45-6789"));
 }
 
+/// `prompts/get` result with two text messages, the first carrying an SSN.
+const PROMPT_REWRITE_BODY: &[u8] = br#"{"jsonrpc":"2.0","id":1,"result":{"description":"old","messages":[
+     {"role":"user","content":{"type":"text","text":"first SSN 123-45-6789"}},
+     {"role":"assistant","content":{"type":"text","text":"second"}}]}}"#;
+
+/// A successful `summarize` prompt result part with the given vetted fields.
+fn prompt_result_part(
+    description: &str,
+    messages: Vec<ppe::praxis_policy_core::cmf::Message>,
+    content: &str,
+) -> ppe::praxis_policy_core::cmf::ContentPart {
+    use ppe::praxis_policy_core::cmf::{ContentPart, PromptResult};
+
+    ContentPart::PromptResult {
+        content: PromptResult {
+            prompt_request_id: "corr-1".to_owned(),
+            prompt_name: "summarize".to_owned(),
+            description: Some(description.to_owned()),
+            messages,
+            content: Some(content.to_owned()),
+            is_error: false,
+            error_message: None,
+        },
+    }
+}
+
 #[test]
 fn reserialize_prompt_writes_each_message_back_keeping_roles() {
-    use ppe::praxis_policy_core::cmf::{ContentPart, Message, PromptResult, Role};
+    use ppe::praxis_policy_core::cmf::{Message, Role};
 
     use super::json_rpc::reserialize_json_rpc_response_body;
 
-    let original = bytes::Bytes::from_static(
-        br#"{"jsonrpc":"2.0","id":1,"result":{"description":"old","messages":[
-             {"role":"user","content":{"type":"text","text":"first SSN 123-45-6789"}},
-             {"role":"assistant","content":{"type":"text","text":"second"}}]}}"#,
-    );
+    let original = bytes::Bytes::from_static(PROMPT_REWRITE_BODY);
     let message = Message::with_content(
         Role::Assistant,
-        vec![ContentPart::PromptResult {
-            content: PromptResult {
-                prompt_request_id: "corr-1".to_owned(),
-                prompt_name: "summarize".to_owned(),
-                description: Some("new".to_owned()),
-                messages: vec![
-                    Message::text(Role::User, "ignored: message one comes from `content`"),
-                    Message::text(Role::Assistant, "second, vetted"),
-                ],
-                content: Some("[REDACTED]".to_owned()),
-                is_error: false,
-                error_message: None,
-            },
-        }],
+        vec![prompt_result_part(
+            "new",
+            vec![
+                Message::text(Role::User, "ignored: message one comes from `content`"),
+                Message::text(Role::Assistant, "second, vetted"),
+            ],
+            "[REDACTED]",
+        )],
     );
     let out = reserialize_json_rpc_response_body(parse_dom(&original), "prompts/get", &message).expect("Some");
     let parsed: serde_json::Value = serde_json::from_slice(&out).expect("valid JSON");
     let messages = parsed["result"]["messages"].as_array().expect("messages array");
     assert_eq!(messages.len(), 2, "the response keeps its messages; got {messages:?}");
     assert_eq!(messages[0]["role"], "user");
-    assert_eq!(messages[0]["content"]["text"], "[REDACTED]", "message one comes from `content`");
+    assert_eq!(
+        messages[0]["content"]["text"], "[REDACTED]",
+        "message one comes from `content`"
+    );
     assert_eq!(messages[1]["role"], "assistant");
     assert_eq!(messages[1]["content"]["text"], "second, vetted");
     assert_eq!(parsed["result"]["description"], "new");
     assert!(!String::from_utf8_lossy(&out).contains("123-45-6789"));
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn prompt_and_resource_result_redaction_reaches_the_served_bytes() {
-    let routes = r#"routes:
+/// Routes that redact PII from a `summarize` prompt result and a CSV resource.
+const RESULT_REDACTION_ROUTES: &str = r#"routes:
   - prompt: summarize
     result:
       content: "str | pii.redact"
@@ -3390,21 +3424,54 @@ async fn prompt_and_resource_result_redaction_reaches_the_served_bytes() {
     result:
       content: "str | pii.redact"
 "#;
-    let prompt_response = r#"{"jsonrpc":"2.0","id":1,"result":{"messages":[{"role":"user","content":{"type":"text","text":"Jane Smith, SSN 123-45-6789, salary 125000"}}]}}"#;
-    let resource_response = r#"{"jsonrpc":"2.0","id":1,"result":{"contents":[{"uri":"file:///data.csv","text":"Jane Smith, SSN 123-45-6789, salary 125000"}]}}"#;
-    for (method, name, request, response, pointer) in [
-        ("prompts/get", "summarize", PROMPT_REQUEST, prompt_response, "/result/messages/0/content/text"),
-        ("resources/read", "file:///data.csv", RESOURCE_REQUEST, resource_response, "/result/contents/0/text"),
-    ] {
-        let (_dir, path) = write_entity_config_with_routes(routes);
+
+/// `prompts/get` result whose only message carries an SSN.
+const PROMPT_PII_RESPONSE: &str = r#"{"jsonrpc":"2.0","id":1,"result":{"messages":[{"role":"user","content":{"type":"text","text":"Jane Smith, SSN 123-45-6789, salary 125000"}}]}}"#;
+
+/// `resources/read` result whose only entry carries an SSN.
+const RESOURCE_PII_RESPONSE: &str = r#"{"jsonrpc":"2.0","id":1,"result":{"contents":[{"uri":"file:///data.csv","text":"Jane Smith, SSN 123-45-6789, salary 125000"}]}}"#;
+
+/// One redaction case: (method, name, request, response, JSON pointer to the redacted text).
+type RedactionCase = (&'static str, &'static str, &'static [u8], &'static str, &'static str);
+
+/// Redaction cases for a prompt result and a resource result.
+const RESULT_REDACTION_CASES: [RedactionCase; 2] = [
+    (
+        "prompts/get",
+        "summarize",
+        PROMPT_REQUEST,
+        PROMPT_PII_RESPONSE,
+        "/result/messages/0/content/text",
+    ),
+    (
+        "resources/read",
+        "file:///data.csv",
+        RESOURCE_REQUEST,
+        RESOURCE_PII_RESPONSE,
+        "/result/contents/0/text",
+    ),
+];
+
+#[tokio::test(flavor = "multi_thread")]
+async fn prompt_and_resource_result_redaction_reaches_the_served_bytes() {
+    for (method, name, request, response, pointer) in RESULT_REDACTION_CASES {
+        let (_dir, path) = write_entity_config_with_routes(RESULT_REDACTION_ROUTES);
         let served = post_only_round_trip(path, method, name, request, response).await;
-        assert_eq!(served.len(), response.len(), "the served body fits the committed length");
+        assert_eq!(
+            served.len(),
+            response.len(),
+            "the served body fits the committed length"
+        );
         assert!(
             !String::from_utf8_lossy(&served).contains("123-45-6789"),
             "{method}: the SSN must not reach the client; got {served:?}",
         );
         let parsed: serde_json::Value = serde_json::from_slice(&served).expect("served body is JSON");
-        assert_eq!(parsed.pointer(pointer), Some(&serde_json::json!("[REDACTED]")), "{method}: {parsed}");
+        assert_eq!(
+            parsed.pointer(pointer),
+            Some(&serde_json::json!("[REDACTED]")),
+            "{method}: {parsed}"
+        );
     }
 }
 
@@ -8500,8 +8567,8 @@ fn prompt_and_resource_result_rules_build_a_filter() {
         let (_dir, path) = write_entity_config_with_routes(&format!(
             "routes:\n  - {entity}: example\n    result:\n      content: \"str | mask(2)\"\n"
         ));
-        let config =
-            serde_yaml::from_str(&format!("config_path: {path}\nbody_access: read_write\n")).expect("filter configuration");
+        let config = serde_yaml::from_str(&format!("config_path: {path}\nbody_access: read_write\n"))
+            .expect("filter configuration");
         assert!(
             PolicyFilter::from_config(&config).is_ok(),
             "a {entity} `result.content` rule must load now that its result is projected",
@@ -8644,8 +8711,16 @@ async fn uninspectable_prompt_and_resource_responses_fail_closed() {
     let malformed = r#"{"jsonrpc":"2.0","id":1,"result":{"contents":[{"text":"SSN 123-45-6789"#;
     for case in ENTITY_CASES {
         for (shape, response, expected) in [
-            ("malformed JSON", malformed, "malformed JSON-RPC response cannot be inspected"),
-            ("a tool-shaped result", ROOMY_MCP_RESPONSE, "response has no inspectable result"),
+            (
+                "malformed JSON",
+                malformed,
+                "malformed JSON-RPC response cannot be inspected",
+            ),
+            (
+                "a tool-shaped result",
+                ROOMY_MCP_RESPONSE,
+                "response has no inspectable result",
+            ),
         ] {
             let (_dir, path) = (case.config)();
             let error = post_only_exchange(path, case.method, case.name, case.request, response)
@@ -8666,12 +8741,18 @@ async fn prompt_and_resource_errors_and_empty_results_still_reach_the_hook() {
     let empty_prompt = r#"{"jsonrpc":"2.0","id":1,"result":{"messages":[]},"padding":"long enough that a replacement deny envelope fits inside the committed content length without being trimmed"}"#;
     let empty_resource = r#"{"jsonrpc":"2.0","id":1,"result":{"contents":[]},"padding":"long enough that a replacement deny envelope fits inside the committed content length without being trimmed"}"#;
     for case in ENTITY_CASES {
-        let empty = if case.entity == "prompt" { empty_prompt } else { empty_resource };
+        let empty = if case.entity == "prompt" {
+            empty_prompt
+        } else {
+            empty_resource
+        };
         for (shape, response) in [("a JSON-RPC error", upstream_error), ("an empty result", empty)] {
             let (_dir, path) = (case.config)();
             let served = post_only_exchange(path, case.method, case.name, case.request, response)
                 .await
-                .unwrap_or_else(|error| panic!("a {} response with {shape} must not fail closed: {error}", case.entity));
+                .unwrap_or_else(|error| {
+                    panic!("a {} response with {shape} must not fail closed: {error}", case.entity)
+                });
             let parsed: serde_json::Value = serde_json::from_slice(&served).expect("served body is JSON");
             assert_eq!(
                 parsed["error"]["data"]["violation"], case.violation,

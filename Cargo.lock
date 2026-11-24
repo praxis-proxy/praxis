@@ -25,6 +25,7 @@ checksum = "0fca89247609239eeb6915e6991111866b92d7b31025e69302bbf430cc4d2c38"
 dependencies = [
  "cfg-if",
  "const-random",
+ "getrandom 0.3.4",
  "getrandom 0.4.3",
  "once_cell",
  "serde",
@@ -1408,7 +1409,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e35d6e78f4cebb90e51d543db8fe41528851d6deeef6ef21ebd4bfdc1e784776"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2805,7 +2806,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3338,7 +3339,7 @@ dependencies = [
 [[package]]
 name = "praxis-policy"
 version = "0.7.0"
-source = "git+https://github.com/monshri/policy.git?branch=feat%2Fapl-resource-prompt-projection#a9197abaa42d2e4ce409d9f2f3be0cfad805731d"
+source = "git+https://github.com/monshri/policy.git?rev=80dd6564f77a9d9ad5089a79a5df756b6ad7b7bb#80dd6564f77a9d9ad5089a79a5df756b6ad7b7bb"
 dependencies = [
  "praxis-policy-apl-cmf",
  "praxis-policy-apl-core",
@@ -3351,7 +3352,7 @@ dependencies = [
 [[package]]
 name = "praxis-policy-apl-cmf"
 version = "0.7.0"
-source = "git+https://github.com/monshri/policy.git?branch=feat%2Fapl-resource-prompt-projection#a9197abaa42d2e4ce409d9f2f3be0cfad805731d"
+source = "git+https://github.com/monshri/policy.git?rev=80dd6564f77a9d9ad5089a79a5df756b6ad7b7bb#80dd6564f77a9d9ad5089a79a5df756b6ad7b7bb"
 dependencies = [
  "chrono",
  "praxis-policy-apl-core",
@@ -3362,7 +3363,7 @@ dependencies = [
 [[package]]
 name = "praxis-policy-apl-core"
 version = "0.7.0"
-source = "git+https://github.com/monshri/policy.git?branch=feat%2Fapl-resource-prompt-projection#a9197abaa42d2e4ce409d9f2f3be0cfad805731d"
+source = "git+https://github.com/monshri/policy.git?rev=80dd6564f77a9d9ad5089a79a5df756b6ad7b7bb#80dd6564f77a9d9ad5089a79a5df756b6ad7b7bb"
 dependencies = [
  "async-trait",
  "futures",
@@ -3378,7 +3379,7 @@ dependencies = [
 [[package]]
 name = "praxis-policy-apl-runtime"
 version = "0.7.0"
-source = "git+https://github.com/monshri/policy.git?branch=feat%2Fapl-resource-prompt-projection#a9197abaa42d2e4ce409d9f2f3be0cfad805731d"
+source = "git+https://github.com/monshri/policy.git?rev=80dd6564f77a9d9ad5089a79a5df756b6ad7b7bb#80dd6564f77a9d9ad5089a79a5df756b6ad7b7bb"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3395,7 +3396,7 @@ dependencies = [
 [[package]]
 name = "praxis-policy-builtins"
 version = "0.7.0"
-source = "git+https://github.com/monshri/policy.git?branch=feat%2Fapl-resource-prompt-projection#a9197abaa42d2e4ce409d9f2f3be0cfad805731d"
+source = "git+https://github.com/monshri/policy.git?rev=80dd6564f77a9d9ad5089a79a5df756b6ad7b7bb#80dd6564f77a9d9ad5089a79a5df756b6ad7b7bb"
 dependencies = [
  "arc-swap",
  "argon2",
@@ -3440,7 +3441,7 @@ dependencies = [
 [[package]]
 name = "praxis-policy-core"
 version = "0.7.0"
-source = "git+https://github.com/monshri/policy.git?branch=feat%2Fapl-resource-prompt-projection#a9197abaa42d2e4ce409d9f2f3be0cfad805731d"
+source = "git+https://github.com/monshri/policy.git?rev=80dd6564f77a9d9ad5089a79a5df756b6ad7b7bb#80dd6564f77a9d9ad5089a79a5df756b6ad7b7bb"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -3469,7 +3470,7 @@ dependencies = [
 [[package]]
 name = "praxis-policy-orchestration"
 version = "0.7.0"
-source = "git+https://github.com/monshri/policy.git?branch=feat%2Fapl-resource-prompt-projection#a9197abaa42d2e4ce409d9f2f3be0cfad805731d"
+source = "git+https://github.com/monshri/policy.git?rev=80dd6564f77a9d9ad5089a79a5df756b6ad7b7bb#80dd6564f77a9d9ad5089a79a5df756b6ad7b7bb"
 dependencies = [
  "futures",
  "tokio",
@@ -3917,8 +3918,8 @@ version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be769465445e8c1474e9c5dac2018218498557af32d9ed057325ec9a41ae81bf"
 dependencies = [
- "heck 0.5.0",
- "itertools 0.14.0",
+ "heck 0.4.1",
+ "itertools 0.13.0",
  "log",
  "multimap",
  "once_cell",
@@ -3938,7 +3939,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.13.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -3951,7 +3952,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ad9c5423459fa2f729b8d9235fab810aa29628b171467744fc86d21460ad70d"
 dependencies = [
  "anyhow",
- "itertools 0.15.0",
+ "itertools 0.13.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -4139,7 +4140,7 @@ dependencies = [
  "arrayvec 0.7.8",
  "async-channel",
  "flurry",
- "hashbrown 0.17.2",
+ "hashbrown 0.16.1",
  "log",
  "parking_lot",
  "rand 0.10.4",
@@ -4614,7 +4615,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5235,10 +5236,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5247,7 +5248,7 @@ version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8c27177b12a6399ffc08b98f76f7c9a1f4fe9fc967c784c5a071fa8d93cf7e1"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -6110,7 +6111,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
