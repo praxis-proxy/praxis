@@ -2270,6 +2270,9 @@ fn branch_chains_are_rejected_even_with_every_validation_override() {
     assert!(FilterPipeline::build_with_chains(&mut entries, &registry, &chains, &insecure, &[]).is_err());
 }
 
+/// Remove `Connection` and nominated fields per [RFC 9110 Section 7.6.1].
+///
+/// [RFC 9110 Section 7.6.1]: https://datatracker.ietf.org/doc/html/rfc9110#section-7.6.1
 #[tokio::test]
 async fn handler_connection_nominations_cannot_remove_response_policy_headers() {
     for kind in [HandlerKind::Buffered, HandlerKind::Consume] {
@@ -2331,6 +2334,9 @@ async fn handler_connection_nominations_cannot_remove_response_policy_headers() 
     }
 }
 
+/// Remove `Connection` and nominated fields per [RFC 9110 Section 7.6.1].
+///
+/// [RFC 9110 Section 7.6.1]: https://datatracker.ietf.org/doc/html/rfc9110#section-7.6.1
 #[tokio::test]
 async fn response_policy_hop_by_hop_fields_are_stripped_at_commitment() {
     let state = State::default();
@@ -2360,6 +2366,9 @@ async fn response_policy_hop_by_hop_fields_are_stripped_at_commitment() {
     assert_complete(&state, 1);
 }
 
+/// Remove `Connection` and nominated fields per [RFC 9110 Section 7.6.1].
+///
+/// [RFC 9110 Section 7.6.1]: https://datatracker.ietf.org/doc/html/rfc9110#section-7.6.1
 #[tokio::test]
 async fn replacement_connection_nominations_cannot_erase_prior_policy_headers() {
     let state = State::default();
