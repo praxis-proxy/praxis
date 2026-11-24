@@ -125,6 +125,10 @@ impl ListenerPipelines {
     ///
     /// No-op if the listener name is not present.
     ///
+    /// # Errors
+    ///
+    /// Returns an error if a live adapter cannot serve the incoming pipeline.
+    ///
     /// ```
     /// use std::{collections::HashMap, sync::Arc};
     ///
@@ -139,16 +143,25 @@ impl ListenerPipelines {
     /// map.insert("web".to_owned(), old);
     /// let pipelines = ListenerPipelines::new(map);
     ///
-    /// pipelines.swap("web", new);
-    /// pipelines.swap(
-    ///     "nonexistent",
-    ///     Arc::new(FilterPipeline::build(&mut [], &registry).unwrap()),
-    /// );
+    /// pipelines.swap("web", new).unwrap();
+    /// pipelines
+    ///     .swap(
+    ///         "nonexistent",
+    ///         Arc::new(FilterPipeline::build(&mut [], &registry).unwrap()),
+    ///     )
+    ///     .unwrap();
     /// ```
-    pub fn swap(&self, listener_name: &str, new_pipeline: Arc<FilterPipeline>) {
+    pub fn swap(
+        &self,
+        listener_name: &str,
+        new_pipeline: Arc<FilterPipeline>,
+    ) -> Result<(), praxis_filter::FilterError> {
         if let Some(slot) = self.pipelines.get(listener_name) {
+            #[cfg(feature = "local-http")]
+            crate::http::local::require_supported_adapter(&new_pipeline)?;
             slot.store(new_pipeline);
         }
+        Ok(())
     }
 
     /// Every filesystem path any filter in any listener's pipeline reads
@@ -214,7 +227,7 @@ mod tests {
 
         let registry = FilterRegistry::with_builtins();
         let new_pipeline = Arc::new(FilterPipeline::build(&mut [], &registry).unwrap());
-        pipelines.swap("web", Arc::clone(&new_pipeline));
+        pipelines.swap("web", Arc::clone(&new_pipeline)).unwrap();
 
         let new_ptr = Arc::as_ptr(&pipelines.get("web").unwrap().load());
         assert_ne!(old_ptr, new_ptr, "swap should replace the pipeline pointer");
@@ -228,7 +241,7 @@ mod tests {
 
         let registry = FilterRegistry::with_builtins();
         let new_pipeline = Arc::new(FilterPipeline::build(&mut [], &registry).unwrap());
-        pipelines.swap("web", new_pipeline);
+        pipelines.swap("web", new_pipeline).unwrap();
 
         let still_old_ptr = Arc::as_ptr(&old_guard);
         assert_eq!(
@@ -242,7 +255,7 @@ mod tests {
         let pipelines = make_pipelines(&["web"]);
         let registry = FilterRegistry::with_builtins();
         let new_pipeline = Arc::new(FilterPipeline::build(&mut [], &registry).unwrap());
-        pipelines.swap("nonexistent", new_pipeline);
+        pipelines.swap("nonexistent", new_pipeline).unwrap();
         assert!(pipelines.get("web").is_some(), "existing pipeline should be unaffected");
     }
 
@@ -286,7 +299,9 @@ mod tests {
         protocols.insert("web".to_owned(), ProtocolKind::Http);
         let pipelines = ListenerPipelines::with_protocols(map, protocols);
 
-        pipelines.swap("web", Arc::new(FilterPipeline::build(&mut [], &registry).unwrap()));
+        pipelines
+            .swap("web", Arc::new(FilterPipeline::build(&mut [], &registry).unwrap()))
+            .unwrap();
 
         assert_eq!(
             pipelines.protocol("web"),

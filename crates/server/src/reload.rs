@@ -127,6 +127,15 @@ pub(crate) fn reload_pipelines(
         },
     };
 
+    // A swap is also checked at publication, so preflight every candidate
+    // before publishing any state for this generation.
+    #[cfg(feature = "local-http")]
+    for name in new_pipelines.listener_names() {
+        if let Some(slot) = new_pipelines.get(name) {
+            praxis_protocol::http::local::require_supported_adapter(&slot.load())?;
+        }
+    }
+
     // Emit this reload's change diagnostics under the OLD logging baseline:
     // refresh_baseline below applies the new config's env-filter immediately,
     // and a reload that both requires a restart and lowers verbosity must not
@@ -191,7 +200,7 @@ pub(crate) fn reload_pipelines(
             skipped.push(name);
             continue;
         }
-        live.swap(name, new_slot.load_full());
+        live.swap(name, new_slot.load_full())?;
         swapped.push(name);
     }
 

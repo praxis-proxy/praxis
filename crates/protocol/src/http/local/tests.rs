@@ -1629,6 +1629,20 @@ async fn compiled_minimal_example_runs_through_the_contract() {
     require_supported_adapter(&FilterPipeline::build(&mut [], &registry).unwrap()).unwrap();
 }
 
+#[test]
+fn local_route_swap_preserves_live_pipeline() {
+    let registry = praxis_filter::FilterRegistry::with_builtins();
+    let original = Arc::new(FilterPipeline::build(&mut [], &registry).unwrap());
+    let replacement = pipeline(vec![Fixture::owner(State::default())]);
+    let live = crate::ListenerPipelines::with_protocols(
+        std::collections::HashMap::from([("web".into(), Arc::clone(&original))]),
+        std::collections::HashMap::from([("web".into(), praxis_core::config::ProtocolKind::Http)]),
+    );
+
+    assert!(live.swap("web", replacement).is_err());
+    assert!(Arc::ptr_eq(&live.get("web").unwrap().load_full(), &original));
+}
+
 #[tokio::test]
 async fn cors_and_configured_security_headers_cover_success_denial_and_handler_error() {
     for (behavior, handler, status, outcome) in [
