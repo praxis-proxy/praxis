@@ -142,9 +142,10 @@ fn connection_nominates_negotiation(headers: &HeaderMap) -> bool {
 /// negotiation belongs to the endpoints; the adapter preserves those fields.
 #[cfg(feature = "pingora")]
 fn validate_selected_extensions(offer: &WebSocketOffer, headers: &HeaderMap) -> Result<(), &'static str> {
-    let selected = headers.get_all("sec-websocket-extensions");
-    if selected.iter().next().is_none() {
-        return Ok(());
+    let mut fields = headers.get_all("sec-websocket-extensions").iter();
+    let Some(selected) = fields.next() else { return Ok(()) };
+    if fields.next().is_some() {
+        return Err("multiple Sec-WebSocket-Extensions response fields");
     }
     let mut offered = HashSet::new();
     for field in &offer.extensions {
@@ -152,16 +153,16 @@ fn validate_selected_extensions(offer: &WebSocketOffer, headers: &HeaderMap) -> 
             offered.insert(name?);
         }
     }
-    let mut has_selection = false;
-    for field in selected {
-        for name in extension_names(field)? {
-            has_selection = true;
-            if !offered.contains(name?) {
-                return Err("WebSocket response selected an unoffered extension");
-            }
+    let mut names = extension_names(selected)?.peekable();
+    if names.peek().is_none() {
+        return Err("empty WebSocket extension selection");
+    }
+    for name in names {
+        if !offered.contains(name?) {
+            return Err("WebSocket response selected an unoffered extension");
         }
     }
-    has_selection.then_some(()).ok_or("empty WebSocket extension selection")
+    Ok(())
 }
 
 /// Extract each extension token before its optional semicolon-separated parameters.
@@ -642,6 +643,11 @@ mod tests {
         let mut response = valid_response();
         response.insert("sec-websocket-extensions", "permessage-deflate".parse().unwrap());
         validate_response(&offer, &response).unwrap();
+        response.append("sec-websocket-extensions", "permessage-deflate".parse().unwrap());
+        assert_eq!(
+            validate_response(&offer, &response),
+            Err("multiple Sec-WebSocket-Extensions response fields")
+        );
         response.insert("sec-websocket-extensions", "other".parse().unwrap());
         assert!(validate_response(&offer, &response).is_err());
         request.remove("sec-websocket-extensions");
@@ -660,7 +666,10 @@ mod tests {
             "sample; =fast",
             "sample; mode=",
         ] {
-            assert!(parse_extension_name(invalid).is_err());
+            assert_eq!(
+                parse_extension_name(invalid),
+                Err("malformed WebSocket extension parameter")
+            );
         }
     }
 

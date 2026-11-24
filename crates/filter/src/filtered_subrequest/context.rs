@@ -130,6 +130,7 @@ pub(super) fn build_sub_filter_context<'a>(
         request_header_mutations: Vec::new(),
         request_start: runtime.request_start,
         response_body_bytes: 0,
+        response_delivery_complete: None,
         response_body_mode: pipeline.body_capabilities().response_body_mode,
         response_header: None,
         response_headers_modified: false,

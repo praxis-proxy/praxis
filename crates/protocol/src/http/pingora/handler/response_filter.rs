@@ -68,6 +68,14 @@ pub(super) async fn execute(
         .as_ref()
         .filter(|_| is_upgrade_response)
         .map(|offer| crate::http::upgrade::validate_response(offer, &upstream_response.headers));
+    if let Some(Err(reason)) = upstream_handshake {
+        return Err(invalid_upgrade_response(
+            ctx,
+            UpgradeFailure::Upstream,
+            "upgrade_response_invalid",
+            reason,
+        ));
+    }
     super::upstream_response::strip_hop_by_hop_response(upstream_response, is_upgrade_response);
     upstream_response.strip_reserved_internal();
     let mut resp = response_header_from_pingora(upstream_response);
@@ -94,7 +102,7 @@ pub(super) async fn execute(
 
     // Evaluate HTTP-status retry before running response filters / committing
     // the response phase, so a retriable 5xx does not leak to the client.
-    if let Some(err) = maybe_retry_response(ctx, upstream_response.status.as_u16()) {
+    if !is_upgrade_response && let Some(err) = maybe_retry_response(ctx, upstream_response.status.as_u16()) {
         return Err(err);
     }
 
@@ -128,14 +136,6 @@ pub(super) async fn execute(
                 UpgradeFailure::Local,
                 "upgrade_synthesized_101",
                 "101 response was not accepted from the upstream",
-            ));
-        }
-        if let Some(Err(reason)) = upstream_handshake {
-            return Err(invalid_upgrade_response(
-                ctx,
-                UpgradeFailure::Upstream,
-                "upgrade_response_invalid",
-                reason,
             ));
         }
         if [
@@ -380,10 +380,13 @@ pub(in crate::http) async fn run_response_filters(
     Some((r, headers_modified))
 }
 
-/// Remove forbidden 204 framing after filters have had their last header edit.
+/// Remove forbidden switching and 204 framing after filters have had their last header edit.
 /// HEAD and 304 may retain a hypothetical representation length.
 fn strip_no_content_framing(resp: &mut praxis_filter::Response) -> bool {
-    if resp.status != http::StatusCode::NO_CONTENT {
+    if !matches!(
+        resp.status,
+        http::StatusCode::SWITCHING_PROTOCOLS | http::StatusCode::NO_CONTENT
+    ) {
         return false;
     }
     let length = resp.headers.remove(http::header::CONTENT_LENGTH).is_some();
@@ -592,6 +595,7 @@ mod tests {
     #[tokio::test]
     async fn no_content_response_phase_removes_framing_and_reports_modified_headers() {
         for status in [
+            http::StatusCode::SWITCHING_PROTOCOLS,
             http::StatusCode::NO_CONTENT,
             http::StatusCode::NOT_MODIFIED,
             http::StatusCode::OK,
@@ -605,7 +609,10 @@ mod tests {
             let mut ctx = make_ctx();
             let (result, changed) = run_response_filters(&pipeline, &mut ctx, &mut response).await.unwrap();
             assert!(matches!(result, Ok(FilterAction::Continue)));
-            let removed = status == http::StatusCode::NO_CONTENT;
+            let removed = matches!(
+                status,
+                http::StatusCode::SWITCHING_PROTOCOLS | http::StatusCode::NO_CONTENT
+            );
             assert_eq!(changed, removed, "write-back must see removed header names");
             assert_eq!(response.headers.contains_key(http::header::CONTENT_LENGTH), !removed);
             assert_eq!(response.headers.contains_key(http::header::TRANSFER_ENCODING), !removed);

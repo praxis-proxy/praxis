@@ -76,8 +76,8 @@ body-access declaration. `BodyAccess::None` remains the default.
 ## Handshake validation and limits
 
 Praxis accepts one valid HTTP/1.1 `websocket` offer using WebSocket version 13.
-It validates the client key, the upstream `Sec-WebSocket-Accept` response, and
-the selected subprotocol, and selected extension names before committing the
+It validates the client key, the upstream `Sec-WebSocket-Accept` response,
+the selected subprotocol, and the selected extension names before committing the
 upgrade. Endpoints negotiate extension parameters. Filters must preserve the
 negotiated subprotocol and extensions. Malformed handshakes
 receive `400`; denied WebSocket offers or mixed WebSocket protocol offers receive `403`; unsolicited or

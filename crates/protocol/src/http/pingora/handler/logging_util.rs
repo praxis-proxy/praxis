@@ -30,9 +30,7 @@ pub(in crate::http) fn emit_completion_observers(pipeline: &FilterPipeline, stat
         if !needs_access_fallback {
             return;
         }
-        // The access_log filter already logged this request (e.g. a bodyless
-        // response whose on_response emitted before a later filter rejected):
-        // no fallback record, or it would duplicate.
+        // A body hook may already have logged this request.
         if praxis_filter::access_record_already_emitted(&filter_ctx) {
             return;
         }

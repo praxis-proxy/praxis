@@ -498,6 +498,7 @@ macro_rules! filter_context {
             request_body_mode: $ctx.request_body_mode,
             request_start: $ctx.request_start,
             response_body_bytes: $ctx.response_body_bytes,
+            response_delivery_complete: Some($ctx.response_delivery_complete),
             response_body_mode: $ctx.response_body_mode,
             response_header: $response_header,
             response_headers_modified: false,

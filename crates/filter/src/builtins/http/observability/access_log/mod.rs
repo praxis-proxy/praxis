@@ -1219,8 +1219,8 @@ fn dial_tcp(address: &str, timeout: Duration) -> std::io::Result<std::net::TcpSt
 /// Cached response metadata for emit on the body phase.
 #[derive(Clone, Debug)]
 struct AccessLogState {
-    /// Wait for the written status when admission can still reject the head.
-    pending_upgrade: bool,
+    /// Wait for the written status when response filters can still change the head.
+    bodyless: bool,
     status: u16,
     response_headers: Option<http::HeaderMap>,
 }
@@ -1653,8 +1653,7 @@ fn request_is_grpc(ctx: &HttpFilterContext<'_>) -> bool {
 ///
 /// The protocol-layer fallback checks for it via
 /// [`access_record_already_emitted`] so a request the filter already logged
-/// (e.g. a bodyless response whose `on_response` emitted before a later
-/// response filter rejected) does not gain a duplicate fallback record.
+/// at end of stream does not gain a duplicate fallback record.
 struct AccessRecordEmitted;
 
 /// Whether an access record has already been emitted for this request.
@@ -1865,11 +1864,11 @@ impl HttpFilter for AccessLogFilter {
     }
 
     fn on_request_complete(&self, ctx: &mut HttpFilterContext<'_>, status: u16) {
-        // A 101 head is provisional until the adapter accepts the final handshake.
-        // Failed upgrades use the normal incomplete-request fallback.
-        if let Some(state) = ctx.get_filter_state_mut::<AccessLogState>()
-            && state.pending_upgrade
-            && (state.status == status || matches!(status, 204 | 304))
+        // Only a delivered head completes a bodyless response. The adapter's
+        // fallback records failed delivery using the status written to the client.
+        if ctx.response_delivery_complete == Some(true)
+            && let Some(state) = ctx.get_filter_state_mut::<AccessLogState>()
+            && state.bodyless
         {
             let headers = state.response_headers.take();
             self.maybe_emit(ctx, status, headers.as_ref());
@@ -1889,17 +1888,12 @@ impl HttpFilter for AccessLogFilter {
         let bodyless = Self::is_bodyless(resp.status, &ctx.request.method);
         let response_headers = self.needs_response_headers.then(|| resp.headers.clone());
 
-        // Emit from the captured map before storing it: re-reading the
-        // freshly inserted state cloned the header map a second time on
-        // every bodyless response.
-        let pending_upgrade = bodyless
-            && (resp.status == http::StatusCode::SWITCHING_PROTOCOLS
-                || crate::pipeline::opaque_upgrade_requested(&ctx.extensions));
-        if bodyless && !pending_upgrade {
+        // Filtered subrequests have no protocol completion callback.
+        if bodyless && ctx.response_delivery_complete.is_none() {
             self.maybe_emit(ctx, status, response_headers.as_ref());
         }
         ctx.insert_filter_state(AccessLogState {
-            pending_upgrade,
+            bodyless,
             status,
             response_headers,
         });
@@ -1919,9 +1913,12 @@ impl HttpFilter for AccessLogFilter {
         if end_of_stream {
             // The record is emitted at most once, so the stored map can
             // be moved out rather than cloned per response.
-            let (status, headers) = ctx
-                .get_filter_state_mut::<AccessLogState>()
-                .map_or((0, None), |state| (state.status, state.response_headers.take()));
+            let adapter_managed = ctx.response_delivery_complete.is_some();
+            let state = ctx.get_filter_state_mut::<AccessLogState>();
+            if adapter_managed && state.as_ref().is_some_and(|state| state.bodyless) {
+                return Ok(FilterAction::Continue);
+            }
+            let (status, headers) = state.map_or((0, None), |state| (state.status, state.response_headers.take()));
             self.maybe_emit(ctx, status, headers.as_ref());
         }
         Ok(FilterAction::Continue)
