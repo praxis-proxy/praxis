@@ -475,14 +475,14 @@ invalid_html_tags = "deny"
 missing_crate_level_docs = "deny"
 private_doc_tests = "allow"
 
-# LOCAL DEV: resolve the PPE crates from the sibling policy checkout so the
-# feature branch builds against the unreleased resource/prompt projection.
-# Remove before merging to main.
+# BRANCH DEV: resolve the PPE crates from the policy feature branch so this
+# branch builds against the unreleased resource/prompt projection (issue 75).
+# Remove once PPE 0.7.0 ships with these fields and this branch merges to main.
 [patch.crates-io]
-praxis-policy = { path = "../policy/crates/ppe" }
-praxis-policy-core = { path = "../policy/crates/ppe-core" }
-praxis-policy-orchestration = { path = "../policy/crates/ppe-orchestration" }
-praxis-policy-apl-core = { path = "../policy/crates/ppe-apl-core" }
-praxis-policy-apl-cmf = { path = "../policy/crates/ppe-apl-cmf" }
-praxis-policy-apl-runtime = { path = "../policy/crates/ppe-apl-runtime" }
-praxis-policy-builtins = { path = "../policy/crates/builtins" }
+praxis-policy = { git = "https://github.com/monshri/policy.git", branch = "feat/apl-resource-prompt-projection" }
+praxis-policy-core = { git = "https://github.com/monshri/policy.git", branch = "feat/apl-resource-prompt-projection" }
+praxis-policy-orchestration = { git = "https://github.com/monshri/policy.git", branch = "feat/apl-resource-prompt-projection" }
+praxis-policy-apl-core = { git = "https://github.com/monshri/policy.git", branch = "feat/apl-resource-prompt-projection" }
+praxis-policy-apl-cmf = { git = "https://github.com/monshri/policy.git", branch = "feat/apl-resource-prompt-projection" }
+praxis-policy-apl-runtime = { git = "https://github.com/monshri/policy.git", branch = "feat/apl-resource-prompt-projection" }
+praxis-policy-builtins = { git = "https://github.com/monshri/policy.git", branch = "feat/apl-resource-prompt-projection" }
