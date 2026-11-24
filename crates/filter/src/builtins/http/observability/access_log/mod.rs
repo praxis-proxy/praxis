@@ -1863,6 +1863,10 @@ impl HttpFilter for AccessLogFilter {
         true
     }
 
+    fn requires_listener_completion(&self) -> bool {
+        false
+    }
+
     fn on_request_complete(&self, ctx: &mut HttpFilterContext<'_>, status: u16) {
         // Only a delivered head completes a bodyless response. The adapter's
         // fallback records failed delivery using the status written to the client.

@@ -139,7 +139,7 @@ impl FilterPipeline {
             enable_upstream_binding(&mut filters, &catalog);
         }
         let body_capabilities = compute_body_capabilities(&filters);
-        let has_request_completion_observer = super::pipeline_has_request_completion_observer(&filters);
+        let completion_observers = super::completion_observers(&filters);
         let compression = extract_compression_config(&filters);
         let may_select_streaming_subrequest_response = filters_may_select_streaming_subrequest_response(&filters);
         let trace_context_filter_indices = filters
@@ -159,7 +159,7 @@ impl FilterPipeline {
         let mut pipeline = Self {
             upgrade_policy: None,
             body_capabilities,
-            has_request_completion_observer,
+            completion_observers,
             compression,
             filters,
             request_head_filter_indices,

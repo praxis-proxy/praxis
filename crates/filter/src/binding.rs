@@ -546,7 +546,7 @@ impl<'a> ChainBindingContext<'a> {
         entries: &[FilterEntry],
         chain_label: &str,
     ) -> Result<(), FilterError> {
-        if pipeline.has_request_completion_observer() {
+        if pipeline.requires_listener_completion() {
             return Err(format!(
                 "outbound chain '{chain_label}' contains a request-completion observer; \
                  terminal completion runs only for listener requests"

@@ -251,6 +251,12 @@ pub trait HttpFilter: Send + Sync {
         false
     }
 
+    /// Whether use in a subrequest must be rejected because its executor lacks
+    /// a terminal completion hook. Observers with a subrequest fallback can opt out.
+    fn requires_listener_completion(&self) -> bool {
+        self.observes_request_completion()
+    }
+
     /// The cluster names this filter can load balance.
     ///
     /// Load-balancing filters override this so validation can compare

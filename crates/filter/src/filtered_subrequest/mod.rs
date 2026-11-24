@@ -789,7 +789,7 @@ impl FilteredSubrequestExecutor {
         // Every error below is handed back through `into_parts`, which restores
         // one parent checkpoint, so enter the scope before the first of them.
         enter_nested_upstream_scope(&mut extensions, inherits_binding);
-        if pipeline.has_request_completion_observer() {
+        if pipeline.requires_listener_completion() {
             return Err(FilteredSubrequestError::new(
                 "filtered_subrequest: request-completion observers require a listener request"
                     .to_owned()

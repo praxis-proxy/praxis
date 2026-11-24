@@ -15,6 +15,9 @@ pub(crate) struct WebSocketOffer {
     pub(crate) key: String,
     /// Client-offered subprotocol tokens.
     pub(crate) subprotocols: Vec<String>,
+    /// Expected RFC 6455 handshake response computed by the local crypto provider.
+    #[cfg(feature = "pingora")]
+    expected_accept: String,
     /// Validated extension names available for the upstream to select.
     extension_names: HashSet<String>,
     /// Original extension offers, including parameters, in wire order.
@@ -60,6 +63,8 @@ pub(crate) fn classify_request(
     }
     Ok(Some(WebSocketOffer {
         key: offer.key.to_owned(),
+        #[cfg(feature = "pingora")]
+        expected_accept: expected_accept(offer.key)?,
         extension_names: names,
         extensions: headers.get_all("sec-websocket-extensions").iter().cloned().collect(),
         subprotocols: offer.subprotocols.into_iter().map(str::to_owned).collect(),
@@ -92,6 +97,21 @@ fn parse_request<'head>(
     Ok(Some(BorrowedOffer { key, subprotocols }))
 }
 
+/// Compute the RFC 6455 response before dispatch so a local provider failure
+/// cannot count against an upstream endpoint.
+#[cfg(feature = "pingora")]
+fn expected_accept(key: &str) -> Result<String, UpgradeRefusal> {
+    let challenge = format!("{key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+    let digest = openssl::hash::hash(openssl::hash::MessageDigest::sha1(), challenge.as_bytes()).map_err(|_error| {
+        UpgradeRefusal {
+            status: 500,
+            code: "upgrade_digest_error",
+            message: "failed to calculate WebSocket handshake",
+        }
+    })?;
+    Ok(STANDARD.encode(digest))
+}
+
 /// Check the final, post-filter response before a 101 can reach the client.
 #[cfg(feature = "pingora")]
 pub(crate) fn validate_response(offer: &WebSocketOffer, headers: &HeaderMap) -> Result<(), &'static str> {
@@ -102,11 +122,7 @@ pub(crate) fn validate_response(offer: &WebSocketOffer, headers: &HeaderMap) -> 
     if accept.is_empty() {
         return Err("WebSocket response supplied an empty Sec-WebSocket-Accept");
     }
-    let challenge = format!("{}258EAFA5-E914-47DA-95CA-C5AB0DC85B11", offer.key);
-    let digest = openssl::hash::hash(openssl::hash::MessageDigest::sha1(), challenge.as_bytes())
-        .map_err(|_digest_error| "failed to calculate the WebSocket handshake digest")?;
-    let expected = STANDARD.encode(digest);
-    if accept != expected {
+    if accept != offer.expected_accept {
         return Err("WebSocket response supplied an invalid Sec-WebSocket-Accept");
     }
     validate_selected_extensions(offer, headers)?;
@@ -124,7 +140,7 @@ pub(crate) fn validate_switch_headers(headers: &HeaderMap) -> Result<(), &'stati
     }
     let websocket =
         is_single_websocket_offer(headers).map_err(|_parse_error| "WebSocket response has malformed Upgrade syntax")?;
-    if !websocket {
+    if !websocket || !praxis_core::next_hop_headers::has_websocket_upgrade(headers) {
         return Err("WebSocket response selected multiple or unsupported Upgrade protocols");
     }
     Ok(())
@@ -706,6 +722,8 @@ mod tests {
             "a syntactically valid list of unsupported protocols is not malformed"
         );
 
+        response.insert("upgrade", "websocket,".parse().unwrap());
+        validate_switch_headers(&response).unwrap_err();
         response.insert("upgrade", "websocket, bad protocol".parse().unwrap());
         assert_eq!(
             validate_response(&offer, &response),

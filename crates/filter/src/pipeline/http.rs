@@ -482,7 +482,7 @@ impl FilterPipeline {
         let interim = ctx.response_header.as_ref().is_some_and(|response| {
             response.status.is_informational() && response.status != http::StatusCode::SWITCHING_PROTOCOLS
         });
-        let track_completion = self.has_request_completion_observer
+        let track_completion = self.has_request_completion_observer()
             && ctx.response_header.is_some()
             && !interim
             && http_filter.observes_request_completion();

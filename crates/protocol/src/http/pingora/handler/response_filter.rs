@@ -45,6 +45,14 @@ pub(super) async fn execute(
     ctx: &mut PingoraRequestCtx,
 ) -> pingora_core::Result<()> {
     ctx.connection_upgraded = false;
+    let is_final = super::fail_to_proxy::is_final_response(upstream_response);
+    if is_final {
+        ctx.upstream_response_status = Some(upstream_response.status.as_u16());
+        praxis_core::subrequest::record_http_client_status(
+            &ctx.upstream_client_span,
+            upstream_response.status.as_u16(),
+        );
+    }
     if upstream_response.status == 101 && ctx.admitted_websocket.is_none() {
         error!("upstream sent unsolicited 101 without matching request Upgrade header");
         return Err(invalid_upgrade_response(
@@ -83,14 +91,6 @@ pub(super) async fn execute(
     // fingerprint comparison is unnecessary — skip hashing the whole header
     // map on every response for listeners with no filters.
     let name_fingerprint_before = (!pipeline.is_empty()).then(|| header_name_fingerprint(&resp.headers));
-    let is_final = super::fail_to_proxy::is_final_response(upstream_response);
-    if is_final {
-        ctx.upstream_response_status = Some(upstream_response.status.as_u16());
-        praxis_core::subrequest::record_http_client_status(
-            &ctx.upstream_client_span,
-            upstream_response.status.as_u16(),
-        );
-    }
     // A gRPC error is often a Trailers-Only response: a single HEADERS
     // frame carrying `grpc-status`, with no trailer frame to follow. The
     // header block is then the only place the outcome appears.
@@ -901,6 +901,7 @@ mod tests {
         let result = execute(&pipeline, &mut resp, &mut ctx).await;
 
         assert!(result.is_err(), "unsolicited WebSocket 101 should be rejected");
+        assert_eq!(ctx.upstream_response_status, Some(101));
         assert!(
             !ctx.connection_upgraded,
             "unsolicited 101 must not set connection_upgraded"
