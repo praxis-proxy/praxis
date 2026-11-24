@@ -55,6 +55,17 @@ pub(super) async fn execute(
         ctx.stamp_error_type("upgrade_response_invalid");
         return Err(invalid_upgrade_response("WebSocket switching requires HTTP/1.1"));
     }
+    if is_upgrade_response && crate::http::upgrade::connection_nominates_negotiation(&upstream_response.headers) {
+        ctx.stamp_error_type("upgrade_response_invalid");
+        return Err(invalid_upgrade_response(
+            "Connection removes WebSocket negotiation headers",
+        ));
+    }
+    let upstream_handshake = ctx
+        .admitted_websocket
+        .as_ref()
+        .filter(|_| is_upgrade_response)
+        .map(|offer| crate::http::upgrade::validate_response(offer, &upstream_response.headers));
     super::upstream_response::strip_hop_by_hop_response(upstream_response, is_upgrade_response);
     upstream_response.strip_reserved_internal();
     let mut resp = response_header_from_pingora(upstream_response);
@@ -93,6 +104,13 @@ pub(super) async fn execute(
     if matches!(result, Err(_) | Ok(FilterAction::Reject(_))) {
         return handle_response_result(result, upstream_response, resp, false, is_bodyless, ctx);
     }
+    // Upstream-supplied reserved internal headers were stripped before the
+    // pipeline ran, but a response filter can add one afterwards; re-strip so
+    // the "reserved headers never reach the client" invariant holds after the
+    // pipeline too. An empty pipeline cannot add headers, so skip the pass.
+    if !pipeline.is_empty() {
+        hop_by_hop::strip_reserved_internal_header_map(&mut resp.headers);
+    }
     if is_upgrade_response && resp.status != http::StatusCode::SWITCHING_PROTOCOLS {
         ctx.stamp_error_type("upgrade_response_status_modified");
         return Err(invalid_upgrade_response(
@@ -106,9 +124,17 @@ pub(super) async fn execute(
                 "101 response was not accepted from the upstream",
             ));
         }
-        if ["sec-websocket-protocol", "sec-websocket-extensions"]
-            .iter()
-            .any(|name| upstream_response.headers.get_all(*name) != resp.headers.get_all(*name))
+        if let Some(Err(reason)) = upstream_handshake {
+            ctx.stamp_error_type("upgrade_response_invalid");
+            return Err(invalid_upgrade_response(reason));
+        }
+        if [
+            "sec-websocket-accept",
+            "sec-websocket-protocol",
+            "sec-websocket-extensions",
+        ]
+        .iter()
+        .any(|name| upstream_response.headers.get_all(*name) != resp.headers.get_all(*name))
         {
             ctx.stamp_error_type("upgrade_response_invalid");
             return Err(invalid_upgrade_response(
@@ -150,7 +176,7 @@ pub(super) async fn execute(
             ctx.stamp_error_type("upgrade_request_modified");
             return Err(invalid_upgrade_response(reason));
         }
-        if let Err(reason) = crate::http::upgrade::validate_response(offer, &resp.headers) {
+        if let Err(reason) = crate::http::upgrade::validate_switch_headers(&resp.headers) {
             warn!(
                 error = reason,
                 "upstream WebSocket response failed handshake validation"
@@ -191,13 +217,6 @@ pub(super) async fn execute(
         || reframed_event_stream
         || restored_chunked_framing
         || name_fingerprint_before.is_some_and(|before| header_name_fingerprint(&resp.headers) != before);
-    // Upstream-supplied reserved internal headers were stripped before the
-    // pipeline ran, but a response filter can add one afterwards; re-strip so
-    // the "reserved headers never reach the client" invariant holds after the
-    // pipeline too. An empty pipeline cannot add headers, so skip the pass.
-    if !pipeline.is_empty() {
-        hop_by_hop::strip_reserved_internal_header_map(&mut resp.headers);
-    }
     let should_snapshot_response_header = pipeline.body_capabilities().any_response_body_condition
         && matches!(
             &result,
@@ -762,7 +781,7 @@ mod tests {
         let mut ctx = make_upgrade_ctx();
         assert!(execute(&make_pipeline(), &mut response, &mut ctx).await.is_err());
         assert!(!ctx.connection_upgraded);
-        assert_eq!(ctx.error_type.as_deref(), Some("upgrade_response_invalid"));
+        assert_eq!(ctx.error_type, Some("upgrade_response_invalid"));
     }
 
     #[tokio::test]
@@ -1058,6 +1077,7 @@ mod tests {
         ctx.admitted_websocket = Some(crate::http::upgrade::WebSocketOffer {
             key: "dGhlIHNhbXBsZSBub25jZQ==".to_owned(),
             subprotocols: Vec::new(),
+            extensions: Vec::new(),
         });
         ctx.request_snapshot = Some(Request {
             method: http::Method::GET,

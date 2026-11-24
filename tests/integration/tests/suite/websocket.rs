@@ -160,24 +160,6 @@ impl HttpFilter for RequiredBoundUpstreamBodyFilter {
     }
 }
 
-/// Optional observer with the same read-only access as [`RequiredBodyFilter`].
-struct OptionalBodyFilter;
-
-#[async_trait::async_trait]
-impl HttpFilter for OptionalBodyFilter {
-    fn name(&self) -> &'static str {
-        "optional_body"
-    }
-
-    fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly(BodyRequirement::Optional)
-    }
-
-    async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        Ok(FilterAction::Continue)
-    }
-}
-
 /// Branch host that selects its nested body-processing branch.
 struct BranchHostFilter;
 
@@ -506,9 +488,10 @@ async fn selected_upstream_required_body_processing_blocks_websocket() {
 async fn optional_body_observer_allows_websocket_message_exchange() {
     let ws_backend = start_websocket_echo_backend().await;
     let proxy_port = free_port();
-    let yaml = custom_filter_yaml(proxy_port, ws_backend.port(), "optional_body");
+    let yaml = custom_filter_yaml(proxy_port, ws_backend.port(), "upgrade_body_probe");
     let config = Config::from_yaml(&yaml).unwrap();
-    let registry = registry_with("optional_body", || Box::new(OptionalBodyFilter));
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let registry = upgrade_probe_registry(Arc::clone(&observed), UpgradeResponseMutation::None);
     let _proxy = start_proxy_with_registry(&config, &registry);
     let backend_connections_after_readiness = ws_backend.connection_count();
 
@@ -523,6 +506,10 @@ async fn optional_body_observer_allows_websocket_message_exchange() {
         "the handshake should add one upstream tunnel"
     );
     drop(ws.close(None).await);
+    assert!(
+        observed.lock().unwrap().is_empty(),
+        "HTTP body hooks must not receive tunnel bytes"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -918,7 +905,10 @@ async fn malformed_or_unsupported_upstream_101_never_opens_a_tunnel() {
         let (backend_port, sent) = start_raw_upgrade_backend(response_headers).await;
         let request = websocket_request("/");
         assert_invalid_upgrade_response(backend_port, &request, case);
-        sent.await.expect("backend wrote the tested response");
+        tokio::time::timeout(Duration::from_secs(2), sent)
+            .await
+            .expect("backend response deadline")
+            .expect("backend wrote the tested response");
     }
 }
 
@@ -1291,22 +1281,6 @@ async fn read_request_headers(stream: &mut tokio::net::TcpStream) -> bool {
     }
 }
 
-/// Return the status and send a frame only if the server actually returns 101.
-fn request_status_and_probe_tunnel(addr: &str, request: &str) -> (u16, Vec<u8>) {
-    let mut stream = TcpStream::connect(addr).unwrap();
-    stream.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
-    stream.write_all(request.as_bytes()).unwrap();
-    let response = read_response_headers(&mut stream);
-    let status = parse_status(&response);
-    let frame = masked_probe_frame();
-    if status == 101 {
-        stream.write_all(&frame).unwrap();
-        let mut echoed_frame = [0_u8; 256];
-        let _echo_result = stream.read(&mut echoed_frame);
-    }
-    (status, frame)
-}
-
 /// Read the response head without waiting for a tunnel to close.
 fn read_response_headers(stream: &mut TcpStream) -> String {
     let mut response = Vec::new();
@@ -1329,16 +1303,6 @@ fn read_response_headers(stream: &mut TcpStream) -> String {
     String::from_utf8_lossy(&response).into_owned()
 }
 
-/// A small masked text frame whose wire bytes identify accidental tunneling.
-fn masked_probe_frame() -> Vec<u8> {
-    let payload = b"opaque-frame-probe";
-    let mask = [0x12_u8, 0x34, 0x56, 0x78];
-    let mut frame = vec![0x81, 0x80 | u8::try_from(payload.len()).unwrap()];
-    frame.extend_from_slice(&mask);
-    frame.extend(payload.iter().zip(mask).map(|(byte, mask_byte)| *byte ^ mask_byte));
-    frame
-}
-
 /// Require the final upstream response to fail closed without exposing a
 /// frame to request or response HTTP body hooks.
 fn assert_invalid_upgrade_response(backend_port: u16, request: &str, case: &str) {
@@ -1359,16 +1323,10 @@ fn assert_invalid_upgrade_response_with_mutation(
     let registry = upgrade_probe_registry(Arc::clone(&observed_body), mutation);
     let proxy = praxis_test_utils::start_tls_proxy_no_wait_with_registry(&config, &registry);
     praxis_test_utils::wait_for_tcp(proxy.addr());
-    let (status, frame) = request_status_and_probe_tunnel(&format!("127.0.0.1:{proxy_port}"), request);
-    let frame_observed_by_http_hooks = observed_body
-        .lock()
-        .unwrap()
-        .windows(frame.len())
-        .any(|window| window == frame.as_slice());
-    assert!(
-        !frame_observed_by_http_hooks,
-        "{case}: HTTP body hooks received bytes from an upgrade frame"
-    );
+    let mut stream = TcpStream::connect(proxy.addr()).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    stream.write_all(request.as_bytes()).unwrap();
+    let status = parse_status(&read_response_headers(&mut stream));
     assert_eq!(
         status, 502,
         "{case}: invalid final 101 must fail closed without a tunnel"

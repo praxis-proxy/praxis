@@ -51,6 +51,7 @@ mod tcp;
 #[cfg(test)]
 mod test_filters;
 mod upgrade;
+pub(crate) use upgrade::tracking_active as opaque_upgrade_requested;
 
 #[cfg(test)]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]

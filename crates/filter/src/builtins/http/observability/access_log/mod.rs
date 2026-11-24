@@ -1219,6 +1219,8 @@ fn dial_tcp(address: &str, timeout: Duration) -> std::io::Result<std::net::TcpSt
 /// Cached response metadata for emit on the body phase.
 #[derive(Clone, Debug)]
 struct AccessLogState {
+    /// Wait for the written status when admission can still reject the head.
+    pending_upgrade: bool,
     status: u16,
     response_headers: Option<http::HeaderMap>,
 }
@@ -1865,8 +1867,9 @@ impl HttpFilter for AccessLogFilter {
     fn on_request_complete(&self, ctx: &mut HttpFilterContext<'_>, status: u16) {
         // A 101 head is provisional until the adapter accepts the final handshake.
         // Failed upgrades use the normal incomplete-request fallback.
-        if status == http::StatusCode::SWITCHING_PROTOCOLS.as_u16()
-            && let Some(state) = ctx.get_filter_state_mut::<AccessLogState>()
+        if let Some(state) = ctx.get_filter_state_mut::<AccessLogState>()
+            && state.pending_upgrade
+            && state.status == status
         {
             let headers = state.response_headers.take();
             self.maybe_emit(ctx, status, headers.as_ref());
@@ -1889,10 +1892,14 @@ impl HttpFilter for AccessLogFilter {
         // Emit from the captured map before storing it: re-reading the
         // freshly inserted state cloned the header map a second time on
         // every bodyless response.
-        if bodyless && resp.status != http::StatusCode::SWITCHING_PROTOCOLS {
+        let pending_upgrade = bodyless
+            && (resp.status == http::StatusCode::SWITCHING_PROTOCOLS
+                || crate::pipeline::opaque_upgrade_requested(&ctx.extensions));
+        if bodyless && !pending_upgrade {
             self.maybe_emit(ctx, status, response_headers.as_ref());
         }
         ctx.insert_filter_state(AccessLogState {
+            pending_upgrade,
             status,
             response_headers,
         });

@@ -15,6 +15,8 @@ pub(crate) struct WebSocketOffer {
     pub(crate) key: String,
     /// Client-offered subprotocol tokens.
     pub(crate) subprotocols: Vec<String>,
+    /// Original extension offers, including parameters, in wire order.
+    pub(crate) extensions: Vec<http::HeaderValue>,
 }
 
 /// Parsed client offer borrowing handshake fields from the request head.
@@ -50,6 +52,7 @@ pub(crate) fn classify_request(
     Ok(
         parse_request(headers, method, version, websocket_permitted)?.map(|offer| WebSocketOffer {
             key: offer.key.to_owned(),
+            extensions: headers.get_all("sec-websocket-extensions").iter().cloned().collect(),
             subprotocols: offer.subprotocols.into_iter().map(str::to_owned).collect(),
         }),
     )
@@ -88,14 +91,7 @@ fn parse_request<'head>(
 /// Check the final, post-filter response before a 101 can reach the client.
 #[cfg(feature = "pingora")]
 pub(crate) fn validate_response(offer: &WebSocketOffer, headers: &HeaderMap) -> Result<(), &'static str> {
-    if !contains_list_token(headers, "connection", "upgrade") || validate_connection_tokens(headers).is_err() {
-        return Err("invalid WebSocket upgrade response headers");
-    }
-    let websocket =
-        is_single_websocket_offer(headers).map_err(|_parse_error| "WebSocket response has malformed Upgrade syntax")?;
-    if !websocket {
-        return Err("WebSocket response selected multiple or unsupported Upgrade protocols");
-    }
+    validate_switch_headers(headers)?;
     let Some(accept) = single_header(headers, "sec-websocket-accept") else {
         return Err("WebSocket response omitted Sec-WebSocket-Accept");
     };
@@ -109,7 +105,63 @@ pub(crate) fn validate_response(offer: &WebSocketOffer, headers: &HeaderMap) -> 
     if accept != expected {
         return Err("WebSocket response supplied an invalid Sec-WebSocket-Accept");
     }
+    validate_selected_extensions(offer, headers)?;
     validate_selected_subprotocol(offer, headers)
+}
+
+/// Check the hop-by-hop fields that identify an HTTP/1.1 WebSocket switch.
+#[cfg(feature = "pingora")]
+pub(crate) fn validate_switch_headers(headers: &HeaderMap) -> Result<(), &'static str> {
+    if !contains_list_token(headers, "connection", "upgrade") || validate_connection_tokens(headers).is_err() {
+        return Err("invalid WebSocket upgrade response headers");
+    }
+    let websocket =
+        is_single_websocket_offer(headers).map_err(|_parse_error| "WebSocket response has malformed Upgrade syntax")?;
+    if !websocket {
+        return Err("WebSocket response selected multiple or unsupported Upgrade protocols");
+    }
+    Ok(())
+}
+
+/// Refuse selections that hop-by-hop stripping would remove before forwarding.
+#[cfg(feature = "pingora")]
+pub(crate) fn connection_nominates_negotiation(headers: &HeaderMap) -> bool {
+    ["sec-websocket-extensions", "sec-websocket-protocol"]
+        .into_iter()
+        .any(|name| headers.contains_key(name) && contains_list_token(headers, "connection", name))
+}
+
+/// Check selected extension names against the offer. Extension-specific parameter
+/// negotiation belongs to the endpoints; the adapter preserves those fields.
+#[cfg(feature = "pingora")]
+fn validate_selected_extensions(offer: &WebSocketOffer, headers: &HeaderMap) -> Result<(), &'static str> {
+    let selected = headers.get_all("sec-websocket-extensions");
+    if selected.iter().next().is_none() {
+        return Ok(());
+    }
+    let mut offered = HashSet::new();
+    for field in &offer.extensions {
+        offered.extend(extension_names(field)?);
+    }
+    for field in selected {
+        for name in extension_names(field)? {
+            if !is_token(name) || !offered.contains(name) {
+                return Err("WebSocket response selected an unoffered extension");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Extract each extension token before its optional semicolon-separated parameters.
+/// RFC 6455 restricts even unescaped quoted parameter values to the token grammar.
+#[cfg(feature = "pingora")]
+fn extension_names(field: &http::HeaderValue) -> Result<impl Iterator<Item = &str>, &'static str> {
+    let value = field.to_str().map_err(|_error| "non-ASCII WebSocket extension")?;
+    Ok(value
+        .split(',')
+        .filter_map(|extension| extension.split(';').next())
+        .map(trim_ows))
 }
 
 /// Verify an upstream-selected subprotocol was offered exactly once.
@@ -143,7 +195,8 @@ pub(crate) fn validate_forwarded_request(
     let Ok(Some(forwarded)) = parse_request(headers, method, version, true) else {
         return Err("forwarded request no longer contains a valid WebSocket offer");
     };
-    if forwarded.key != offer.key
+    if headers.get_all("sec-websocket-extensions").iter().ne(&offer.extensions)
+        || forwarded.key != offer.key
         || !forwarded
             .subprotocols
             .iter()
@@ -518,6 +571,26 @@ mod tests {
         response = valid_response();
         response.insert("sec-websocket-protocol", "other".parse().unwrap());
         assert!(validate_response(&offer, &response).is_err());
+    }
+
+    #[cfg(feature = "pingora")]
+    #[test]
+    fn extension_selection_preserves_offered_names_and_parameters() {
+        let mut request = valid_request();
+        request.insert(
+            "sec-websocket-extensions",
+            "permessage-deflate; client_max_window_bits".parse().unwrap(),
+        );
+        let offer = classify_request(&request, &Method::GET, Version::HTTP_11, true)
+            .unwrap()
+            .unwrap();
+        let mut response = valid_response();
+        response.insert("sec-websocket-extensions", "permessage-deflate".parse().unwrap());
+        validate_response(&offer, &response).unwrap();
+        response.insert("sec-websocket-extensions", "other".parse().unwrap());
+        assert!(validate_response(&offer, &response).is_err());
+        request.remove("sec-websocket-extensions");
+        assert!(validate_forwarded_request(&offer, &Method::GET, &request, Version::HTTP_11).is_err());
     }
 
     #[test]

@@ -198,7 +198,7 @@ pub(super) fn select_bound_upstream_requirement(
 }
 
 /// Whether admission tracking was enabled by the protocol adapter.
-fn tracking_active(extensions: &RequestExtensions) -> bool {
+pub(crate) fn tracking_active(extensions: &RequestExtensions) -> bool {
     extensions
         .get::<UpgradeRequirementState>()
         .is_some_and(|state| state.upgrade_requested)
