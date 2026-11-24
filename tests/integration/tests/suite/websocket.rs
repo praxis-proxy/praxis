@@ -1378,7 +1378,7 @@ fn assert_invalid_upgrade_response_with_mutation(
         "{case}: trailing bytes after the 502"
     );
     drop(proxy);
-    let observed = observed.lock().unwrap();
+    let observed = std::mem::take(&mut *observed.lock().unwrap());
     assert!(
         observed.mutated,
         "{case}: expected the response filter to change the upstream head"
