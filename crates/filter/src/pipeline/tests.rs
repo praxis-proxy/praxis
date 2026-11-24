@@ -6175,43 +6175,7 @@ fn make_pipeline(filters: Vec<Box<dyn HttpFilter>>) -> FilterPipeline {
         .collect();
     let body_capabilities = compute_body_capabilities(&filters);
 
-    with_body_indices(FilterPipeline {
-        #[cfg(feature = "local-http")]
-        local_routes: Vec::new(),
-        #[cfg(feature = "local-http")]
-        local_http_valid: true,
-        #[cfg(feature = "local-http")]
-        nested_local_routes: false,
-        upgrade_policy: None,
-        body_capabilities,
-        has_request_completion_observer: false,
-        compression: None,
-        filters,
-        record_filter_duration_metrics: false,
-        route_templates: Arc::default(),
-        health_registry: None,
-        id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
-        kv_stores: None,
-        session_stores: None,
-        slow_start_registry: None,
-        subrequest_client: None,
-        may_select_streaming_subrequest_response: false,
-        trace_context_filter_indices: Vec::new(),
-        pipeline_extensions: Vec::new(),
-        time_source: Arc::new(praxis_core::time::SystemTimeSource),
-        buffer_cap: praxis_core::config::DEFAULT_MAX_BUFFER_BYTES,
-        request_body_ceiling: None,
-        response_body_ceiling: None,
-        request_head_filter_indices: Vec::new(),
-        shielded_admitter_indices: Vec::new(),
-        request_body_filter_indices: Vec::new(),
-        response_body_filter_indices: Vec::new(),
-        selected_upstream_request_body_filter_indices: Vec::new(),
-        #[cfg(feature = "bound-upstream-request-body")]
-        bound_upstream_request_body_filter_indices: Vec::new(),
-        allow_private_upstreams: false,
-        response_trailer_filter_indices: Vec::new(),
-    })
+    test_pipeline(body_capabilities, filters)
 }
 
 /// Build a [`FilterPipeline`] with per-filter request conditions.
@@ -6225,43 +6189,7 @@ fn make_pipeline_with_conditions(
         .collect();
     let body_capabilities = compute_body_capabilities(&filters);
 
-    with_body_indices(FilterPipeline {
-        #[cfg(feature = "local-http")]
-        local_routes: Vec::new(),
-        #[cfg(feature = "local-http")]
-        local_http_valid: true,
-        #[cfg(feature = "local-http")]
-        nested_local_routes: false,
-        upgrade_policy: None,
-        body_capabilities,
-        has_request_completion_observer: false,
-        compression: None,
-        filters,
-        record_filter_duration_metrics: false,
-        route_templates: Arc::default(),
-        health_registry: None,
-        id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
-        kv_stores: None,
-        session_stores: None,
-        slow_start_registry: None,
-        subrequest_client: None,
-        may_select_streaming_subrequest_response: false,
-        trace_context_filter_indices: Vec::new(),
-        pipeline_extensions: Vec::new(),
-        time_source: Arc::new(praxis_core::time::SystemTimeSource),
-        buffer_cap: praxis_core::config::DEFAULT_MAX_BUFFER_BYTES,
-        request_body_ceiling: None,
-        response_body_ceiling: None,
-        request_head_filter_indices: Vec::new(),
-        shielded_admitter_indices: Vec::new(),
-        request_body_filter_indices: Vec::new(),
-        response_body_filter_indices: Vec::new(),
-        selected_upstream_request_body_filter_indices: Vec::new(),
-        #[cfg(feature = "bound-upstream-request-body")]
-        bound_upstream_request_body_filter_indices: Vec::new(),
-        allow_private_upstreams: false,
-        response_trailer_filter_indices: Vec::new(),
-    })
+    test_pipeline(body_capabilities, filters)
 }
 
 /// Build a [`FilterPipeline`] with per-filter response conditions.
@@ -6275,43 +6203,7 @@ fn make_pipeline_with_response_conditions(
         .collect();
     let body_capabilities = compute_body_capabilities(&filters);
 
-    with_body_indices(FilterPipeline {
-        #[cfg(feature = "local-http")]
-        local_routes: Vec::new(),
-        #[cfg(feature = "local-http")]
-        local_http_valid: true,
-        #[cfg(feature = "local-http")]
-        nested_local_routes: false,
-        upgrade_policy: None,
-        body_capabilities,
-        has_request_completion_observer: false,
-        compression: None,
-        filters,
-        record_filter_duration_metrics: false,
-        route_templates: Arc::default(),
-        health_registry: None,
-        id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
-        kv_stores: None,
-        session_stores: None,
-        slow_start_registry: None,
-        subrequest_client: None,
-        may_select_streaming_subrequest_response: false,
-        trace_context_filter_indices: Vec::new(),
-        pipeline_extensions: Vec::new(),
-        time_source: Arc::new(praxis_core::time::SystemTimeSource),
-        buffer_cap: praxis_core::config::DEFAULT_MAX_BUFFER_BYTES,
-        request_body_ceiling: None,
-        response_body_ceiling: None,
-        request_head_filter_indices: Vec::new(),
-        shielded_admitter_indices: Vec::new(),
-        request_body_filter_indices: Vec::new(),
-        response_body_filter_indices: Vec::new(),
-        selected_upstream_request_body_filter_indices: Vec::new(),
-        #[cfg(feature = "bound-upstream-request-body")]
-        bound_upstream_request_body_filter_indices: Vec::new(),
-        allow_private_upstreams: false,
-        response_trailer_filter_indices: Vec::new(),
-    })
+    test_pipeline(body_capabilities, filters)
 }
 
 /// Build a `When` condition that matches on a path prefix.
