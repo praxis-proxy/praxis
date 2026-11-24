@@ -42,6 +42,8 @@ pub(crate) mod grpc_trailers;
 /// HTTP proxy handler and Pingora integration.
 #[cfg(any(feature = "pingora", feature = "hyper"))]
 pub mod handler;
+#[cfg(feature = "managed-websocket")]
+pub mod local_upgrade;
 /// Health check infrastructure: admin endpoints, probes, and background runner.
 pub mod health;
 #[cfg(feature = "admin-api")]
