@@ -17,6 +17,14 @@ pub(crate) struct WebSocketOffer {
     pub(crate) subprotocols: Vec<String>,
 }
 
+/// Parsed client offer borrowing handshake fields from the request head.
+struct BorrowedOffer<'head> {
+    /// Validated client nonce.
+    key: &'head str,
+    /// Validated subprotocols in client preference order.
+    subprotocols: Vec<&'head str>,
+}
+
 /// Local refusal for an invalid, unsupported, or disallowed upgrade request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct UpgradeRefusal {
@@ -39,6 +47,21 @@ pub(crate) fn classify_request(
     version: Version,
     websocket_permitted: bool,
 ) -> Result<Option<WebSocketOffer>, UpgradeRefusal> {
+    Ok(
+        parse_request(headers, method, version, websocket_permitted)?.map(|offer| WebSocketOffer {
+            key: offer.key.to_owned(),
+            subprotocols: offer.subprotocols.into_iter().map(str::to_owned).collect(),
+        }),
+    )
+}
+
+/// Parse and validate a client offer without copying header strings.
+fn parse_request<'head>(
+    headers: &'head HeaderMap,
+    method: &Method,
+    version: Version,
+    websocket_permitted: bool,
+) -> Result<Option<BorrowedOffer<'head>>, UpgradeRefusal> {
     if version != Version::HTTP_11 || !contains_list_token(headers, "upgrade", "websocket") {
         return Ok(None);
     }
@@ -46,11 +69,11 @@ pub(crate) fn classify_request(
         return Err(malformed_handshake());
     }
     validate_connection_tokens(headers)?;
-    let offered_protocols = parse_upgrade_offers(headers)?;
+    let single_websocket = is_single_websocket_offer(headers)?;
     if method != Method::GET {
         return Err(malformed_handshake());
     }
-    if offered_protocols.len() != 1 || offered_protocols.first().map(String::as_str) != Some("websocket") {
+    if !single_websocket {
         return Err(unsupported_upgrade());
     }
     let key = websocket_key(headers)?;
@@ -59,7 +82,7 @@ pub(crate) fn classify_request(
     if !websocket_permitted {
         return Err(denied_upgrade());
     }
-    Ok(Some(WebSocketOffer { key, subprotocols }))
+    Ok(Some(BorrowedOffer { key, subprotocols }))
 }
 
 /// Ensure filters preserved the client offer that authorized this upgrade.
@@ -70,10 +93,16 @@ pub(crate) fn validate_forwarded_request(
     headers: &HeaderMap,
     version: Version,
 ) -> Result<(), &'static str> {
-    let Ok(Some(forwarded)) = classify_request(headers, method, version, true) else {
+    let Ok(Some(forwarded)) = parse_request(headers, method, version, true) else {
         return Err("forwarded request no longer contains a valid WebSocket offer");
     };
-    if forwarded != *offer {
+    if forwarded.key != offer.key
+        || !forwarded
+            .subprotocols
+            .iter()
+            .copied()
+            .eq(offer.subprotocols.iter().map(String::as_str))
+    {
         return Err("filters changed the admitted WebSocket offer");
     }
     Ok(())
@@ -106,9 +135,10 @@ fn validate_connection_tokens(headers: &HeaderMap) -> Result<(), UpgradeRefusal>
     Ok(())
 }
 
-/// Parse all offered Upgrade protocol tokens, normalizing protocol names.
-fn parse_upgrade_offers(headers: &HeaderMap) -> Result<Vec<String>, UpgradeRefusal> {
-    let mut offers = Vec::new();
+/// Validate Upgrade syntax and check for one unversioned WebSocket offer.
+fn is_single_websocket_offer(headers: &HeaderMap) -> Result<bool, UpgradeRefusal> {
+    let mut first = None;
+    let mut multiple = false;
     for value in headers.get_all("upgrade") {
         let value = value.to_str().map_err(|_header_error| malformed_handshake())?;
         for item in value.split(',') {
@@ -122,18 +152,14 @@ fn parse_upgrade_offers(headers: &HeaderMap) -> Result<Vec<String>, UpgradeRefus
             if parts.next().is_some() || !is_token(name) || version.is_some_and(|v| !is_token(v)) {
                 return Err(malformed_handshake());
             }
-            let protocol = version.map_or_else(
-                || name.to_ascii_lowercase(),
-                |v| format!("{}/{}", name.to_ascii_lowercase(), v),
-            );
-            offers.push(protocol);
+            multiple |= first.replace(item).is_some();
         }
     }
-    Ok(offers)
+    Ok(!multiple && first.is_some_and(|item| item.eq_ignore_ascii_case("websocket")))
 }
 
 /// Validate and retain the one client nonce required by RFC 6455.
-fn websocket_key(headers: &HeaderMap) -> Result<String, UpgradeRefusal> {
+fn websocket_key(headers: &HeaderMap) -> Result<&str, UpgradeRefusal> {
     let Some(key) = single_header(headers, "sec-websocket-key") else {
         return Err(malformed_handshake());
     };
@@ -141,7 +167,7 @@ fn websocket_key(headers: &HeaderMap) -> Result<String, UpgradeRefusal> {
     if decoded.len() != 16 {
         return Err(malformed_handshake());
     }
-    Ok(key.to_owned())
+    Ok(key)
 }
 
 /// Validate the only WebSocket version supported by this listener adapter.
@@ -158,7 +184,7 @@ fn validate_websocket_version(headers: &HeaderMap) -> Result<(), UpgradeRefusal>
 /// [RFC 6455 Section 4.1] requires unique offered subprotocol strings.
 ///
 /// [RFC 6455 Section 4.1]: https://datatracker.ietf.org/doc/html/rfc6455#section-4.1
-fn parse_subprotocols(headers: &HeaderMap) -> Result<Vec<String>, UpgradeRefusal> {
+fn parse_subprotocols(headers: &HeaderMap) -> Result<Vec<&str>, UpgradeRefusal> {
     let mut protocols = Vec::new();
     let mut seen = HashSet::new();
     for value in headers.get_all("sec-websocket-protocol") {
@@ -171,8 +197,11 @@ fn parse_subprotocols(headers: &HeaderMap) -> Result<Vec<String>, UpgradeRefusal
             if !is_token(protocol) || !seen.insert(protocol) {
                 return Err(malformed_handshake());
             }
-            protocols.push(protocol.to_owned());
+            protocols.push(protocol);
         }
+    }
+    if protocols.is_empty() && headers.contains_key("sec-websocket-protocol") {
+        return Err(malformed_handshake());
     }
     Ok(protocols)
 }
@@ -378,6 +407,16 @@ mod tests {
                 .subprotocols,
             ["chat", "Chat"]
         );
+    }
+
+    #[test]
+    fn present_subprotocol_header_requires_at_least_one_token() {
+        for value in ["", ", ,"] {
+            let mut headers = valid_request();
+            headers.insert("sec-websocket-protocol", value.parse().unwrap());
+            let refusal = classify_request(&headers, &Method::GET, Version::HTTP_11, true).unwrap_err();
+            assert_eq!(refusal.status, 400);
+        }
     }
 
     #[test]
