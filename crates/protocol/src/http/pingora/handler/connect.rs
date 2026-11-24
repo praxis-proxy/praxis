@@ -1021,15 +1021,18 @@ fn authority_port(authority: &http::uri::Authority, default_port: u16) -> Option
 /// blocking thread per name, and client names never fill the shared cache.
 /// A name with any private or reserved answer is refused unless
 /// `insecure_options.allow_private_upstreams` is set, as the CONNECT dialer
-/// refuses it. IPv4 is preferred, as for configured endpoints. `None`,
-/// after logging why, when there is nothing to dial.
+/// refuses it; an IP literal the rules list on this port passes, with the
+/// same exemption the CONNECT dialer gives it
+/// ([`private_allowed`](ForwardProxyRuntime::private_allowed)). IPv4 is
+/// preferred, as for configured endpoints. `None`, after logging why, when
+/// there is nothing to dial.
 async fn checked_dial_address(
     forward_proxy: &ForwardProxyRuntime,
     destination: &ConnectDestination,
 ) -> Option<std::net::SocketAddr> {
     let address = dial_address(destination);
     let addrs = resolve_destination(&address, &destination.host, destination.port).await?;
-    if !forward_proxy.allow_private_upstreams
+    if !forward_proxy.private_allowed(&destination.host, destination.port)
         && let Some(private) = find_private_addr(&addrs)
     {
         warn!(
@@ -1670,6 +1673,23 @@ allow_destinations:
         }
     }
 
+    #[tokio::test]
+    async fn absolute_form_dial_passes_the_guard_for_a_listed_address_only() {
+        // The forwarded request's own check on the resolved answers gives a
+        // listed address the exemption the CONNECT dialer gives it, and no
+        // more: another port, or a name answering with the address, keeps
+        // the guard.
+        let forward_proxy = runtime_with_listed_loopback();
+        for (target, dialed) in [
+            ("http://127.0.0.1:11434/", Some("127.0.0.1:11434")),
+            ("http://[::1]:11434/", Some("[::1]:11434")),
+            ("http://127.0.0.1:8080/", None),
+            ("http://localhost:11434/", None),
+        ] {
+            let addr = checked_dial_address(&forward_proxy, &forwarded(target).destination).await;
+            assert_eq!(addr.map(|addr| addr.to_string()).as_deref(), dialed, "{target}");
+        }
+    }
 
     #[test]
     fn runtime_carries_timeout_configuration() {
