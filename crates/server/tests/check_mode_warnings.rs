@@ -181,6 +181,31 @@ filter_chains:
 "#;
 
 #[test]
+fn numeric_identifiers_retain_their_listener_and_chain_in_warnings() {
+    let yaml = DEPRECATED_CREDENTIAL_FIELD_CONFIG
+        .replace("name: web", "name: 007")
+        .replace("main", "123");
+    let (ok, _, stderr) = run_check_mode("--validate", &yaml, Some("json"));
+    assert!(ok, "numeric identifiers should validate: {stderr}");
+    let warnings: Vec<_> = stderr
+        .lines()
+        .filter(|line| line.contains("remove strip_client_credential"))
+        .collect();
+    assert_eq!(warnings.len(), 2, "{stderr}");
+    for warning in warnings {
+        let event: serde_json::Value = serde_json::from_str(warning).expect("JSON log");
+        let fields = event.get("fields").expect("structured warning");
+        assert_eq!(fields.get("listener").and_then(serde_json::Value::as_str), Some("007"));
+        assert!(
+            fields
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|path| path.starts_with("filter_chains[123]"))
+        );
+    }
+}
+
+#[test]
 fn validate_warns_for_explicit_deprecated_credential_fields() {
     let (ok, _, stderr) = run_check_mode("--validate", DEPRECATED_CREDENTIAL_FIELD_CONFIG, Some("json"));
     assert!(ok, "deprecated credential settings remain accepted: {stderr}");

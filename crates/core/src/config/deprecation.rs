@@ -7,8 +7,11 @@
 //! filter instance to the listener pipeline, and deprecation warnings are not
 //! deduplicated.
 
+mod outbound;
+
 use std::collections::{HashMap, HashSet};
 
+pub use outbound::InlineChainDeprecations;
 use serde_yaml::Value;
 use tracing::warn;
 
@@ -124,38 +127,66 @@ const MAX_WARNING_BYTES: usize = 1_048_576; // 1 MiB
 /// the native stack the recursive scan consumes.
 const MAX_SCAN_DEPTH: usize = 32;
 
-/// Check valid YAML for deprecated config usages and report truncation.
-pub(super) fn check_for_deprecated_config(yaml: &str) {
-    let Ok(root) = serde_yaml::from_str::<Value>(yaml) else {
-        return;
-    };
-    let (usages, truncated) = find_usages(&root, DEPRECATION_RULES);
-    let reported = usages.len();
-    for usage in usages {
-        warn_usage(&usage);
-    }
-    if truncated {
-        warn!(
-            item = "deprecation_scan",
-            reported, "deprecation scan truncated; some deprecated settings may not be reported"
-        );
+/// Deprecation warnings collected before a serving process initializes logging.
+#[derive(Default)]
+pub struct DeprecationWarnings {
+    /// Deprecated settings found in the candidate configuration.
+    usages: Vec<DeprecatedConfigOccurrence>,
+    /// Whether the scan exhausted a limit.
+    truncated: bool,
+}
+
+impl DeprecationWarnings {
+    /// Emit the collected warnings to the current tracing subscriber.
+    pub fn emit(self) {
+        let reported = self.usages.len();
+        for usage in self.usages {
+            warn_usage(&usage);
+        }
+        if self.truncated {
+            warn!(
+                item = "deprecation_scan",
+                reported, "deprecation scan truncated; some deprecated settings may not be reported"
+            );
+        }
     }
 }
 
+/// Use deserialized identifiers for pipeline lookup and raw YAML for field presence.
+pub(super) fn collect(config: &super::Config, yaml: &str) -> DeprecationWarnings {
+    let Ok(root) = serde_yaml::from_str::<Value>(yaml) else {
+        return DeprecationWarnings::default();
+    };
+    let chains = config
+        .filter_chains
+        .iter()
+        .map(|chain| chain.name.as_str())
+        .zip(sequence_at(&root, "filter_chains").into_iter().flatten())
+        .collect();
+    let listeners = config.listeners.iter().map(|listener| {
+        (
+            listener.name.as_str(),
+            listener.filter_chains.iter().map(String::as_str),
+        )
+    });
+    let (usages, truncated) = scan(&root, DEPRECATION_RULES, chains, listeners);
+    DeprecationWarnings { usages, truncated }
+}
+
 /// Find deprecated usages declared in `rules`, subject to scan limits.
-fn find_usages(root: &Value, rules: &[DeprecationRule]) -> (Vec<DeprecatedConfigOccurrence>, bool) {
+fn scan<'config>(
+    root: &Value,
+    rules: &[DeprecationRule],
+    chains: HashMap<&'config str, &'config Value>,
+    listeners: impl Iterator<Item = (&'config str, impl Iterator<Item = &'config str>)>,
+) -> (Vec<DeprecatedConfigOccurrence>, bool) {
     let mut scanner = Scanner {
-        chains: named_chains(root),
+        chains,
         rules,
-        reached_chains: HashSet::new(),
-        usages: Vec::new(),
-        visits: 0,
-        depth: 0,
-        warning_bytes: 0,
-        truncated: false,
+        ..Scanner::default()
     };
     find_config_fields(root, &mut scanner);
-    scan_listener_chains(root, &mut scanner);
+    scan_listener_chains(listeners, &mut scanner);
     scan_unreferenced_chains(&mut scanner);
     (scanner.usages, scanner.truncated)
 }
@@ -174,16 +205,8 @@ fn find_config_fields(root: &Value, scanner: &mut Scanner<'_, '_>) {
     }
 }
 
-/// Index top-level named filter chains by their declared names.
-fn named_chains(root: &Value) -> HashMap<&str, &Value> {
-    sequence_at(root, "filter_chains")
-        .into_iter()
-        .flatten()
-        .filter_map(|chain| string_at(chain, "name").map(|name| (name, chain)))
-        .collect()
-}
-
 /// Holds invariant state shared by the recursive config scanner.
+#[derive(Default)]
 struct Scanner<'config, 'rules> {
     /// Top-level named filter chains.
     chains: HashMap<&'config str, &'config Value>,
@@ -232,19 +255,15 @@ impl Scanner<'_, '_> {
 }
 
 /// Scan every chain referenced by every listener, preserving listener context.
-fn scan_listener_chains(root: &Value, scanner: &mut Scanner<'_, '_>) {
-    for listener in sequence_at(root, "listeners").into_iter().flatten() {
+fn scan_listener_chains<'config>(
+    listeners: impl Iterator<Item = (&'config str, impl Iterator<Item = &'config str>)>,
+    scanner: &mut Scanner<'_, '_>,
+) {
+    for (listener_name, chains) in listeners {
         if !scanner.visit() {
             break;
         }
-        let Some(listener_name) = string_at(listener, "name") else {
-            continue;
-        };
-        for chain_name in sequence_at(listener, "filter_chains")
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-        {
+        for chain_name in chains {
             if !scanner.visit() {
                 break;
             }
@@ -334,7 +353,9 @@ fn scan_filter_entry(
     scanner.depth = scanner.depth.saturating_add(1);
     find_filter_deprecations(scanner, entry, filter, path, listener);
     scan_branch_chains(scanner, entry, path, listener, chain_stack);
-    scan_step_filters(scanner, entry, path, listener, chain_stack);
+    if filter == super::validate::STEP_BEARING_FILTER {
+        scan_step_filters(scanner, entry, path, listener, chain_stack);
+    }
     scanner.depth = scanner.depth.saturating_sub(1);
 }
 
@@ -505,22 +526,40 @@ fn append_field(prefix: &str, field: &str) -> String {
 }
 
 #[cfg(test)]
-#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
-#[allow(
+#[expect(
     clippy::unwrap_used,
-    clippy::expect_used,
     clippy::indexing_slicing,
-    clippy::needless_raw_strings,
-    clippy::needless_raw_string_hashes,
-    reason = "tests"
+    reason = "fixtures must parse and occurrence counts are asserted before indexing"
 )]
 mod tests {
     use std::fmt::Write as _;
 
     use super::{
         ConfigPathSegment, DEPRECATION_RULES, DeprecatedConfigOccurrence, DeprecatedConfigTarget, DeprecationRule,
-        MAX_WARNINGS, find_usages,
+        MAX_WARNINGS, scan, sequence_at, string_at,
     };
+
+    /// Supply identifiers for isolated scanner fixtures without requiring a valid proxy config.
+    fn find_usages(root: &serde_yaml::Value, rules: &[DeprecationRule]) -> (Vec<DeprecatedConfigOccurrence>, bool) {
+        let chains = sequence_at(root, "filter_chains")
+            .into_iter()
+            .flatten()
+            .filter_map(|chain| Some((string_at(chain, "name")?, chain)))
+            .collect();
+        let listeners = sequence_at(root, "listeners")
+            .into_iter()
+            .flatten()
+            .filter_map(|listener| {
+                Some((
+                    string_at(listener, "name")?,
+                    sequence_at(listener, "filter_chains")
+                        .into_iter()
+                        .flatten()
+                        .filter_map(serde_yaml::Value::as_str),
+                ))
+            });
+        scan(root, rules, chains, listeners)
+    }
 
     /// Generate a compact chain graph with exponentially many pipeline occurrences.
     fn branching_config(leaf_filter: &str) -> serde_yaml::Value {
@@ -601,7 +640,7 @@ mod tests {
     #[test]
     fn deprecated_filter_warns_once_per_listener_usage() {
         let config = serde_yaml::from_str(
-            r#"
+            "
 listeners:
   - name: public
     filter_chains: [auth]
@@ -611,7 +650,7 @@ filter_chains:
   - name: auth
     filters:
       - filter: basic_auth
-"#,
+",
         )
         .unwrap();
         let usages = find_usages(&config, DEPRECATION_RULES).0;
@@ -629,7 +668,7 @@ filter_chains:
     #[test]
     fn repeated_chain_references_remain_individually_visible() {
         let config = serde_yaml::from_str(
-            r#"
+            "
 listeners:
   - name: web
     filter_chains: [auth, auth]
@@ -637,7 +676,7 @@ filter_chains:
   - name: auth
     filters:
       - filter: basic_auth
-"#,
+",
         )
         .unwrap();
         let usages = find_usages(&config, DEPRECATION_RULES).0;
@@ -649,13 +688,13 @@ filter_chains:
     #[test]
     fn deprecated_filters_in_unreferenced_chains_are_reported() {
         let config = serde_yaml::from_str(
-            r#"
+            "
 listeners: []
 filter_chains:
   - name: unused
     filters:
       - filter: basic_auth
-"#,
+",
         )
         .unwrap();
         let usages = find_usages(&config, DEPRECATION_RULES).0;
@@ -667,7 +706,7 @@ filter_chains:
     #[test]
     fn a_deprecated_filter_in_a_named_branch_is_reported_for_its_listener() {
         let config = serde_yaml::from_str(
-            r#"
+            "
 listeners:
   - name: web
     filter_chains: [main]
@@ -681,7 +720,7 @@ filter_chains:
   - name: legacy
     filters:
       - filter: basic_auth
-"#,
+",
         )
         .unwrap();
         let usages = find_usages(&config, DEPRECATION_RULES).0;
@@ -729,13 +768,13 @@ filter_chains:
             message: "test field",
         }];
         let config: serde_yaml::Value = serde_yaml::from_str(
-            r#"
+            "
 listeners:
   - name: web
     old_setting: false
   - name: admin
     name_only: true
-"#,
+",
         )
         .unwrap();
         let usages = find_usages(&config, &rules).0;
@@ -756,7 +795,7 @@ listeners:
             message: "test field",
         }];
         let config: serde_yaml::Value = serde_yaml::from_str(
-            r#"
+            "
 filter_chains:
   - name: main
     filters:
@@ -764,7 +803,7 @@ filter_chains:
         old_option: false
       - filter: request_id
         old_option: false
-"#,
+",
         )
         .unwrap();
         let usages = find_usages(&config, &rules).0;
@@ -774,7 +813,7 @@ filter_chains:
     }
 
     /// Explicit and omitted credential fields, plus a same-named field owned by another filter.
-    const CREDENTIAL_FIELDS_YAML: &str = r#"
+    const CREDENTIAL_FIELDS_YAML: &str = "
 listeners:
   - name: web
     filter_chains: [main]
@@ -792,7 +831,7 @@ filter_chains:
         clusters:
           - name: unrelated
             strip_client_credential: true
-"#;
+";
 
     #[test]
     fn credential_stripping_rule_reports_only_explicit_fields_in_its_filter() {
@@ -822,18 +861,21 @@ filter_chains:
     }
 
     #[test]
-    fn nested_step_filters_are_scanned_for_any_filter_type() {
+    fn only_pipeline_steps_are_scanned() {
         let config: serde_yaml::Value = serde_yaml::from_str(
-            r#"
+            "
 filter_chains:
   - name: main
     filters:
       - filter: custom_step_container
         steps:
+          - filters: [{filter: basic_auth}]
+      - filter: iterative_request_router
+        steps:
           - name: auth
             filters:
               - filter: basic_auth
-"#,
+",
         )
         .unwrap();
         let usages: Vec<DeprecatedConfigOccurrence> = find_usages(&config, DEPRECATION_RULES).0;
