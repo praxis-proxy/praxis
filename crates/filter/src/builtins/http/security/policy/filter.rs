@@ -391,9 +391,9 @@ pub(super) enum ResponseCustomState {
 /// [PPE documentation]: https://github.com/praxis-proxy/policy/blob/main/docs/content/index.md
 /// [Policy enforcement with PPE]: https://github.com/praxis-proxy/praxis/blob/main/docs/security/policy-enforcement.md
 /// [Identity configuration]: https://github.com/praxis-proxy/policy/blob/main/docs/content/apl/identity.md
-/// [OIDC claim mapping]: https://github.com/praxis-proxy/policy/blob/main/docs/content/identity-delegation.md#reading-claims-the-way-your-idp-writes-them
-/// [Header assertions]: https://github.com/praxis-proxy/policy/blob/main/docs/content/assertions.md
-/// [Vault delegation recipes]: https://github.com/praxis-proxy/policy/blob/main/docs/content/identity-delegation.md#recipe-8-a-users-vault-stored-credential
+/// [OIDC claim mapping]: https://github.com/praxis-proxy/policy/blob/main/docs/content/guides/identity-delegation.md#reading-claims-the-way-your-idp-writes-them
+/// [Header assertions]: https://github.com/praxis-proxy/policy/blob/main/docs/content/reference/assertions.md
+/// [Vault delegation recipes]: https://github.com/praxis-proxy/policy/blob/main/docs/content/guides/identity-delegation.md#recipe-8-a-users-vault-stored-credential
 /// [Structured request input]: https://github.com/praxis-proxy/policy/blob/main/docs/content/apl/pdp.md#structured-request-input
 /// [normalized LLM input example]: https://github.com/praxis-proxy/praxis/blob/main/examples/configs/security/policy-llm-input.yaml
 #[expect(

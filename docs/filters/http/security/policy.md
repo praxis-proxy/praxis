@@ -134,11 +134,11 @@ llm:
   provider: openai
 ```
 
-[Header assertions]: https://github.com/praxis-proxy/policy/blob/main/docs/content/assertions.md
+[Header assertions]: https://github.com/praxis-proxy/policy/blob/main/docs/content/reference/assertions.md
 [Identity configuration]: https://github.com/praxis-proxy/policy/blob/main/docs/content/apl/identity.md
-[OIDC claim mapping]: https://github.com/praxis-proxy/policy/blob/main/docs/content/identity-delegation.md#reading-claims-the-way-your-idp-writes-them
+[OIDC claim mapping]: https://github.com/praxis-proxy/policy/blob/main/docs/content/guides/identity-delegation.md#reading-claims-the-way-your-idp-writes-them
 [PPE documentation]: https://github.com/praxis-proxy/policy/blob/main/docs/content/index.md
 [Policy enforcement with PPE]: https://github.com/praxis-proxy/praxis/blob/main/docs/security/policy-enforcement.md
 [Structured request input]: https://github.com/praxis-proxy/policy/blob/main/docs/content/apl/pdp.md#structured-request-input
-[Vault delegation recipes]: https://github.com/praxis-proxy/policy/blob/main/docs/content/identity-delegation.md#recipe-8-a-users-vault-stored-credential
+[Vault delegation recipes]: https://github.com/praxis-proxy/policy/blob/main/docs/content/guides/identity-delegation.md#recipe-8-a-users-vault-stored-credential
 [normalized LLM input example]: https://github.com/praxis-proxy/praxis/blob/main/examples/configs/security/policy-llm-input.yaml
