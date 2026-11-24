@@ -90,6 +90,9 @@ pub(super) async fn execute(
     }
 
     let (result, filter_flagged_modification) = run_response_pipeline(pipeline, ctx, &mut resp).await?;
+    if matches!(result, Err(_) | Ok(FilterAction::Reject(_))) {
+        return handle_response_result(result, upstream_response, resp, false, is_bodyless, ctx);
+    }
     if is_upgrade_response && resp.status != http::StatusCode::SWITCHING_PROTOCOLS {
         ctx.stamp_error_type("upgrade_response_status_modified");
         return Err(invalid_upgrade_response(
@@ -750,6 +753,16 @@ mod tests {
             ctx.connection_upgraded,
             "valid WebSocket 101 should set connection_upgraded"
         );
+    }
+
+    #[tokio::test]
+    async fn websocket_101_requires_http11_from_upstream() {
+        let mut response = pingora_http::ResponseHeader::build(101, None).unwrap();
+        response.set_version(http::Version::HTTP_10);
+        let mut ctx = make_upgrade_ctx();
+        assert!(execute(&make_pipeline(), &mut response, &mut ctx).await.is_err());
+        assert!(!ctx.connection_upgraded);
+        assert_eq!(ctx.error_type.as_deref(), Some("upgrade_response_invalid"));
     }
 
     #[tokio::test]

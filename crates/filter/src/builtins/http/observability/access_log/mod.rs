@@ -1858,6 +1858,21 @@ impl HttpFilter for AccessLogFilter {
         true
     }
 
+    fn observes_request_completion(&self) -> bool {
+        true
+    }
+
+    fn on_request_complete(&self, ctx: &mut HttpFilterContext<'_>, status: u16) {
+        // A 101 head is provisional until the adapter accepts the final handshake.
+        // Failed upgrades use the normal incomplete-request fallback.
+        if status == http::StatusCode::SWITCHING_PROTOCOLS.as_u16()
+            && let Some(state) = ctx.get_filter_state_mut::<AccessLogState>()
+        {
+            let headers = state.response_headers.take();
+            self.maybe_emit(ctx, status, headers.as_ref());
+        }
+    }
+
     async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         let Some(resp) = &ctx.response_header else {
             return Ok(FilterAction::Continue);
@@ -1874,7 +1889,7 @@ impl HttpFilter for AccessLogFilter {
         // Emit from the captured map before storing it: re-reading the
         // freshly inserted state cloned the header map a second time on
         // every bodyless response.
-        if bodyless {
+        if bodyless && resp.status != http::StatusCode::SWITCHING_PROTOCOLS {
             self.maybe_emit(ctx, status, response_headers.as_ref());
         }
         ctx.insert_filter_state(AccessLogState {

@@ -64,6 +64,9 @@ async fn assert_upgrade_remains_final(filter: &AccessLogFilter) {
         ctx.get_filter_state::<AccessLogState>().map(|state| state.status),
         Some(101)
     );
+    assert!(!access_record_already_emitted(&ctx));
+    filter.on_request_complete(&mut ctx, 101);
+    assert!(access_record_already_emitted(&ctx));
 }
 
 /// Read exactly one direct-sink NDJSON record within a bounded async wait.

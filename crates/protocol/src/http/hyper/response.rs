@@ -264,19 +264,13 @@ fn settle(
     reframe(flight, &mut head, &result);
     close_connection_on_drain(flight, &mut head.response);
     match result {
-        Ok(action)
-            if head.response.status == StatusCode::SWITCHING_PROTOCOLS
-                && !matches!(action, FilterAction::Reject(_)) =>
-        {
-            refuse_synthesized_101(listener, flight, session)
-        },
         Ok(
             FilterAction::Continue
             | FilterAction::Release
             | FilterAction::BodyDone
             | FilterAction::TerminalResponse(_)
             | FilterAction::StreamingTerminalResponse(_),
-        ) => Outcome::Answered(Box::new(answer(flight, session, head))),
+        ) => finish_response(listener, flight, session, head),
         Ok(FilterAction::Reject(refusal)) => {
             warn!(status = refusal.status, "filter rejected response");
             release(&listener.connector, session, false);
@@ -292,8 +286,11 @@ fn settle(
     }
 }
 
-/// Refuse a response filter that creates a `101` after Hyper's upstream guard.
-fn refuse_synthesized_101(listener: &ListenerShared, flight: &mut Flight, session: HyperSession) -> Outcome {
+/// Deliver the filtered head only if it remains a supported HTTP response.
+fn finish_response(listener: &ListenerShared, flight: &mut Flight, session: HyperSession, head: Head) -> Outcome {
+    if head.response.status != StatusCode::SWITCHING_PROTOCOLS {
+        return Outcome::Answered(Box::new(answer(flight, session, head)));
+    }
     error!("response filter attempted an unsupported protocol upgrade");
     flight.ctx.stamp_error_type("upgrade_synthesized_101");
     release(&listener.connector, session, false);

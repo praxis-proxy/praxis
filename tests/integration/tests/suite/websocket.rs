@@ -915,9 +915,10 @@ async fn malformed_or_unsupported_upstream_101_never_opens_a_tunnel() {
         ),
     ];
     for (case, response_headers) in cases {
-        let backend_port = start_raw_upgrade_backend(response_headers).await;
+        let (backend_port, sent) = start_raw_upgrade_backend(response_headers).await;
         let request = websocket_request("/");
         assert_invalid_upgrade_response(backend_port, &request, case);
+        sent.await.expect("backend wrote the tested response");
     }
 }
 
@@ -1239,7 +1240,7 @@ fn upgrade_probe_registry(observed_body: Arc<Mutex<Vec<u8>>>, mutation: UpgradeR
 
 /// Start a one-connection backend that writes a raw HTTP 101 and echoes a
 /// later frame, making an accidentally committed tunnel observable.
-async fn start_raw_upgrade_backend(response_headers: &str) -> u16 {
+async fn start_raw_upgrade_backend(response_headers: &str) -> (u16, tokio::sync::oneshot::Receiver<()>) {
     use tokio::{
         io::{AsyncReadExt as _, AsyncWriteExt as _},
         net::TcpListener,
@@ -1248,6 +1249,7 @@ async fn start_raw_upgrade_backend(response_headers: &str) -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let response = format!("HTTP/1.1 101 Switching Protocols\r\n{response_headers}\r\n");
+    let (sent, received) = tokio::sync::oneshot::channel();
     let _server_task = tokio::spawn(async move {
         let Ok((mut stream, _peer)) = listener.accept().await else {
             return;
@@ -1258,6 +1260,7 @@ async fn start_raw_upgrade_backend(response_headers: &str) -> u16 {
         if stream.write_all(response.as_bytes()).await.is_err() {
             return;
         }
+        sent.send(()).unwrap();
         let mut frame = [0_u8; 256];
         if let Ok(Ok(size)) = tokio::time::timeout(Duration::from_millis(500), stream.read(&mut frame)).await
             && size > 0
@@ -1265,7 +1268,7 @@ async fn start_raw_upgrade_backend(response_headers: &str) -> u16 {
             let _echo_result = stream.write_all(&frame[..size]).await;
         }
     });
-    port
+    (port, received)
 }
 
 /// Read a backend handshake before writing its response.
@@ -1354,7 +1357,8 @@ fn assert_invalid_upgrade_response_with_mutation(
     let config = Config::from_yaml(&yaml).unwrap();
     let observed_body = Arc::new(Mutex::new(Vec::new()));
     let registry = upgrade_probe_registry(Arc::clone(&observed_body), mutation);
-    let _proxy = start_proxy_with_registry(&config, &registry);
+    let proxy = praxis_test_utils::start_tls_proxy_no_wait_with_registry(&config, &registry);
+    praxis_test_utils::wait_for_tcp(proxy.addr());
     let (status, frame) = request_status_and_probe_tunnel(&format!("127.0.0.1:{proxy_port}"), request);
     let frame_observed_by_http_hooks = observed_body
         .lock()
