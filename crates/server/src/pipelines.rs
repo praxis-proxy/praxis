@@ -244,12 +244,11 @@ pub(crate) fn resolve_pipelines_with_composition(
         )?;
         let listener_session_stores = Arc::new(session_stores.candidate());
         pipeline.set_upgrade_policy(listener.upgrade_policy.clone());
+        #[cfg(feature = "local-http")]
+        praxis_protocol::http::local::require_supported_adapter(&pipeline)
+            .map_err(|error| format!("listener '{}': {error}", listener.name))?;
         configure_pipeline(
-            {
-                #[cfg(feature = "local-http")]
-                praxis_protocol::http::local::require_supported_adapter(&pipeline)?;
-                &mut pipeline
-            },
+            &mut pipeline,
             config,
             health_registry,
             kv_stores,
@@ -456,6 +455,9 @@ mod tests {
                 }),
                 "{error}"
             );
+            if !open {
+                assert!(error.contains("listener 'web':"), "{error}");
+            }
         }
     }
 
