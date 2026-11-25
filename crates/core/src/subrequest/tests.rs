@@ -63,7 +63,7 @@ async fn validation_connector_refuses_egress() {
         circuit_breaker: None,
     });
     let peer = PeerSpec::plain("127.0.0.1:1".parse().unwrap());
-    let result = connector.connector().connect(&peer, Duration::from_secs(1)).await;
+    let result = Box::pin(connector.connector().connect(&peer, Duration::from_secs(1))).await;
     assert!(
         matches!(result, Err(EgressError::Unavailable)),
         "offline connector must refuse egress"
