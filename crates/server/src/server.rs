@@ -656,6 +656,7 @@ struct ServerState {
 fn resolve_composition(
     config: &Config,
     composition: ServerComposition,
+    validation_only: bool,
 ) -> Result<(SubRequestClient, FilterRegistry, PipelineComposition), StartupError> {
     // Shared with the CLI --validate/--dump path (commands.rs) so both build an
     // identical connector, including the circuit breaker (issue #994).
@@ -664,7 +665,7 @@ fn resolve_composition(
     // Build the downstream registry once, from immutable server context, then
     // reuse it across reloads. The factory is synchronous and side-effect-free.
     let (registry_factory, pipeline_composition) = composition.into_parts();
-    let registry = registry_factory(&RegistryContext::new(&subrequest_client))?;
+    let registry = registry_factory(&RegistryContext::new(&subrequest_client))?.with_validation_only(validation_only);
     if praxis_tls::provider::required()
         && let Some(reason) = fips_blocker(&registry)
     {
@@ -695,13 +696,24 @@ pub fn validate_config(config: &Config) -> Result<(), StartupError> {
 ///
 /// Returns an error if the composition, pipelines, or listener groups are invalid.
 pub fn validate_config_with_composition(config: &Config, composition: ServerComposition) -> Result<(), StartupError> {
+    let mut checked = config.clone();
+    checked.validate()?;
+    validate_parsed_config_pipelines(&checked, composition)
+}
+
+/// Validate pipeline construction for a configuration already checked by [`Config::validate`].
+///
+/// # Errors
+///
+/// Returns an error if a composition rule, pipeline or listener group is invalid.
+pub fn validate_parsed_config_pipelines(config: &Config, composition: ServerComposition) -> Result<(), StartupError> {
     try_install_crypto_provider()?;
-    let (client, registry, pipeline) = resolve_composition(config, composition)?;
+    let (client, registry, pipeline) = resolve_composition(config, composition, true)?;
     let slow_start_registry = Arc::new(praxis_filter::SlowStartRegistry::new());
     let _generation = slow_start_registry.enter_generation();
     resolve_pipeline_candidate(
         config,
-        &registry.for_validation(),
+        &registry,
         &praxis_core::kv::KvStoreRegistry::new(),
         &Arc::new(praxis_filter::SessionStoreRegistry::new()),
         &slow_start_registry,
@@ -729,7 +741,7 @@ fn build_server_state(
     info!("building filter pipelines");
     let kv_stores = praxis_core::kv::KvStoreRegistry::new();
 
-    let (subrequest_client, registry, pipeline_composition) = resolve_composition(config, composition)?;
+    let (subrequest_client, registry, pipeline_composition) = resolve_composition(config, composition, false)?;
     #[cfg(not(feature = "policy-engine"))]
     warn_policy_filter_without_feature(&registry);
 
@@ -1492,6 +1504,25 @@ mod tests {
             result.is_ok() || praxis_tls::provider::required(),
             "install should succeed unless FIPS is required: {result:?}"
         );
+    }
+
+    /// Serving must initialize sinks even if an embedder previously used its registry for validation.
+    #[test]
+    fn serving_reenables_access_log_sinks() {
+        praxis_tls::provider::install();
+        let dir = tempfile::tempdir().expect("temporary log directory");
+        let path = dir.path().join("access.log");
+        let registry = FilterRegistry::with_builtins().with_validation_only(true);
+        let (_, serving, _) = resolve_composition(
+            &minimal_config("static_response"),
+            ServerComposition::with_registry(registry),
+            false,
+        )
+        .expect("serving registry");
+        let sink = serde_yaml::to_value(serde_json::json!({"sink": {"type": "file", "path": path}}))
+            .expect("sink configuration");
+        serving.create("access_log", &sink).expect("serving sink");
+        assert!(path.exists(), "serving must open the configured sink");
     }
 
     #[test]

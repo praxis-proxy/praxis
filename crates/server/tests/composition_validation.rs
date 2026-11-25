@@ -8,6 +8,19 @@
 use praxis::{CompositionError, ServerComposition, validate_config_with_composition};
 use praxis_core::config::{Config, DEFAULT_CONFIG};
 
+/// Embedders may edit a parsed config before asking the server to validate it.
+#[test]
+fn validation_rejects_a_config_with_no_listeners() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut config = Config::from_yaml(DEFAULT_CONFIG)?;
+    config.listeners.clear();
+    let err = praxis::validate_config(&config).expect_err("a server requires a listener");
+    assert!(
+        err.to_string().contains("at least one listener"),
+        "unexpected error: {err}"
+    );
+    Ok(())
+}
+
 /// Validation and startup apply the same downstream rejection.
 #[test]
 fn validation_uses_downstream_pipeline_validators() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

@@ -1732,7 +1732,7 @@ global:
 fn policy_validation_skips_jwks_initialization() {
     praxis_tls::provider::install();
     let (_dir, path) = write_jwks_url_config("    capabilities:\n      - perform_http\n");
-    let registry = FilterRegistry::with_builtins().for_validation();
+    let registry = FilterRegistry::with_builtins().with_validation_only(true);
 
     let filter = registry
         .build_policy(&policy_filter_config(&path))
@@ -4759,9 +4759,15 @@ async fn an_asserted_secret_stays_redacted_on_the_response_half() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_file_backed_secret_is_refused_at_load() {
     let (_dir, path) = write_secret_assertion_config("file", "upstream.key");
+    let registry = FilterRegistry::with_builtins().with_validation_only(true);
+    let offline = registry
+        .build_policy(&policy_filter_config(&path))
+        .err()
+        .expect("validation must reject file providers");
     let err = PolicyFilter::new(filter_config(path), None)
         .err()
         .expect("a `file` provider must not load");
+    assert!(offline.to_string().contains("not registered"), "got {offline}");
     let msg = err.to_string();
     assert!(
         msg.contains("`file`") && msg.contains("not registered"),

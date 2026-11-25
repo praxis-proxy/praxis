@@ -630,12 +630,7 @@ impl PolicyFilter {
         // other provider kind fails at `initialize()`, naming `env`.
         let mut secret_providers = ppe::SecretProviderRegistry::new();
         secret_providers.register(Box::new(EnvSecretProviderFactory));
-        if !mgr.set_secret_providers(secret_providers) {
-            tracing::warn!(
-                target: "policy.filter",
-                "policy: secret providers were already registered on a fresh engine"
-            );
-        }
+
 
         // Host-supplied factories, for `kind:` values the engine does not
         // bundle. After the builtins on purpose: the factory registry is
@@ -664,8 +659,19 @@ impl PolicyFilter {
         // error is reported after the engine's own, more specific one.
         let parsed = ppe::praxis_policy_core::config::parse_config(&yaml);
         if let Ok(document) = &parsed {
+            if validation_only {
+                for (name, provider) in &document.secrets.providers {
+                    secret_providers.build(name, provider)?;
+                }
+            }
             require_dpop_external_base_url(document)?;
             refuse_query_credentials_with_delegation(document)?;
+        }
+        if !mgr.set_secret_providers(secret_providers) {
+            tracing::warn!(
+                target: "policy.filter",
+                "policy: secret providers were already registered on a fresh engine"
+            );
         }
         mgr.load_config_yaml(&yaml)
             .map_err(|e: Box<PluginError>| engine_error("load_config_yaml", &cfg.config_path, &e))?;

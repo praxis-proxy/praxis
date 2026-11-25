@@ -526,14 +526,13 @@ impl FilterRegistry {
         self.policy_connector = Some(connector.clone());
     }
 
-    /// Build unpublished validation candidates without initializing built-in
-    /// policy plugins or access log writers.
+    /// Select whether built-in policy plugins and access-log writers defer initialization.
     ///
     /// Custom factories still run and should keep validation free of network
     /// and worker startup side effects.
     #[must_use]
-    pub fn for_validation(mut self) -> Self {
-        self.validation_only = true;
+    pub fn with_validation_only(mut self, validation_only: bool) -> Self {
+        self.validation_only = validation_only;
         self
     }
 

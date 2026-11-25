@@ -63,7 +63,7 @@ pub use praxis_filter::{PipelineExtension, RequestExtensions};
 pub use server::{
     StartupError, check_root_privilege, fatal, install_crypto_provider, report_fatal, resolve_config_path, run_server,
     run_server_with_composition, run_server_with_registry, try_run_server, try_run_server_with_composition,
-    try_run_server_with_registry, validate_config, validate_config_with_composition,
+    try_run_server_with_registry, validate_config, validate_config_with_composition, validate_parsed_config_pipelines,
 };
 pub use startup_checks::fips_blocker;
 #[cfg(feature = "admin-api")]

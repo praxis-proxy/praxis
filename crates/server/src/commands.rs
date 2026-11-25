@@ -69,7 +69,7 @@ pub(crate) fn load_and_validate_for_cli(
 /// undefined chain references, filter instantiation errors, or inconsistent
 /// TCP listener groups.
 pub(crate) fn validate_config_for_startup(config: &Config) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    praxis::validate_config(config)
+    praxis::validate_parsed_config_pipelines(config, praxis::ServerComposition::standard())
 }
 
 // -----------------------------------------------------------------------------
