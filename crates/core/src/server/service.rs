@@ -256,7 +256,11 @@ mod tests {
         fn run(self: Arc<Self>, context: RuntimeServiceContext) -> RuntimeServiceFuture {
             Box::pin(async move {
                 let (mut shutdown, ready) = context.into_parts();
-                self.initialize.notified().await;
+                tokio::select! {
+                    () = self.initialize.notified() => {},
+                    () = self.exit.notified() => return,
+                    () = shutdown.requested() => return,
+                }
                 ready.notify_ready();
                 self.signaled.notify_one();
                 tokio::select! {
@@ -265,6 +269,25 @@ mod tests {
                 }
             })
         }
+    }
+
+    /// Initialization failure keeps the listener gate closed and names the failed service.
+    #[tokio::test]
+    async fn startup_failure_keeps_the_gate_closed() {
+        let lifecycle = LifecycleHandle::new();
+        prepare(&lifecycle);
+        let worker = Arc::new(ControlledService::default());
+        worker.exit.notify_one();
+        let workers: Vec<RuntimeServiceRegistration> = vec![(Arc::from("store"), worker)];
+        let gate = lifecycle.runtime_services_gate();
+        let supervisor = tokio::spawn(supervise(workers, lifecycle.clone()));
+
+        let ready = tokio::time::timeout(Duration::from_secs(2), gate.wait_for_initialization())
+            .await
+            .expect("startup failure must unblock the gate");
+        assert!(!ready, "listeners must stay closed");
+        assert_eq!(gate.status(), RuntimeServicesStatus::StartupFailed(Arc::from("store")));
+        supervisor.await.expect("failed worker was reaped");
     }
 
     /// All registrations must signal before gate release. A later exit revokes readiness.
