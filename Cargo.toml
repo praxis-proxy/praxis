@@ -58,7 +58,7 @@ hyper-util = { version = "0.1.21", default-features = false }
 loom = "0.7.3"
 metrics = "0.24.6"
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
-nix = { version = "0.31.4", default-features = false, features = ["process", "resource", "signal", "user"] }
+nix = { version = "0.32.0", default-features = false, features = ["process", "resource", "signal", "user"] }
 notify = "8.2.2"
 opentelemetry = { version = "0.33.1", default-features = false, features = ["trace"] }
 opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["trace", "rt-tokio"] }
