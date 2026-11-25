@@ -33,7 +33,7 @@ fn validation_normalizes_the_embedding_config() -> Result<(), Box<dyn std::error
     let policy = config
         .listeners
         .first()
-        .and_then(|listener| listener.upgrade_policy.as_ref())
+        .and_then(|validated| validated.upgrade_policy.as_ref())
         .ok_or("missing upgrade policy")?;
     assert!(
         policy.protocols.contains_key("websocket"),
