@@ -18,12 +18,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[cfg(feature = "admin-api")]
-use praxis_core::health::HealthRegistry;
 use praxis_core::{
     ServerRuntime as _,
     backend::Runtime,
     config::{Config, ConfigFile, LogOutput, ProtocolKind, RuntimeConfig},
+    health::HealthRegistry,
     logging::LogLevelState,
     server::ShutdownFuture,
     subrequest::SubRequestClient,
