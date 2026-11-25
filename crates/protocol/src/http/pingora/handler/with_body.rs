@@ -489,7 +489,10 @@ impl ProxyHttp for PingoraHttpHandler {
         // Even ReusedOnly errors bypassing the policy engine must not replay
         // an oversized original or final body. An empty retained adaptation
         // can be just a phase marker when its output exceeded the buffer cap.
-        if ctx.pending_rejection.is_some()
+        // Invalid upgrades also remain final because Pingora may already have
+        // switched the downstream to opaque tunnel mode after a 101.
+        if ctx.upgrade_failure.is_some()
+            || ctx.pending_rejection.is_some()
             || super::retry::streaming_writer_cannot_replay(ctx)
             || super::retry::replay_body_size(ctx) > praxis_core::config::MAX_RETRY_BODY_LIMIT_BYTES
             || session.response_written().is_some_and(fail_to_proxy::is_final_response)
@@ -608,12 +611,8 @@ impl ProxyHttp for PingoraHttpHandler {
         let client_span = ctx.upstream_client_span.clone();
         let exchange_span = ctx.upstream_exchange_span.clone();
         let upstream_ver = upstream_response.version;
-        let result = response_filter::execute(&pipeline, upstream_response, ctx)
-            .instrument(exchange_span)
-            .instrument(client_span)
-            .instrument(span)
-            .await;
-        if result.is_ok() {
+        async {
+            response_filter::execute(&pipeline, upstream_response, ctx).await?;
             add_drain_connection_close(session, upstream_response, ctx, &self.lifecycle)?;
             // RFC 9110 §7.6.3: the response Via received-protocol is the leg this
             // proxy received the response on — the upstream connection — not the
@@ -621,8 +620,15 @@ impl ProxyHttp for PingoraHttpHandler {
             // the header.
             via::append_response_via(upstream_response, upstream_ver);
             adjust_compression(session, upstream_response, pipeline.compression_config());
+            if ctx.connection_upgraded {
+                super::logging_util::log_accepted_upgrade(&pipeline, ctx);
+            }
+            Ok(())
         }
-        result
+        .instrument(exchange_span)
+        .instrument(client_span)
+        .instrument(span)
+        .await
     }
 
     async fn upstream_peer(&self, _session: &mut Session, ctx: &mut Self::CTX) -> Result<Box<HttpPeer>> {
@@ -983,5 +989,69 @@ mod replay_tests {
         } else {
             VecDeque::from([Bytes::from(vec![b'x'; len])])
         }
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::allow_attributes,
+    reason = "test module uses concise Pingora fixture unwraps"
+)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test fixtures use valid static HTTP data"
+)]
+mod tests {
+    use praxis_core::config::{RetriableCondition, RetryPolicy};
+    use praxis_filter::FilterRegistry;
+
+    use super::*;
+
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "exercise the complete Pingora response-retry lifecycle"
+    )]
+    async fn invalid_websocket_101_is_not_retried_under_status_5xx_policy() {
+        let pipeline = FilterPipeline::build(&mut [], &FilterRegistry::with_builtins()).unwrap();
+        let handler = PingoraHttpHandler::new(
+            Arc::new(ArcSwap::from_pointee(pipeline)),
+            None,
+            None,
+            None,
+            ::metrics::SharedString::const_str("review"),
+            #[cfg(feature = "forward-proxy")]
+            None,
+            LifecycleHandle::new(),
+        );
+        let request = b"GET / HTTP/1.1\r\nHost: example.test\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n";
+        let mut session = Session::new_h1(Box::new(std::io::Cursor::new(request.to_vec())));
+        session.read_request().await.unwrap();
+        let mut ctx = handler.new_ctx();
+        assert!(!handler.request_filter(&mut session, &mut ctx).await.unwrap());
+        ctx.retry_policy = Some(Arc::new(RetryPolicy {
+            retriable_conditions: vec![RetriableCondition::Status5xx],
+            ..RetryPolicy::legacy_default()
+        }));
+
+        let mut response = pingora_http::ResponseHeader::build(101, None).unwrap();
+        response.insert_header("connection", "Upgrade").unwrap();
+        response.insert_header("upgrade", "websocket").unwrap();
+        response.insert_header("sec-websocket-accept", "invalid").unwrap();
+        let error = handler
+            .response_filter(&mut session, &mut response, &mut ctx)
+            .await
+            .unwrap_err();
+        let peer = HttpPeer::new("127.0.0.1:80", false, String::new());
+
+        let error = handler.error_while_proxy(&peer, &mut session, error, &mut ctx, false);
+
+        assert!(
+            !error.retry(),
+            "invalid WebSocket negotiation must not be retried as a 5xx"
+        );
+        assert_eq!(ctx.retries, 0, "invalid WebSocket negotiation must not consume a retry");
+        drop(ctx);
     }
 }

@@ -502,6 +502,10 @@ pub struct HttpFilterContext<'a> {
     /// [`set_response_body_mode`]: Self::set_response_body_mode
     pub response_body_mode: BodyMode,
 
+    /// Whether the protocol adapter completed delivery of the response.
+    /// Subrequest contexts have no adapter completion hook and leave this unset.
+    pub response_delivery_complete: Option<bool>,
+
     /// The upstream response headers, available during `on_response`.
     /// `None` during the request phase.
     pub response_header: Option<&'a mut Response>,

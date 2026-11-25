@@ -261,6 +261,7 @@ pub(crate) mod test_utils {
             request_body_mode: crate::body::BodyMode::Stream,
             request_start: std::time::Instant::now(),
             response_body_bytes: 0,
+            response_delivery_complete: Some(false),
             response_body_mode: crate::body::BodyMode::Stream,
             response_header: None,
             response_headers_modified: false,

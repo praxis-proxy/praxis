@@ -53,6 +53,8 @@ To proxy model APIs or agent protocols, use the
   file descriptor budget, limits, and load shedding
 - [Build Features](operating/build-features.md):
   compile-time feature flags and when to toggle them
+- [WebSocket Handling](operating/websocket.md):
+  upgrade admission policy, body requirements, and transport limits
 - [FIPS 140-3](operating/fips.md):
   the FIPS build, host prerequisites,
   `PRAXIS_REQUIRE_FIPS`, verifying a deployment

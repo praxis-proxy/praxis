@@ -196,12 +196,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - Deprecation warnings describe settings in the candidate configuration without
   implying that the configuration is already active.
+- Validate the final WebSocket handshake after response filters and reject
+  invalid or synthesized HTTP 101 responses before opening a tunnel.
 - Correct PPE documentation links in the security guides, policy filter
   reference, and rustdoc to follow the reorganized pages. Preserve the
   claim-mapping, use-case, and Vault recipe anchors.
 
-- Reject explicit listener `upgrade_policy` settings until protocol admission
-  enforcement is available, rather than silently accepting unenforced denials.
+- Apply explicit listener `upgrade_policy` settings at startup and reload.
 
 - Send a server-wide `OPTIONS *` unchanged on a hedged route whose cluster
   sets `http.base_path`, as a single attempt does, instead of prefixing it

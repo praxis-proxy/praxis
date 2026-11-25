@@ -230,6 +230,10 @@ pub trait HttpFilter: Send + Sync {
         false
     }
 
+    /// Finish a pending bodyless access record with the adapter's final status.
+    /// Called in response order for access logs that observed the response head.
+    fn finish_bodyless_access_record(&self, _ctx: &mut HttpFilterContext<'_>, _status: u16) {}
+
     /// Observe terminal request completion after response delivery or failure.
     ///
     /// This hook runs once in the protocol completion callback, inside the

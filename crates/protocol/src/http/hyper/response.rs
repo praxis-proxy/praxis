@@ -32,7 +32,7 @@ use super::{
     upstream::{Outcome, after_failure, record_attempt_failure, release},
 };
 use crate::http::pingora::{
-    context::PingoraRequestCtx,
+    context::{PingoraRequestCtx, UpgradeFailure},
     handler::{
         health_util::ErrorOrigin,
         hop_by_hop::{RESPONSE_HOP_BY_HOP, strip_hop_by_hop_header_map, strip_reserved_internal_header_map},
@@ -270,7 +270,7 @@ fn settle(
             | FilterAction::BodyDone
             | FilterAction::TerminalResponse(_)
             | FilterAction::StreamingTerminalResponse(_),
-        ) => Outcome::Answered(Box::new(answer(flight, session, head))),
+        ) => finish_response(listener, flight, session, head),
         Ok(FilterAction::Reject(refusal)) => {
             warn!(status = refusal.status, "filter rejected response");
             release(&listener.connector, session, false);
@@ -284,6 +284,19 @@ fn settle(
             Outcome::Failed(Failure::internal(format!("response filter error: {err}")))
         },
     }
+}
+
+/// Deliver the filtered head only if it remains a supported HTTP response.
+fn finish_response(listener: &ListenerShared, flight: &mut Flight, session: HyperSession, head: Head) -> Outcome {
+    if head.response.status != StatusCode::SWITCHING_PROTOCOLS {
+        return Outcome::Answered(Box::new(answer(flight, session, head)));
+    }
+    error!("response filter attempted an unsupported protocol upgrade");
+    flight.ctx.upgrade_failure = Some(UpgradeFailure::Local);
+    flight.ctx.stamp_error_type("upgrade_synthesized_101");
+    release(&listener.connector, session, false);
+    let failure = Failure::status(502, "response filter synthesized unsupported 101");
+    Outcome::Failed(failure)
 }
 
 /// Restore HTTP/1.1 framing a filter's rewrite removed, re-strip reserved
