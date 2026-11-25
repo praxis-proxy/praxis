@@ -1752,7 +1752,10 @@ fn validation_refuses_plaintext_jwks_without_opt_in() {
         .build_policy(&policy_filter_config(&path))
         .err()
         .expect("plaintext must be rejected");
-    assert!(err.to_string().contains("insecure_http"), "got {err}");
+    assert!(
+        err.to_string().contains("insecure_http"),
+        "expected the 'insecure_http' diagnostic"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1771,7 +1774,10 @@ async fn a_jwks_issuer_without_perform_http_fails_to_construct() {
         .build_policy(&policy_filter_config(&path))
         .err()
         .expect("offline validation must reject a missing HTTP grant");
-    assert!(offline.to_string().contains("perform_http"), "got {offline}");
+    assert!(
+        offline.to_string().contains("perform_http"),
+        "expected the 'perform_http' diagnostic"
+    );
     let err = try_build_filter_allowing_private(path, true)
         .err()
         .expect("a withheld capability must refuse to start");
@@ -4788,11 +4794,14 @@ async fn a_file_backed_secret_is_refused_at_load() {
     let err = PolicyFilter::new(filter_config(path), None)
         .err()
         .expect("a `file` provider must not load");
-    assert!(offline.to_string().contains("not registered"), "got {offline}");
+    assert!(
+        offline.to_string().contains("not registered"),
+        "expected the 'not registered' diagnostic"
+    );
     let msg = err.to_string();
     assert!(
         msg.contains("`file`") && msg.contains("not registered"),
-        "the error must name the unregistered kind; got {msg}"
+        "the error must name the unregistered kind"
     );
 }
 
