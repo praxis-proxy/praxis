@@ -119,10 +119,10 @@ pub(super) fn require_dpop_external_base_url(policy: &PolicyConfig) -> Result<()
 }
 
 /// Check the compiled JWT instances that would need an HTTP transport during initialization.
-pub(super) fn validate_jwks_capabilities(engine: &ppe::PolicyEngine) -> Result<(), FilterError> {
+pub(super) fn validate_jwks_sources(engine: &ppe::PolicyEngine) -> Result<(), FilterError> {
     for plugin in engine.plugin_names().iter().filter_map(|name| engine.get_plugin(name)) {
         let config = plugin.trusted_config();
-        if config.kind != JWT_KIND || config.capabilities.contains("perform_http") {
+        if config.kind != JWT_KIND {
             continue;
         }
         let issuers = config
@@ -130,17 +130,33 @@ pub(super) fn validate_jwks_capabilities(engine: &ppe::PolicyEngine) -> Result<(
             .as_ref()
             .and_then(|value| value.get("trusted_issuers"))
             .and_then(serde_json::Value::as_array);
-        if issuers
+        for key in issuers
             .into_iter()
             .flatten()
-            .any(|issuer| issuer.pointer("/decoding_key/kind").and_then(serde_json::Value::as_str) == Some("jwks_url"))
+            .filter_map(|issuer| issuer.get("decoding_key"))
         {
-            return Err(format!(
-                "policy: JWT plugin '{}' requires perform_http for a jwks_url issuer",
-                config.name
-            )
-            .into());
+            validate_jwks_key(key, &config.name, config.capabilities.contains("perform_http"))?;
         }
+    }
+    Ok(())
+}
+
+/// Check transport requirements that the JWT plugin would enforce before its first fetch.
+fn validate_jwks_key(key: &serde_json::Value, name: &str, can_fetch: bool) -> Result<(), FilterError> {
+    if key.get("kind").and_then(serde_json::Value::as_str) != Some("jwks_url") {
+        return Ok(());
+    }
+    if !can_fetch {
+        return Err(format!("policy: JWT plugin '{name}' requires perform_http for a jwks_url issuer").into());
+    }
+    let plaintext = key
+        .get("url")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|url| url.trim_start().to_ascii_lowercase().starts_with("http://"));
+    if plaintext && key.get("insecure_http").and_then(serde_json::Value::as_bool) != Some(true) {
+        return Err(
+            format!("policy: JWT plugin '{name}' requires HTTPS for JWKS unless insecure_http is enabled").into(),
+        );
     }
     Ok(())
 }

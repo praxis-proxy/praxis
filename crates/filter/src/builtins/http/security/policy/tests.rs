@@ -1740,6 +1740,21 @@ fn policy_validation_skips_jwks_initialization() {
     assert!(!filter.engine_is_initialized());
 }
 
+/// Plaintext JWKS needs explicit opt-in even when the HTTP capability is granted.
+#[test]
+fn validation_refuses_plaintext_jwks_without_opt_in() {
+    praxis_tls::provider::install();
+    let (_dir, path) = write_jwks_url_config("    capabilities: [perform_http]\n");
+    let yaml = std::fs::read_to_string(&path).expect("JWKS fixture");
+    std::fs::write(&path, yaml.replace("insecure_http: true", "insecure_http: false")).expect("disable plaintext");
+    let registry = FilterRegistry::with_builtins().with_validation_only(true);
+    let err = registry
+        .build_policy(&policy_filter_config(&path))
+        .err()
+        .expect("plaintext must be rejected");
+    assert!(err.to_string().contains("insecure_http"), "got {err}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_jwks_issuer_constructs_with_the_installed_transport() {
     let (_dir, path) = write_jwks_url_config("    capabilities:\n      - perform_http\n");
