@@ -13,7 +13,9 @@ use praxis_core::config::{Config, DEFAULT_CONFIG};
 fn validation_rejects_a_config_with_no_listeners() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut config = Config::from_yaml(DEFAULT_CONFIG)?;
     config.listeners.clear();
-    let err = praxis::validate_config(&config).expect_err("a server requires a listener");
+    let err = praxis::validate_config(&config)
+        .err()
+        .ok_or("validation accepted an empty listener list")?;
     assert!(
         err.to_string().contains("at least one listener"),
         "unexpected error: {err}"
