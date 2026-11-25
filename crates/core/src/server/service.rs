@@ -232,7 +232,8 @@ fn service_failed(gate: &RuntimeServicesGate, name: &Arc<str>) {
     });
 }
 
-#[cfg(all(test, any(feature = "pingora", feature = "hyper")))]
+#[cfg(test)]
+#[cfg(any(feature = "pingora", feature = "hyper"))]
 #[expect(clippy::expect_used, reason = "test coordination failures should fail the test")]
 mod tests {
     use std::time::Duration;
@@ -292,6 +293,10 @@ mod tests {
 
     /// All registrations must signal before gate release. A later exit revokes readiness.
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one scenario checks readiness, service loss, and drain"
+    )]
     async fn waits_for_each_service_and_revokes_readiness_on_exit() {
         let lifecycle = LifecycleHandle::new();
         let first = Arc::new(ControlledService::default());

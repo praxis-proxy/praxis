@@ -751,6 +751,61 @@ mod tests {
         });
     }
 
+    /// Required worker can fail before readiness or signal and serve until drain.
+    struct TestWorker(bool);
+
+    impl crate::server::RuntimeService for TestWorker {
+        fn run(self: Arc<Self>, context: crate::server::RuntimeServiceContext) -> crate::server::RuntimeServiceFuture {
+            Box::pin(async move {
+                if self.0 {
+                    let (mut shutdown, ready) = context.into_parts();
+                    ready.notify_ready();
+                    shutdown.requested().await;
+                }
+            })
+        }
+    }
+
+    /// Serves as the proxy listener and records whether Pingora started it.
+    struct ListenerProbe(tokio::sync::mpsc::UnboundedSender<()>);
+
+    #[async_trait]
+    impl BackgroundService for ListenerProbe {
+        async fn start(&self, mut shutdown: ShutdownWatch) {
+            self.0.send(()).expect("listener probe receiver");
+            service::wait_for_backend_shutdown(&mut shutdown).await;
+        }
+    }
+
+    /// Exercise the actual Pingora runtime with both readiness outcomes.
+    #[test]
+    fn required_services_gate_pingora_listeners() {
+        for ready in [true, false] {
+            let config = Config::from_yaml(crate::config::DEFAULT_CONFIG).unwrap();
+            let mut runtime = PingoraServerRuntime::new(&config);
+            let lifecycle = runtime.lifecycle();
+            runtime.add_runtime_services(vec![(Arc::from("test worker"), Arc::new(TestWorker(ready)))]);
+            let (started, mut listener) = tokio::sync::mpsc::unbounded_channel();
+            runtime.add_proxy_service(background_service("listener probe", ListenerProbe(started)));
+            let observed = Arc::new(AtomicBool::new(false));
+            let probe = Arc::clone(&observed);
+            runtime.run_with_shutdown(Box::pin(async move {
+                if tokio::time::timeout(PHASE_DEADLINE, listener.recv())
+                    .await
+                    .is_ok_and(|event| event.is_some())
+                {
+                    probe.store(true, Ordering::SeqCst);
+                }
+            }));
+            assert_eq!(
+                observed.load(Ordering::SeqCst),
+                ready,
+                "worker readiness controls listener startup"
+            );
+            assert_eq!(lifecycle.phase(), LifecyclePhase::Stopped);
+        }
+    }
+
     #[test]
     /// The harness shutdown future stops Pingora.
     fn run_with_shutdown_returns_once_the_future_resolves() {
