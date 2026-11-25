@@ -82,6 +82,12 @@ listeners:
 filter_chains:
   - name: main
     filters:
+      - filter: credential_injection
+        clusters:
+          - name: example
+            header: Authorization
+            value: example
+            strip_client_credential: true
       - filter: static_response
         status: 200
         body: "ok"
@@ -104,6 +110,11 @@ filter_chains:
     terminate_gracefully(child);
 
     let active = fs::read_to_string(&log_path).unwrap_or_default();
+    assert_eq!(
+        active.matches("remove strip_client_credential").count(),
+        1,
+        "the configured file should receive the startup deprecation warning once: {active:?}"
+    );
     assert!(
         active.contains("INFO"),
         "non-blocking logs should flush to disk on graceful shutdown: {active:?}"

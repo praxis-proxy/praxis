@@ -55,6 +55,21 @@ pub struct ResponseTrailersPending;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UpstreamForwardedEndpoint(pub Arc<str>);
 
+/// Trace ID of the exported root HTTP request span.
+///
+/// Published by an HTTP adapter right after it creates the root `http_request`
+/// span, when the `otel` feature is compiled in and a configured exporter gave
+/// the span a valid OpenTelemetry span context. Consumers that report
+/// correlation IDs (such as the policy filter's request metadata) prefer it, so
+/// an audit record joins the trace the collector exports instead of the
+/// filter-level [`TraceContext`] trace ID, which is minted independently.
+/// Absent when `otel` is off or no exporter is active; consumers fall back to
+/// [`TraceContext`].
+///
+/// [`TraceContext`]: crate::trace_context::TraceContext
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExportedSpanTraceId(pub Arc<str>);
+
 /// The request will not reach the cluster a router selects for it.
 ///
 /// Published by an HTTP adapter before the request filters run, for a

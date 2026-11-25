@@ -292,6 +292,7 @@ impl FilteredStreamingBody {
                 request_header_mutations: Vec::new(),
                 request_start: cont.request_start,
                 response_body_bytes: cont.response_body_bytes,
+                response_delivery_complete: None,
                 response_body_mode: cont.response_body_mode,
                 response_header: None,
                 response_headers_modified: false,

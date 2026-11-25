@@ -22,17 +22,17 @@ use crate::http::pingora::context::PingoraRequestCtx;
 pub(in crate::http) fn emit_completion_observers(pipeline: &FilterPipeline, status: u16, ctx: &mut PingoraRequestCtx) {
     let needs_access_fallback =
         !ctx.response_delivery_complete && !ctx.connection_upgraded && pipeline.contains_filter("access_log");
-    if !pipeline.has_request_completion_observer() && !needs_access_fallback {
+    let pending_bodyless = FilterPipeline::has_pending_bodyless_access_log(&ctx.extensions);
+    if !pipeline.has_request_completion_observer() && !needs_access_fallback && !pending_bodyless {
         return;
     }
     if let Some(mut filter_ctx) = ctx.filter_context_for(pipeline, None) {
         pipeline.emit_request_completion(&mut filter_ctx, status);
+        pipeline.finish_bodyless_access_logs(&mut filter_ctx, status);
         if !needs_access_fallback {
             return;
         }
-        // The access_log filter already logged this request (e.g. a bodyless
-        // response whose on_response emitted before a later filter rejected):
-        // no fallback record, or it would duplicate.
+        // A body hook may already have logged this request.
         if praxis_filter::access_record_already_emitted(&filter_ctx) {
             return;
         }
@@ -53,6 +53,27 @@ pub(in crate::http) fn emit_completion_observers(pipeline: &FilterPipeline, stat
         if !pipeline.emit_deferred_access_record(&mut filter_ctx, status) {
             praxis_filter::emit_access_record(&filter_ctx, status);
         }
+    }
+}
+
+/// Log an accepted handshake when the HTTP response ends, before tunnel traffic.
+#[cfg(feature = "pingora")]
+pub(super) fn log_accepted_upgrade(pipeline: &FilterPipeline, ctx: &mut PingoraRequestCtx) {
+    if !FilterPipeline::has_pending_bodyless_access_log(&ctx.extensions) {
+        return;
+    }
+    if let Some(mut filter_ctx) = ctx.filter_context_for(pipeline, None) {
+        pipeline.finish_bodyless_access_logs(&mut filter_ctx, 101);
+        let output = super::body_util::BodyFilterOutput::take_from(&mut filter_ctx);
+        let mutations = filter_ctx.pre_read_mutations;
+        let metadata = filter_ctx.structured_metadata;
+        let results = filter_ctx.filter_results;
+        let path = filter_ctx.rewritten_path;
+        output.write_back(ctx);
+        ctx.pre_read_mutations = mutations;
+        ctx.structured_metadata = metadata;
+        ctx.filter_results = results;
+        ctx.rewritten_path = path;
     }
 }
 

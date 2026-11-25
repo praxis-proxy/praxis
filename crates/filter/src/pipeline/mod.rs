@@ -656,6 +656,18 @@ impl FilterPipeline {
         false
     }
 
+    /// Whether a listener access log saw a bodyless response that still needs its final status.
+    pub fn has_pending_bodyless_access_log(extensions: &RequestExtensions) -> bool {
+        extensions.get::<PendingBodylessAccessLog>().is_some()
+    }
+
+    /// Emit eligible bodyless records after the adapter accepts or refuses the final head.
+    pub fn finish_bodyless_access_logs(&self, ctx: &mut crate::HttpFilterContext<'_>, status: u16) {
+        if ctx.extensions.remove::<PendingBodylessAccessLog>().is_some() {
+            finish_access_logs(&self.filters, ctx, status);
+        }
+    }
+
     /// Notify executed HTTP filter invocations that the request has ended.
     ///
     /// Branch filters retain their own invocation IDs and execution bits.
@@ -983,6 +995,25 @@ fn for_each_pipeline_filter(filters: &[PipelineFilter], visit: &mut dyn FnMut(&P
         visit(pf);
         for branch in &pf.branches {
             for_each_pipeline_filter(&branch.filters, visit);
+        }
+    }
+}
+
+/// Set while a listener-managed bodyless access record awaits the final head.
+pub(crate) struct PendingBodylessAccessLog;
+
+/// Visit pending access logs in the same order as response hooks.
+fn finish_access_logs(entries: &[PipelineFilter], ctx: &mut crate::HttpFilterContext<'_>, status: u16) {
+    for entry in entries.iter().rev() {
+        for branch in entry.branches.iter().rev() {
+            finish_access_logs(&branch.filters, ctx, status);
+        }
+        if let AnyFilter::Http(filter) = &entry.filter
+            && filter.name() == "access_log"
+        {
+            let previous = ctx.current_filter_id.replace(entry.filter_id);
+            filter.finish_bodyless_access_record(ctx, status);
+            ctx.current_filter_id = previous;
         }
     }
 }

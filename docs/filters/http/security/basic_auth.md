@@ -9,7 +9,7 @@ Requires Cargo feature: `basic-auth-filter`.
 
 ## Configuration Notes
 
-Deprecated: slated for removal in favor of the authentication support in the Praxis policy engine (<https://github.com/praxis-proxy/policy>).
+Deprecated: slated for removal in favor of the authentication support in the Praxis policy engine (<https://github.com/praxis-proxy/policy>). Praxis warns when a loaded config uses this filter; it remains accepted for compatibility during the deprecation period.
 
 Experimental: requires the `basic-auth-filter` cargo feature, which is off by default. Credentials are stored in plaintext; this filter is intended for development and testing only.
 

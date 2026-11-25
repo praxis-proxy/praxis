@@ -9207,6 +9207,48 @@ async fn response_short_circuit_still_runs_terminal_observer() {
     assert_eq!(*seen.lock().unwrap(), [(0, 500)]);
 }
 
+#[tokio::test]
+async fn bodyless_completion_preserves_response_order_across_access_logs() {
+    for (delivered, status) in [(true, 200), (false, 502)] {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first.ndjson");
+        let last = dir.path().join("last.ndjson");
+        let yaml: String = [&first, &last]
+            .iter()
+            .map(|path| {
+                format!(
+                    "- filter: access_log\n  fields: [status]\n  sink: {{type: file, path: '{}'}}\n",
+                    path.display()
+                )
+            })
+            .collect();
+        let mut entries: Vec<FilterEntry> = serde_yaml::from_str(&yaml).unwrap();
+        let pipeline = FilterPipeline::build(&mut entries, &FilterRegistry::with_builtins()).unwrap();
+        assert!(
+            !pipeline.has_request_completion_observer(),
+            "access logs also support subrequests"
+        );
+        let request = crate::test_utils::make_request(Method::HEAD, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&request);
+        ctx.executed_filter_indices = vec![true, true];
+        let mut response = crate::test_utils::make_response();
+        ctx.response_header = Some(&mut response);
+        assert!(matches!(
+            pipeline.execute_http_response(&mut ctx).await.unwrap(),
+            FilterAction::Continue
+        ));
+        ctx.response_header = None;
+        ctx.response_delivery_complete = Some(delivered);
+        pipeline.finish_bodyless_access_logs(&mut ctx, status);
+        assert!(
+            wait_for_deferred_access_record(&last)
+                .await
+                .contains(&format!(r#""status":"{status}""#))
+        );
+        assert!(std::fs::read_to_string(first).unwrap_or_default().is_empty());
+    }
+}
+
 /// Wait for exactly one deferred access record without blocking the runtime.
 async fn wait_for_deferred_access_record(path: &std::path::Path) -> String {
     tokio::time::timeout(std::time::Duration::from_secs(1), async {

@@ -412,7 +412,7 @@ Requests that reached an upstream endpoint.
 | Label | Values |
 | -------------- | ---------------------------------------- |
 | `cluster` | Cluster name or `"none"` |
-| `endpoint` | Configured upstream address (`host:port`) |
+| `endpoint` | Configured upstream address (`host:port`), or `forward_proxy` |
 | `status_class` | `1xx`, `2xx`, `3xx`, `4xx`, `5xx`, `unknown` |
 
 Counted once per request, so a request retried across
@@ -432,6 +432,16 @@ endpoints generated from pod IPs) keeps a set of
 series for every address it has ever configured, and
 `/metrics` grows with each one. Disable the `endpoint`
 dimension there (see [Metric Label Sets](#metric-label-sets)).
+
+A forward-proxy listener (`forward-proxy` builds) that
+forwards an absolute-form request
+(`GET http://host/path`) to the destination its
+target names labels it `endpoint="forward_proxy"`,
+whatever the destination: the client chooses it, so
+labeling each by address would grow one series per
+destination without bound. A request the pipeline
+routes to a cluster instead keeps that endpoint's
+configured address.
 
 ### TCP Connection Metrics
 

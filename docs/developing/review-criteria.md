@@ -279,7 +279,7 @@ correctness. Review what the suite would *fail to notice*.
 - Doc quality at the contract: every trait method should
   state its call ordering, its relationship to body modes,
   and what a returned action does; the tutorial
-  (`docs/filters/http-filter-tutorial.md`) must stay
+  (`docs/developing/http-filter-tutorial.md`) must stay
   buildable against the current API.
 
 ## 13. Dependency and Supply-Chain Hygiene

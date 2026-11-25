@@ -185,36 +185,36 @@ trusted endpoints, and response behavior.
 4. Run the [gateway demo][demo] and check both allowed and denied outcomes.
 
 [ppe]: https://github.com/praxis-proxy/policy
-[ai-quickstart]: https://github.com/praxis-proxy/ai/blob/main/docs/quickstart.md
+[ai-quickstart]: https://github.com/praxis-proxy/ai/blob/main/docs/getting-started/quickstart.md
 [build-features]: ../operating/build-features.md#selecting-policy-features
 [tool-access]:
-  https://github.com/praxis-proxy/policy/blob/main/docs/content/use-cases.md#1-identity-aware-tool-access
+  https://github.com/praxis-proxy/policy/blob/main/docs/content/concepts/use-cases.md#1-identity-aware-tool-access
 [http]:
-  https://github.com/praxis-proxy/policy/blob/main/docs/content/http-routing.md
+  https://github.com/praxis-proxy/policy/blob/main/docs/content/guides/http-routing.md
 [pdp]: https://github.com/praxis-proxy/policy/blob/main/docs/content/apl/pdp.md
 [llm]:
-  https://github.com/praxis-proxy/policy/blob/main/docs/content/llm-routes.md
+  https://github.com/praxis-proxy/policy/blob/main/docs/content/guides/llm-routes.md
 [llm-example]: ../../examples/configs/security/policy-llm-input.yaml
 [token-exchange]:
-  https://github.com/praxis-proxy/policy/blob/main/docs/content/use-cases.md#3-credential-custody-and-token-exchange
+  https://github.com/praxis-proxy/policy/blob/main/docs/content/concepts/use-cases.md#3-credential-custody-and-token-exchange
 [delegation]:
-  https://github.com/praxis-proxy/policy/blob/main/docs/content/identity-delegation.md
+  https://github.com/praxis-proxy/policy/blob/main/docs/content/guides/identity-delegation.md
 [redaction]:
-  https://github.com/praxis-proxy/policy/blob/main/docs/content/use-cases.md#2-on-the-wire-redaction
+  https://github.com/praxis-proxy/policy/blob/main/docs/content/concepts/use-cases.md#2-on-the-wire-redaction
 [effects]:
   https://github.com/praxis-proxy/policy/blob/main/docs/content/apl/effects.md
 [data-flow]:
-  https://github.com/praxis-proxy/policy/blob/main/docs/content/use-cases.md#4-cross-tool-data-flow-control
+  https://github.com/praxis-proxy/policy/blob/main/docs/content/concepts/use-cases.md#4-cross-tool-data-flow-control
 [taint]:
   https://github.com/praxis-proxy/policy/blob/main/docs/content/apl/tainting.md
 [approval]:
-  https://github.com/praxis-proxy/policy/blob/main/docs/content/use-cases.md#6-human-in-the-loop-approval
+  https://github.com/praxis-proxy/policy/blob/main/docs/content/concepts/use-cases.md#6-human-in-the-loop-approval
 [pii]:
-  https://github.com/praxis-proxy/policy/blob/main/docs/content/use-cases.md#5-pii-guardrails-on-arguments
+  https://github.com/praxis-proxy/policy/blob/main/docs/content/concepts/use-cases.md#5-pii-guardrails-on-arguments
 [audit]:
-  https://github.com/praxis-proxy/policy/blob/main/docs/content/auditing.md
+  https://github.com/praxis-proxy/policy/blob/main/docs/content/guides/auditing.md
 [limits]:
-  https://github.com/praxis-proxy/policy/blob/main/docs/content/rate-limiting.md
+  https://github.com/praxis-proxy/policy/blob/main/docs/content/guides/rate-limiting.md
 [ip-acl]: ../filters/http/security/ip_acl.md
 [guardrails]: ../filters/http/security/guardrails.md
 [credentials]: ../filters/http/security/credential_injection.md
@@ -222,8 +222,8 @@ trusted endpoints, and response behavior.
 [demo]: https://github.com/praxis-proxy/demos/tree/main/demos/policy-engine
 [filter-reference]: ../filters/http/security/policy.md
 [use-cases]:
-  https://github.com/praxis-proxy/policy/blob/main/docs/content/use-cases.md
+  https://github.com/praxis-proxy/policy/blob/main/docs/content/concepts/use-cases.md
 [ppe-quickstart]:
-  https://github.com/praxis-proxy/policy/blob/main/docs/content/quickstart.md
+  https://github.com/praxis-proxy/policy/blob/main/docs/content/getting-started/quickstart.md
 [apl]:
   https://github.com/praxis-proxy/policy/blob/main/docs/content/apl/index.md

@@ -26,7 +26,7 @@ use crate::{
 const CLUSTER_BEARING_FILTERS: &[&str] = &["load_balancer", "tcp_load_balancer"];
 
 /// Filter type whose config nests filter entries under `steps[].filters`.
-pub(super) const STEP_BEARING_FILTER: &str = "iterative_request_router";
+pub(in crate::config) const STEP_BEARING_FILTER: &str = "iterative_request_router";
 
 // -----------------------------------------------------------------------------
 // Inline Cluster Validation

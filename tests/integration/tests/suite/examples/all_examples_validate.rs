@@ -36,6 +36,11 @@ fn every_example_resolves_its_pipelines() {
                 continue;
             }
         }
+        // The Hyper adapter rejects this Pingora-only passthrough config.
+        #[cfg(feature = "hyper")]
+        if path.file_name().is_some_and(|name| name == "websocket.yaml") {
+            continue;
+        }
         #[cfg(not(feature = "tls-health-check"))]
         if path.file_name().is_some_and(|name| name == "tls-health-check.yaml") {
             continue;
@@ -679,6 +684,10 @@ fn external_files(example: &std::path::Path) -> &'static [ExternalFile<'static>]
         }],
         "security/policy-assertions.yaml" => &[ExternalFile {
             path: "/etc/praxis/assertions-policy.yaml",
+            loader: FileLoader::Policy,
+        }],
+        "security/policy-request-context.yaml" => &[ExternalFile {
+            path: "/etc/praxis/request-context-policy.yaml",
             loader: FileLoader::Policy,
         }],
         "security/policy.yaml" | "security/policy-context.yaml" => &[ExternalFile {

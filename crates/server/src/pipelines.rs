@@ -204,13 +204,6 @@ pub(crate) fn resolve_pipelines_with_composition(
     let chains = expanded_chains.as_slices();
     let mut pipelines = HashMap::with_capacity(config.listeners.len());
     for listener in &config.listeners {
-        if listener.upgrade_policy.is_some() {
-            return Err(format!(
-                "listener '{}': explicit upgrade_policy requires protocol admission support, which is not available yet",
-                listener.name
-            )
-            .into());
-        }
         #[cfg(feature = "hyper")]
         if listener
             .upgrade_policy
@@ -446,9 +439,9 @@ mod tests {
         }
     }
 
-    /// Explicit denials must not be accepted before adapters enforce them.
+    /// Explicit denials must reach the pipeline used to admit upgrades.
     #[test]
-    fn resolve_pipelines_rejects_unenforced_upgrade_policy() {
+    fn resolve_pipelines_applies_explicit_upgrade_policy() {
         let mut config = valid_config();
         config.listeners[0].upgrade_policy = Some(serde_yaml::from_str("default: deny").unwrap());
         let result = resolve_pipelines(
@@ -459,12 +452,8 @@ mod tests {
             &empty_session_stores(),
             &empty_subrequest_client(),
         );
-        let error = result.err().expect("an unenforced policy must fail startup");
-        assert!(
-            error
-                .to_string()
-                .contains("explicit upgrade_policy requires protocol admission support")
-        );
+        let pipelines = result.unwrap();
+        assert!(!pipelines.get("web").unwrap().load().permits_upgrade("websocket"));
     }
 
     #[test]
