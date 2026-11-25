@@ -680,11 +680,11 @@ fn resolve_composition(
 /// # Errors
 ///
 /// Returns an error if the registry, pipelines, or listener groups are invalid.
-pub fn validate_config(config: &Config) -> Result<(), StartupError> {
+pub fn validate_config(config: &mut Config) -> Result<(), StartupError> {
     validate_config_with_composition(config, ServerComposition::standard())
 }
 
-/// Build and validate the same pipeline candidate as startup without starting
+/// Normalize the supplied configuration in place, then validate the same pipeline candidate as startup without starting
 /// server-owned runtime tasks or registering listeners.
 ///
 /// Built-in policy filters compile policy documents without initializing
@@ -695,10 +695,12 @@ pub fn validate_config(config: &Config) -> Result<(), StartupError> {
 /// # Errors
 ///
 /// Returns an error if the composition, pipelines, or listener groups are invalid.
-pub fn validate_config_with_composition(config: &Config, composition: ServerComposition) -> Result<(), StartupError> {
-    let mut checked = config.clone();
-    checked.validate()?;
-    validate_parsed_config_pipelines(&checked, composition)
+pub fn validate_config_with_composition(
+    config: &mut Config,
+    composition: ServerComposition,
+) -> Result<(), StartupError> {
+    config.validate()?;
+    validate_parsed_config_pipelines(config, composition)
 }
 
 /// Validate pipeline construction for a configuration already checked by [`Config::validate`].

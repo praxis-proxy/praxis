@@ -118,6 +118,33 @@ pub(super) fn require_dpop_external_base_url(policy: &PolicyConfig) -> Result<()
     Ok(())
 }
 
+/// Check the compiled JWT instances that would need an HTTP transport during initialization.
+pub(super) fn validate_jwks_capabilities(engine: &ppe::PolicyEngine) -> Result<(), FilterError> {
+    for plugin in engine.plugin_names().iter().filter_map(|name| engine.get_plugin(name)) {
+        let config = plugin.trusted_config();
+        if config.kind != JWT_KIND || config.capabilities.contains("perform_http") {
+            continue;
+        }
+        let issuers = config
+            .config
+            .as_ref()
+            .and_then(|value| value.get("trusted_issuers"))
+            .and_then(serde_json::Value::as_array);
+        if issuers
+            .into_iter()
+            .flatten()
+            .any(|issuer| issuer.pointer("/decoding_key/kind").and_then(serde_json::Value::as_str) == Some("jwks_url"))
+        {
+            return Err(format!(
+                "policy: JWT plugin '{}' requires perform_http for a jwks_url issuer",
+                config.name
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
 /// Return a section-specific reason to defer identity resolution to the route.
 ///
 /// Assumes inherited authentication steps decide consistently across HTTP and

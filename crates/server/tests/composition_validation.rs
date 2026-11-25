@@ -13,7 +13,7 @@ use praxis_core::config::{Config, DEFAULT_CONFIG};
 fn validation_rejects_a_config_with_no_listeners() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut config = Config::from_yaml(DEFAULT_CONFIG)?;
     config.listeners.clear();
-    let err = praxis::validate_config(&config)
+    let err = praxis::validate_config(&mut config)
         .err()
         .ok_or("validation accepted an empty listener list")?;
     assert!(
@@ -23,14 +23,33 @@ fn validation_rejects_a_config_with_no_listeners() -> Result<(), Box<dyn std::er
     Ok(())
 }
 
+/// The caller retains the normalized configuration that passed validation.
+#[test]
+fn validation_normalizes_the_embedding_config() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut config = Config::from_yaml(DEFAULT_CONFIG)?;
+    let listener = config.listeners.first_mut().ok_or("missing default listener")?;
+    listener.upgrade_policy = Some(serde_yaml::from_str("protocols: {WebSocket: deny}")?);
+    praxis::validate_config(&mut config)?;
+    let policy = config
+        .listeners
+        .first()
+        .and_then(|listener| listener.upgrade_policy.as_ref())
+        .ok_or("missing upgrade policy")?;
+    assert!(
+        policy.protocols.contains_key("websocket"),
+        "caller must retain normalized keys"
+    );
+    Ok(())
+}
+
 /// Validation and startup apply the same downstream rejection.
 #[test]
 fn validation_uses_downstream_pipeline_validators() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let config = Config::from_yaml(DEFAULT_CONFIG)?;
+    let mut config = Config::from_yaml(DEFAULT_CONFIG)?;
     let composition = ServerComposition::standard()
         .add_pipeline_validator(|_| Err(CompositionError::new("downstream validator rejected candidate")));
 
-    let result = validate_config_with_composition(&config, composition);
+    let result = validate_config_with_composition(&mut config, composition);
     let rejects = |error: praxis::StartupError| error.to_string().contains("downstream validator rejected candidate");
     assert!(
         result.is_err_and(rejects),
@@ -75,7 +94,7 @@ filter_chains:
 "#,
         path.display()
     );
-    praxis::validate_config(&Config::from_yaml(&yaml)?)?;
+    praxis::validate_config(&mut Config::from_yaml(&yaml)?)?;
     assert!(
         !path.exists(),
         "library validation created the configured access-log sink"

@@ -1751,6 +1751,12 @@ async fn a_jwks_issuer_constructs_with_the_installed_transport() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_jwks_issuer_without_perform_http_fails_to_construct() {
     let (_dir, path) = write_jwks_url_config("");
+    let registry = FilterRegistry::with_builtins().with_validation_only(true);
+    let offline = registry
+        .build_policy(&policy_filter_config(&path))
+        .err()
+        .expect("offline validation must reject a missing HTTP grant");
+    assert!(offline.to_string().contains("perform_http"), "got {offline}");
     let err = try_build_filter_allowing_private(path, true)
         .err()
         .expect("a withheld capability must refuse to start");

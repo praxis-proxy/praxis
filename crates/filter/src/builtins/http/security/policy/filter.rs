@@ -642,6 +642,7 @@ impl PolicyFilter {
         // would fail the reload with "no factory registered" for a config that
         // had been serving traffic.
         let host_factories = super::host_plugins::host_plugin_factories();
+        let builtin_jwt = !host_factories.iter().any(|(kind, _)| kind == "identity/jwt");
         if !host_factories.is_empty() {
             tracing::info!(
                 count = super::host_plugins::host_plugin_count(),
@@ -676,6 +677,9 @@ impl PolicyFilter {
         mgr.load_config_yaml(&yaml)
             .map_err(|e: Box<PluginError>| engine_error("load_config_yaml", &cfg.config_path, &e))?;
 
+        if validation_only && builtin_jwt {
+            super::construction::validate_jwks_capabilities(&mgr)?;
+        }
         if !validation_only {
             Self::initialize_policy(&mgr, &cfg.config_path, cfg.init_timeout_secs)?;
         }
