@@ -11,6 +11,9 @@ use praxis_filter::{BodyBuffer, BodyMode, FilterPipeline, Request, Response, Tru
 use tokio::sync::OwnedSemaphorePermit;
 use tracing::Span;
 
+#[cfg(feature = "pingora")]
+use crate::http::upgrade::WebSocketOffer;
+
 // -----------------------------------------------------------------------------
 // PingoraRequestCtx
 // -----------------------------------------------------------------------------
@@ -38,6 +41,14 @@ use tracing::Span;
 pub struct PingoraRequestCtx {
     /// Process lifecycle used by direct response writers during drain.
     pub lifecycle: Option<LifecycleHandle>,
+
+    /// Listener that owns this request's pinned pipeline generation.
+    #[cfg(feature = "pingora")]
+    pub(crate) listener_name: ::metrics::SharedString,
+
+    /// Valid client WebSocket handshake admitted by this request's pinned pipeline.
+    #[cfg(feature = "pingora")]
+    pub(crate) admitted_websocket: Option<WebSocketOffer>,
 
     /// Connection permit from the per-listener semaphore.
     ///
@@ -417,6 +428,12 @@ pub struct PingoraRequestCtx {
     /// request that never reached the cluster. Reset per request.
     pub upstream_contacted: bool,
 
+    /// Whether `upstream` is a client-chosen forward-proxy destination rather
+    /// than an endpoint from configuration. Metrics then label it with a
+    /// fixed endpoint, so each destination a client names does not add a
+    /// series that is never removed.
+    pub(crate) upstream_is_forward_destination: bool,
+
     /// Set in the logging phase when the client went away before the
     /// upstream answered, so the cleanup response pass does not report the
     /// upstream as reached and a circuit breaker releases instead of
@@ -628,6 +645,10 @@ impl Default for PingoraRequestCtx {
     )]
     fn default() -> Self {
         Self {
+            #[cfg(feature = "pingora")]
+            admitted_websocket: None,
+            #[cfg(feature = "pingora")]
+            listener_name: ::metrics::SharedString::const_str("unknown"),
             _connection_permit: None,
             _global_connection_permit: None,
             cached_body_done_indices: Vec::new(),
@@ -699,6 +720,7 @@ impl Default for PingoraRequestCtx {
             upstream: None,
             upstream_for_retry: None,
             upstream_contacted: false,
+            upstream_is_forward_destination: false,
             ended_by_client: false,
         }
     }

@@ -1,24 +1,37 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-//! Forward-proxy (HTTP CONNECT) configuration for HTTP listeners.
+//! Forward-proxy configuration for HTTP listeners: HTTP CONNECT tunnels and
+//! absolute-form requests.
 //!
 //! A listener with a [`ForwardProxyConfig`] block accepts `CONNECT host:port`
 //! requests and tunnels bytes to the destination after the filter pipeline
-//! and the destination rules approve it. This turns Praxis into an egress
-//! gateway for clients configured with `HTTP_PROXY`/`HTTPS_PROXY`.
+//! and the destination rules approve it. It also forwards HTTP/1
+//! absolute-form requests (`GET http://host/path`, what `HTTP_PROXY` clients
+//! send for `http://` URLs) to the origin their target names, after the same
+//! pipeline and destination rules: over plain TCP for `http`, and with TLS
+//! for `https`, sending the host as SNI and verifying the certificate
+//! against the system roots. The filters see such a request with the
+//! canonical `Host` its target names, whatever `Host` the client sent or
+//! omitted (RFC 9112 Section 3.2.2). When the pipeline selects an upstream
+//! itself (a `router` and `load_balancer`), the request takes that route
+//! instead, under the cluster's TLS and connection settings. This turns
+//! Praxis into an egress gateway for clients configured with
+//! `HTTP_PROXY`/`HTTPS_PROXY`.
 //!
-//! The tunnel is opaque: TLS inside it is end-to-end between client and
+//! A tunnel is opaque: TLS inside it is end-to-end between client and
 //! destination, so payload-inspecting filters (`guardrails`,
-//! `credential_injection`) cannot see tunneled traffic. Egress control is
-//! L4 — destination host/port, client identity, timing.
+//! `credential_injection`) cannot see tunneled traffic, and egress control
+//! for it is L4 — destination host/port, client identity, timing. An
+//! absolute-form request is not tunneled: it runs the pipeline as any
+//! proxied request does.
 //!
 //! Destinations are matched with [`SniMatcher`] semantics: exact hostnames
 //! win over wildcards, `*.example.com` matches any number of leading labels
 //! (longest suffix first), and matching is case-insensitive. IP-literal
 //! destinations cannot be allowlisted (host patterns must be DNS names);
 //! they are denied whenever a destination rule list is configured. Private
-//! destination IPs are denied at connect time unless
+//! and reserved destination IPs, literal or resolved, are refused unless
 //! `insecure_options.allow_private_upstreams` is set.
 
 use std::collections::BTreeMap;
@@ -79,7 +92,7 @@ pub struct DestinationRule {
 ///
 /// Deserialization validates timeout bounds, ports, and destination host
 /// patterns, so a malformed block fails at config load rather than at the
-/// first CONNECT request.
+/// first forward-proxy request.
 ///
 /// ```
 /// use praxis_core::config::ForwardProxyConfig;
@@ -103,7 +116,8 @@ pub struct DestinationRule {
 /// ```
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ForwardProxyConfig {
-    /// Whether the listener accepts CONNECT requests.
+    /// Whether the listener forward-proxies: accepts CONNECT requests and
+    /// forwards absolute-form ones.
     ///
     /// Defaults to `false`: the block's presence alone is inert until
     /// enabled, so a staged rollout can ship the rest of the settings
@@ -113,8 +127,12 @@ pub struct ForwardProxyConfig {
     /// How long the tunnel may stay idle before it is closed, in
     /// milliseconds.
     ///
-    /// Progress in either direction resets the deadline. Defaults to
-    /// 300,000 (5 minutes); bounded to 1 hour.
+    /// Progress in either direction resets the deadline. An absolute-form
+    /// request the proxy forwards to the destination it names gets it as the
+    /// read and write timeout toward that destination; one whose pipeline
+    /// selected an upstream (a `router` and `load_balancer`) uses that
+    /// upstream's connection settings instead. Defaults to 300,000
+    /// (5 minutes); bounded to 1 hour.
     pub idle_timeout_ms: u64,
 
     /// Maximum total tunnel duration in seconds, regardless of activity.
@@ -124,7 +142,8 @@ pub struct ForwardProxyConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_duration_secs: Option<u64>,
 
-    /// Destination host/port patterns a CONNECT may target.
+    /// Destination host/port patterns a CONNECT or absolute-form request may
+    /// target.
     ///
     /// Entries sharing a host (case-insensitively) merge their ports; a
     /// portless entry makes that host any-port. An empty list allows
@@ -140,7 +159,7 @@ pub struct ForwardProxyConfig {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ForwardProxyConfigRaw {
-    /// Whether CONNECT is accepted.
+    /// Whether the listener forward-proxies.
     #[serde(default)]
     enabled: bool,
 

@@ -190,9 +190,9 @@
 //! See [Header assertions].
 //!
 //! [Identity configuration]: https://github.com/praxis-proxy/policy/blob/main/docs/content/apl/identity.md
-//! [OIDC claim mapping]: https://github.com/praxis-proxy/policy/blob/main/docs/content/identity-delegation.md#reading-claims-the-way-your-idp-writes-them
-//! [Header assertions]: https://github.com/praxis-proxy/policy/blob/main/docs/content/assertions.md
-//! [Vault delegation recipes]: https://github.com/praxis-proxy/policy/blob/main/docs/content/identity-delegation.md#recipe-8-a-users-vault-stored-credential
+//! [OIDC claim mapping]: https://github.com/praxis-proxy/policy/blob/main/docs/content/guides/identity-delegation.md#reading-claims-the-way-your-idp-writes-them
+//! [Header assertions]: https://github.com/praxis-proxy/policy/blob/main/docs/content/reference/assertions.md
+//! [Vault delegation recipes]: https://github.com/praxis-proxy/policy/blob/main/docs/content/guides/identity-delegation.md#recipe-8-a-users-vault-stored-credential
 //!
 //! # Sessions and taint
 //!
@@ -300,6 +300,7 @@ mod filter;
 mod host_plugins;
 mod json_rpc;
 mod llm;
+mod request_context;
 mod request_facts;
 mod request_headers;
 mod request_state;

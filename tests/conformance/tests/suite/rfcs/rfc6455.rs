@@ -126,6 +126,10 @@ fn rfc6455_sec_websocket_key_forwarded_unchanged() {
              Sec-WebSocket-Version: 13\r\n\r\n"
         ),
     );
+    if cfg!(feature = "hyper") {
+        assert_eq!(parse_status(&raw), 403, "Hyper refuses WebSocket passthrough");
+        return;
+    }
     let body = parse_body(&raw);
 
     assert!(
@@ -158,6 +162,10 @@ fn rfc6455_sec_websocket_version_forwarded() {
              Sec-WebSocket-Version: 13\r\n\r\n"
         ),
     );
+    if cfg!(feature = "hyper") {
+        assert_eq!(parse_status(&raw), 403, "Hyper refuses WebSocket passthrough");
+        return;
+    }
     let body = parse_body(&raw);
 
     assert!(

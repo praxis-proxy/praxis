@@ -143,9 +143,14 @@ fn upgrade_request_preserves_upgrade_headers() {
          Connection: Upgrade\r\n\
          Keep-Alive: 300\r\n\
          Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+         Sec-WebSocket-Version: 13\r\n\
          \r\n"
     );
     let raw = http_send(proxy.addr(), &request);
+    if cfg!(feature = "hyper") {
+        assert_eq!(parse_status(&raw), 403, "Hyper refuses WebSocket passthrough");
+        return;
+    }
     let body = parse_body(&raw);
     let body_lower = body.to_lowercase();
 
@@ -181,6 +186,10 @@ fn upgrade_rejected_by_upstream_returns_normal_response() {
          \r\n"
     );
     let raw = http_send(proxy.addr(), &request);
+    if cfg!(feature = "hyper") {
+        assert_eq!(parse_status(&raw), 403, "Hyper refuses WebSocket passthrough");
+        return;
+    }
     let status = parse_status(&raw);
 
     assert_eq!(status, 200, "non-websocket backend should return normal 200, not 101");
@@ -214,6 +223,34 @@ fn h2c_upgrade_headers_stripped() {
         !body_lower.contains("http2-settings"),
         "HTTP2-Settings must be stripped for h2c requests: {body}"
     );
+}
+
+#[test]
+fn unknown_upgrade_and_http10_offers_remain_ordinary_http() {
+    let backend = start_header_echo_backend();
+    let config = Config::from_yaml(&simple_proxy_yaml(free_port(), backend.port())).unwrap();
+    let proxy = start_proxy(&config);
+    for (method, version, protocol) in [
+        ("POST", "HTTP/1.1", "h2c"),
+        ("GET", "HTTP/1.1", "custom"),
+        ("GET", "HTTP/1.0", "websocket"),
+    ] {
+        let raw = http_send(
+            proxy.addr(),
+            &format!(
+                "{method} / {version}\r\nHost: localhost\r\nConnection: Upgrade, close\r\nUpgrade: {protocol}\r\nContent-Length: 0\r\n\r\n"
+            ),
+        );
+        assert_eq!(
+            parse_status(&raw),
+            200,
+            "ignored upgrade must remain ordinary HTTP: {raw}"
+        );
+        assert!(
+            !parse_body(&raw).to_ascii_lowercase().contains("upgrade"),
+            "ignored offers must not be forwarded"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

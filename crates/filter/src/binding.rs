@@ -91,6 +91,10 @@ pub(crate) struct ResolutionStack {
     /// the same [`ClusterRef`], sharing its balancer state and retry budget.
     #[cfg(feature = "chain-binding")]
     clusters: RefCell<HashMap<Arc<str>, ClusterRef>>,
+
+    /// Warning and traversal limits shared by all inline outbound bindings in this build.
+    #[cfg(feature = "chain-binding")]
+    inline_deprecations: RefCell<praxis_core::config::InlineChainDeprecations>,
 }
 
 impl ResolutionStack {
@@ -100,6 +104,8 @@ impl ResolutionStack {
             active: RefCell::new(Vec::new()),
             #[cfg(feature = "chain-binding")]
             clusters: RefCell::new(HashMap::new()),
+            #[cfg(feature = "chain-binding")]
+            inline_deprecations: RefCell::default(),
         }
     }
 
@@ -449,6 +455,7 @@ impl<'a> ChainBindingContext<'a> {
         // `load_balancer` with no cluster selector, a misplaced terminal filter,
         // etc. would otherwise 502 at request time instead of failing the build.
         self.enforce_bound_ordering(&pipeline, &entries, name.unwrap_or("<inline>"))?;
+        self.stack.inline_deprecations.borrow_mut().warn(chain_ref);
         Ok(pipeline)
     }
 
@@ -892,6 +899,37 @@ mod tests {
             *sink.lock().expect("sink lock"),
             Some(2),
             "callout should bind the 2-filter inline outbound chain"
+        );
+    }
+
+    #[test]
+    fn warns_about_deprecated_fields_in_bound_inline_chains() {
+        let mut registry = FilterRegistry::with_builtins();
+        register_probe(&mut registry, Arc::new(Mutex::new(None)));
+        let mut top = entries(
+            "
+- filter: test_callout
+  outbound_chain:
+    name: outbound
+    filters:
+      - filter: credential_injection
+        clusters:
+          - {name: api, header: authorization, value: fixture, strip_client_credential: false}
+",
+        );
+        let log = tempfile::NamedTempFile::new().expect("open warning capture");
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(log.reopen().expect("open warning writer"))
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            FilterPipeline::build_with_chains(&mut top, &registry, &HashMap::new(), &InsecureOptions::default(), &[])
+                .expect("build bound pipeline");
+        });
+        let messages = std::fs::read_to_string(log.path()).expect("read warnings");
+        assert!(
+            messages.contains("outbound].filters[0].clusters[0].strip_client_credential"),
+            "bound chain warning should identify the inline chain and deprecated field: {messages}"
         );
     }
 

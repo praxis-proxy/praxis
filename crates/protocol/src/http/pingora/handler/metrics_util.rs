@@ -90,8 +90,69 @@ fn emit_upstream_request_metric(ctx: &PingoraRequestCtx, cluster: &::metrics::Sh
     {
         metrics::record_upstream_request(
             cluster.clone(),
-            ::metrics::SharedString::from(std::sync::Arc::clone(&upstream.address)),
+            endpoint_label(ctx, upstream),
             metrics::status_class(upstream_status),
         );
+    }
+}
+
+/// Fixed `endpoint` label for every client-chosen forward-proxy destination.
+const FORWARD_PROXY_ENDPOINT: &str = "forward_proxy";
+
+/// The `endpoint` label for the upstream a request reached.
+///
+/// A configured endpoint is labeled with its address. A forward-proxy
+/// destination is chosen by the client, and the recorder never drops a
+/// series, so labeling it by address would grow one series per destination
+/// without bound; it carries [`FORWARD_PROXY_ENDPOINT`] instead.
+fn endpoint_label(ctx: &PingoraRequestCtx, upstream: &praxis_core::connectivity::Upstream) -> ::metrics::SharedString {
+    if ctx.upstream_is_forward_destination {
+        ::metrics::SharedString::const_str(FORWARD_PROXY_ENDPOINT)
+    } else {
+        ::metrics::SharedString::from(std::sync::Arc::clone(&upstream.address))
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use praxis_core::connectivity::{ConnectionOptions, Upstream};
+
+    use super::{FORWARD_PROXY_ENDPOINT, endpoint_label};
+    use crate::http::pingora::context::PingoraRequestCtx;
+
+    /// An upstream dialing `address`.
+    fn upstream(address: &str) -> Upstream {
+        Upstream {
+            address: Arc::from(address),
+            authority: None,
+            base_path: None,
+            connection: Arc::new(ConnectionOptions::default()),
+            tls: None,
+        }
+    }
+
+    #[test]
+    fn configured_endpoints_are_labeled_by_address() {
+        let ctx = PingoraRequestCtx::default();
+        assert_eq!(&*endpoint_label(&ctx, &upstream("10.0.0.7:8080")), "10.0.0.7:8080");
+    }
+
+    #[test]
+    fn forward_destinations_share_one_endpoint_label() {
+        // Each destination a client names would otherwise add a series the
+        // recorder never removes.
+        let ctx = PingoraRequestCtx {
+            upstream_is_forward_destination: true,
+            ..PingoraRequestCtx::default()
+        };
+        for address in ["93.184.216.34:80", "[2001:db8::1]:443"] {
+            assert_eq!(&*endpoint_label(&ctx, &upstream(address)), FORWARD_PROXY_ENDPOINT);
+        }
     }
 }

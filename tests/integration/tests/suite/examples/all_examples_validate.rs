@@ -681,6 +681,10 @@ fn external_files(example: &std::path::Path) -> &'static [ExternalFile<'static>]
             path: "/etc/praxis/assertions-policy.yaml",
             loader: FileLoader::Policy,
         }],
+        "security/policy-request-context.yaml" => &[ExternalFile {
+            path: "/etc/praxis/request-context-policy.yaml",
+            loader: FileLoader::Policy,
+        }],
         "security/policy.yaml" | "security/policy-context.yaml" => &[ExternalFile {
             path: "/etc/praxis/policy.yaml",
             loader: FileLoader::Policy,

@@ -83,6 +83,8 @@ impl Config {
         warn_active_insecure_options(&self.insecure_options);
         validate_listeners(&mut self.listeners)?;
         validate_listener_names(&self.listeners)?;
+        #[cfg(feature = "jobs-config")]
+        crate::config::jobs::validate_listener_job_queues(&self.listeners, self.jobs.as_ref())?;
         validate_filter_chains(&self.filter_chains, &self.listeners)?;
         validate_branch_chains(&self.filter_chains)?;
         let metrics_address = self

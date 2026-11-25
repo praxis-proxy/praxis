@@ -66,14 +66,16 @@ curl -fsS http://127.0.0.1:9902/metrics
 | `GET /api/stats` | `version.display`, uptime, listener activity and upstream health. `version.git_sha` is present when available at build time. |
 | `GET /api/pipelines` | Resolved live pipelines, including branches. Use `?listener=NAME` to inspect one listener. |
 | `GET /healthy` | Liveness: `200` once the listener accepts requests. |
-| `GET /ready` | Upstream readiness: `503` when a cluster has no healthy endpoints. With no health checks, this returns `200`. |
+| `GET /ready` | Readiness: `503` while the replica is initializing, draining or stopped. Once serving, the default `admin.readiness: serving` returns `200` even when a cluster has no healthy endpoints; `readiness: upstreams` returns `503` in that case. |
 | `GET /metrics` | Request, error, health and reload metrics. |
 
 `/api/*` uses port 9901 in this example; health and metrics
-use 9902. `/ready` is an upstream health check, not a
-drain-status endpoint. Enable `admin.verbose` only when
-per-cluster readiness detail is needed; it exposes
-internal topology.
+use 9902. The `/ready` body names the phase
+(`{"status":"draining"}` during shutdown) or, with active
+health checks, the cluster counts, so a `503` tells you
+whether the replica is shutting down or an upstream is
+down. Enable `admin.verbose` only when per-cluster
+readiness detail is needed; it exposes internal topology.
 
 See [Observability] for endpoint responses and metric
 definitions, and [Health Checking] for probe behaviour.

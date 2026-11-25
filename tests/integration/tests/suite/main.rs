@@ -135,6 +135,8 @@ mod url_rewrite;
 mod url_target_tls;
 mod via;
 mod websocket;
+#[cfg(feature = "pingora")]
+mod websocket_admission;
 mod wildcard_routing;
 
 #[cfg(feature = "tls-health-check")]

@@ -22,11 +22,13 @@ mod branch_chain;
 mod chain_ref;
 mod cluster;
 mod condition;
+mod deprecation;
 mod expanded_chains;
 mod filters;
 mod forward_proxy;
 mod hedge_policy;
 mod insecure_options;
+mod jobs;
 mod listener;
 mod logging;
 mod metrics;
@@ -56,11 +58,13 @@ pub use cluster::{
 pub use condition::{
     ApplicationMatch, Condition, ConditionMatch, ResponseCondition, ResponseConditionMatch, SelectedUpstreamMatch,
 };
+pub use deprecation::{DeprecationWarnings, InlineChainDeprecations};
 pub use expanded_chains::ExpandedFilterChains;
 pub use filters::{FailureMode, FilterChainConfig, FilterEntry};
 pub use forward_proxy::{DestinationRule, ForwardProxyConfig};
 pub use hedge_policy::{HedgePolicy, MAX_HEDGE_ATTEMPTS};
 pub use insecure_options::{InsecureFlag, InsecureOptions, SkipPipelineChecks};
+pub use jobs::{JobQueueSize, JobQueuedBytes, JobTimeoutSecs, JobWorkers, JobsConfig};
 pub use listener::{Listener, ListenerTls, ProtocolKind, UpgradeAction, UpgradePolicy};
 pub use logging::{DEFAULT_BUFFER_SIZE_LINES, LogOutput, LoggingConfig};
 pub use metrics::{MetricLabel, MetricLabelsConfig, MetricsConfig, RouteTemplates};
@@ -127,6 +131,15 @@ pub struct Config {
     #[serde(default)]
     pub insecure_options: InsecureOptions,
 
+    /// Background job queue settings. Absent means no job runtime is started.
+    ///
+    /// Requires the `jobs-config` Cargo feature, which is off by default:
+    /// without it the key is unknown, and a build that enables the feature
+    /// warns at startup because nothing reads the section yet.
+    #[cfg_attr(not(feature = "jobs-config"), serde(skip))]
+    #[serde(default)]
+    pub jobs: Option<JobsConfig>,
+
     /// Proxy listeners to bind.
     pub listeners: Vec<Listener>,
 
@@ -187,6 +200,17 @@ impl Config {
     ///
     /// [`ProxyError::Config`]: crate::errors::ProxyError::Config
     pub fn from_yaml(yaml: &str) -> Result<Self, crate::errors::ProxyError> {
+        let (config, warnings) = Self::from_yaml_with_deprecations(yaml)?;
+        warnings.emit();
+        Ok(config)
+    }
+
+    /// Parse a candidate and retain its deprecation warnings until logging is configured.
+    ///
+    /// # Errors
+    ///
+    /// Returns a configuration error for invalid YAML or invalid settings.
+    pub fn from_yaml_with_deprecations(yaml: &str) -> Result<(Self, DeprecationWarnings), crate::errors::ProxyError> {
         check_yaml_safety(yaml)?;
 
         let mut config: Config = serde_yaml::from_str(yaml)
@@ -194,7 +218,8 @@ impl Config {
 
         config.validate()?;
 
-        Ok(config)
+        let warnings = deprecation::collect(&config, yaml);
+        Ok((config, warnings))
     }
 
     /// Load and validate config from a YAML file.

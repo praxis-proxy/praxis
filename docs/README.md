@@ -14,6 +14,8 @@ material. Extension and contributor material is last.
 - [Getting started](getting-started/README.md): where to begin
 - [Quickstart](getting-started/quickstart.md):
   run the container image in front of a backend and send a request
+- [Route requests](getting-started/route-requests.md):
+  send two paths to two backends through one listener
 - [Build from source](getting-started/build-from-source.md):
   build the binary and run a local proxy
 - [Example configs](../examples/README.md):
@@ -22,12 +24,14 @@ material. Extension and contributor material is last.
 To proxy model APIs or agent protocols, use the
 [Praxis AI quickstart][ai-quickstart].
 
-[ai-quickstart]: https://github.com/praxis-proxy/ai/blob/main/docs/quickstart.md
+[ai-quickstart]: https://github.com/praxis-proxy/ai/blob/main/docs/getting-started/quickstart.md
 
 ## Operating Praxis
 
 - [Configuration](operating/configuration.md):
   YAML config, listeners, chains, runtime
+- [Rehearse a Reload](operating/reload.md):
+  validate a change and apply it to a running proxy
 - [Security Hardening](operating/security-hardening.md):
   production deployment guidance
 - [TLS](operating/tls.md):

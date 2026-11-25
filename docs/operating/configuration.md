@@ -74,6 +74,9 @@ If the new config is invalid (bad YAML, unknown filter,
 validation failure), the server logs the error and
 continues serving with the old config.
 
+[Rehearse a reload](reload.md) walks through validating
+a change and applying it to a running container.
+
 The watcher compares the file against the exact text
 the running config was parsed from, so an edit that
 lands while the server is still starting (before the
