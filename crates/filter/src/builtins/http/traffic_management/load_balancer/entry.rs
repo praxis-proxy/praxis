@@ -48,7 +48,7 @@ const MAX_RETRY_MEMO_ENTRIES: usize = 16;
 type RetryMemo = Vec<(Arc<RetryPolicy>, Arc<RetryPolicy>)>;
 
 /// Resolved state for a single cluster.
-pub(super) struct ClusterEntry {
+pub(crate) struct ClusterEntry {
     /// The cluster's name, for logs, metrics, and errors.
     name: Arc<str>,
 
@@ -112,7 +112,7 @@ impl ClusterEntry {
     /// address.
     ///
     /// [RFC 6066]: https://datatracker.ietf.org/doc/html/rfc6066#section-3
-    pub(super) fn build_upstream(&self, addr: Arc<str>, ctx: &HttpFilterContext<'_>) -> Upstream {
+    pub(crate) fn build_upstream(&self, addr: Arc<str>, ctx: &HttpFilterContext<'_>) -> Upstream {
         let authority = self.authority.for_address(&addr);
         let tls = self.tls.clone().map(|mut t| {
             if t.sni().is_none()
@@ -142,6 +142,25 @@ impl ClusterEntry {
         }
     }
 
+    /// Release the in-flight count a pick of `addr` took, for strategies that
+    /// track load.
+    #[cfg(feature = "chain-binding")]
+    pub(crate) fn release(&self, addr: &str) {
+        self.strategy.release(addr);
+    }
+
+    /// The cluster's shared active-request counter and retry budget.
+    #[cfg(feature = "chain-binding")]
+    pub(crate) fn retry_state(&self) -> &Arc<ClusterRetryState> {
+        &self.retry_state
+    }
+
+    /// The cluster's opaque application protocol and provider tags.
+    #[cfg(feature = "chain-binding")]
+    pub(crate) fn application(&self) -> (Option<Arc<str>>, Option<Arc<str>>) {
+        (self.application_protocol.clone(), self.application_provider.clone())
+    }
+
     /// Pick an endpoint with this cluster's strategy, skipping
     /// `exclude`d addresses.
     ///
@@ -153,7 +172,7 @@ impl ClusterEntry {
     /// # Errors
     ///
     /// Returns [`FilterError`] when the strategy has no endpoint to offer.
-    pub(super) fn pick(
+    pub(crate) fn pick(
         &self,
         ctx: &HttpFilterContext<'_>,
         health: Option<&ClusterHealthState>,
@@ -266,7 +285,7 @@ fn sni_candidate(host: &str) -> Option<&str> {
 /// Returns [`FilterError`] if the authority override, or an endpoint
 /// address the authority is taken from, cannot be parsed as a valid HTTP
 /// authority.
-pub(super) fn build_cluster_entry(cluster: &Cluster) -> Result<ClusterEntry, FilterError> {
+pub(crate) fn build_cluster_entry(cluster: &Cluster) -> Result<ClusterEntry, FilterError> {
     let endpoints = build_weighted_endpoints(cluster);
     let total_weight: u32 = endpoints.iter().map(|ep| ep.weight).sum();
     debug!(

@@ -89,6 +89,10 @@ pub(crate) struct FilteredSubrequestContinuation {
     pub(super) step_deadline: std::time::Instant,
     /// Verified downstream mTLS identity.
     pub(super) peer_identity: Option<Arc<praxis_tls::TlsPeerIdentity>>,
+    /// Endpoint held for a cluster-staged callout, released when the
+    /// continuation (and so a streaming body) is finished or dropped.
+    #[cfg(feature = "chain-binding")]
+    pub(super) lease: Option<crate::cluster_ref::ClusterLease>,
 }
 
 impl FilteredSubrequestContinuation {
@@ -124,6 +128,8 @@ impl FilteredSubrequestContinuation {
             request_start: ctx.request_start,
             step_deadline,
             peer_identity: ctx.peer_identity.clone(),
+            #[cfg(feature = "chain-binding")]
+            lease: None,
         }
     }
 

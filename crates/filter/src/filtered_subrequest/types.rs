@@ -380,3 +380,51 @@ impl StagedUpstreamFallback {
         &self.0
     }
 }
+
+// -----------------------------------------------------------------------------
+// Staged Cluster
+// -----------------------------------------------------------------------------
+
+/// A top-level cluster a callout stages as its destination.
+///
+/// A chain-binding filter resolves the cluster once at construction with
+/// [`ChainBindingContext::cluster`] and stages it on each callout:
+///
+/// ```ignore
+/// let cluster = binding.cluster("weather-mcp")?; // at construction
+/// extensions.insert(StagedCluster::new(&cluster)); // per call
+/// executor.run(&outbound, &request, extensions, deadline).await?;
+/// ```
+///
+/// Before the request phase the executor picks an endpoint with the cluster's
+/// load-balancing strategy, health, and slow start, and sets
+/// [`HttpFilterContext::cluster`] and [`HttpFilterContext::upstream`] so
+/// outbound-chain filters (for example `credential_injection`) see them. Both
+/// are re-pinned after the request phase, so a chain filter cannot retarget
+/// the callout. The cluster's TLS (including client certificates), authority,
+/// base path, and connection options apply to the dial, and the central DNS,
+/// SSRF, and Host enforcement still runs at transport time.
+///
+/// Health is read from the outbound pipeline's health registry, which reaches
+/// the pipeline only when the owning filter forwards
+/// `visit_nested_pipelines` to it; without that, selection ignores health
+/// and attempts are not reported to passive health.
+///
+/// Staging a `StagedCluster` together with a [`StagedUpstream`] or
+/// [`StagedUpstreamFallback`] fails the callout.
+///
+/// [`ChainBindingContext::cluster`]: crate::ChainBindingContext::cluster
+/// [`HttpFilterContext::cluster`]: crate::HttpFilterContext
+/// [`HttpFilterContext::upstream`]: crate::HttpFilterContext
+#[cfg(feature = "chain-binding")]
+#[derive(Clone, Debug)]
+pub struct StagedCluster(pub(crate) crate::ClusterRef);
+
+#[cfg(feature = "chain-binding")]
+impl StagedCluster {
+    /// Stage `cluster` as the callout's destination.
+    #[must_use]
+    pub fn new(cluster: &crate::ClusterRef) -> Self {
+        Self(cluster.clone())
+    }
+}

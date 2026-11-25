@@ -1550,6 +1550,8 @@ fn into_parent_extensions_restores_parent_upstream_scope() {
         request_start: std::time::Instant::now(),
         step_deadline: std::time::Instant::now(),
         peer_identity: None,
+        #[cfg(feature = "chain-binding")]
+        lease: None,
     };
 
     let extensions = continuation.into_parent_extensions();
@@ -1605,6 +1607,8 @@ fn into_completion_restores_parent_upstream_scope() {
         request_start: std::time::Instant::now(),
         step_deadline: std::time::Instant::now(),
         peer_identity: None,
+        #[cfg(feature = "chain-binding")]
+        lease: None,
     };
 
     let completion = continuation.into_completion();
@@ -2626,7 +2630,7 @@ impl crate::HttpFilter for RejectOnCompletionFilter {
 struct CalloutParentMarker(&'static str);
 
 // Build a registry with the builtins plus the streaming callout test filters.
-fn callout_registry() -> crate::FilterRegistry {
+pub(super) fn callout_registry() -> crate::FilterRegistry {
     let mut registry = crate::FilterRegistry::with_builtins();
     registry
         .register(
@@ -2656,7 +2660,7 @@ fn callout_registry() -> crate::FilterRegistry {
 }
 
 // Spawn a raw TCP backend that replies with a fixed response for each accept.
-async fn spawn_raw_backend(response: &'static str) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+pub(super) async fn spawn_raw_backend(response: &'static str) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2776,7 +2780,7 @@ fn dual_limit_executor(buffered_bytes: usize, streaming_bytes: usize) -> crate::
 }
 
 // Drain a streaming body to completion, returning the concatenated payload.
-async fn drain(body: &mut Box<dyn crate::StreamingResponseBody>) -> Result<Vec<u8>, crate::FilterError> {
+pub(super) async fn drain(body: &mut Box<dyn crate::StreamingResponseBody>) -> Result<Vec<u8>, crate::FilterError> {
     let mut out = Vec::new();
     while let Some(chunk) = body.next_chunk().await? {
         out.extend_from_slice(&chunk);

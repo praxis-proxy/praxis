@@ -188,6 +188,12 @@ impl HttpFilter for CredentialInjectionFilter {
         // exploitation requires a memory-read primitive on the proxy process.
         ctx.extra_request_headers
             .push((Cow::Owned(cred.header.clone()), cred.header_value.as_str().to_owned()));
+        // Bind the queued header to its cluster, so a callout staged at
+        // another cluster refuses to send it.
+        #[cfg(feature = "chain-binding")]
+        ctx.extensions
+            .get_or_insert_with(crate::credentials::QueuedCredentialClusters::default)
+            .record(cluster);
 
         Ok(FilterAction::Continue)
     }

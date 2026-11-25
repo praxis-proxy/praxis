@@ -30,6 +30,8 @@ pub use grpc_timeout::GrpcTimeoutFilter;
 pub use head_classifier::HeadClassifierFilter;
 #[cfg(feature = "iterative-request-router")]
 pub use iterative_request_router::IterativeRequestRouterFilter;
+#[cfg(feature = "chain-binding")]
+pub(crate) use load_balancer::{ClusterEntry, build_cluster_entry};
 pub use load_balancer::{EndpointReselector, LoadBalancerFilter};
 pub use rate_limit::{RateLimitFilter, RateLimitMode, RateLimitScope};
 pub use redirect::{RedirectFilter, RedirectStatus};
