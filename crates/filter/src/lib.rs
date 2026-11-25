@@ -94,14 +94,13 @@ pub(crate) mod test_support {
     /// A loopback address that refuses every connection for as long as the
     /// returned socket lives.
     ///
-    /// The socket is bound but never listens, so a connect attempt is refused
-    /// while the port stays taken. Binding a listener and dropping it would
-    /// hand the port back to the kernel, and a backend spawned by another test
-    /// in this binary could pick it up before the refusal is observed.
+    /// Hold the client end of an established loopback connection. Its local
+    /// port stays reserved and refuses incoming connections on Linux and macOS.
     #[expect(clippy::unwrap_used, reason = "test helper")]
-    pub(crate) fn refusing_addr() -> (tokio::net::TcpSocket, std::net::SocketAddr) {
-        let socket = tokio::net::TcpSocket::new_v4().unwrap();
-        socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    pub(crate) fn refusing_addr() -> (std::net::TcpStream, std::net::SocketAddr) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let socket = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (_accepted, _) = listener.accept().unwrap();
         let addr = socket.local_addr().unwrap();
         (socket, addr)
     }

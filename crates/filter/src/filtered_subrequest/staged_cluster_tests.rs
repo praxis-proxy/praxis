@@ -631,3 +631,137 @@ async fn staged_cluster_sheds_a_callout_at_max_connections() {
     backend.abort();
     assert!(reopened.is_ok(), "the released slot admits the next callout");
 }
+
+#[tokio::test]
+async fn cluster_callout_caps_each_attempt_at_per_try_timeout() {
+    let (silent, silent_backend) = spawn_silent_backend().await;
+    let per_try = "retry_policy:\n  per_try_timeout_ms: 100\n";
+    let declared = cluster(&[silent], per_try);
+    let target = ClusterRef::resolve(&declared).unwrap();
+    let pipeline = pipeline("[]", &callout_registry(), &[declared]);
+    let slow_step = executor(Duration::from_secs(3));
+
+    let started = Instant::now();
+    let response = run_buffered(&slow_step, &pipeline, &get(), staged(&target))
+        .await
+        .unwrap();
+    silent_backend.abort();
+
+    assert_eq!(response.status, 504, "the stalled attempt timed out");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "per_try_timeout_ms ends the attempt long before the 3 s step: took {:?}",
+        started.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn cluster_callout_oversized_response_does_not_eject_the_endpoint() {
+    let (addr, backend) = spawn_raw_backend("HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n0123456789").await;
+    let health = "health_check:\n  type: tcp\n  interval_ms: 60000\n  passive_unhealthy_threshold: 1\n";
+    let declared = cluster(&[addr], health);
+    let target = ClusterRef::resolve(&declared).unwrap();
+    let pipeline = pipeline("[]", &callout_registry(), std::slice::from_ref(&declared));
+    let client = SubRequestClient::new(crate::test_support::connector(4, None));
+    let downstream = SubrequestRuntime::new(None, false, None, Instant::now());
+    let tight = FilteredSubrequestExecutor::for_callout(client, downstream, 0, 4, Duration::from_secs(5));
+
+    drop(run_buffered(&tight, &pipeline, &get(), staged(&target)).await);
+    backend.abort();
+
+    let state = pipeline.health_registry().unwrap().get("weather-mcp").unwrap();
+    assert!(
+        state.endpoints()[0].is_healthy(),
+        "a response over the caller's own limit says nothing about the endpoint"
+    );
+}
+
+#[test]
+fn caller_side_outcomes_are_not_endpoint_observations() {
+    use super::{
+        attempt::{AttemptResult, facts},
+        types::{ResponseOrigin, TransportFailure},
+    };
+
+    let synthesized = |failure: TransportFailure| {
+        AttemptResult::Buffered(Box::new((
+            crate::SubResponse {
+                version: http::Version::HTTP_11,
+                status: 503,
+                headers: HeaderMap::new(),
+                body: bytes::Bytes::new(),
+            },
+            ResponseOrigin::Transport,
+            Some(failure),
+        )))
+    };
+    for failure in [
+        TransportFailure::AdmissionTimeout,
+        TransportFailure::CircuitOpen,
+        TransportFailure::ResponseTooLarge { actual: 10, limit: 4 },
+    ] {
+        assert!(
+            !facts(&synthesized(failure), true).contacted,
+            "{failure:?} is decided on the caller side and must not reach passive health"
+        );
+    }
+    for failure in [
+        TransportFailure::Connect,
+        TransportFailure::Io,
+        TransportFailure::DeadlineExceeded,
+    ] {
+        let observed = facts(&synthesized(failure), true);
+        assert!(
+            observed.contacted && observed.failure,
+            "{failure:?} counts against the endpoint"
+        );
+    }
+}
+
+#[tokio::test]
+async fn cluster_callout_request_timeout_bounds_the_whole_callout() {
+    let (silent, silent_backend) = spawn_silent_backend().await;
+    let declared = cluster(&[silent], "retry_policy:\n  request_timeout_ms: 150\n");
+    let target = ClusterRef::resolve(&declared).unwrap();
+    let pipeline = pipeline("[]", &callout_registry(), &[declared]);
+    let slow_step = executor(Duration::from_secs(3));
+
+    let started = Instant::now();
+    let response = run_buffered(&slow_step, &pipeline, &get(), staged(&target))
+        .await
+        .unwrap();
+    silent_backend.abort();
+
+    assert_eq!(response.status, 504, "the callout timed out");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "request_timeout_ms ends the callout long before the 3 s step: took {:?}",
+        started.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn cluster_callout_step_deadline_counts_the_stalled_attempt_against_its_endpoint() {
+    let (silent, silent_backend) = spawn_silent_backend().await;
+    let health = "health_check:\n  type: tcp\n  interval_ms: 60000\n  passive_unhealthy_threshold: 1\n";
+    let declared = cluster(&[silent], health);
+    let target = ClusterRef::resolve(&declared).unwrap();
+    let pipeline = pipeline("[]", &callout_registry(), std::slice::from_ref(&declared));
+
+    let response = run_buffered(
+        &executor(Duration::from_millis(300)),
+        &pipeline,
+        &get(),
+        staged(&target),
+    )
+    .await
+    .unwrap();
+    silent_backend.abort();
+
+    assert_eq!(response.status, 504, "the step deadline ended the stalled attempt");
+    let state = pipeline.health_registry().unwrap().get("weather-mcp").unwrap();
+    assert!(
+        !state.endpoints()[0].is_healthy(),
+        "the attempt the deadline cancelled still counts as an endpoint failure"
+    );
+}

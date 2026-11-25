@@ -115,7 +115,7 @@ impl ClusterRef {
     ///
     /// Reads the cluster's health from `ctx.health_registry`, applies panic
     /// mode and slow start, and picks with the cluster's strategy, skipping
-    /// `exclude`d addresses. Records `ctx.selected_endpoint_index`. The
+    /// `exclude`d addresses. The lease records the endpoint index. The
     /// returned lease releases the endpoint's in-flight count when dropped and
     /// keeps `admission` alive until then.
     ///
@@ -124,7 +124,7 @@ impl ClusterRef {
     /// Returns [`FilterError`] when the cluster has no endpoint to offer.
     pub(crate) fn select(
         &self,
-        ctx: &mut HttpFilterContext<'_>,
+        ctx: &HttpFilterContext<'_>,
         exclude: &[Arc<str>],
         admission: &Arc<AdmissionLease>,
     ) -> Result<(Upstream, ClusterLease), FilterError> {
@@ -132,13 +132,14 @@ impl ClusterRef {
         let health = ctx.health_registry.and_then(|registry| registry.get(self.name()));
         let weights = self.slow_start_weights(health);
         let address = entry.pick(ctx, health, weights.as_ref(), exclude)?;
-        ctx.selected_endpoint_index = health
+        let index = health
             .and_then(|state| state.endpoint_index(&address))
-            .or(Some(usize::MAX));
+            .unwrap_or(usize::MAX);
         let upstream = entry.build_upstream(Arc::clone(&address), ctx);
         let lease = ClusterLease {
             cluster: self.clone(),
             address,
+            index,
             _admission: Arc::clone(admission),
         };
         Ok((upstream, lease))
@@ -215,7 +216,10 @@ pub(crate) struct ClusterLease {
     /// Selected endpoint address.
     address: Arc<str>,
 
-    /// The callout's `max_connections` slot, held until the lease drops.
+    /// Index in the health registry, or `usize::MAX` for an untracked address.
+    pub(crate) index: usize,
+
+    /// The callout's `max_connections` slot.
     _admission: Arc<AdmissionLease>,
 }
 

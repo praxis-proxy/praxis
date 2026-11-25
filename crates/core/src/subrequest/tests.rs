@@ -3384,6 +3384,11 @@ async fn forwarding_progress_stays_false_before_contact() {
                 !progress.forwarded(),
                 "a blocked admission or failed dial cannot establish affinity"
             );
+            assert_eq!(
+                progress.dial_started(),
+                !admission_blocked,
+                "only admitted attempts dial"
+            );
             drop(permit);
         }
     }

@@ -92,6 +92,9 @@ pub(crate) enum TransportFailure {
     Connect,
     /// A generic I/O failure occurred.
     Io,
+    /// The request could not be built locally (for example an invalid
+    /// authority); the endpoint was never asked.
+    InvalidRequest,
     /// The transport deadline was exceeded.
     DeadlineExceeded,
     /// The response exceeded the configured size limit.

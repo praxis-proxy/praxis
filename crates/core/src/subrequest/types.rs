@@ -13,7 +13,7 @@
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU8, Ordering},
+        atomic::{AtomicU8, Ordering},
     },
     time::Duration,
 };
@@ -43,8 +43,8 @@ pub struct RequestProgress(Arc<Witness>);
 /// The shared state behind a [`RequestProgress`].
 #[derive(Debug, Default)]
 struct Witness {
-    /// Whether the transport sent the request head.
-    forwarded: AtomicBool,
+    /// 0 before dialing, 1 once dialing started, 2 once the head was sent.
+    stage: AtomicU8,
     /// 0 for none, then [`ExchangeFailure::Refused`] (1) or `Aborted` (2).
     failure: AtomicU8,
 }
@@ -53,7 +53,13 @@ impl RequestProgress {
     /// Whether this attempt successfully sent its request head.
     #[must_use]
     pub fn forwarded(&self) -> bool {
-        self.0.forwarded.load(Ordering::Acquire)
+        self.0.stage.load(Ordering::Acquire) == 2
+    }
+
+    /// Whether the transport began dialing after local admission.
+    #[must_use]
+    pub fn dial_started(&self) -> bool {
+        self.0.stage.load(Ordering::Acquire) != 0
     }
 
     /// How the exchange failed at the HTTP/2 layer, when it did.
@@ -75,9 +81,14 @@ impl RequestProgress {
         self.0.failure.store(code, Ordering::Release);
     }
 
+    /// Record the start of the connection attempt.
+    pub(super) fn mark_dial_started(&self) {
+        self.0.stage.store(1, Ordering::Release);
+    }
+
     /// Publish forwarding only after the transport's head write succeeds.
     pub(super) fn mark_forwarded(&self) {
-        self.0.forwarded.store(true, Ordering::Release);
+        self.0.stage.store(2, Ordering::Release);
     }
 }
 
