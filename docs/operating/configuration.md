@@ -39,8 +39,10 @@ Exits `0` on success. Exits non-zero and prints an
 error to stderr on failure. Validation warnings (active
 `insecure_options`, degraded upstream TLS, likely filter
 config typos) are printed to stderr either way, in the
-`PRAXIS_LOG_FORMAT` format. Does not bind listener ports
-or enter the server runtime.
+`PRAXIS_LOG_FORMAT` format. Validation leaves listener ports
+unbound. It compiles built-in policies and validates access-log
+sink configuration without starting policy plugins or log writers.
+Startup still checks whether the configured resources can initialize.
 
 ## Dumping Effective Configuration
 
@@ -58,8 +60,8 @@ praxis -T -c praxis.yaml
 Exits `0` on valid config, writing YAML to stdout.
 Exits non-zero and writes errors to stderr on failure.
 Validation warnings go to stderr, as with `--validate`.
-Does not start the proxy or bind listeners. `--dump`
-and `--validate` are mutually exclusive.
+Dump uses the same validation rules as `--validate`.
+The two flags are mutually exclusive.
 
 ## Dynamic Configuration Reload
 
