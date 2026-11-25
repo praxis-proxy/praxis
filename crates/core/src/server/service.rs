@@ -9,7 +9,9 @@ use tokio::sync::{mpsc, watch};
 #[cfg(any(feature = "pingora", feature = "hyper"))]
 use tokio::task::JoinSet;
 
-use super::{LifecycleHandle, LifecyclePhase};
+#[cfg(any(feature = "pingora", feature = "hyper"))]
+use super::LifecycleHandle;
+use super::LifecyclePhase;
 
 /// Boxed future for an embedding service.
 pub type RuntimeServiceFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
