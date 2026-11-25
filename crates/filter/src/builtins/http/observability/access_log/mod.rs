@@ -264,6 +264,13 @@ impl TryFrom<RawSinkConfig> for SinkConfig {
     type Error = String;
 
     fn try_from(raw: RawSinkConfig) -> Result<Self, Self::Error> {
+        if raw
+            .path
+            .as_ref()
+            .is_some_and(|path| path.is_empty() || path.contains('\0'))
+        {
+            return Err("access_log: sink path must be nonempty and contain no NUL bytes".to_owned());
+        }
         match raw.kind {
             SinkKind::Stdout => {
                 #[cfg(feature = "access-log-syslog")]

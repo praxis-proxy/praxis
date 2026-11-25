@@ -82,11 +82,6 @@ pub(crate) fn reload_pipelines(
         return Err(err);
     }
 
-    if let Err(err) = praxis_protocol::tcp::validate_tcp_groups(new_config) {
-        error!(error = %err, "config reload failed: inconsistent TCP listener group");
-        return Err(err.into());
-    }
-
     if let Err(err) = reject_tcp_group_changes(new_config, old_config) {
         error!(error = %err, "config reload failed: TCP listener topology changed; requires restart");
         return Err(err);
