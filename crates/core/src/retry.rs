@@ -303,6 +303,12 @@ impl ClusterRetryState {
         self.budget.try_acquire()
     }
 
+    /// Requests currently counted as in flight against this cluster.
+    #[must_use]
+    pub fn active_requests(&self) -> u64 {
+        self.active_requests.load(Ordering::Relaxed)
+    }
+
     /// Access the underlying budget (tests/metrics).
     #[must_use]
     pub fn budget(&self) -> &RetryBudget {

@@ -725,6 +725,8 @@ mod tests {
             request_start: Instant::now(),
             step_deadline: Instant::now() + Duration::from_secs(30),
             peer_identity: None,
+            #[cfg(feature = "chain-binding")]
+            lease: None,
         };
         let mut filtered = FilteredStreamingBody::new(Box::new(response.body), continuation);
         let mut body = Some(Bytes::from_static(b"first chunk"));
@@ -804,6 +806,8 @@ mod tests {
             request_start: Instant::now(),
             step_deadline,
             peer_identity: None,
+            #[cfg(feature = "chain-binding")]
+            lease: None,
         };
         let mut filtered = FilteredStreamingBody::new(Box::new(response.body), continuation);
         assert_eq!(

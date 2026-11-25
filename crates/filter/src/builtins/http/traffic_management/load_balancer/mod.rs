@@ -31,7 +31,10 @@ use praxis_core::{
 };
 use tracing::debug;
 
+#[cfg(not(feature = "chain-binding"))]
 use self::entry::{ClusterEntry, build_cluster_entry};
+#[cfg(feature = "chain-binding")]
+pub(crate) use self::entry::{ClusterEntry, build_cluster_entry};
 pub use self::reselector::EndpointReselector;
 #[cfg(feature = "upstream-binding")]
 use crate::pipeline::catalog::{ClusterApplicationMetadata, ClusterMetadataDeclaration};

@@ -13,12 +13,14 @@
 //!
 //! The executor owns three transient extension mechanisms end-to-end
 //! ([`RetainedFilterResults`], [`PendingStreamChunks`], and
-//! [`StreamTermination`]) and recognizes two framework-defined caller-staged
+//! [`StreamTermination`]) and recognizes three framework-defined caller-staged
 //! channels: [`PendingCredentials`], which it drains to materialize each
 //! authority-bound secret only after resolving the destination (see
-//! [`DeferredCredential`](crate::DeferredCredential)), and [`StagedUpstream`],
+//! [`DeferredCredential`](crate::DeferredCredential)); [`StagedUpstream`],
 //! which it drains to seed the sub-request's upstream before the request phase so
-//! a callout can dial a known destination without an upstream-selecting filter.
+//! a callout can dial a known destination without an upstream-selecting filter;
+//! and, with the `chain-binding` feature, `StagedCluster`, which names a
+//! top-level cluster whose endpoint the executor selects and pins.
 //! It also scopes the parent's upstream state: on entry it clears the
 //! exchange-local upstream selection and, with the `upstream-binding` feature,
 //! sets the parent's logical binding aside (an IRR step keeps seeing it, a
@@ -38,6 +40,22 @@
 mod context;
 mod continuation;
 mod sanitize;
+#[cfg(feature = "chain-binding")]
+mod staged_cluster;
+#[cfg(test)]
+#[cfg(feature = "chain-binding")]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::too_many_lines,
+    clippy::large_futures,
+    clippy::large_stack_frames,
+    reason = "tests"
+)]
+mod staged_cluster_tests;
 mod streaming;
 #[cfg(test)]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
@@ -68,6 +86,8 @@ use praxis_core::{
 };
 use tracing::{Instrument as _, warn};
 
+#[cfg(feature = "chain-binding")]
+pub use self::types::StagedCluster;
 use self::{
     context::{SubrequestRuntimeResources, build_sub_filter_context},
     sanitize::{
@@ -850,7 +870,11 @@ impl FilteredSubrequestExecutor {
         // Without the re-pin a filter could redirect the dial — and any body-borne
         // credential (e.g. Tavily's key) — to an authority the callout never
         // prepared. `Upstream` is `Arc`-backed, so the clone is a refcount bump.
-        let pinned_upstream = filter_ctx.extensions.remove::<StagedUpstream>().map(|staged| staged.0);
+        #[cfg_attr(
+            not(feature = "chain-binding"),
+            expect(unused_mut, reason = "only a staged cluster replaces the pinned upstream")
+        )]
+        let mut pinned_upstream = filter_ctx.extensions.remove::<StagedUpstream>().map(|staged| staged.0);
         if let Some(upstream) = &pinned_upstream {
             filter_ctx.upstream = Some(upstream.clone());
         }
@@ -864,6 +888,23 @@ impl FilteredSubrequestExecutor {
             .remove::<StagedUpstreamFallback>()
             .map(|fallback| fallback.0)
             .unwrap_or_default();
+        // A callout may instead stage a named cluster. Its endpoint is selected
+        // here, before the request phase, and pinned exactly like a staged
+        // upstream; the cluster name is pinned with it so `ctx.cluster`
+        // consumers (credential injection, observability) see the staged
+        // cluster and cannot be pointed at another.
+        #[cfg(feature = "chain-binding")]
+        let pinned_cluster = {
+            let conflicting = pinned_upstream.is_some() || !fallback_addresses.is_empty();
+            match staged_cluster::stage_cluster(&mut filter_ctx, conflicting) {
+                Ok(Some((upstream, pinned))) => {
+                    pinned_upstream = Some(upstream);
+                    Some(pinned)
+                },
+                Ok(None) => None,
+                Err(error) => return Err(FilteredSubrequestError::capture(error, &mut filter_ctx)),
+            }
+        };
 
         let step_budget = remaining.min(self.step_timeout);
         let step_started = Instant::now();
@@ -947,7 +988,11 @@ impl FilteredSubrequestExecutor {
             // metadata. Any value a chain filter published for the discarded
             // load-balancer selection would misdescribe the pinned destination,
             // so the body phase must not read it.
+            #[cfg(feature = "chain-binding")]
+            staged_cluster::ensure_cluster_unchanged(&filter_ctx, pinned_cluster.as_ref())?;
             repin_staged_upstream(&mut filter_ctx, pinned_upstream.as_ref());
+            #[cfg(feature = "chain-binding")]
+            staged_cluster::repin_cluster(&mut filter_ctx, pinned_cluster.as_ref());
 
             // #1138: selected-upstream request-body phase. Mirrors the Pingora
             // path (crates/protocol .../request_filter/mod.rs run_pipeline): after
@@ -993,7 +1038,11 @@ impl FilteredSubrequestExecutor {
                 // prepared, the exact exfiltration the staged-upstream invariant
                 // blocks. Mirror the pre-phase re-pin: clear any discarded-selection
                 // metadata a rewrite may have republished.
+                #[cfg(feature = "chain-binding")]
+                staged_cluster::ensure_cluster_unchanged(&filter_ctx, pinned_cluster.as_ref())?;
                 repin_staged_upstream(&mut filter_ctx, pinned_upstream.as_ref());
+                #[cfg(feature = "chain-binding")]
+                staged_cluster::repin_cluster(&mut filter_ctx, pinned_cluster.as_ref());
             }
 
             let upstream = filter_ctx.upstream.as_ref().ok_or_else(|| -> FilterError {
@@ -1509,7 +1558,11 @@ impl FilteredSubrequestExecutor {
             uri: filter_ctx.request.uri.clone(),
             headers: filter_ctx.request.headers.clone(),
         };
-        let continuation = FilteredSubrequestContinuation::capture(
+        #[cfg_attr(
+            not(feature = "chain-binding"),
+            expect(unused_mut, reason = "only a staged cluster attaches a lease")
+        )]
+        let mut continuation = FilteredSubrequestContinuation::capture(
             Arc::clone(pipeline),
             request_snapshot,
             response_snapshot,
@@ -1517,6 +1570,10 @@ impl FilteredSubrequestExecutor {
             completed,
             step_deadline,
         );
+        #[cfg(feature = "chain-binding")]
+        {
+            continuation.lease = pinned_cluster.map(|pinned| pinned.lease);
+        }
         Ok(OpenedSubrequest { continuation, kind })
     }
 }

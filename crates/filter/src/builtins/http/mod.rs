@@ -42,6 +42,8 @@ pub use traffic_management::{
     RedirectStatus, RouterFilter, StaticResponseFilter, StickySessionsFilter, TimeoutFilter,
     sticky_sessions::{SessionStore, SessionStoreRegistry},
 };
+#[cfg(feature = "chain-binding")]
+pub(crate) use traffic_management::{ClusterEntry, build_cluster_entry};
 pub use transformation::{
     GrpcStatusFilter, HeaderFilter, PathRewriteFilter, UrlRewriteFilter, has_dot_dot_traversal,
     normalize_rewritten_path,

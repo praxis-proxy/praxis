@@ -628,6 +628,12 @@ impl SlowStartBinding {
         drop(self.ramp_handle(Some(registry)));
     }
 
+    /// Whether [`open`](Self::open) attached this binding to a registry.
+    #[cfg(all(test, feature = "chain-binding"))]
+    pub(crate) fn is_attached(&self) -> bool {
+        self.registry.get().is_some()
+    }
+
     /// Attach and hand the binding back. Tests keep the value they opened.
     #[cfg(test)]
     fn opened(self, registry: &Arc<SlowStartRegistry>) -> Self {
