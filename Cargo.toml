@@ -65,6 +65,7 @@ opentelemetry_sdk = { version = "0.33.1", default-features = false, features = [
 opentelemetry-otlp = { version = "0.33.1", default-features = false, features = ["grpc-tonic", "http-proto", "reqwest-client", "tls-provider-agnostic", "tls-roots", "trace"] }
 opentelemetry-proto = { version = "0.33.1", default-features = false, features = ["gen-tonic", "trace"] }
 # Pin the upload writer hooks explicitly: downstream workspaces do not inherit patches.
+# Release blocker/removal plan: https://github.com/praxis-proxy/praxis/issues/1598
 # A crates.io release must first require a published Pingora version with these hooks.
 pingora-core = { git = "https://github.com/rkaplan-hub/pingora.git", rev = "5c933247cda0223f3adf2b875a7aa6016794baa4", version = "0.11.4", package = "quixotic-plecostomus-core", features = ["rustls"] }
 pingora-http = { git = "https://github.com/rkaplan-hub/pingora.git", rev = "5c933247cda0223f3adf2b875a7aa6016794baa4", version = "0.11.4", package = "quixotic-plecostomus-http" }
@@ -131,7 +132,7 @@ rustls-native-certs = "0.8.5"
 # The OpenSSL-backed rustls provider, vendored and published from the Pingora
 # fork (tofay/rustls-openssl 0.4.1 plus its FIPS provider-routing fixes); the
 # library name is still `rustls_openssl`.
-rustls-openssl = { git = "https://github.com/rkaplan-hub/pingora.git", rev = "5c933247cda0223f3adf2b875a7aa6016794baa4", version = "0.4.1", package = "quixotic-plecostomus-rustls-openssl", default-features = false, features = ["tls12"] }
+rustls-openssl = { version = "0.4.1", package = "quixotic-plecostomus-rustls-openssl", default-features = false, features = ["tls12"] }
 # parse-only: default-features off keeps the verify/ring crypto out of the graph.
 x509-parser = { version = "0.18.1", default-features = false }
 # SPIFFE-ID parsing only; default-features off keeps the workload-API client (tonic/grpc) and JWT support out of the graph.
