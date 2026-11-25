@@ -4076,7 +4076,8 @@ dependencies = [
 [[package]]
 name = "quixotic-plecostomus-rustls-openssl"
 version = "0.4.1"
-source = "git+https://github.com/rkaplan-hub/pingora.git?rev=5c933247cda0223f3adf2b875a7aa6016794baa4#5c933247cda0223f3adf2b875a7aa6016794baa4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a6a3a34cedce4e2fa3139daae891222fde83957801bf0de8ecc8c09ffaf8796"
 dependencies = [
  "foreign-types",
  "once_cell",

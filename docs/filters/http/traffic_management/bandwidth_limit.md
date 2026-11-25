@@ -13,4 +13,6 @@ Configure `mode: per_connection` to share budgets across requests and HTTP/2 str
 
 In `per_ip` mode, optional `ipv6_prefix_len` (0 through 128) groups IPv6 addresses by that prefix. Omit it to use the full address. IPv4-mapped IPv6 addresses always use their normalized IPv4 address. Prefix grouping does not change IPv4 keys and is rejected with `per_connection` mode.
 
+The table tracks at most 200,000 keys. When it is full and no idle entry can be evicted, connections from new sources are closed. On listeners that accept IPv6 from untrusted networks, set `ipv6_prefix_len` to 64 or lower; otherwise a single /64 can fill the table by rotating full IPv6 addresses.
+
 HTTP `per_connection` hosts must provide a stable [`DownstreamConnectionId`] and a live [`ConnectionAlive`] watch owned for the socket's lifetime. Missing identity, lifetime ownership, or source address closes the connection instead of weakening the selected sharing mode. TCP hosts use [`crate::TcpConnectState`] with the bandwidth-aware connect executor.

@@ -130,6 +130,11 @@ impl TryFrom<u8> for Ipv6PrefixLength {
 /// addresses always use their normalized IPv4 address. Prefix grouping does not
 /// change IPv4 keys and is rejected with `per_connection` mode.
 ///
+/// The table tracks at most 200,000 keys. When it is full and no idle entry can
+/// be evicted, connections from new sources are closed. On listeners that
+/// accept IPv6 from untrusted networks, set `ipv6_prefix_len` to 64 or lower;
+/// otherwise a single /64 can fill the table by rotating full IPv6 addresses.
+///
 /// HTTP `per_connection` hosts must provide a stable [`DownstreamConnectionId`]
 /// and a live [`ConnectionAlive`] watch owned for the socket's lifetime. Missing
 /// identity, lifetime ownership, or source address closes the connection instead of weakening the
@@ -680,7 +685,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        bandwidth::{commit_upload_pace, connection_close_reason, download_pace_delay, upload_pace_delay},
+        bandwidth::{commit_upload_pace, connection_close_reason, upload_pace_delay},
         test_utils::{make_filter_context, make_request},
     };
 
@@ -1025,25 +1030,25 @@ mod tests {
 
     #[tokio::test]
     async fn a_full_per_ip_table_closes_a_new_address() {
-        let table = Arc::new(BandwidthTable::with_limits(None, Some(1_000), 0, 1, 1));
+        let table = Arc::new(BandwidthTable::with_limits(None, Some(1_000), 0, 2, 2));
         let filter = BandwidthLimitFilter::from_table(BandwidthMode::PerIp, table);
         let req = make_request(Method::GET, "/");
-        let mut first = make_filter_context(&req);
-        first.client_addr = Some(IpAddr::from([10, 0, 0, 1]));
-        expect_continue(&filter.on_request(&mut first).await.unwrap());
-
-        let mut second = make_filter_context(&req);
-        second.client_addr = Some(IpAddr::from([10, 0, 0, 2]));
-        let action = filter.on_request(&mut second).await.unwrap();
-        assert_eq!(
-            close_reason_of(&action, &second.extensions),
-            Some(CLOSE_TABLE_FULL),
-            "a full table closes the new address"
-        );
-        assert!(
-            download_pace_delay(&first.extensions).is_none(),
-            "the first address is still tracked"
-        );
+        let mut held = Vec::new();
+        for address in ["2001:db8:1234:5678::1", "2001:db8:1234:5678::2"] {
+            let mut ctx = make_filter_context(&req);
+            ctx.client_addr = Some(address.parse().unwrap());
+            expect_continue(&filter.on_request(&mut ctx).await.unwrap());
+            held.push(ctx);
+        }
+        let mut newcomer = make_filter_context(&req);
+        newcomer.client_addr = Some("2001:db8:1234:5678::3".parse().unwrap());
+        let action = filter.on_request(&mut newcomer).await.unwrap();
+        assert_eq!(close_reason_of(&action, &newcomer.extensions), Some(CLOSE_TABLE_FULL));
+        assert!(crate::bandwidth::take_download(&mut newcomer.extensions).is_none());
+        let mut existing = make_filter_context(&req);
+        existing.client_addr = Some("2001:db8:1234:5678::1".parse().unwrap());
+        expect_continue(&filter.on_request(&mut existing).await.unwrap());
+        drop(held);
     }
 
     #[tokio::test]
