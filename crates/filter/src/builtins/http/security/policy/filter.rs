@@ -677,8 +677,8 @@ impl PolicyFilter {
         mgr.load_config_yaml(&yaml)
             .map_err(|e: Box<PluginError>| engine_error("load_config_yaml", &cfg.config_path, &e))?;
 
-        if validation_only && builtin_jwt {
-            super::construction::validate_jwks_sources(&mgr)?;
+        if builtin_jwt && let Ok(document) = &parsed {
+            super::construction::validate_jwks_sources(&mgr, document)?;
         }
         if !validation_only {
             Self::initialize_policy(&mgr, &cfg.config_path, cfg.init_timeout_secs)?;

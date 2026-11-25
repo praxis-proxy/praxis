@@ -1740,6 +1740,37 @@ fn policy_validation_skips_jwks_initialization() {
     assert!(!filter.engine_is_initialized());
 }
 
+/// Authentication overrides must meet the same JWKS transport requirements as base plugins.
+#[test]
+fn jwks_override_is_checked_before_serving() {
+    praxis_tls::provider::install();
+    let (_dir, path) = write_single_plugin_config();
+    let base = std::fs::read_to_string(&path).expect("policy fixture");
+    for (grant, insecure, expected) in [
+        ("", "true", Some("perform_http")),
+        ("    capabilities: [perform_http]\n", "false", Some("insecure_http")),
+        ("    capabilities: [perform_http]\n", "true", None),
+    ] {
+        let yaml = base.replace("    config:", &format!("{grant}    config:")).replace(
+            "    - jwt-user",
+            &format!("    - name: jwt-user\n      config:\n        trusted_issuers:\n          - issuer: https://issuer.example\n            audiences: [gateway]\n            algorithms: [RS256]\n            decoding_key:\n              kind: jwks_url\n              url: http://127.0.0.1:1/jwks.json\n              insecure_http: {insecure}"),
+        );
+        std::fs::write(&path, yaml).expect("write override");
+        for validation_only in [true, false] {
+            let result = FilterRegistry::with_builtins()
+                .with_validation_only(validation_only)
+                .build_policy(&policy_filter_config(&path));
+            match expected {
+                Some(message) => assert!(
+                    result.is_err_and(|error| error.to_string().contains(message)),
+                    "expected {message}"
+                ),
+                None => assert!(result.is_ok(), "explicitly opted-in override should build"),
+            }
+        }
+    }
+}
+
 /// Plaintext JWKS needs explicit opt-in even when the HTTP capability is granted.
 #[test]
 fn validation_refuses_plaintext_jwks_without_opt_in() {
