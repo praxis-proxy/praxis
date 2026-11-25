@@ -11,6 +11,7 @@
 
 use std::sync::Arc;
 
+use praxis_core::health::PassiveTransition;
 use praxis_filter::FilterPipeline;
 
 use super::metrics;
@@ -77,6 +78,10 @@ pub(in crate::http) fn record_passive_health_outcome(
     if !ctx.upstream_contacted {
         return;
     }
+    let upstream_failed = ctx.upstream_response_status.is_some_and(|status| status >= 500);
+    if ctx.upgrade_failure == Some(crate::http::pingora::context::UpgradeFailure::Local) && !upstream_failed {
+        return;
+    }
 
     // Classify the observation by the error's origin. A client-sourced
     // (Downstream) error carries no signal about the endpoint, so when it
@@ -91,8 +96,7 @@ pub(in crate::http) fn record_passive_health_outcome(
     if ended_by_client_origin(error, ctx.upstream_response_status) {
         return;
     }
-    let is_failure =
-        ctx.upstream_response_status.is_some_and(|s| s >= 500) || (error.is_some() && !is_downstream_error);
+    let is_failure = upstream_failed || (error.is_some() && !is_downstream_error);
     apply_passive_threshold(health, idx, cluster_name, is_failure);
 }
 
@@ -144,13 +148,8 @@ fn apply_passive_threshold(
     cluster_name: &Arc<str>,
     is_failure: bool,
 ) {
-    if is_failure {
-        if let Some(threshold) = health.passive_unhealthy_threshold()
-            && health
-                .endpoints()
-                .get(idx)
-                .is_some_and(|ep| ep.record_failure(threshold))
-        {
+    match health.observe_passive(idx, is_failure) {
+        Some(PassiveTransition::Unhealthy { threshold }) => {
             tracing::warn!(
                 cluster = %cluster_name,
                 endpoint_index = idx,
@@ -158,20 +157,17 @@ fn apply_passive_threshold(
                 "passive health: endpoint marked unhealthy"
             );
             emit_passive_health_transition(health, cluster_name, metrics::HEALTH_RESULT_UNHEALTHY);
-        }
-    } else if let Some(threshold) = health.passive_healthy_threshold()
-        && health
-            .endpoints()
-            .get(idx)
-            .is_some_and(|ep| ep.record_success(threshold))
-    {
-        tracing::info!(
-            cluster = %cluster_name,
-            endpoint_index = idx,
-            threshold,
-            "passive health: endpoint recovered"
-        );
-        emit_passive_health_transition(health, cluster_name, metrics::HEALTH_RESULT_HEALTHY);
+        },
+        Some(PassiveTransition::Recovered { threshold }) => {
+            tracing::info!(
+                cluster = %cluster_name,
+                endpoint_index = idx,
+                threshold,
+                "passive health: endpoint recovered"
+            );
+            emit_passive_health_transition(health, cluster_name, metrics::HEALTH_RESULT_HEALTHY);
+        },
+        None => {},
     }
 }
 

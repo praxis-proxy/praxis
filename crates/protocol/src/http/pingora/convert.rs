@@ -117,7 +117,7 @@ pub(crate) async fn send_rejection_for(
     #[cfg(feature = "forward-proxy")]
     if session.req_header().method == http::Method::CONNECT {
         let rejection = super::handler::connect::connect_refusal(ctx, rejection);
-        return send_rejection(session, rejection).await;
+        return Box::pin(send_rejection_with_pace(session, rejection, Some(&mut ctx.extensions))).await;
     }
     // Path 1: gRPC filter already set grpc-status, just frame it.
     if rejection
@@ -137,7 +137,7 @@ pub(crate) async fn send_rejection_for(
         return;
     }
     // Path 3: plain HTTP rejection.
-    send_rejection_with_pace(session, rejection, Some(&mut ctx.extensions)).await;
+    Box::pin(send_rejection_with_pace(session, rejection, Some(&mut ctx.extensions))).await;
 }
 
 /// The text to carry as `grpc-message` for a rejection.

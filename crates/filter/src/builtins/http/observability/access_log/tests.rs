@@ -64,6 +64,10 @@ async fn assert_upgrade_remains_final(filter: &AccessLogFilter) {
         ctx.get_filter_state::<AccessLogState>().map(|state| state.status),
         Some(101)
     );
+    assert!(!access_record_already_emitted(&ctx));
+    ctx.response_delivery_complete = Some(true);
+    filter.finish_bodyless_access_record(&mut ctx, 101);
+    assert!(access_record_already_emitted(&ctx));
 }
 
 /// Read exactly one direct-sink NDJSON record within a bounded async wait.
@@ -93,6 +97,29 @@ async fn access_log_ignores_early_hints_until_final_response() {
     assert_eq!(record["status"], "200");
     assert_eq!(record["response_body_bytes"], "3");
     assert_upgrade_remains_final(&filter).await;
+}
+
+#[tokio::test]
+async fn bodyless_access_record_uses_written_status() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("head.ndjson");
+    let config = serde_yaml::from_str(&format!(
+        "fields: [status]\nsink:\n  type: file\n  path: {}",
+        path.display()
+    ))
+    .unwrap();
+    let filter = test_filter(&config);
+    let request = crate::test_utils::make_request(http::Method::HEAD, "/");
+    let mut response = crate::test_utils::make_response();
+    let mut ctx = crate::test_utils::make_filter_context(&request);
+    ctx.current_filter_id = Some(1);
+    ctx.response_header = Some(&mut response);
+    drop(filter.on_response(&mut ctx).await.unwrap());
+    drop(filter.on_response_body(&mut ctx, &mut None, true).unwrap());
+    assert!(!access_record_already_emitted(&ctx));
+    ctx.response_delivery_complete = Some(true);
+    filter.finish_bodyless_access_record(&mut ctx, 202);
+    assert_eq!(read_single_record(&path).await["status"], "202");
 }
 
 #[test]

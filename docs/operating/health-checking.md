@@ -400,6 +400,13 @@ A cluster is "degraded" when all of its endpoints are
 unhealthy. A cluster with at least one healthy
 endpoint still counts as healthy.
 
+In both modes, `/ready` returns `503` while the replica is
+initializing, draining or stopped, with
+`{"status":"initializing"}`, `{"status":"draining"}` or
+`{"status":"stopped"}`. Draining starts on `SIGTERM`; see
+[Graceful Shutdown](configuration.md#graceful-shutdown) for
+`shutdown_drain_delay_secs`.
+
 ### Verbose Mode
 
 By default, `/ready` returns aggregate counts without

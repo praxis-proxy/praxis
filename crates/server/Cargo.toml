@@ -44,6 +44,7 @@ cargo_metadata = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }
+serde_json = { workspace = true }
 tempfile = { workspace = true }
 tracing-subscriber = { workspace = true }
 
@@ -76,6 +77,10 @@ basic-auth-filter = ["praxis-filter/basic-auth-filter", "experimental"]
 # payloads wait for its reservations, and IRR steps and bound outbound chains
 # wait in the filtered sub-request executor.
 bandwidth = ["praxis-filter/bandwidth", "praxis-protocol/bandwidth", "experimental"]
+# The `jobs:` config section and its not-yet-read startup warning. Off by
+# default; experimental. The bounds land before the background job runtime
+# that reads them, so an end-to-end review precedes promotion.
+jobs-config = ["praxis-core/jobs-config", "experimental"]
 cloud-events-filter = ["praxis-filter/cloud-events-filter", "experimental"]
 # Logical upstream binding (`bound_upstream` conditions, bound load balancers).
 # Off by default; experimental. Implied by `iterative-request-router` and
