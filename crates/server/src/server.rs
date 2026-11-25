@@ -343,6 +343,12 @@ fn try_run_server_with_composition_and_shutdown(
     let prometheus_recorder = (config.admin.address.is_some() || config.admin.metrics_address.is_some())
         .then(praxis_protocol::backend::admin::install_prometheus_admin_recorder);
 
+    #[cfg(feature = "runtime-services")]
+    let (composition, runtime_services) = {
+        let mut composition = composition;
+        let runtime_services = composition.take_runtime_services();
+        (composition, runtime_services)
+    };
     let (mut state, registry) = build_server_state(&config, composition, log_level)?;
     let tasks = state
         .tasks
@@ -353,6 +359,11 @@ fn try_run_server_with_composition_and_shutdown(
 
     info!(backend = praxis_core::backend::NAME, "initializing server");
     let mut server = Runtime::from_config(&config);
+    #[cfg(feature = "runtime-services")]
+    let lifecycle = {
+        server.add_runtime_services(runtime_services);
+        server.lifecycle()
+    };
     let cert_shutdowns = register_protocols(&mut server, &config, &state.pipelines)?;
     #[cfg(feature = "admin-api")]
     register_admin_endpoints(
@@ -385,6 +396,10 @@ fn try_run_server_with_composition_and_shutdown(
     // bounded window to flush records still queued for their writer threads
     // before the process exits.
     praxis_filter::shutdown_access_log_sinks(ACCESS_LOG_SINK_DRAIN_TIMEOUT);
+    #[cfg(feature = "runtime-services")]
+    if let praxis_core::server::RuntimeServicesStatus::StartupFailed(name) = lifecycle.runtime_services_status() {
+        return Err(format!("required runtime service '{name}' failed before startup completed").into());
+    }
     Ok(())
 }
 

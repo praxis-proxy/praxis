@@ -202,17 +202,8 @@ impl PingoraHealthService {
     /// Build the readiness response, running `between_reads` after the first
     /// lifecycle read so tests can drive a concurrent transition.
     fn ready_response_with(&self, between_reads: impl FnOnce()) -> (u16, String) {
-        match self.lifecycle.as_ref().map(LifecycleHandle::phase) {
-            Some(praxis_core::server::LifecyclePhase::Initializing) => {
-                return (503, r#"{"status":"initializing"}"#.to_owned());
-            },
-            Some(praxis_core::server::LifecyclePhase::Draining) => {
-                return (503, r#"{"status":"draining"}"#.to_owned());
-            },
-            Some(praxis_core::server::LifecyclePhase::Stopped) => {
-                return (503, r#"{"status":"stopped"}"#.to_owned());
-            },
-            Some(praxis_core::server::LifecyclePhase::Serving) | None => {},
+        if let Some(response) = self.lifecycle_readiness() {
+            return response;
         }
 
         // Resolve the health registry from the live pipelines (post-reload)
@@ -224,14 +215,30 @@ impl PingoraHealthService {
             Some(state) => stats_admin::resolve_health_registry(self.registry.as_ref(), Some(state), &state.meta),
             None => self.registry.clone(),
         };
-        match self.lifecycle.as_ref().map(LifecycleHandle::phase) {
-            Some(praxis_core::server::LifecyclePhase::Initializing) => (503, r#"{"status":"initializing"}"#.to_owned()),
-            Some(praxis_core::server::LifecyclePhase::Draining) => (503, r#"{"status":"draining"}"#.to_owned()),
-            Some(praxis_core::server::LifecyclePhase::Stopped) => (503, r#"{"status":"stopped"}"#.to_owned()),
-            Some(praxis_core::server::LifecyclePhase::Serving) | None => {
-                compute_ready_response(registry.as_ref(), self.verbose, self.readiness)
+        self.lifecycle_readiness()
+            .unwrap_or_else(|| compute_ready_response(registry.as_ref(), self.verbose, self.readiness))
+    }
+
+    /// Resolve readiness gates before applying the configured upstream mode.
+    fn lifecycle_readiness(&self) -> Option<(u16, String)> {
+        use praxis_core::server::{LifecyclePhase, RuntimeServicesStatus};
+
+        let lifecycle = self.lifecycle.as_ref()?;
+        let status = match lifecycle.phase() {
+            LifecyclePhase::Draining => r#"{"status":"draining"}"#,
+            LifecyclePhase::Stopped => r#"{"status":"stopped"}"#,
+            phase @ (LifecyclePhase::Initializing | LifecyclePhase::Serving) => match lifecycle
+                .runtime_services_status()
+            {
+                RuntimeServicesStatus::StartupFailed(_) | RuntimeServicesStatus::Unavailable => {
+                    r#"{"status":"unavailable","runtime_services":"not_ready"}"#
+                },
+                RuntimeServicesStatus::Initializing => r#"{"status":"initializing"}"#,
+                RuntimeServicesStatus::Ready if phase == LifecyclePhase::Initializing => r#"{"status":"initializing"}"#,
+                RuntimeServicesStatus::Ready => return None,
             },
-        }
+        };
+        Some((503, status.to_owned()))
     }
 
     /// Answer one request on the health and metrics listener.

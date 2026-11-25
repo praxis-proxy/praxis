@@ -23,7 +23,7 @@ use pingora_core::{Result, server::Server, services::listening::Service};
 #[cfg(feature = "pingora")]
 use pingora_proxy::http_proxy;
 #[cfg(feature = "pingora")]
-use praxis_core::server::LifecycleHandle;
+use praxis_core::server::{LifecycleHandle, PingoraServerRuntime, ServerRuntime as _};
 #[cfg(feature = "pingora")]
 use praxis_filter::FilterPipeline;
 #[cfg(feature = "pingora")]
@@ -104,7 +104,7 @@ pub use with_body::PingoraHttpHandler;
 // Load Handler
 // -----------------------------------------------------------------------------
 
-/// Load an HTTP handler for a single listener.
+/// Load an HTTP handler directly on Pingora, bypassing embedding-service readiness.
 ///
 /// Any TLS certificate watcher shutdown senders are appended to
 /// `cert_watcher_shutdowns`. The watcher tasks run for the process
@@ -247,6 +247,60 @@ pub fn load_http_handler_with_options(
     lifecycle: LifecycleHandle,
     options: &HttpHandlerOptions,
 ) -> Result<(), praxis_core::ProxyError> {
+    let config = Arc::clone(&server.configuration);
+    load_http_handler_inner(
+        &config,
+        listener,
+        pipeline,
+        cert_watcher_shutdowns,
+        lifecycle,
+        options,
+        |service| {
+            server.add_service(service);
+        },
+    )
+}
+
+/// Register an HTTP proxy on the runtime's embedding-service readiness gate.
+#[cfg(feature = "pingora")]
+pub(super) fn register_http_handler(
+    runtime: &mut PingoraServerRuntime,
+    listener: &praxis_core::config::Listener,
+    pipeline: Arc<ArcSwap<FilterPipeline>>,
+    cert_watcher_shutdowns: &mut Vec<tokio::sync::watch::Sender<bool>>,
+    options: &HttpHandlerOptions,
+) -> Result<(), praxis_core::ProxyError> {
+    let config = Arc::clone(&runtime.server_mut().configuration);
+    let lifecycle = runtime.lifecycle();
+    load_http_handler_inner(
+        &config,
+        listener,
+        pipeline,
+        cert_watcher_shutdowns,
+        lifecycle,
+        options,
+        |service| runtime.add_proxy_service(service),
+    )
+}
+
+/// Construct the service and pass it to the caller's registration path.
+#[cfg(feature = "pingora")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "shared runtime and raw-server registration inputs"
+)]
+fn load_http_handler_inner<F>(
+    config: &Arc<pingora_core::server::configuration::ServerConf>,
+    listener: &praxis_core::config::Listener,
+    pipeline: Arc<ArcSwap<FilterPipeline>>,
+    cert_watcher_shutdowns: &mut Vec<tokio::sync::watch::Sender<bool>>,
+    lifecycle: LifecycleHandle,
+    options: &HttpHandlerOptions,
+    register: F,
+) -> Result<(), praxis_core::ProxyError>
+where
+    F: FnOnce(Service<pingora_proxy::HttpProxy<PingoraHttpHandler>>),
+{
     let downstream_read_timeout = listener.downstream_read_timeout_ms.map(Duration::from_millis);
     let downstream_keepalive_timeout_secs = listener
         .downstream_keepalive_timeout_ms
@@ -286,24 +340,24 @@ pub fn load_http_handler_with_options(
         forward_proxy,
         lifecycle,
     );
-    wire_service(server, listener, handler, cert_watcher_shutdowns)?;
+    register(build_service(config, listener, handler, cert_watcher_shutdowns)?);
     Ok(())
 }
 
-/// Create a Pingora HTTP proxy service, bind the listener, and add it to the server.
+/// Create a Pingora HTTP proxy service and configure its listener.
 #[cfg(feature = "pingora")]
-fn wire_service<H>(
-    server: &mut Server,
+fn build_service<H>(
+    config: &Arc<pingora_core::server::configuration::ServerConf>,
     listener: &praxis_core::config::Listener,
     handler: H,
     cert_watcher_shutdowns: &mut Vec<tokio::sync::watch::Sender<bool>>,
-) -> Result<(), praxis_core::ProxyError>
+) -> Result<Service<pingora_proxy::HttpProxy<H>>, praxis_core::ProxyError>
 where
     H: pingora_proxy::ProxyHttp + Send + Sync + 'static,
     H::CTX: Send + Sync,
 {
     let service_name = format!("http-proxy:{name}", name = listener.name);
-    let mut proxy = http_proxy(&server.configuration, handler);
+    let mut proxy = http_proxy(config, handler);
     // The proxy layer 405s CONNECT before any handler hook unless the
     // listener's forward_proxy block enables it. The block can parse
     // without this crate's runtime (the core feature alone), so the
@@ -317,8 +371,7 @@ where
     if let Some(tx) = super::listener::add_listener(&mut service, listener)? {
         cert_watcher_shutdowns.push(tx);
     }
-    server.add_service(service);
-    Ok(())
+    Ok(service)
 }
 
 // -----------------------------------------------------------------------------

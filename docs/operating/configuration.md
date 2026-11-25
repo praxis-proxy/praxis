@@ -150,7 +150,8 @@ not listed here return `404 NOT FOUND`. Neither listener has authentication.
   `readiness: upstreams` returns `503 SERVICE UNAVAILABLE` when any checked
   cluster has zero healthy endpoints. Response bodies, including the `503`
   states while initializing, draining, or stopped, are in
-  [Health Checking](health-checking.md#ready-readiness).
+  [Health Checking](health-checking.md#ready-readiness). If a required embedded
+  runtime service exits after startup, `/ready` returns `503`.
 - `/metrics` returns Prometheus text exposition format; see the
   [Metrics Reference](observability.md#metrics-reference).
 - `/api/kv/{store}/{key}` reads and writes entries in configured

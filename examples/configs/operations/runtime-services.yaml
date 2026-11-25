@@ -1,0 +1,22 @@
+# Embedded runtime services
+#
+# Demonstrates a proxy listener that waits for an embedding service to initialize.
+#
+# Usage:
+#   cargo run -p praxis-proxy --features runtime-services --example runtime_services
+
+admin:
+  metrics_address: "127.0.0.1:9902"
+runtime:
+  threads: 1
+shutdown_timeout_secs: 1
+listeners:
+  - name: http
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+        body: ready

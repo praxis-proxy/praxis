@@ -205,7 +205,7 @@ impl GroupContext<'_> {
             self.config,
         ));
         let name = proxy::tcp_service_name(upstream.as_deref(), cluster.as_deref());
-        runtime.add_required_service(&name, move |shutdown, ready| {
+        runtime.add_proxy_service(&name, move |shutdown, ready| {
             serve_group(proxy, sockets, shutdown, ready)
         });
         Ok(())

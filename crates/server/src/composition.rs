@@ -33,6 +33,13 @@
 //!    [`ValidatorContext`] and may reject it, but cannot mutate it. Use this to enforce downstream policy (required
 //!    filters, forbidden configurations, etc.).
 //!
+//! With the experimental `runtime-services` feature, a composition can also
+//! contribute process-lifetime workers via
+//! `ServerComposition::add_runtime_service`. Workers
+//! initialize resources on the serving backend, signal readiness, and observe
+//! the start of drain. Keep request-visible state in consumer-owned handles
+//! that remain usable while current requests finish.
+//!
 //! The composition never exposes mutable pipelines, watchers, listeners, or
 //! publication handles. It is a description consumed by the server, not a hook
 //! into a running one.
@@ -358,6 +365,9 @@ pub struct ServerComposition {
     extension_factories: Vec<ExtensionFactory>,
     /// Read-only validators run against each built pipeline.
     validators: Vec<PipelineValidator>,
+    /// Required process-lifetime resources started by the serving backend.
+    #[cfg(feature = "runtime-services")]
+    runtime_services: Vec<praxis_core::server::RuntimeServiceRegistration>,
 }
 
 impl ServerComposition {
@@ -399,6 +409,8 @@ impl ServerComposition {
             registry_factory: Box::new(factory),
             extension_factories: Vec::new(),
             validators: Vec::new(),
+            #[cfg(feature = "runtime-services")]
+            runtime_services: Vec::new(),
         }
     }
 
@@ -429,6 +441,32 @@ impl ServerComposition {
     {
         self.validators.push(Box::new(validator));
         self
+    }
+
+    /// Contribute a required process-lifetime service to the serving backend.
+    ///
+    /// Each service starts once per server run. Proxy listeners wait for all
+    /// services to initialize. Validation and reload skip worker startup.
+    /// A service that drops its readiness handle or exits during initialization
+    /// causes startup to fail. A later exit revokes administrative readiness.
+    ///
+    /// Share the resource through a pipeline-extension factory. The worker
+    /// should leave resources in consumer-owned handles usable during drain.
+    #[cfg(feature = "runtime-services")]
+    #[must_use]
+    pub fn add_runtime_service<N, S>(mut self, name: N, service: S) -> Self
+    where
+        N: Into<Arc<str>>,
+        S: praxis_core::server::RuntimeService,
+    {
+        self.runtime_services.push((name.into(), Arc::new(service)));
+        self
+    }
+
+    /// Extract the process-lifetime services before consuming the composition.
+    #[cfg(feature = "runtime-services")]
+    pub(crate) fn take_runtime_services(&mut self) -> Vec<praxis_core::server::RuntimeServiceRegistration> {
+        std::mem::take(&mut self.runtime_services)
     }
 
     /// Split into the startup-only registry factory and the reload-durable

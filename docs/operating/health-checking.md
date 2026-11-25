@@ -289,6 +289,14 @@ draining, or stopped, with `{"status":"initializing"}`,
 `SIGTERM`; see [Graceful Shutdown](configuration.md#graceful-shutdown) for
 `shutdown_drain_delay_secs`.
 
+When an embedding distribution registers runtime services, HTTP and TCP proxy
+listeners wait for all required services before accepting traffic. The metrics
+listener can answer `/ready` during initialization. A service that abandons
+readiness before startup causes the server to shut down with an error naming the
+service. If a service exits after startup, `/ready` returns `503` with
+`{"status":"unavailable","runtime_services":"not_ready"}`. Already-running
+listeners continue to serve.
+
 ### Verbose Mode
 
 `/ready` omits cluster names by default so it does not leak internal
