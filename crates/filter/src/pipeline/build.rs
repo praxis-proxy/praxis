@@ -7,12 +7,12 @@
 //! which instantiate filters from [`FilterEntry`] slices via the
 //! [`FilterRegistry`], compute [`BodyCapabilities`], and run ordering
 //! validation checks. Branch-aware builds delegate to
-//! [`build_branch::resolve_chain_filters`] for recursive resolution.
+//! [`build_branch::resolve_chain_filters_in`] for recursive resolution.
 //!
 //! [`FilterEntry`]: praxis_core::config::FilterEntry
 //! [`FilterRegistry`]: crate::registry::FilterRegistry
 //! [`BodyCapabilities`]: crate::body::BodyCapabilities
-//! [`build_branch::resolve_chain_filters`]: super::build_branch::resolve_chain_filters
+//! [`build_branch::resolve_chain_filters_in`]: super::build_branch::resolve_chain_filters_in
 
 use std::{collections::HashMap, mem, sync::Arc};
 
@@ -110,15 +110,26 @@ impl FilterPipeline {
         insecure_options: &InsecureOptions,
         top_level_clusters: &[praxis_core::config::Cluster],
     ) -> Result<Self, FilterError> {
-        let filters = super::build_branch::resolve_chain_filters(
+        let stack = crate::binding::ResolutionStack::new();
+        let filters = super::build_branch::resolve_chain_filters_in(
             entries,
             registry,
             chains,
             0,
             insecure_options,
             top_level_clusters,
+            &stack,
         )?;
-        Ok(Self::from_filters(filters))
+        #[cfg_attr(
+            not(all(feature = "chain-binding", feature = "slow-start")),
+            expect(unused_mut, reason = "only bound clusters are attached after construction")
+        )]
+        let mut pipeline = Self::from_filters(filters);
+        #[cfg(all(feature = "chain-binding", feature = "slow-start"))]
+        {
+            pipeline.bound_clusters = stack.into_clusters();
+        }
+        Ok(pipeline)
     }
 
     /// Create a pipeline from an already-resolved filter list.
@@ -176,6 +187,8 @@ impl FilterPipeline {
             kv_stores: None,
             session_stores: None,
             slow_start_registry: None,
+            #[cfg(all(feature = "chain-binding", feature = "slow-start"))]
+            bound_clusters: Vec::new(),
             pipeline_extensions: Vec::new(),
             record_filter_duration_metrics: false,
             route_templates: Arc::default(),

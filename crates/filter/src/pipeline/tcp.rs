@@ -540,6 +540,8 @@ mod tests {
             kv_stores: None,
             session_stores: None,
             slow_start_registry: None,
+            #[cfg(all(feature = "chain-binding", feature = "slow-start"))]
+            bound_clusters: Vec::new(),
             subrequest_client: None,
             may_select_streaming_subrequest_response: false,
             trace_context_filter_indices: Vec::new(),

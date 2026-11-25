@@ -668,3 +668,53 @@ See the
 [`iterative_request_router` reference](../filters/http/traffic_management/iterative_request_router.md)
 and [proposal 00786](https://github.com/praxis-proxy/enhancements/blob/main/proposals/00786_iterative-request-router.md)
 for the full design.
+
+## Advanced: Callouts to a Named Cluster
+
+With the `chain-binding` build feature, a chain-binding filter can send a
+`FilteredSubrequestExecutor` callout to a top-level cluster instead of a URL.
+One `clusters:` entry then supplies the callout's endpoints, load-balancing
+strategy, health, slow start, TLS (including client certificates), authority,
+base path, and connection options.
+
+Resolve the cluster once, when the filter is built, and stage it on each
+callout:
+
+```rust,ignore
+// In the factory passed to `register_chain_binding`:
+let cluster = binding.cluster("weather-mcp")?; // unknown name fails config load
+let outbound = Arc::new(binding.bind_chain(&chain_ref)?);
+
+// Per request:
+let mut extensions = RequestExtensions::default();
+extensions.insert(StagedCluster::new(&cluster));
+let response = executor.run(&outbound, &request, extensions, deadline).await?;
+```
+
+The owning filter must forward `visit_nested_pipelines` to its bound outbound
+pipeline (as any chain-binding filter must). The staged cluster's health is
+read from that pipeline's health registry, so a filter that does not forward
+it gets endpoint selection without health.
+
+What the executor does with a staged cluster:
+
+- **Selection.** Before the request phase it picks an endpoint with the
+  cluster's strategy, reading health from the pipeline's health registry
+  (panic mode and slow start apply as in `load_balancer`), and sets
+  `ctx.cluster` and `ctx.upstream`. Outbound-chain filters that key on the
+  cluster, such as `credential_injection`, work unchanged.
+- **Admission.** A callout claims one of the cluster's `max_connections` slots
+  when it is staged, and holds it until its response ends
+  (for a streaming callout, until the body finishes or is dropped). A callout
+  staged at a cluster that is at its ceiling fails without dialing.
+- **Pinning.** `ctx.upstream` is re-pinned after the request phase and after
+  the selected-upstream body phase, so a chain filter cannot retarget the
+  callout. A chain filter that changes `ctx.cluster` (for example a `router`)
+  fails the callout before anything is sent: filters after it may already have
+  chosen headers, such as a `credential_injection` secret, for the other
+  cluster. Staging `StagedCluster` together with `StagedUpstream` fails the
+  callout.
+
+Limitations: a callout makes one attempt; the cluster's `retry_policy` is not
+applied yet. A `ClusterRef` keeps its own balancer state, separate from any
+`load_balancer` filter that declares the same cluster.

@@ -50,6 +50,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - Expose compact JSON sizing and capped serialization utilities in
   `praxis_filter::json_size` for built-in and external filters.
+- Add cluster-staged callouts behind the experimental `chain-binding` feature
+  (#1557). A chain-binding filter resolves a top-level cluster at config load
+  with `ChainBindingContext::cluster` and stages it per call with
+  `StagedCluster`; the executor picks the endpoint with the cluster's
+  strategy, health, and slow start, and pins `ctx.cluster` and
+  `ctx.upstream`. `credential_injection` now applies inside such callouts'
+  outbound chains.
+
 - Policy request metadata now carries the exported root HTTP request span's
   trace ID when the `otel` feature is compiled in and an exporter is
   configured, so PPE audit records join the trace a collector exports. The
