@@ -53,6 +53,24 @@ fn test_connector_with_options(options: SubRequestConnectorOptions) -> SubReques
     SubRequestConnector::with_options(options)
 }
 
+/// Offline candidates can inspect admission settings but cannot open a connection.
+#[tokio::test]
+async fn validation_connector_refuses_egress() {
+    use crate::egress::{Connector as _, EgressError};
+    let connector = SubRequestConnector::for_validation(SubRequestConnectorOptions {
+        keepalive_pool_size: 8,
+        max_connections: Some(2),
+        circuit_breaker: None,
+    });
+    let peer = PeerSpec::plain("127.0.0.1:1".parse().unwrap());
+    let result = connector.connector().connect(&peer, Duration::from_secs(1)).await;
+    assert!(
+        matches!(result, Err(EgressError::Unavailable)),
+        "offline connector must refuse egress"
+    );
+    assert_eq!(connector.configured_max_connections(), Some(2));
+}
+
 /// A body already in its terminal state, on the build's connector.
 fn done_body() -> SubResponseBody {
     SubResponseBody::new_done()

@@ -104,6 +104,8 @@ filter_chains:
     std::fs::write(&config_path, yaml)?;
     for flag in ["--validate", "--dump"] {
         let output = std::process::Command::new(env!("CARGO_BIN_EXE_praxis"))
+            .env("SSL_CERT_FILE", temp.path().join("unavailable-roots.pem"))
+            .env("SSL_CERT_DIR", temp.path().join("unavailable-roots"))
             .args([flag, "-c"])
             .arg(&config_path)
             .output()?;

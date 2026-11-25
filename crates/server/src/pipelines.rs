@@ -77,12 +77,20 @@ pub fn build_full_registry() -> FilterRegistry {
 /// Returns an error when `runtime.upstream_ca_file` is set and the file
 /// cannot be read or parsed.
 pub fn build_subrequest_client(config: &Config) -> Result<SubRequestClient, Box<dyn std::error::Error + Send + Sync>> {
+    build_subrequest_client_with(config, SubRequestConnector::with_options)
+}
+
+/// Build the client with the connector appropriate for serving or offline validation.
+pub(crate) fn build_subrequest_client_with(
+    config: &Config,
+    connector_factory: fn(SubRequestConnectorOptions) -> SubRequestConnector,
+) -> Result<SubRequestClient, crate::StartupError> {
     let pool_size = config
         .runtime
         .subrequest_pool_size
         .unwrap_or(DEFAULT_SUBREQUEST_POOL_SIZE);
 
-    let connector = SubRequestConnector::with_options(SubRequestConnectorOptions {
+    let connector = connector_factory(SubRequestConnectorOptions {
         keepalive_pool_size: pool_size,
         max_connections: config.runtime.subrequest_max_connections,
         circuit_breaker: config

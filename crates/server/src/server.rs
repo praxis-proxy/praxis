@@ -658,9 +658,15 @@ fn resolve_composition(
     composition: ServerComposition,
     validation_only: bool,
 ) -> Result<(SubRequestClient, FilterRegistry, PipelineComposition), StartupError> {
-    // Shared with the CLI --validate/--dump path (commands.rs) so both build an
-    // identical connector, including the circuit breaker (issue #994).
-    let subrequest_client = crate::pipelines::build_subrequest_client(config)?;
+    // Offline candidates need the serving circuit-breaker and admission settings, but never dial.
+    let subrequest_client = if validation_only {
+        crate::pipelines::build_subrequest_client_with(
+            config,
+            praxis_core::subrequest::SubRequestConnector::for_validation,
+        )?
+    } else {
+        crate::pipelines::build_subrequest_client(config)?
+    };
 
     // Build the downstream registry once, from immutable server context, then
     // reuse it across reloads. The factory is synchronous and side-effect-free.

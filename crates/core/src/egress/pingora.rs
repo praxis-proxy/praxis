@@ -85,7 +85,14 @@ pub fn http_peer(spec: &PeerSpec) -> Result<HttpPeer, EgressError> {
 #[derive(Clone)]
 pub struct PingoraConnector {
     /// Shared Pingora HTTP connector.
-    pub(crate) inner: Arc<HttpConnector<()>>,
+    inner: Option<Arc<HttpConnector<()>>>,
+}
+
+impl PingoraConnector {
+    /// Offline candidates never dial, so they need neither a pool nor native TLS roots.
+    pub(crate) fn offline() -> Self {
+        Self { inner: None }
+    }
 }
 
 impl std::fmt::Debug for PingoraConnector {
@@ -102,7 +109,7 @@ impl Connector for PingoraConnector {
     fn new(keepalive_pool_size: usize) -> Self {
         let options = ConnectorOptions::new(keepalive_pool_size);
         Self {
-            inner: Arc::new(HttpConnector::new(Some(options))),
+            inner: Some(Arc::new(HttpConnector::new(Some(options)))),
         }
     }
 
@@ -117,6 +124,8 @@ impl Connector for PingoraConnector {
 
         let (inner, reused) = self
             .inner
+            .as_ref()
+            .ok_or(EgressError::Unavailable)?
             .get_http_session(&http_peer)
             .await
             .map_err(|err| EgressError::Connect(err.to_string()))?;
@@ -131,10 +140,12 @@ impl Connector for PingoraConnector {
     #[expect(clippy::large_stack_frames, reason = "Pingora's session types are large")]
     async fn release(&self, session: PingoraSession, keepalive: bool) {
         let PingoraSession { mut inner, peer, .. } = session;
+        let Some(pool) = self.inner.as_ref() else {
+            inner.shutdown().await;
+            return;
+        };
         if keepalive {
-            self.inner
-                .release_http_session(inner, &peer, peer.options.idle_timeout)
-                .await;
+            pool.release_http_session(inner, &peer, peer.options.idle_timeout).await;
             return;
         }
 
@@ -143,9 +154,7 @@ impl Connector for PingoraConnector {
         // the connection alive for the others. An H1 connection stays shut,
         // because unread bytes would corrupt the next response on it.
         if matches!(inner, HttpSession::H2(_)) {
-            self.inner
-                .release_http_session(inner, &peer, peer.options.idle_timeout)
-                .await;
+            pool.release_http_session(inner, &peer, peer.options.idle_timeout).await;
         }
     }
 }
@@ -568,7 +577,7 @@ mod tests {
         let second = first.clone();
 
         assert!(
-            Arc::ptr_eq(&first.inner, &second.inner),
+            Arc::ptr_eq(first.inner.as_ref().unwrap(), second.inner.as_ref().unwrap()),
             "a cloned connector must share the pool"
         );
     }
