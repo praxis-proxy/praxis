@@ -113,10 +113,46 @@ pub fn build_subrequest_client(config: &Config) -> Result<SubRequestClient, Box<
 // Pipeline Resolution
 // -----------------------------------------------------------------------------
 
+/// Unpublished listener pipelines and their shared health registry.
+pub(crate) struct PipelineCandidate {
+    /// Candidate pipelines, keyed by listener name.
+    pub(crate) pipelines: ListenerPipelines,
+    /// Health registry shared by the candidate pipelines.
+    pub(crate) health_registry: praxis_core::health::HealthRegistry,
+}
+
+/// Build a candidate without publishing pipelines or starting health checks.
+#[expect(clippy::too_many_arguments, reason = "candidate uses shared registries and client")]
+pub(crate) fn resolve_pipeline_candidate(
+    config: &Config,
+    registry: &FilterRegistry,
+    kv_stores: &praxis_core::kv::KvStoreRegistry,
+    session_stores: &Arc<praxis_filter::SessionStoreRegistry>,
+    slow_start_registry: &Arc<praxis_filter::SlowStartRegistry>,
+    subrequest_client: &SubRequestClient,
+    composition: &PipelineComposition,
+) -> Result<PipelineCandidate, crate::StartupError> {
+    praxis_protocol::tcp::validate_tcp_groups(config)?;
+    let health_registry = praxis_core::health::build_health_registry(&config.clusters);
+    let pipelines = resolve_pipelines_with_composition(
+        config,
+        registry,
+        &health_registry,
+        kv_stores,
+        session_stores,
+        slow_start_registry,
+        subrequest_client,
+        composition,
+    )?;
+    Ok(PipelineCandidate {
+        pipelines,
+        health_registry,
+    })
+}
+
 /// Build a [`FilterPipeline`] for each listener by resolving named chains.
 ///
-/// This is the config-to-runtime bridge used by the CLI validate/dump path and
-/// by callers that need no downstream composition: it applies no pipeline
+/// This is the config-to-runtime bridge for callers that need no downstream composition: it applies no pipeline
 /// extensions and no validators. Embedded servers that customize per-listener
 /// pipelines go through [`run_server_with_composition`](crate::run_server_with_composition)
 /// instead.

@@ -18,11 +18,12 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(feature = "admin-api")]
+use praxis_core::health::HealthRegistry;
 use praxis_core::{
     ServerRuntime as _,
     backend::Runtime,
     config::{Config, ConfigFile, LogOutput, ProtocolKind, RuntimeConfig},
-    health::{HealthRegistry, build_health_registry},
     logging::LogLevelState,
     server::ShutdownFuture,
     subrequest::SubRequestClient,
@@ -48,7 +49,7 @@ use crate::startup_checks::warn_jobs_configured_without_runtime;
 use crate::startup_checks::warn_policy_filter_without_feature;
 use crate::{
     composition::{PipelineComposition, RegistryContext, ServerComposition},
-    pipelines::resolve_pipelines_with_composition,
+    pipelines::resolve_pipeline_candidate,
     startup_checks::{
         enforce_root_check, fips_blocker, warn_insecure_key_permissions, warn_insecure_log_file_permissions,
         warn_insecure_options, warn_insecure_sink_file_permissions, warn_overload_gauges_without_exporter,
@@ -343,8 +344,7 @@ fn try_run_server_with_composition_and_shutdown(
     let prometheus_recorder = (config.admin.address.is_some() || config.admin.metrics_address.is_some())
         .then(praxis_protocol::backend::admin::install_prometheus_admin_recorder);
 
-    let health_registry = build_health_registry(&config.clusters);
-    let (mut state, registry) = build_server_state(&config, composition, &health_registry, log_level)?;
+    let (mut state, registry) = build_server_state(&config, composition, log_level)?;
     let tasks = state
         .tasks
         .take()
@@ -359,7 +359,7 @@ fn try_run_server_with_composition_and_shutdown(
     register_admin_endpoints(
         &mut server,
         &config,
-        health_registry,
+        Arc::clone(&state.health_registry),
         &state,
         prometheus_recorder,
         stats_started_at,
@@ -648,6 +648,68 @@ struct ServerState {
 
     /// Downstream pipeline extensions and validators, re-applied on reload.
     pipeline_composition: PipelineComposition,
+    /// Startup health registry used by the admin service.
+    #[cfg(feature = "admin-api")]
+    health_registry: HealthRegistry,
+}
+
+/// Assemble the registry and pipeline rules for a startup or validation candidate.
+fn resolve_composition(
+    config: &Config,
+    composition: ServerComposition,
+) -> Result<(SubRequestClient, FilterRegistry, PipelineComposition), StartupError> {
+    // Shared with the CLI --validate/--dump path (commands.rs) so both build an
+    // identical connector, including the circuit breaker (issue #994).
+    let subrequest_client = crate::pipelines::build_subrequest_client(config)?;
+
+    // Build the downstream registry once, from immutable server context, then
+    // reuse it across reloads. The factory is synchronous and side-effect-free.
+    let (registry_factory, pipeline_composition) = composition.into_parts();
+    let registry = registry_factory(&RegistryContext::new(&subrequest_client))?;
+    if praxis_tls::provider::required()
+        && let Some(reason) = fips_blocker(&registry)
+    {
+        return Err(reason.into());
+    }
+
+    Ok((subrequest_client, registry, pipeline_composition))
+}
+
+/// Validate a configuration using the standard server composition.
+///
+/// # Errors
+///
+/// Returns an error if the registry, pipelines, or listener groups are invalid.
+pub fn validate_config(config: &Config) -> Result<(), StartupError> {
+    validate_config_with_composition(config, ServerComposition::standard())
+}
+
+/// Build and validate the same pipeline candidate as startup without starting
+/// server-owned runtime tasks or registering listeners.
+///
+/// Built-in policy filters compile policy documents without initializing
+/// plugins or starting dispatch workers, and access-log filters do not open
+/// their configured sinks. Registry, extension, and custom filter factories
+/// still run and should perform no network I/O during validation.
+///
+/// # Errors
+///
+/// Returns an error if the composition, pipelines, or listener groups are invalid.
+pub fn validate_config_with_composition(config: &Config, composition: ServerComposition) -> Result<(), StartupError> {
+    try_install_crypto_provider()?;
+    let (client, registry, pipeline) = resolve_composition(config, composition)?;
+    let slow_start_registry = Arc::new(praxis_filter::SlowStartRegistry::new());
+    let _generation = slow_start_registry.enter_generation();
+    resolve_pipeline_candidate(
+        config,
+        &registry.for_validation(),
+        &praxis_core::kv::KvStoreRegistry::new(),
+        &Arc::new(praxis_filter::SessionStoreRegistry::new()),
+        &slow_start_registry,
+        &client,
+        &pipeline,
+    )?;
+    Ok(())
 }
 
 /// Build filter pipelines, health checks, and registries.
@@ -663,35 +725,21 @@ struct ServerState {
 fn build_server_state(
     config: &Config,
     composition: ServerComposition,
-    health_registry: &HealthRegistry,
     log_level: Option<Arc<LogLevelState>>,
 ) -> Result<(ServerState, FilterRegistry), StartupError> {
     info!("building filter pipelines");
     let kv_stores = praxis_core::kv::KvStoreRegistry::new();
 
-    // Shared with the CLI --validate/--dump path (commands.rs) so both build an
-    // identical connector, including the circuit breaker (issue #994).
-    let subrequest_client = crate::pipelines::build_subrequest_client(config)?;
-
-    // Build the downstream registry once, from immutable server context, then
-    // reuse it across reloads. The factory is synchronous and side-effect-free.
-    let (registry_factory, pipeline_composition) = composition.into_parts();
-    let registry = registry_factory(&RegistryContext::new(&subrequest_client))?;
+    let (subrequest_client, registry, pipeline_composition) = resolve_composition(config, composition)?;
     #[cfg(not(feature = "policy-engine"))]
     warn_policy_filter_without_feature(&registry);
-    if praxis_tls::provider::required()
-        && let Some(reason) = fips_blocker(&registry)
-    {
-        return Err(reason.into());
-    }
 
     let session_stores = Arc::new(praxis_filter::SessionStoreRegistry::new());
     let slow_start_registry = Arc::new(praxis_filter::SlowStartRegistry::new());
     let slow_start_generation = slow_start_registry.enter_generation();
-    let pipelines = resolve_pipelines_with_composition(
+    let candidate = resolve_pipeline_candidate(
         config,
         &registry,
-        health_registry,
         &kv_stores,
         &session_stores,
         &slow_start_registry,
@@ -713,7 +761,7 @@ fn build_server_state(
     let health_shutdown = Arc::new(Mutex::new(health_lifecycle.new_token()));
     if let Some(handle) = spawn_health_check_tasks(
         config,
-        Arc::clone(health_registry),
+        Arc::clone(&candidate.health_registry),
         &health_shutdown,
         subrequest_client.upstream_ca(),
     ) {
@@ -726,7 +774,7 @@ fn build_server_state(
     };
 
     let state = ServerState {
-        pipelines: Arc::new(pipelines),
+        pipelines: Arc::new(candidate.pipelines),
         listener_meta,
         cluster_meta,
         kv_stores,
@@ -735,6 +783,8 @@ fn build_server_state(
         subrequest_client,
         health_shutdown,
         health_lifecycle,
+        #[cfg(feature = "admin-api")]
+        health_registry: candidate.health_registry,
         tasks: Some(tasks),
         log_level,
         pipeline_composition,
@@ -1450,7 +1500,7 @@ mod tests {
         praxis_tls::provider::install();
         let config = minimal_config("static_response");
         let composition = ServerComposition::with_registry_factory(|_| Err("registry unavailable".into()));
-        let err = build_server_state(&config, composition, &build_health_registry(&config.clusters), None)
+        let err = build_server_state(&config, composition, None)
             .err()
             .expect("a failing registry factory should be returned, not exit");
         assert!(
@@ -1463,14 +1513,9 @@ mod tests {
     fn build_server_state_returns_pipeline_error() {
         praxis_tls::provider::install();
         let config = minimal_config("no_such_filter");
-        let err = build_server_state(
-            &config,
-            ServerComposition::standard(),
-            &build_health_registry(&config.clusters),
-            None,
-        )
-        .err()
-        .expect("an unknown filter should be returned, not exit");
+        let err = build_server_state(&config, ServerComposition::standard(), None)
+            .err()
+            .expect("an unknown filter should be returned, not exit");
         assert!(
             err.to_string().contains("no_such_filter"),
             "pipeline error should name the filter: {err}"
@@ -1487,13 +1532,8 @@ mod tests {
         std::fs::write(&key_path, "fake-key").expect("write key");
         std::fs::write(&cert_path, "fake-cert").expect("write cert");
         let config = config_with_tls(cert_path.to_str().unwrap(), key_path.to_str().unwrap());
-        let (state, _registry) = build_server_state(
-            &config,
-            ServerComposition::standard(),
-            &build_health_registry(&config.clusters),
-            None,
-        )
-        .expect("pipelines should build");
+        let (state, _registry) =
+            build_server_state(&config, ServerComposition::standard(), None).expect("pipelines should build");
         let mut server = Runtime::from_config(&config);
         let err = register_protocols(&mut server, &config, &state.pipelines)
             .err()
@@ -1718,7 +1758,7 @@ filter_chains:
               - "127.0.0.1:1"
 "#;
         let config = Config::from_yaml(yaml).expect("test config should parse");
-        let registry = build_health_registry(&config.clusters);
+        let registry = praxis_core::health::build_health_registry(&config.clusters);
         assert!(!registry.is_empty(), "health-checked clusters must register");
         let health_shutdown = Arc::new(Mutex::new(CancellationToken::new()));
         let handle = spawn_health_check_tasks(&config, registry, &health_shutdown, None)
@@ -2159,9 +2199,7 @@ filter_chains:
     #[cfg(feature = "config-reload")]
     fn startup_state(config: &Config) -> (ServerState, FilterRegistry) {
         praxis_tls::provider::install();
-        let health_registry = build_health_registry(&config.clusters);
-        build_server_state(config, ServerComposition::standard(), &health_registry, None)
-            .expect("server state should build")
+        build_server_state(config, ServerComposition::standard(), None).expect("server state should build")
     }
 
     #[cfg(unix)]

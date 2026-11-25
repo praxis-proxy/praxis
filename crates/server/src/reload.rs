@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use praxis_core::{
     config::{Config, ProtocolKind},
-    health::{HealthRegistry, build_health_registry},
+    health::HealthRegistry,
 };
 use praxis_filter::FilterRegistry;
 use praxis_protocol::ListenerPipelines;
@@ -23,7 +23,7 @@ use crate::reload_diagnostics::{
 };
 use crate::{
     composition::PipelineComposition,
-    pipelines::resolve_pipelines_with_composition,
+    pipelines::{PipelineCandidate, resolve_pipeline_candidate},
     reload_diagnostics::{
         log_config_change_audit, log_restart_required_changes, warn_insecure_option_escalations,
         warn_stateful_filter_reset,
@@ -97,8 +97,6 @@ pub(crate) fn reload_pipelines(
         return Err(err);
     }
 
-    let health_registry = build_health_registry(&new_config.clusters);
-
     let new_ceiling = new_config
         .body_limits
         .max_response_bytes
@@ -110,10 +108,12 @@ pub(crate) fn reload_pipelines(
     // pipeline construction would retire live tables when a later step fails.
     let slow_start_generation = slow_start_registry.enter_generation();
     let candidate_session_stores = Arc::new(session_stores.candidate());
-    let new_pipelines = match resolve_pipelines_with_composition(
+    let PipelineCandidate {
+        pipelines: new_pipelines,
+        health_registry,
+    } = match resolve_pipeline_candidate(
         new_config,
         registry,
-        &health_registry,
         kv_stores,
         &candidate_session_stores,
         slow_start_registry,
@@ -603,7 +603,10 @@ mod tests {
         sync::atomic::{AtomicUsize, Ordering},
     };
 
-    use praxis_core::config::{InsecureOptions, SkipPipelineChecks};
+    use praxis_core::{
+        config::{InsecureOptions, SkipPipelineChecks},
+        health::build_health_registry,
+    };
     use praxis_filter::{CircuitBreakerFilter, FilterFactory, PipelineExtension, RequestExtensions};
     use tracing_subscriber::layer::SubscriberExt as _;
 

@@ -1727,6 +1727,19 @@ global:
     (dir, path_str)
 }
 
+/// A validation candidate checks policy configuration without initializing JWKS clients.
+#[test]
+fn policy_validation_skips_jwks_initialization() {
+    praxis_tls::provider::install();
+    let (_dir, path) = write_jwks_url_config("    capabilities:\n      - perform_http\n");
+    let registry = FilterRegistry::with_builtins().for_validation();
+
+    let filter = registry
+        .build_policy(&policy_filter_config(&path))
+        .expect("static policy validation");
+    assert!(!filter.engine_is_initialized());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_jwks_issuer_constructs_with_the_installed_transport() {
     let (_dir, path) = write_jwks_url_config("    capabilities:\n      - perform_http\n");

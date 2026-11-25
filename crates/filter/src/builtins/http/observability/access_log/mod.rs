@@ -1238,12 +1238,26 @@ impl AccessLogFilter {
     ///
     /// [`FilterError`]: crate::FilterError
     pub fn from_config(config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
+        Self::from_config_with_mode(config, false)
+    }
+
+    /// Build an access-log filter while deferring sink I/O in validation mode.
+    pub(crate) fn from_config_with_mode(
+        config: &serde_yaml::Value,
+        validation_only: bool,
+    ) -> Result<Box<dyn HttpFilter>, FilterError> {
         let cfg: AccessLogConfig = parse_filter_config("access_log", config)?;
-        Ok(Box::new(Self::build(cfg)?))
+        Ok(Box::new(Self::build_with_mode(cfg, validation_only)?))
+    }
+
+    /// Construct the serving filter for the test fixture.
+    #[cfg(test)]
+    fn build(cfg: AccessLogConfig) -> Result<Self, FilterError> {
+        Self::build_with_mode(cfg, false)
     }
 
     #[expect(clippy::too_many_lines, reason = "config validation and emit plan assembly")]
-    fn build(cfg: AccessLogConfig) -> Result<Self, FilterError> {
+    fn build_with_mode(cfg: AccessLogConfig, validation_only: bool) -> Result<Self, FilterError> {
         // NaN compares false against both bounds, so a plain range check
         // lets it through and then every sampling comparison fails.
         if !cfg.sample_rate.is_finite() || cfg.sample_rate <= 0.0 || cfg.sample_rate > 1.0 {
@@ -1313,7 +1327,11 @@ impl AccessLogFilter {
 
         validate_emit_conditions(cfg.conditions.as_ref())?;
 
-        let sink = build_runtime_sink(cfg.sink)?;
+        let sink = if validation_only {
+            RuntimeSink::Tracing
+        } else {
+            build_runtime_sink(cfg.sink)?
+        };
 
         Ok(Self {
             sample_rate: cfg.sample_rate,
