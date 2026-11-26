@@ -71,7 +71,14 @@ use super::{Connector, EgressError, PeerSpec};
 #[derive(Clone)]
 pub struct HyperConnector {
     /// What every clone shares.
-    shared: Arc<Shared>,
+    shared: Option<Arc<Shared>>,
+}
+
+impl HyperConnector {
+    /// Keep offline candidates from opening a connection or allocating a pool.
+    pub(crate) fn offline() -> Self {
+        Self { shared: None }
+    }
 }
 
 impl Connector for HyperConnector {
@@ -79,35 +86,38 @@ impl Connector for HyperConnector {
 
     fn new(keepalive_pool_size: usize) -> Self {
         Self {
-            shared: Arc::new(Shared {
+            shared: Some(Arc::new(Shared {
                 capacity: keepalive_pool_size,
                 pool: Mutex::new(Pool::new(keepalive_pool_size)),
                 tls: TlsConfigs::default(),
-            }),
+            })),
         }
     }
 
     async fn connect(&self, peer: &PeerSpec, timeout: Duration) -> Result<HyperSession, EgressError> {
+        let pool = self.shared.as_ref().ok_or(EgressError::Unavailable)?;
         let key = PoolKey::new(peer);
-        let pooled = self.shared.pool().checkout(&key, Instant::now());
+        let pooled = pool.pool().checkout(&key, Instant::now());
         if let Some(connection) = pooled {
             trace!(peer = %peer.address, "reusing a pooled upstream connection");
             return Ok(HyperSession::new(connection, key, peer));
         }
 
         let timeouts = SetupTimeouts::new(&peer.connection, timeout);
-        let connection = Box::pin(dial(peer, &self.shared.tls, timeouts)).await?;
+        let connection = Box::pin(dial(peer, &pool.tls, timeouts)).await?;
         let shared = connection.share();
         let session = HyperSession::new(connection, key.clone(), peer);
         if let Some(shared) = shared {
-            self.shared.pool().put(key, shared);
+            pool.pool().put(key, shared);
         }
         Ok(session)
     }
 
     async fn release(&self, session: HyperSession, keepalive: bool) {
-        if let Some((key, connection)) = session.into_reusable(keepalive).await {
-            self.shared.pool().put(key, connection);
+        if let Some(pool) = &self.shared
+            && let Some((key, connection)) = session.into_reusable(keepalive).await
+        {
+            pool.pool().put(key, connection);
         }
     }
 }
@@ -115,7 +125,7 @@ impl Connector for HyperConnector {
 impl fmt::Debug for HyperConnector {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HyperConnector")
-            .field("capacity", &self.shared.capacity)
+            .field("capacity", &self.shared.as_ref().map(|shared| shared.capacity))
             .finish_non_exhaustive()
     }
 }
@@ -318,7 +328,7 @@ mod tests {
         let upstream = Upstream::start_hanging_up(Arc::clone(&hang_up)).await;
         let connector = HyperConnector::new(4);
         round_trip(&connector, &upstream.peer()).await;
-        let pooled = connector.shared.pool().len();
+        let pooled = connector.shared.as_ref().unwrap().pool().len();
 
         hang_up.notify_one();
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -403,7 +413,7 @@ mod tests {
         exchange(&mut session).await;
 
         connector.release(session, true).await;
-        let pooled = connector.shared.pool().len();
+        let pooled = connector.shared.as_ref().unwrap().pool().len();
         let next = connector
             .connect(&upstream.peer(), Duration::from_secs(5))
             .await

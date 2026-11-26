@@ -1434,16 +1434,20 @@ fn has_from_config_method(imp: &syn::ItemImpl) -> bool {
 
 /// Extract the config type name from `let cfg: T = parse_filter_config(...)`.
 fn extract_config_type_name(imp: &syn::ItemImpl) -> Option<String> {
-    let method = imp.items.iter().find_map(|item| {
-        if let syn::ImplItem::Fn(m) = item
-            && m.sig.ident == "from_config"
-        {
-            return Some(m);
-        }
-        None
-    })?;
-
-    for stmt in &method.block.stmts {
+    // Filters that defer runtime resources parse the same schema in their mode-aware factory.
+    let statements = imp
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::ImplItem::Fn(method)
+                if method.sig.ident == "from_config" || method.sig.ident == "from_config_with_mode" =>
+            {
+                Some(&method.block.stmts)
+            },
+            _ => None,
+        })
+        .flatten();
+    for stmt in statements {
         if let syn::Stmt::Local(local) = stmt {
             let Some(init) = local.init.as_ref() else {
                 continue;

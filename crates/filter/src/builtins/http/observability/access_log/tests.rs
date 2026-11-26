@@ -1606,6 +1606,20 @@ fn from_config_rejects_sink_stdout_with_path() {
     assert!(err.to_string().contains("does not accept a path"), "got: {err}");
 }
 
+/// Malformed paths are configuration errors even when validation skips opening the sink.
+#[test]
+fn malformed_file_sink_paths_fail_in_both_modes() {
+    for path in ["", "access\0.log"] {
+        let config = serde_yaml::to_value(serde_json::json!({"sink": {"type": "file", "path": path}})).unwrap();
+        for validation_only in [true, false] {
+            let err = AccessLogFilter::from_config_with_mode(&config, validation_only)
+                .err()
+                .expect("malformed sink path should fail");
+            assert!(err.to_string().contains("sink path"), "unexpected diagnostic: {err}");
+        }
+    }
+}
+
 #[test]
 fn from_config_rejects_sink_file_without_path() {
     let yaml: serde_yaml::Value = serde_yaml::from_str("sink:\n  type: file").unwrap();
