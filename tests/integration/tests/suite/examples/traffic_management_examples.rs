@@ -174,9 +174,20 @@ impl praxis_filter::HttpFilter for ReportImageModality {
         ctx: &mut praxis_filter::HttpFilterContext<'_>,
         body: &mut Option<bytes::Bytes>,
     ) -> Result<praxis_filter::SelectedUpstreamBodyOutcome, praxis_filter::FilterError> {
-        assert_eq!(ctx.selected_application_provider(), Some("vllm"));
-        assert_eq!(ctx.selected_application_protocol(), Some("openai_chat_completions"));
-        assert!(ctx.selected_input_modality_declared(praxis_core::config::InputModality::Text));
+        assert_eq!(
+            ctx.selected_application_provider(),
+            Some("vllm"),
+            "both routes must select vLLM"
+        );
+        assert_eq!(
+            ctx.selected_application_protocol(),
+            Some("openai_chat_completions"),
+            "both routes must select Chat Completions"
+        );
+        assert!(
+            ctx.selected_input_modality_declared(praxis_core::config::InputModality::Text),
+            "both clusters declare text input"
+        );
         let image = ctx.selected_input_modality_declared(praxis_core::config::InputModality::Image);
         *body = Some(bytes::Bytes::from_static(if image { b"image" } else { b"text" }));
         Ok(praxis_filter::SelectedUpstreamBodyOutcome::Continue)
