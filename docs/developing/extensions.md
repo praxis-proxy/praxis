@@ -116,7 +116,9 @@ register_filters! {
 ```
 
 Every key next to `filter:` in a chain entry reaches `from_config` as a
-`serde_yaml::Value`:
+`serde_yaml::Value`, except the entry keys `branch_chains`, `conditions`,
+`failure_mode`, `name`, and `response_conditions`, which the pipeline
+consumes:
 
 ```yaml
 filter_chains:

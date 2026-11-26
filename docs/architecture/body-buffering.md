@@ -27,6 +27,11 @@ accumulated bytes are frozen into one `Bytes` and forwarded. `max_bytes`
 bounds the buffered phase. After `Release`, later chunks stream and the
 global ceiling bounds them.
 
+A request `StreamBuffer` that the pipeline declares at build time is
+[pre-read](#pre-read-body) instead. `Release` doesn't end that buffering: the
+whole body is forwarded at end-of-stream, and a chunk that takes the buffer
+past `max_bytes` returns 413.
+
 `SizeLimit` passes chunks through with a running byte counter and returns 413
 (request) or aborts (response) once the total exceeds `max_bytes`. It never
 buffers. Filters don't declare it: `apply_body_limits` injects it when a
@@ -34,9 +39,10 @@ global ceiling exists but no filter needs body access.
 
 ## Mode Merging
 
-At pipeline build time, `compute_body_capabilities` walks every filter,
-branch sub-chains included, and merges the declared modes into one mode per
-direction. Modes only ratchet up:
+At pipeline build time, `compute_body_capabilities` merges the declared modes
+of top-level filters into one mode per direction. Branch sub-chains never run
+body hooks, so their filters contribute only request-context needs. Modes only
+ratchet up:
 
 ```text
 StreamBuffer > SizeLimit > Stream
@@ -213,7 +219,8 @@ routing. The pre-read chunks go into a `VecDeque<Bytes>` that later
 - `Continue`: proceed to the next filter. In `StreamBuffer` mode the chunk is
   held back from the upstream.
 - `Release`: freeze the buffer, forward it, and mark the context released so
-  later chunks stream. Outside `StreamBuffer` it acts like `Continue`.
+  later chunks stream. Outside `StreamBuffer` it acts like `Continue`. A
+  request pre-read ignores it and buffers to end-of-stream.
 - `BodyDone`: this filter is done inspecting. The pipeline skips it for the
   remaining chunks and keeps calling the others.
 - `Reject`: an error response (request) or connection abort (response).

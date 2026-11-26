@@ -89,7 +89,11 @@ curl --fail-with-body http://127.0.0.1:8080/
 ```
 
 The expected body is the backend's, `{"source":"local-backend"}`. Stop
-Praxis and the echo server with Ctrl+C.
+Praxis and the echo server with Ctrl+C, then remove the sample `praxis.yaml`:
+Praxis loads it from the working directory whenever it starts without `-c`,
+and it carries a development-only `allow_private_endpoints` exception. Restore
+any config you backed up, unless you continue to the built-in responder check
+below; restore it after that check instead.
 
 ## If the request fails
 
@@ -110,8 +114,8 @@ See [diagnostics](../operating/diagnostics.md) for config checks and logs.
 
 Praxis loads `praxis.yaml` from the working directory, or the file in
 `PRAXIS_CONFIG`, when present. With neither, it starts a default responder on
-port 8080 that does not forward anywhere. Remove the sample `praxis.yaml`
-(keep any backup where it is), then run:
+port 8080 that does not forward anywhere. Make sure the sample `praxis.yaml`
+is gone (keep any backup where it is), then run:
 
 ```console
 unset PRAXIS_CONFIG

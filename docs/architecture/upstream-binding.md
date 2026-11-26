@@ -70,7 +70,7 @@ the declarations into one name-to-metadata map for the binding router, which
 then never owns endpoint state. The catalog is configuration, not request
 state: it never travels in the request extensions, and each nested pipeline
 (an IRR step or an outbound chain) has its own. Top-level `clusters:` never
-enter it, so a `bound_upstream` matcher can only name tags a load balancer
+enter it, so a `bound_upstream` matcher can only match tags a load balancer
 declares.
 
 Several load balancers often declare the same cluster, for example one per

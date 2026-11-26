@@ -48,7 +48,8 @@ sequenceDiagram
 
 Request filters run in declared order and response filters in reverse.
 `request_body_filter` runs only if a filter declares body access.
-`response_body_filter` is synchronous: `on_response_body` is a plain `fn`.
+`response_body_filter` is `async`, but the `on_response_body` hooks it runs are
+plain `fn`s.
 `logging` re-runs the response filters when the response phase was skipped
 (upstream error, filter rejection), and the upstream connection then goes back
 to the pool. [Pingora Handler Lifecycle](pingora-handler-lifecycle.md)

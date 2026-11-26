@@ -2,7 +2,9 @@
 
 Praxis finds unhealthy upstream endpoints with active probes and with passive
 observation of real traffic. Unhealthy endpoints leave load balancer rotation
-and return when they recover.
+and return when they recover. When every endpoint in a cluster is unhealthy,
+the load balancer routes to all of them; see
+[Panic Mode](load-balancing.md#panic-mode).
 
 ## Active Health Checks
 

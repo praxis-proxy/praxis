@@ -1,13 +1,17 @@
 # FIPS 140-3
 
 Praxis does all of its cryptography in the system OpenSSL library. On a Red
-Hat Enterprise Linux 9 host in FIPS mode, that library's provider is the
-validated module (Red Hat Enterprise Linux 9 OpenSSL FIPS Provider, CMVP
-certificate #4857 at the time of writing; Red Hat keeps the current list at
-<https://access.redhat.com/compliance/fips>), so praxis's TLS, hashing and
-random numbers run inside a FIPS 140-3 validated boundary. Praxis itself is
-not a validated module and never turns FIPS mode on: the host does, and
-praxis reports it and, on request, enforces it.
+Hat Enterprise Linux 9 host in FIPS mode, that library's provider is the Red
+Hat Enterprise Linux 9 OpenSSL FIPS Provider. Module version
+`3.0.7-395c1a240fbfffd8` is validated (CMVP certificate #4857 at the time of
+writing; Red Hat keeps the current list at
+<https://access.redhat.com/compliance/fips>), and with it praxis's TLS,
+hashing and random numbers run inside a FIPS 140-3 validated boundary. The
+UBI 9.8 images the FIPS build pins ship module version
+`3.0.7-cda111b5812c30d4`, which is in validation, not yet on a certificate;
+see [What is validated, and what is not](#what-is-validated-and-what-is-not).
+Praxis itself is not a validated module and never turns FIPS mode on: the
+host does, and praxis reports it and, on request, enforces it.
 
 This page is for operators deploying the FIPS build. How the build is checked
 is in [FIPS Tooling](../developing/fips.md).

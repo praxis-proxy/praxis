@@ -103,7 +103,7 @@ pub fn check_root_privilege(allow_root: bool, euid: u32) -> Option<String> {
         "Praxis refuses to run as root (UID 0). Running a proxy as root is a security risk.\n\
          Use one of these alternatives:\n  \
          - Run as a non-root user with CAP_NET_BIND_SERVICE for low ports\n  \
-         - Use a reverse proxy or socket activation\n  \
+         - Run behind a reverse proxy or load balancer for low ports\n  \
          - Set insecure_options.allow_root: true in config to override (not recommended)"
             .to_owned(),
     )

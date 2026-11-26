@@ -60,8 +60,8 @@ request is also skipped on response and on every body hook, ordinary and
 selected-upstream. There are two exceptions:
 
 - A `stream_buffer` pre-read runs the request-body hooks *before* the request
-  phase. Nothing has been skipped yet, so every filter declaring request-body
-  access runs.
+  phase. Request conditions are evaluated then, but no branch has run yet, so
+  a filter that `SkipTo` later skips still runs its body hook.
 - The bound-upstream body hook's conditions are evaluated at the freeze, right
   after the binding router. A later top-level participant receives the body
   before its own `on_request` position, so a condition on a header or result
@@ -81,7 +81,7 @@ routing filters whose capabilities must be visible to pipeline validation.
 A filter may declare both `request_body_access` (pre-read) and
 `bound_upstream_request_body_access` (the barrier). Core picks one effective
 phase per filter from whether it carries a `bound_upstream` request condition,
-and runs the hook exactly once:
+and runs the hook only in that phase:
 
 | Declared access | Has `bound_upstream` condition | Runs at |
 | --- | --- | --- |

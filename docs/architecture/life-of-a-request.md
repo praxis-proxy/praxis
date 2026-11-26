@@ -95,7 +95,10 @@ Delivery depends on the pipeline's `BodyMode` (`Stream`, `StreamBuffer`, or
 `SizeLimit`); [Body Buffering](body-buffering.md) explains each mode.
 
 Body filters run in forward order. A filter that returned `BodyDone` is
-skipped on later chunks. The code is in `crates/filter/src/pipeline/http.rs`.
+skipped on later chunks. A `StreamBuffer` pre-read runs before the request
+filters, so `SkipTo` doesn't skip its body hooks; see
+[Response Processing](#response-processing). The code is in
+`crates/filter/src/pipeline/http.rs`.
 
 ## Upstream Selection and Request
 
@@ -123,7 +126,10 @@ See `crates/protocol/src/http/pingora/handler/upstream_peer.rs`.
 
 Response filters run in **reverse order**, and only those that ran in the
 request phase. A filter skipped by a condition or by `SkipTo` is also
-skipped in the response phase and in both body phases. Each `on_response`
+skipped in the response phase and in both body phases. The exception is a
+`StreamBuffer` pre-read: it runs the request-body hooks before the request
+phase, so a filter that `SkipTo` later skips may already have read or rejected
+the body. Each `on_response`
 gets the upstream response headers and can change them or reject the
 response. `response_conditions` on the filter entry can gate it further on
 response status or headers (`crates/filter/src/pipeline/http.rs`).

@@ -160,9 +160,10 @@ connection, so lean-build checks work. Library consumers that depend on
 
 ## Experimental features
 
-Each experimental feature is off by default and turns on the `experimental`
-marker feature, which makes the server log `experimental features are
-enabled that should not be used in production` at startup. Do not run an
+Each experimental feature turns on the `experimental` marker feature, which
+makes the server log `experimental features are enabled that should not be used in production`
+at startup. All are off by default except `policy-experimental-ratelimit`,
+which the default `policy-builtins` bundle enables. Do not run an
 experimental build in production. Details beyond the table:
 
 - **`hyper`**: runs the same filter pipeline, admin surface and sub-request
@@ -207,8 +208,9 @@ experimental build in production. Details beyond the table:
   freezes the request's
   [logical upstream binding](../architecture/upstream-binding.md), over the
   fully buffered body. A read-write participant's output becomes the body
-  forwarded, retried, and handed to the IRR. Logical binding itself is not
-  gated; only this hook is. No in-tree filter uses it yet.
+  forwarded, retried, and handed to the IRR. Logical binding needs
+  `upstream-binding`, which this feature pulls in; this feature gates only
+  the hook. No in-tree filter uses it yet.
 - **`chain-binding`**: `register_chain_binding` and
   `ChainBindingContext::bind_chain`, the authority-bound deferred-credential
   channel (`PendingCredentials` / `DeferredCredential`), which injects a

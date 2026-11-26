@@ -304,11 +304,14 @@ connections or TCP listeners.
 
 ### Max Connections
 
-`max_connections` caps concurrent connections per listener. HTTP listeners
+`max_connections` caps concurrent requests on an HTTP listener and
+concurrent connections on a TCP listener. HTTP listeners
 reject excess requests with `503 Service Unavailable` and a `Retry-After: 1`
 header; TCP listeners close the socket immediately. A slot is held for the
 request (HTTP) or connection (TCP) and freed on completion, error, or timeout.
-Each listener has its own limit.
+Each HTTP listener has its own limit. TCP listeners with the same upstream,
+cluster, and timeouts form a group that shares one limit, and must set the
+same `max_connections`.
 
 ```yaml
 listeners:
@@ -486,9 +489,10 @@ runtime:
 - `upstream_keepalive_pool_size`: maximum idle upstream connections kept per
   thread. `Option<usize>`, default `Some(64)`. `null` uses Pingora's default
   of 128 per thread.
-- `max_connections`: process-wide limit on concurrent connections across all
-  listeners, distinct from per-listener `max_connections`. New connections
-  beyond it are rejected. `Option<u32>`, default `None` (disabled).
+- `max_connections`: process-wide limit on concurrent HTTP requests and TCP
+  connections across all listeners, distinct from per-listener
+  `max_connections`. Requests and connections beyond it are rejected.
+  `Option<u32>`, default `None` (disabled).
 - `max_memory_bytes`: process-wide RSS limit for load shedding. Above it, new
   requests get `503 Service Unavailable`. `Option<usize>`, default `None`
   (disabled).

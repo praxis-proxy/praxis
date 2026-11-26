@@ -13,7 +13,8 @@ A request path can diverge and rejoin at a defined point.
 ## Key Concepts
 
 A **branch** runs when a filter emits a result that matches its `on_result`
-condition. A branch can run inline filters, reference a named top-level chain,
+condition. A branch without `on_result` runs every time its filter runs. A
+branch can run inline filters, reference a named top-level chain,
 or nest further branches.
 
 When a branch finishes, execution **rejoins** at `rejoin: next` (the

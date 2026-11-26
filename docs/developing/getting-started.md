@@ -174,7 +174,6 @@ binding or protocol registration. To bind ports below 1024:
 - Grant `CAP_NET_BIND_SERVICE` to the binary:
   `sudo setcap cap_net_bind_service=+ep ./target/release/praxis`
 - Run behind a reverse proxy or load balancer that handles port 80/443.
-- Use systemd socket activation to pass pre-bound sockets.
 
 ## Insecure Options
 

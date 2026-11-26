@@ -268,8 +268,10 @@ See `examples/configs/branching/reentrance.yaml`.
 
 ### Multiple Branches
 
-Several conditional branches on one filter act like a switch with
-first-match-wins:
+Several conditional branches on one filter are checked in order. A matching
+branch with `rejoin: next` runs and evaluation moves on to the next branch.
+The first matching branch with any other rejoin ends evaluation, as does a
+branch chain that rejects or sends a terminal response:
 
 ```yaml
 branch_chains:

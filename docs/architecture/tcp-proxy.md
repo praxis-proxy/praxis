@@ -47,9 +47,10 @@ when the session ends.
 
 ## SNI Peek-and-Forward
 
-Without a static upstream, the proxy must read the SNI hostname from the TLS
-`ClientHello` before filters run, and those bytes must still reach the
-upstream intact.
+Without a static upstream, the proxy reads the client's first bytes before
+filters run and takes the SNI hostname from them when they are a TLS
+`ClientHello`. Non-TLS bytes yield no SNI. Either way, the bytes read must
+still reach the upstream intact.
 
 ### Peek Strategy
 
