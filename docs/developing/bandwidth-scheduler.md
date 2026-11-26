@@ -46,66 +46,57 @@ specific responsibilities the current scheduler supplies. This evaluation suppor
 retaining that primitive for these requirements; it does not compare every crate
 or claim a performance advantage. A compatible upstream primitive could replace it.
 
+## Seven-requirement thin-wrapper comparison
+
+The [standalone harness](../../tests/benches/experiments/async_speed_limit_contract.rs)
+imports the actual `schedule.rs` unchanged, so its existing 23 tests run alongside
+14 crate observations. The wrapper only defers charging until activation, owns the
+crate's `Consume` future, refunds on drop, and settles accepted bytes. It adds no
+arrival-time ledger, generation tracking, notification queue, or timer rescheduling.
+A passing observation test can reproduce a **contract failure**; it does not mean
+the candidate meets the contract. Read the outcome column below.
+
+| Requirement | Observed with async-speed-limit 0.4.2 and the thin wrapper |
+| --- | --- |
+| 1. Partial write/refund | Fresh sibling immediately reuses 12 KiB after 4 KiB is accepted; an already waiting sibling retains its 750 ms timer. |
+| 2. Configured burst and pre-refill refund | A positive burst maps to `refill = burst / rate`. Normal refill works. Cancelling an old full-burst reservation after refill and a newer full-burst write admits another full burst at the same time. The earlier delayed-partial-settlement counterexample also reproduces. |
+| 3. Zero burst, first byte and idle | Literal zero refill panics. A 1 ns refill plus matching `min_wait` paces the first byte and prevents idle credit at 1,000 B/s. At 2,000,000,000 B/s its initial bucket holds two bytes and the first byte is free. This workaround does not cover the configured `u64` rate range. |
+| 4. Repeated resets on one key | With all writes cancelled, both the positive-burst and ordinary-rate zero-burst adapters recover without banked credit or debt, including resets across idle intervals. Cancellation while a newer write has committed is the failing case in row 2. |
+| 5. Out-of-order cancellation | An earlier 500-byte cancellation leaves the later captured deadline at 1 s; cancelling both restores the next byte's ordinary-rate no-burst delay. The retained deadline is compatible with `schedule.rs`'s conservative outstanding-reservation test, so this probe is **not an independent failure**. Prompt dynamic waiter re-admission is tested separately in row 1. |
+| 6. Prepared but never written | Passes with deferred activation: live plans debit nothing and do not block another full-burst reservation. Bare `consume` charges on creation, so the wrapper intentionally delays that call. |
+| 7. Absolute release after DNS/connect | An owned future created at t=0 correctly completes at t=1 s after DNS uses 600 ms. Combined with row 6, activating the previously uncharged plan only at t=600 ms instead completes at t=1.6 s. Retaining plan age while respecting intervening shared debt needs additional accounting. |
+
+These results support retaining the current scheduler rather than replacing it with
+this wrapper. They do not rule out a more capable adapter or an upstream change:
+those would need to implement and validate the missing ownership, re-admission,
+zero-burst and plan-age behavior. Existing open runtime findings remain separate;
+this comparison is not a correctness proof or their resolution.
+
 ## Reproduce against async-speed-limit 0.4.2
 
-In a temporary directory outside the Praxis workspace, create this `Cargo.toml`
-(and leave Praxis's manifest and lockfile unchanged):
+The harness is intentionally outside the production workspace's targets and
+has no dependency changes in Praxis's `Cargo.toml` or `Cargo.lock`. Create a
+**temporary directory** and this manifest, replacing the absolute `path` with
+your checkout's harness path:
 
 ```toml
 [package]
-name = "bandwidth-refund-evaluation"
+name = "praxis-limiter-contract-evaluation"
 version = "0.0.0"
 edition = "2024"
 
 [workspace]
 
+[lib]
+path = "/absolute/path/to/praxis/tests/benches/experiments/async_speed_limit_contract.rs"
+
 [dependencies]
 async-speed-limit = { version = "=0.4.2", default-features = false }
+tokio = { version = "1", features = ["sync"] }
 ```
 
-Save the following as `src/main.rs`, then run `cargo run`. It asserts the working
-baseline and both limitations. The evaluated published archive has SHA-256
+Run `cargo test --manifest-path /path/to/temporary/Cargo.toml -- --test-threads=1`.
+The relative source import reads `schedule.rs` directly from the checkout, without
+copying its implementation or replacing its state. The evaluated published crate
+archive has SHA-256
 `97c1688bb8e4eb3dcd68a8b0e5a81deae887c67362bb482a902b785e83ac2edc`.
-
-```rust
-use async_speed_limit::{Limiter, clock::{ManualClock, Nanoseconds}};
-use std::{future::Future, pin::Pin, task::{Context, Waker}, time::Duration};
-
-fn limiter() -> Limiter<ManualClock> {
-    Limiter::builder(16_384.0).refill(Duration::from_secs(1))
-        .min_wait(Duration::ZERO).build()
-}
-
-fn main() {
-    let first = limiter();
-    let second = first.clone();
-    assert!(first.consume_duration(16_384).is_zero());
-    first.unconsume(12_288); // 4 KiB accepted, 12 KiB unused.
-    assert!(second.consume_duration(12_288).is_zero());
-    println!("PASS: a new second request uses the 12 KiB refund immediately");
-
-    let first = limiter();
-    let second = first.clone();
-    assert!(first.consume_duration(16_384).is_zero());
-    let mut pending = second.consume(12_288);
-    let mut context = Context::from_waker(Waker::noop());
-    assert!(Pin::new(&mut pending).poll(&mut context).is_pending());
-    first.unconsume(12_288);
-    assert!(Pin::new(&mut pending).poll(&mut context).is_pending());
-    first.clock().set_time(Nanoseconds(749_999_999));
-    assert!(Pin::new(&mut pending).poll(&mut context).is_pending());
-    first.clock().set_time(Nanoseconds(750_000_000));
-    assert!(Pin::new(&mut pending).poll(&mut context).is_ready());
-    println!("LIMITATION: an existing second waiter keeps its 750 ms timer after refund");
-
-    let first = limiter();
-    let second = first.clone();
-    assert!(first.consume_duration(16_384).is_zero());
-    first.clock().set_time(Nanoseconds(1_000_000_000));
-    assert!(second.consume_duration(4_096).is_zero());
-    first.unconsume(12_288); // First writer accepts 4 KiB only now.
-    assert!(second.consume_duration(16_384).is_zero());
-    assert_eq!(first.total_bytes_consumed(), 24_576);
-    println!("LIMITATION: delayed settlement allows 24 KiB at t=1s with a 16 KiB burst");
-}
-```
