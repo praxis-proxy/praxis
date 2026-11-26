@@ -8,18 +8,18 @@ local report predicts a clean scan. The build targets (`make release-fips`,
 [Getting Started](getting-started.md#fips-build-and-compliance-check), and
 the operator guide is [FIPS 140-3](../operating/fips.md).
 
-The report, the image verification, the signature-store setup and the host
-attestation are [`cargo fips-check`](https://github.com/praxis-proxy/cargo-fips-check)
-commands with Makefile wrappers. It is a separate tool, shared with other Rust
-projects: the checks are its own, and [`fips-check.toml`](../../fips-check.toml)
-at the workspace root tells it what is specific to this tree (the shipped
-package, the paths the source guards scan, where a denied crate usually comes
-from, what the unit tests may link). The Makefile installs it at a pinned
-commit (`FIPS_CHECK_REV`) under `target/fips/tools` on first use; set
-`FIPS_CHECK` to use another build. The toolchain stage of `Containerfile.fips`
-installs the same commit, and `make fips-deps` fails while the two differ.
+The report, image verification, signature-store setup and host attestation
+are [`cargo fips-check`](https://github.com/praxis-proxy/cargo-fips-check)
+commands with Makefile wrappers. It is a separate tool shared with other Rust
+projects; [`fips-check.toml`](../../fips-check.toml) at the workspace root
+tells it what is specific to this tree (the shipped package, the paths the
+source guards scan, where a denied crate usually comes from, what the unit
+tests may link). The Makefile installs it at a pinned commit
+(`FIPS_CHECK_REV`) under `target/fips/tools` on first use; set `FIPS_CHECK`
+to use another build. The toolchain stage of `Containerfile.fips` installs
+the same commit, and `make fips-deps` fails while the two differ.
 
-Only the runtime probe is specific to Praxis and remains `cargo xtask fips`
+Only the runtime probe is Praxis-specific and stays in `cargo xtask fips`
 (`xtask/src/fips/`). The Makefile builds xtask without its default features
 (`XTASK_FIPS`), so it never compiles the standard proxy build.
 
@@ -35,69 +35,65 @@ Only the runtime probe is specific to Praxis and remains `cargo xtask fips`
 ## The FIPS host run
 
 The hosted checks prove what is in the image. What the image does in FIPS
-mode can only be proven on a RHEL 9 host in FIPS mode, and the pieces below
-exist so that proof is a Make target, not a manual session.
+mode can only be proven on a RHEL 9 host in FIPS mode, and these pieces make
+that proof a Make target.
 
 **The suites as the FIPS build.** `make test-integration-fips` runs the
 schema, security, integration and resilience suites (and
 `test-conformance-fips` the conformance suite) with `--no-default-features`,
 so the proxy each suite starts in process is built exactly as the FIPS binary
 is: the workspace declares the binary crate without its defaults, and every
-test crate opts into `policy-builtins` through its own default feature. The
-tests that spawn the binary get the FIPS build through `PRAXIS_BIN`
-(`make build-fips` produces it first) rather than the standard binary the
-harness would otherwise build. `cargo tree -e normal,dev --no-default-features
+test crate opts into `policy-builtins` through its own default feature. Tests
+that spawn the binary get the FIPS build through `PRAXIS_BIN`
+(`make build-fips` produces it first). `cargo tree -e normal,dev --no-default-features
 -p praxis-tests-integration -i aws-lc-rs` prints nothing for that graph; only
 `ring` remains, for rcgen's test certificates.
 
 **Both branches, always.** The FIPS behavior tests
 (`crates/tls/tests/fips_mode.rs`, `tests/integration/tests/suite/fips.rs`)
 key their expectations on what the installed provider reports
-(`praxis_tls::provider::status().provider_fips`) and assert both branches:
-on a host whose OpenSSL is in approved mode they prove the refusals, anywhere
-else they prove the same offers are accepted. So they run, and mean
-something, on every developer machine and in the hosted CI too.
-`PRAXIS_FIPS_HOST=1` declares the host to be in FIPS mode: the harness then
-fails closed the first time it installs the provider on a host that is not
-(all three signals: provider, kernel flag and crypto policy), and every behavior test insists on
-its approved-mode branch. A green run on the FIPS runner therefore cannot
-have happened on OpenSSL's default provider.
+(`praxis_tls::provider::status().provider_fips`): on a host whose OpenSSL is
+in approved mode they prove the refusals, anywhere else they prove the same
+offers are accepted, so they mean something on every machine and in hosted
+CI. `PRAXIS_FIPS_HOST=1` declares the host to be in FIPS mode: the harness
+then fails closed the first time it installs the provider on a host that is
+not (all three signals: provider, kernel flag and crypto policy), and every
+behavior test insists on its approved-mode branch. A green run on the FIPS
+runner therefore cannot have happened on OpenSSL's default provider.
 
 **Inside the toolchain image.** `make test-fips-host` builds the `toolchain`
 stage of `Containerfile.fips` (Red Hat's `rust-toolset` and OpenSSL, no
 sources) and runs `test-fips`, `test-integration-fips` and
-`test-conformance-fips` inside it against the bind-mounted checkout, with
-`PRAXIS_FIPS_HOST=1` and `PRAXIS_REQUIRE_FIPS=1`. The OpenSSL and the module
-under test are then the image's, the same packages the FIPS image is built
-with; the kernel flag and the FIPS crypto policy are the host's, which podman
-passes into the container. The container runs as the invoking user
-(rootless podman's `--userns=keep-id`), since praxis refuses to start as root
-and the tests that boot the real server would fail for that reason alone.
-The cargo home and the target directory live in named volumes
-(`praxis-fips-host-cargo`, mounted with `:U` so it belongs to that user, and
-`praxis-fips-host-target`) so the second run is incremental. The run opens
-with `make fips-host-facts`, which prints what the process the suites run as
-actually sees (the kernel flag, the crypto policy, the providers OpenSSL
-loads, whether MD5 is refused) into the log next to the results, and fails
-right there when `PRAXIS_FIPS_HOST` is declared on a container that is not
-in FIPS mode. The resilience suite's throughput floors are scaled down for
-this run (`PRAXIS_TEST_THROUGHPUT_SCALE`, set from the Makefile's
-`FIPS_HOST_THROUGHPUT_SCALE`, 0.5 by default): the floors are sized for
-GitHub's hosted runners, and the host is there to prove FIPS behavior, not
-speed.
+`test-conformance-fips` in it against the bind-mounted checkout, with
+`PRAXIS_FIPS_HOST=1` and `PRAXIS_REQUIRE_FIPS=1`. OpenSSL and the module
+under test are the image's, the same packages the FIPS image is built with;
+the kernel flag and FIPS crypto policy are the host's, passed in by podman.
+
+- The container runs as the invoking user (rootless podman's
+  `--userns=keep-id`), since praxis refuses to start as root.
+- The cargo home and target directory live in named volumes
+  (`praxis-fips-host-cargo`, mounted with `:U` so it belongs to that user,
+  and `praxis-fips-host-target`), so later runs are incremental.
+- The run opens with `make fips-host-facts`, which logs what the test process
+  sees (kernel flag, crypto policy, the providers OpenSSL loads, whether MD5
+  is refused) and fails right there when `PRAXIS_FIPS_HOST` is declared on a
+  container that is not in FIPS mode.
+- The resilience suite's throughput floors, sized for GitHub's hosted
+  runners, are scaled down (`PRAXIS_TEST_THROUGHPUT_SCALE`, from the
+  Makefile's `FIPS_HOST_THROUGHPUT_SCALE`, 0.5 by default).
 
 **The raw TLS probes.** `tests/utils/src/tls_probe.rs` builds `ClientHello`
 records that offer exactly what a test names (ChaCha20 only, X25519 only,
 TLS 1.2 without Extended Master Secret) and reads the listener's first record
 back: a `ServerHello` means accepted, an alert means refused. A rogue server
-does the reverse for the upstream client: it records what praxis offered and
-answers with a chosen `ServerHello` or alert, then watches for the client's
-alert. No cryptography is involved, which is the point: the probes work
-against any listener, including the shipped image, on any host.
+does the reverse for the upstream client: it records what praxis offered,
+answers with a chosen `ServerHello` or alert, and watches for the client's
+alert. No cryptography is involved, so the probes work against any listener,
+including the shipped image, on any host.
 
 **Policy FIPS construction.** Every run executes four startup scenarios in
-isolated child processes with their own `OPENSSL_CONF`. The expected result
-is explicit and checked against the kernel flag:
+isolated child processes with their own `OPENSSL_CONF`, each with an explicit
+expected result checked against the kernel flag:
 
 | Scenario | Configurable provider, non-FIPS kernel | RHEL FIPS kernel |
 |---|---|---|
@@ -106,22 +102,19 @@ is explicit and checked against the kernel flag:
 | Rival `jsonwebtoken` provider | Construction refuses the rival provider | Construction refuses the rival provider |
 | Three JWT loads in one process | All succeed | All succeed |
 
-RHEL automatically activates its FIPS provider and default properties when
-the kernel requires FIPS, even if the supplied config omits them. The tests
-assert the effective crypto state before checking Policy construction.
+RHEL activates its FIPS provider and default properties when the kernel
+requires FIPS, even if the supplied config omits them, so the tests assert
+the effective crypto state before checking Policy construction.
 
-`make test-fips-policy-provider` runs all four cases in the UBI toolchain
-image on a non-FIPS kernel. The hosted `FIPS` job requires it on every PR
-and push. `make test-fips-host` runs all four on the FIPS runner, alongside
-the unit, integration and conformance suites. `make test-fips-provider`
-also includes the configurable-provider startup checks.
-
-The general `test-fips` unit target excludes these startup scenarios, so it
-does not require `FIPS_POLICY_STARTUP_MODE`. Both container entrypoints run
-the dedicated startup target separately, including when a Policy profile
-is enabled.
-
-For a direct run inside the toolchain image, use:
+`make test-fips-policy-provider` runs all four in the UBI toolchain image on a
+non-FIPS kernel; the hosted `FIPS` job requires it on every PR and push.
+`make test-fips-host` runs them on the FIPS runner with the unit,
+integration and conformance suites, and `make test-fips-provider` also
+includes the configurable-provider startup checks. The general `test-fips`
+unit target excludes these scenarios, so it does not require
+`FIPS_POLICY_STARTUP_MODE`; both container entrypoints run the dedicated
+startup target separately, including with a Policy profile. For a direct run
+inside the toolchain image:
 
 ```console
 make test-fips-policy-startup FIPS_POLICY_STARTUP_MODE=configurable-provider \
@@ -129,35 +122,29 @@ make test-fips-policy-startup FIPS_POLICY_STARTUP_MODE=configurable-provider \
 ```
 
 Use mode `kernel-fips` on the FIPS host. A missing mode, wrong kernel mode,
-missing provider config, ignored test or missing scenario fails the gate.
-There are no successful skips. The tests exercise Policy's existing crypto
+missing provider config, ignored test or missing scenario fails the gate;
+there are no successful skips. The tests exercise Policy's existing crypto
 validation; Praxis adds no production crypto checks.
 
 **Policy FIPS profiles.** The default FIPS build leaves Policy out.
-`FIPS_POLICY_PROFILE` opts one in, and every FIPS target honors it: the
-build, `lint-fips`, `test-fips`, `test-integration-fips`, `fips-deps`,
-`fips-report`, `container-fips` (tagged `<version>-fips-policy-<profile>`),
-`fips-scan` and `fips-runtime-probe`.
-
-| Profile | Policy features |
-|---|---|
-| `none` (default) | none |
-| `engine` | `policy-engine,policy-crypto-fips` |
-| `api-key` | `policy-api-key-fips` |
-| `jwt` | `policy-jwt-fips` |
-| `both` | `policy-api-key-fips,policy-jwt-fips` |
+`FIPS_POLICY_PROFILE` (`none`, `engine`, `api-key`, `jwt`, `both`; features
+per profile in [the operator guide](../operating/fips.md#the-policy-filter-on-fips))
+opts one in, and every FIPS target honors it: the build, `lint-fips`,
+`test-fips`, `test-integration-fips`, `fips-deps`, `fips-report`,
+`container-fips` (tagged `<version>-fips-policy-<profile>`), `fips-scan` and
+`fips-runtime-probe`.
 
 A Policy profile refuses to build its filter without a FIPS provider, so its
 tests need one. `make test-fips-provider FIPS_POLICY_PROFILE=jwt` runs
 `test-fips`, `test-fips-policy-startup` and `test-integration-fips` inside
 the toolchain image with Red Hat's module activated by
 `xtask/assets/fips/fips-provider.cnf`. It works with docker or podman on a
-non-FIPS kernel, so `test-fips-host` remains the FIPS-host proof. On the host
-itself those tests check the refusal instead. The
-`FIPS Policy profiles` workflow runs the four profiles nightly and on
-dispatch. The JWT example tests sign RS256 and ES256 tokens and DPoP proofs
-at run time with the test-only keys in `tests/integration/fixtures/policy-fips/`;
-the runtime probe signs its own with keys generated for the run.
+non-FIPS kernel, so `test-fips-host` remains the FIPS-host proof; on the host
+itself those tests check the refusal instead. The `FIPS Policy profiles`
+workflow runs the four profiles nightly and on dispatch. The JWT example
+tests sign RS256 and ES256 tokens and DPoP proofs at run time with the
+test-only keys in `tests/integration/fixtures/policy-fips/`; the runtime
+probe signs its own with keys generated for the run.
 
 `fips-deps` checks the profile's production graph (normal and build edges)
 and, separately, the unit-test graph `make test-fips` compiles. A test edge
@@ -172,10 +159,10 @@ and a SHA-1-signed certificate, with the commands that made them in its
 
 ## Simulating approved mode
 
-A host that is not in FIPS mode can still exercise the approved-mode branch
-of every behavior test, against Red Hat's real module, by activating the
-FIPS provider for the test processes alone with the bundled configuration
-(`xtask/assets/fips/fips-provider.cnf`). Inside the toolchain image:
+A host not in FIPS mode can still exercise the approved-mode branch of every
+behavior test against Red Hat's real module, by activating the FIPS provider
+for the test processes alone with `xtask/assets/fips/fips-provider.cnf`.
+Inside the toolchain image:
 
 ```console
 make fips-toolchain
@@ -187,10 +174,9 @@ podman run --rm --userns=keep-id --security-opt label=disable -v "$PWD":/src -w 
 ```
 
 The provider reports approved algorithms only, so the tests prove the
-refusals; the kernel flag still reads `0`, so the `PRAXIS_REQUIRE_FIPS` test
+refusals. The kernel flag still reads `0`, so the `PRAXIS_REQUIRE_FIPS` test
 proves the refusal to start instead of the serving path, and
-`PRAXIS_FIPS_HOST` must stay unset (it would fail closed, correctly). Test
-infrastructure only: the application never activates a provider itself.
+`PRAXIS_FIPS_HOST` must stay unset (it would fail closed, correctly).
 
 ## The runner job
 
@@ -199,10 +185,10 @@ labeled `fips` and `rhel`: a RHEL 9 host in FIPS mode with `git`, `make`,
 `podman`, `gnupg2`, `gcc`, `gcc-c++`, `cmake` and `openssl-devel` installed
 (the host-side commands, `cargo fips-check` and `cargo xtask fips`, compile
 there, and `verify-image` checks Red Hat's signatures through gpg; the suites
-compile inside the toolchain image). The runner's group must grant this public
-repository access, which GitHub does not do by default. Its steps are the composite action
-`.github/actions/fips-host`, so the release workflow can run the same checks
-against a pushed image.
+compile inside the toolchain image). The runner's group must grant this
+public repository access, which GitHub does not do by default. Its steps are
+the composite action `.github/actions/fips-host`, so the release workflow can
+run the same checks against a pushed image.
 
 The hosted `ubi-image` job is the
 [cargo-fips-check action](https://github.com/praxis-proxy/cargo-fips-check#github-action),
@@ -210,15 +196,15 @@ pinned by commit: the dependency report, the base image verification, the
 build and report on UBI 9, the runtime image, one run of it and the scan,
 followed here by the Policy startup scenarios.
 
-The runner tests the exact image that job built and scanned: the action
-saves the image as an artifact with its id (as `make fips-image-save` does), and
+The runner tests the exact image that job built and scanned: the action saves
+the image as an artifact with its id (as `make fips-image-save` does), and
 the runner loads it and checks the id against the one the hosted job
 recorded (`make fips-image-load`). A self-hosted runner must never run a
 fork's code, so on pull requests the job runs only for branches of this
-repository; it runs on every push to main, nightly, and on dispatch. The
-release workflow's `fips-host` job pulls the pushed `-fips` image by digest,
-attests and probes it (without repeating the suites), and the draft release
-waits for it.
+repository; it also runs on every push to main, nightly, and on dispatch.
+The release workflow's `fips-host` job pulls the pushed `-fips` image by
+digest, attests and probes it (without repeating the suites), and the draft
+release waits for it.
 
 ## What the report checks
 
@@ -235,7 +221,6 @@ waits for it.
    statically links OpenSSL.
 
 Each finding says why the scanner cares, where to look and what to do.
-
 `--deps-only` skips the binary checks. `make fips-deps` runs the report that
 way, after checking that the `CARGO_FEATURES` default in `Containerfile.fips`
 matches `FIPS_FEATURES`, and `make lint` runs `make fips-deps`.
@@ -246,13 +231,13 @@ Red Hat's release key, the `registries.d` entry for its signature store and
 the list of FIPS provider module builds with their standing at NIST are
 compiled into `cargo fips-check`; their provenance is in
 [its README](https://github.com/praxis-proxy/cargo-fips-check#bundled-data).
-A change to any of them is a change to that tool, picked up here by moving
-`FIPS_CHECK_REV` (and `CARGO_FIPS_CHECK_REV` in `Containerfile.fips`).
+To change any of them, change that tool and move `FIPS_CHECK_REV` (and
+`CARGO_FIPS_CHECK_REV` in `Containerfile.fips`).
 
-One file stays in this tree, `xtask/assets/fips/fips-provider.cnf`: an
-`OPENSSL_CONF` that activates the RHEL FIPS provider for one process, which
-the FIPS test targets use on hosts that are not in FIPS mode. Test
-infrastructure only; the application never enables FIPS itself.
+The one file in this tree is `xtask/assets/fips/fips-provider.cnf`, an
+`OPENSSL_CONF` that activates the RHEL FIPS provider for one process, used by
+the FIPS test targets on hosts not in FIPS mode. It is test infrastructure
+only; the application never enables FIPS itself.
 
 ## cargo-auditable
 

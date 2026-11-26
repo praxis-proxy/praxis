@@ -1,9 +1,8 @@
 # Distributed Tracing
 
-Praxis can export HTTP spans to an OTLP collector when built with the
-`otel` feature. Without that feature, Praxis does not create OTel spans and
-does not require a collector. The `trace_context` filter remains usable as a
-header-only propagation option.
+Praxis exports HTTP spans to an OTLP collector when built with the `otel`
+feature. Without it, Praxis creates no OTel spans and needs no collector; the
+`trace_context` filter still propagates trace headers.
 
 ## Configure OTLP export
 
@@ -16,76 +15,97 @@ telemetry:
   service_name: "praxis-edge"
 ```
 
-Supply exporter credentials through `OTEL_EXPORTER_OTLP_HEADERS`, populated
-from a deployment-managed Secret or equivalent environment reference. Praxis
-also accepts `telemetry.otlp_headers` for deployments that manage the config
-outside overlays; avoid putting secret values in checked-in YAML or routing
-overlays. Exporter headers are sent only to the collector and are never copied
-to proxy requests, traces, or logs.
-Sampling is parent based: a sampled inbound parent is continued, an unsampled
-parent stays unsampled, and new roots use `sampling_rate` (or the configured
-default sampler).
-`sampling_rate` is not a hard export-volume limit: a valid sampled remote
-parent is honored even when the local root sampling rate is zero. On listeners
-that accept trace context from untrusted callers, those callers can increase
-tracing work and collector ingest by sending sampled contexts. Apply ingress
-controls where a hard telemetry-volume limit is required; a listener-level
-trace-context trust policy is outside this configuration.
+The [OTLP tracing example][otlp-tracing-config] shows the batching and header
+settings too.
 
-The application must initialize tracing from the loaded configuration and
-retain the returned `TracingGuard` for the server lifetime. The guard shuts
-down the OTLP provider and flushes pending spans during normal shutdown.
+Pass exporter credentials in `OTEL_EXPORTER_OTLP_HEADERS`, filled from a
+deployment-managed Secret or similar. `telemetry.otlp_headers` also works, but
+keep secret values out of checked-in YAML and routing overlays. Exporter
+headers go only to the collector, never into proxy requests, traces, or logs.
+
+Sampling is parent based. A sampled inbound parent is continued, an unsampled
+one stays unsampled, and new roots use `sampling_rate` (or the configured
+default sampler). This is not a hard volume limit: a valid sampled remote
+parent is honored even when `sampling_rate` is zero, so untrusted callers can
+raise tracing work and collector ingest by sending sampled contexts. Where you
+need a hard limit, apply ingress controls; there is no listener-level
+trace-context trust policy.
+
+An application embedding Praxis must initialize tracing from the loaded
+config and hold the returned `TracingGuard` for the server's lifetime. On
+normal shutdown the guard shuts down the OTLP provider and flushes pending
+spans.
+
+[otlp-tracing-config]: ../../examples/configs/observability/tracing-otlp.yaml
+
+### Collector transport and TLS
+
+The endpoint scheme picks the transport: `http://` is plaintext, and
+`https://` is TLS verified against the operating system's trust store, with
+normal chain and hostname checks. For a gRPC endpoint without a scheme,
+`OTEL_EXPORTER_OTLP_TRACES_INSECURE` takes precedence over
+`OTEL_EXPORTER_OTLP_INSECURE`, and only the value `true` (any case) selects
+plaintext, as in the OpenTelemetry OTLP exporter contract.
+
+For a private collector CA, install it in the platform trust store, or set
+`SSL_CERT_FILE` to a PEM bundle or `SSL_CERT_DIR` to a directory of PEM
+certificates (read by Tonic's native-root loader). Either variable replaces
+the platform roots rather than adding to them, so a bundle that needs public
+and private roots must hold both. Praxis never falls back to disabling peer
+or hostname verification. These settings apply to OTLP/gRPC only; the
+HTTP/protobuf exporter follows its URL scheme.
 
 ## Context propagation
 
 With `otel` enabled and an exporter configured, Praxis validates a single
 inbound W3C `traceparent` before creating the HTTP server span. A valid remote
-context becomes that server span's parent, including its sampled flag and
-validated `tracestate`. Missing, malformed, or duplicate `traceparent` fields
-start a local root; malformed trace state is discarded.
+context becomes the server span's parent, with its sampled flag and validated
+`tracestate`. A missing, malformed, or duplicate `traceparent` starts a local
+root, and malformed trace state is discarded.
 
-Praxis creates an HTTP `CLIENT` span for each actual upstream request attempt.
-The final outbound header hook injects that span's context after filter header
-mutations, replacing conflicting client-supplied or filter-generated trace
-headers. The next Praxis gateway therefore receives the exported client span
-as its remote parent. Retries and requests sent over pooled connections each
-create a fresh client span and inject that attempt's ID.
+Each actual upstream request attempt gets an HTTP `CLIENT` span. The final
+outbound header hook injects that span's context after filters have changed
+headers, replacing any trace headers from the client or from filters, so the
+next Praxis gateway sees the exported client span as its remote parent.
+Retries and requests on pooled connections each get a fresh client span and
+inject their own ID. Framework sub-requests use the same span and injection
+path.
 
-Framework sub-requests use the same client span and injection path. When OTel
-is unavailable, the `trace_context` filter keeps its existing header-only
-behavior, including its synthetic hop ID and `x-request-id` correlation.
+Without OTel, the `trace_context` filter keeps its header-only behavior,
+including its synthetic hop ID and `x-request-id` correlation.
 
 ## Exported spans and data
 
-HTTP request handling emits `SERVER` spans. Each proxied HTTP attempt and
-framework sub-request emits a `CLIENT` span; the existing `upstream_exchange`
-span remains an `INTERNAL` child for connection and response details. Filter
-execution emits bounded `filter` spans when debug level tracing is enabled.
-The `iterative-request-router` build feature emits `filtered_subrequest` step
-spans beneath the active request/filter context, with step name and iteration.
-Those routing spans contain no prompt or body data.
+- HTTP request handling emits `SERVER` spans.
+- Each proxied HTTP attempt and framework sub-request emits a `CLIENT` span.
+  The `upstream_exchange` span stays an `INTERNAL` child carrying connection
+  and response details.
+- Filter execution emits bounded `filter` spans when debug-level tracing is
+  on (see [Log Level Overrides](observability.md#log-level-overrides)).
+- The `iterative-request-router` build feature emits `filtered_subrequest`
+  step spans under the active request or filter context, with step name and
+  iteration. They contain no prompt or body data.
 
-Server spans also record the request URL path and `User-Agent`. The optional
-`request_id` filter can record a validated client-supplied request ID. These
-values can contain sensitive or identifying information even though Praxis
-does not record request or response bodies, Authorization or cookie headers,
-or exporter credentials. Avoid placing secrets or personal data in URL paths,
-User-Agent values, or request IDs, and control access and retention for the
-collector accordingly. Redacting or hashing these fields would change existing
-trace attributes and should be considered as a separate design decision.
+Server spans record the request URL path and `User-Agent`, and the optional
+`request_id` filter can record a validated client-supplied request ID. Praxis
+never records request or response bodies, Authorization or cookie headers, or
+exporter credentials, but these three values can still identify people. Keep
+secrets and personal data out of URL paths, User-Agent values, and request
+IDs, and control access to and retention in the collector.
 
-Sampling may omit spans; a propagated unsampled context intentionally has no
-exported span IDs to inspect.
+Sampling may omit spans. A propagated unsampled context has no exported span
+IDs to inspect.
 
 ## Verification
 
-This command runs two local Praxis proxies through an OTLP test receiver:
+This test runs two local Praxis proxies through an OTLP test receiver:
 
 ```console
 cargo test -p praxis-tests-integration --features otel,cloud-events-filter --test otel_cross_gateway -- --nocapture
 ```
 
-The test parses the exported IDs and checks the chain
+It parses the exported IDs and checks the chain
 `edge SERVER -> edge CLIENT -> provider SERVER -> provider CLIENT`, checks the
-backend's received client span ID, exercises missing/malformed/unsampled
-contexts, and scans exported span data for body and credential sentinels.
+client span ID the backend received, exercises missing, malformed, and
+unsampled contexts, and scans exported span data for body and credential
+sentinels.

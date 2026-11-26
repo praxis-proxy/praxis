@@ -20,9 +20,7 @@ Praxis is a [Rust]-based framework for building **proxy servers**.
 
 ## Documentation
 
-The full documentation is available [here](docs/README.md).
-
-The following are some good places to start:
+See the [full documentation](docs/README.md). Good places to start:
 
 - [Configuration](docs/operating/configuration.md)
 - [Policy enforcement](docs/security/policy-enforcement.md)
@@ -32,21 +30,18 @@ The following are some good places to start:
 - [TLS](docs/operating/tls.md)
 - [Security Hardening](docs/operating/security-hardening.md)
 
-Core embeds the [Praxis Policy Engine (PPE)][ppe] through its `policy`
-filter for access control, delegation, and data protection. Start with
-[policy enforcement](docs/security/policy-enforcement.md) for use cases.
+The `policy` filter embeds the [Praxis Policy Engine (PPE)][ppe] for access
+control, delegation, and data protection.
 
 [ppe]: https://github.com/praxis-proxy/policy
 
-> **Note**: AI Features are developed and maintained in a separate repository.
-> If you're looking for AI-specific source, see [praxis-proxy/ai].
+AI features live in a separate repository: [praxis-proxy/ai].
 
 [praxis-proxy/ai]:https://github.com/praxis-proxy/ai
 
 ## Contributing
 
-[Issues] and [pull requests] are welcome. Familiarize yourself
-with the following documentation before submissions:
+[Issues] and [pull requests] are welcome. Read these first:
 
 - [Architecture](docs/architecture/overview.md)
 - [Conventions](docs/developing/conventions.md)
@@ -65,20 +60,13 @@ Everyone is expected to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Community
 
-Read [GOVERNANCE.md](GOVERNANCE.md) to see how our community works.
+- [GOVERNANCE.md](GOVERNANCE.md): how the community works
+- [Discussion forums] and the [#praxis] channel on [CNCF Slack]: questions and ideas
+- [SUPPORT.md](SUPPORT.md): where to ask questions, propose enhancements,
+  and report bugs or security vulnerabilities
+- [CNCF Praxis Calendar]: community calls and meetups
 
-Feel free to join our [discussion forums] to ask questions or share ideas.
-
-Or please join us in our Slack channel on [CNCF Slack]: [#praxis] channel
-
-See [SUPPORT.md](SUPPORT.md) for the full list of channels: where to
-ask questions, propose enhancements, report bugs, and report security
-vulnerabilities.
-
-Check the [CNCF Praxis Calendar] to see our community calls and other online
-meetups.
-
-[discussion forums]:https://github.com/praxis-proxy/praxis/discussions
+[Discussion forums]:https://github.com/praxis-proxy/praxis/discussions
 [CNCF Praxis Calendar]:https://app.lfx.dev/projects/praxis/calendar
 
 ## License

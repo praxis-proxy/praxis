@@ -1,22 +1,16 @@
 # Adding a Protocol
 
-## Overview
-
-Protocols translate between external network protocols
-and the internal filter pipeline. Each protocol
-registers one or more services on the network backend's
-runtime that bind listeners and dispatch traffic through
-the filter pipeline. (A *protocol* is what a listener
-speaks; a *backend* is the library that owns the sockets.
-To add a backend instead, see
-[Adding a Network Backend](adding-backends.md).)
+A protocol is what a listener speaks. It registers services on the network
+backend's runtime that bind listeners and run traffic through the filter
+pipeline. The backend is the library that owns the sockets; to add one, see
+[Adding a Network Backend](adding-backends.md).
 
 ## Steps
 
 ### 1. Implement `Protocol`
 
-Create a module under `crates/protocol/src/` and implement
-the [`Protocol`] trait:
+Create a module under `crates/protocol/src/` that implements the
+[`Protocol`] trait:
 
 ```rust
 pub trait Protocol: Send {
@@ -29,19 +23,16 @@ pub trait Protocol: Send {
 }
 ```
 
-`register` filters listeners by protocol kind, resolves
-pipelines from `ListenerPipelines`, and registers
-services on the backend runtime (`backend::Runtime` is
-the selected backend's runtime type). Return any TLS
-certificate watcher shutdown senders; the caller keeps
-them alive until server shutdown.
+`register` picks the listeners of its protocol kind, resolves their
+pipelines from `ListenerPipelines`, and registers services on the backend
+runtime (`backend::Runtime` is the selected backend's runtime type). It
+returns any TLS certificate watcher shutdown senders, which the caller keeps
+alive until server shutdown.
 
-**Reference implementations** (exposed as
-`praxis_protocol::backend::{Http, Tcp}`):
-
-- **HTTP**: `crates/protocol/src/http/pingora/mod.rs`
-  (`PingoraHttp`)
-- **TCP**: `crates/protocol/src/tcp/service.rs` (`PingoraTcp`)
+The reference implementations, exposed as
+`praxis_protocol::backend::{Http, Tcp}`, are `PingoraHttp` in
+`crates/protocol/src/http/pingora/mod.rs` and `PingoraTcp` in
+`crates/protocol/src/tcp/service.rs`.
 
 ### 2. Add `ProtocolKind` variant
 
@@ -59,14 +50,13 @@ pub enum ProtocolKind {
 }
 ```
 
-The `#[serde(rename_all = "lowercase")]` attribute maps
-YAML values (e.g. `protocol: tcp`) to enum variants.
+`#[serde(rename_all = "lowercase")]` maps YAML values such as
+`protocol: tcp` to variants.
 
 ### 3. Wire in `server.rs`
 
-In `crates/server/src/server.rs`, add a branch to
-`register_protocols` that checks for listeners using
-the new protocol kind and registers the implementation:
+In `crates/server/src/server.rs`, add a branch to `register_protocols` that
+registers the implementation when a listener uses the new kind:
 
 ```rust
 if config.listeners.iter().any(|l| l.protocol == ProtocolKind::NewProtocol) {
@@ -79,17 +69,14 @@ if config.listeners.iter().any(|l| l.protocol == ProtocolKind::NewProtocol) {
 
 ### 4. Add filter compatibility
 
-If the protocol uses a different filter trait than
-`HttpFilter` or `TcpFilter`, define the new trait in
-`crates/filter/src/` and ensure the pipeline engine can
-dispatch to it.
+If the protocol needs a filter trait other than `HttpFilter` or `TcpFilter`,
+define it in `crates/filter/src/` and make the pipeline engine dispatch to
+it.
 
 ### 5. Test and document
 
-- Add unit tests for the protocol implementation
-- Add integration tests under `tests/integration/`
-- Add example configs under `examples/configs/`
-- Update `examples/README.md`
-- Update `docs/features.md` with the new protocol
+Add unit tests, integration tests under `tests/integration/`, and example
+configs under `examples/configs/`. Update `examples/README.md` and add the
+protocol to `docs/features.md`.
 
 [`Protocol`]: ../../crates/protocol/src/lib.rs

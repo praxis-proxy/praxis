@@ -8,11 +8,9 @@
 
 ## Reporting a Vulnerability
 
-Please report security vulnerabilities privately via
-GitHub's [private vulnerability reporting] on this
-repository. Do not open a public issue.
-
-Include:
+Report vulnerabilities privately through GitHub's
+[private vulnerability reporting] on this repository. Do not open a public
+issue. Include:
 
 - Description of the vulnerability
 - Steps to reproduce
@@ -23,9 +21,8 @@ Include:
 
 ## Response Timeline
 
-Prior to `v1.0.0` we will work with researchers
-individually on timelines. After `v1.0.0` we will have
-a standardized response timeline.
+Before `v1.0.0`, we agree timelines with each researcher individually. From
+`v1.0.0` on, there will be a standard response timeline.
 
 ## Severity Classification
 
@@ -40,8 +37,6 @@ a standardized response timeline.
 
 ## Safe Harbor
 
-We consider security research conducted in good faith to
-be authorized. We will not pursue legal action against
-researchers who follow this policy and report findings
-responsibly. We appreciate the effort you put into
-keeping this project secure.
+We consider good-faith security research authorized, and we will not pursue
+legal action against researchers who follow this policy and report findings
+responsibly.

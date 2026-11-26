@@ -1,137 +1,45 @@
 # Observability
 
-Praxis exposes Prometheus metrics, structured access
-logs, and health endpoints for monitoring proxy
-behavior. This guide covers setup, metric reference,
-logging configuration, and usage patterns.
-
-## OTLP Trace Export
-
-When Praxis is built with the `otel` feature and an OTLP endpoint is configured,
-OTLP/gRPC exports to HTTPS use the operating system's native certificate trust
-store and retain normal certificate-chain and hostname verification. The
-endpoint scheme controls transport: an explicit `http://` endpoint remains
-plaintext; an explicit `https://` endpoint uses verified TLS. For a scheme-less
-gRPC endpoint, `OTEL_EXPORTER_OTLP_TRACES_INSECURE` takes precedence over
-`OTEL_EXPORTER_OTLP_INSECURE`; only the value `true` (case-insensitive) selects
-plaintext, matching the OpenTelemetry OTLP exporter contract.
-
-Install private collector CAs in the platform trust store, or point
-`SSL_CERT_FILE` at a PEM bundle or `SSL_CERT_DIR` at a directory of PEM
-certificates. These variables are consumed by Tonic's native-root loader. When
-either variable is set, certificates are loaded from those explicit locations
-instead of the platform defaults. If both public and private roots are needed,
-provide a bundle containing both; these overrides do not append to system
-roots. Praxis never disables peer or hostname verification as a fallback. The
-HTTP/protobuf exporter remains governed by its URL scheme and is not changed by
-the gRPC trust configuration.
-
-See the [OTLP tracing configuration example][otlp-tracing-config] for endpoint,
-sampling, batching, and header settings.
-
-[otlp-tracing-config]: ../../examples/configs/observability/tracing-otlp.yaml
+Praxis exposes Prometheus metrics, access logs, process logs, and health
+endpoints. Span export over OTLP is covered in
+[Distributed Tracing](tracing.md).
 
 ## Admin and Metrics Endpoints
 
-Health and metrics endpoints use a dedicated listener. Configure
-`admin.metrics_address`; the separate `admin.address` is reserved for `/api/*`:
+`admin.metrics_address` serves `/healthy`, `/ready`, and `/metrics`;
+`admin.address` serves the `/api/*` management API, including
+`/api/log-level`. [Admin](configuration.md#admin) covers the binding rules
+(loopback-only admin API unless `insecure_options.allow_public_admin: true`,
+no authentication on either listener), and
+[Health Checking](health-checking.md#admin-health-endpoints) the `/healthy`
+and `/ready` responses.
 
 ```yaml
 admin:
   metrics_address: "127.0.0.1:9902"
 ```
 
-The health and metrics listener exposes these endpoints:
-
-| Path | Purpose |
-| ----------- | ----------------------------------------- |
-| `/healthy` | Liveness probe - returns `200` once the server is accepting connections |
-| `/ready` | Readiness probe - returns cluster health status; the default `readiness: serving` stays `200` through an upstream outage, while `readiness: upstreams` returns `503` when any cluster has zero healthy endpoints |
-| `/metrics` | Prometheus text exposition format |
-
-The separate `admin.address` listener exposes the management API, including
-`/api/log-level`. The admin API is restricted to loopback by default and
-requires `insecure_options.allow_public_admin: true` for a non-loopback bind.
-The health and metrics listener may bind to a non-loopback address without
-that flag; use network controls to restrict access because it has no
-authentication.
-
-A loopback listener answers `421` on every path
-unless `Host` is a loopback IP literal or `localhost`
-(a request without `Host` is served), which blocks
-DNS rebinding attacks from a browser. Point probes and
-scrapers at `127.0.0.1`, `[::1]`, or `localhost`. See
+A loopback listener answers `421` on every path unless `Host` is a loopback
+IP literal or `localhost` (a request without `Host` is served). This blocks
+browser DNS rebinding attacks. Point probes and scrapers at `127.0.0.1`,
+`[::1]`, or `localhost`. See
 [Admin DNS Rebinding](security-hardening.md#admin-dns-rebinding).
 
-The admin and health/metrics surfaces are compiled
-in by the `admin-api` build feature, on by default. A
-binary built without it exposes no admin endpoints
-regardless of either address. See
+Both listeners are compiled in by the `admin-api` build feature, on by
+default. Without it, neither address exposes anything. See
 [Build Features](build-features.md).
 
 ### Verbose Readiness
 
-By default, `/ready` returns aggregate counts only
-(total, healthy, degraded clusters) without cluster
-names. Set `verbose: true` to include per-cluster
-detail:
-
-```yaml
-admin:
-  metrics_address: "127.0.0.1:9902"
-  verbose: true
-```
-
-Non-verbose response (default):
-
-```json
-{
-  "status": "ok",
-  "clusters": {
-    "total": 2,
-    "healthy": 2,
-    "degraded": 0
-  }
-}
-```
-
-Verbose response:
-
-```json
-{
-  "status": "ok",
-  "clusters": {
-    "total": 2,
-    "healthy": 2,
-    "degraded": 0,
-    "detail": {
-      "api": {
-        "healthy": 3,
-        "unhealthy": 0,
-        "total": 3
-      },
-      "web": {
-        "healthy": 2,
-        "unhealthy": 0,
-        "total": 2
-      }
-    }
-  }
-}
-```
-
-Verbose mode exposes internal topology (cluster
-names, endpoint counts). Keep it off in production
-unless the health/metrics listener is network-isolated.
+`admin.verbose: true` adds per-cluster detail to `/ready`; the response is in
+[Verbose Mode](health-checking.md#verbose-mode).
 
 ### Runtime log levels (`/api/log-level`)
 
-Adjust process tracing verbosity at runtime without
-restarting. The admin API layers temporary overlays on
-top of the startup baseline (`RUST_LOG` plus
-`runtime.log_overrides`). Overlays auto-revert after
-`duration_secs` (default **300** seconds, maximum
-**86400**).
+The admin API changes log verbosity without a restart by layering temporary
+overlays on the startup baseline (`RUST_LOG` plus `runtime.log_overrides`).
+Overlays revert after `duration_secs` (default 300 seconds, maximum
+86400).
 
 | Method | Purpose |
 | ------ | ------- |
@@ -139,8 +47,6 @@ top of the startup baseline (`RUST_LOG` plus
 | `GET` | Read baseline, active overlays, and effective directive |
 | `HEAD` | Same as `GET` without a body |
 | `DELETE` | Clear overlay(s) before timer expiry (`?module=`, or `?all=true`) |
-
-Example per-module temporary raise:
 
 ```http
 PUT /api/log-level
@@ -153,32 +59,24 @@ Content-Type: application/json
 }
 ```
 
-`GET /api/log-level` returns structured JSON including
-`baseline_directive`, `overlays` (with `expires_at` in
-RFC 3339 UTC), and `effective_directive`. Invalid
-levels, empty `module`, and out-of-range durations
-return **400** JSON errors.
+`GET /api/log-level` returns JSON with `baseline_directive`, `overlays` (each
+with `expires_at` in RFC 3339 UTC), and `effective_directive`. Invalid levels,
+an empty `module`, and out-of-range durations return 400 JSON errors.
 
 ## Metrics Reference
 
-Praxis records Prometheus metrics in three
-categories: HTTP request metrics, TCP connection
-metrics (both always on when admin is enabled), and
-per-filter duration histograms (opt-in).
-
-Recorder upkeep runs every five seconds whenever the
-admin endpoint is enabled. It is independent of
-Prometheus scrape traffic, so histogram buffers are
-drained even when `/metrics` is not being scraped.
+HTTP request and TCP connection metrics are always on when admin is enabled;
+per-filter duration histograms are opt-in. Recorder upkeep runs every five
+seconds while admin is enabled, independent of scrapes, so histogram buffers
+drain even when nobody scrapes `/metrics`.
 
 ### HTTP Request Metrics
 
-These are recorded automatically for every proxied
-request when the admin endpoint is enabled.
+Recorded for every proxied request.
 
 #### `praxis_http_requests_total` (counter)
 
-Total completed HTTP requests.
+Completed HTTP requests.
 
 | Label | Values |
 | -------------- | ---------------------------------------- |
@@ -187,48 +85,31 @@ Total completed HTTP requests.
 | `route` | Route path-match pattern (e.g. `/api/*`), a configured path template, or `"unknown"` |
 | `cluster` | Cluster name or `"none"` |
 
-Non-standard HTTP methods (e.g. `PURGE`) are
-collapsed to `OTHER` to bound cardinality. Status
-code `0` (no response written) maps to `unknown`.
+Non-standard methods (e.g. `PURGE`) collapse to `OTHER` to bound cardinality.
+Status code `0` (no response written) maps to `unknown`.
 
 #### `praxis_http_request_duration_seconds` (histogram)
 
-Wall-clock duration of completed HTTP requests in
-seconds. Uses the same label set as
+Wall-clock duration of completed HTTP requests, in seconds. Same labels as
 `praxis_http_requests_total`.
 
 #### `praxis_http_active_requests` (gauge)
 
-HTTP requests currently in flight, incremented when a
-request is admitted and decremented when it finishes.
-
-| Label | Values |
-| ---------- | ---------------------------------------- |
-| `listener` | Listener name from config |
-
-Requests rejected by overload protection (memory
-pressure, file descriptor pressure, global or
-per-listener connection limits) are never admitted and
-do not appear here. The
-decrement is tied to the request context's lifetime,
-so it also fires when a client aborts mid-body or an
-HTTP/2 stream is reset.
-
-This series carries only HTTP requests; TCP
-connections are tracked separately by
+HTTP requests in flight, by `listener` (listener name from config).
+Incremented when a request is admitted, decremented when it finishes. Requests
+rejected by overload protection (memory pressure, file descriptor pressure,
+global or per-listener connection limits) are never admitted and never appear.
+The decrement is tied to the request context's lifetime, so it also fires when
+a client aborts mid-body or an HTTP/2 stream is reset. TCP connections are in
 `praxis_tcp_active_connections`.
 
 ### Error Metrics
 
 #### `praxis_errors_total` (counter)
 
-Proxy errors, classified by cause.
+Proxy errors, by cause in the `type` label.
 
-| Label | Values |
-| ------ | ---------------------------------------- |
-| `type` | `filter_reject`, `timeout`, `upstream_unavailable`, `upstream_protocol`, `downstream`, `internal` |
-
-| Type | Meaning |
+| `type` | Meaning |
 | ---------------------- | ---------------------------------------- |
 | `filter_reject` | A filter or a request-body limit rejected the request |
 | `timeout` | An upstream connect, read or write timed out |
@@ -237,99 +118,69 @@ Proxy errors, classified by cause.
 | `downstream` | The client connection failed |
 | `internal` | An internal proxy fault |
 
-The error type is classified at the sites that
-terminate a request (the terminal failure hook and
-the request- and body-filter rejection paths) and
-recorded first-write-wins on the request context. The
-counter is incremented once per request, from the same
-hook that records `praxis_http_requests_total`, so a
-request that fails and retries counts once rather than
-once per attempt.
+The type is set first-write-wins on the request context at the sites that end
+a request (the terminal failure hook and the request- and body-filter
+rejection paths). The counter is incremented once per request, from the hook
+that records `praxis_http_requests_total`, so a request that fails and retries
+counts once.
 
-Overload rejections are counted by
-`praxis_overload_rejects_total` and are not repeated
-here. Connect failures do appear under
-`upstream_unavailable` as well as in
-`praxis_upstream_connect_failures_total`, so this
-counter stands on its own as an error denominator
-rather than needing the connect-failure counter added
-in.
+Overload rejections are counted only in `praxis_overload_rejects_total`.
+Connect failures count here under `upstream_unavailable` and also in
+`praxis_upstream_connect_failures_total`, so this counter works as an error
+denominator on its own.
 
 ### Overload and Process Metrics
 
 #### `praxis_overload_rejects_total` (counter)
 
-Requests (HTTP) and connections (TCP) rejected by
-overload protection before any filter runs. HTTP
-rejections answer `503` with `Retry-After`; TCP
-rejections close the connection.
+HTTP requests and TCP connections rejected by overload protection before any
+filter runs. HTTP rejections get `503` with `Retry-After`; TCP rejections
+close the connection.
 
 | Label | Values |
 | -------- | ---------------------------------------- |
 | `reason` | `memory`, `file_descriptors`, `global_connections`, `listener_connections` |
 
-`file_descriptors` counts requests shed because open
-descriptors neared the process limit (see
-`runtime.shed_on_fd_pressure`). A steady rate means
-the limit is too small for the traffic.
+`file_descriptors` counts requests shed because open descriptors neared the
+process limit (`runtime.shed_on_fd_pressure`). A steady rate means the limit
+is too small for the traffic.
 
 #### `praxis_cluster_overload_rejects_total` (counter)
 
-Requests shed by a cluster's `max_connections` ceiling,
-answered with `503` and `Retry-After: 1`. Separate from
-`praxis_overload_rejects_total`, which counts only the
-protections that run before any filter and carries no
-cluster label.
+Requests shed by a cluster's `max_connections` ceiling, answered with `503`
+and `Retry-After: 1`, by `cluster`. `praxis_overload_rejects_total` counts
+only the pre-filter protections and has no cluster label.
 
-| Label | Values |
-| --------- | --------------------------------- |
-| `cluster` | The cluster name that shed the request |
-
-A steady rate on one cluster means its ceiling is below
-what the upstream can actually serve, or that the upstream
-has slowed down and requests are occupying slots longer.
-Requests pinned by session affinity bypass the ceiling and
-so are never counted here.
+A steady rate on one cluster means its ceiling is below what the upstream can
+serve, or the upstream has slowed and requests hold slots longer. Requests
+pinned by session affinity bypass the ceiling and are never counted.
 
 #### `praxis_overload_pressure` (gauge)
 
-Smoothed pressure from 0 to 1 for one resource.
-Published only when `runtime.overload_gauges` is true,
-and scraped from `/metrics` on `admin.metrics_address`.
-`admin.address` answers `/metrics` with 404, and
-`/api/stats` omits these gauges. A resource with no
-sample is absent: no cgroup limit, no PSI file, no
-`runtime.max_memory_bytes` for heap, no connection
-cap, or no descriptor usage (including non-Linux).
-The gauge does not refuse work.
+Smoothed pressure from 0 to 1 for one resource, published only when
+`runtime.overload_gauges` is true. Scrape it from `/metrics` on
+`admin.metrics_address`; `admin.address` answers `/metrics` with 404, and
+`/api/stats` omits these gauges. The gauge does not refuse work.
 
 | Label | Values |
 | ---------- | -------------------------------------------------------- |
 | `resource` | `cgroup_memory`, `heap`, `cpu`, `connections`, `file_descriptors` |
 
-`cgroup_memory` is the highest working-set ratio of this
-process's cgroup and its ancestors, up to the cgroup
-root. Each level is `(memory.current - inactive_file) /
-memory.max`. A level whose `memory.max` is `max` does
-not constrain the process, so a limit set on a parent
-slice still counts when the service cgroup itself is
-unlimited. A finite limit whose `memory.current` or
-`memory.stat` cannot be read keeps the previous
-pressure.
-`heap` is anonymous resident memory (`RssAnon`) over
-`runtime.max_memory_bytes`. `cpu` is Linux PSI stall
-time (per-cgroup when available, host-wide as
-fallback), not core utilization. `connections` is admitted requests over
-`runtime.max_connections`. Each in-flight HTTP request
-or active TCP session holds one permit; idle HTTP/1
-keep-alive connections do not, and a single HTTP/2
-connection may hold many.
-`file_descriptors` is open descriptors over the
-process limit.
+A resource with no sample is absent: no cgroup limit, no PSI file, no
+`runtime.max_memory_bytes` for heap, no connection cap, or no descriptor usage
+(including non-Linux). If a read fails after an earlier sample, the gauge
+keeps its last value.
 
-Each sample maps usage to a pressure from 0 to 1. Pressure is 0 at
-or below the resource's scaling threshold and 1 at or above its
-saturation threshold.
+| Resource | Usage ratio |
+| -------- | ----------- |
+| `cgroup_memory` | Highest working-set ratio of this process's cgroup and its ancestors up to the root. Each level is `(memory.current - inactive_file) / memory.max`. A level with `memory.max` of `max` does not constrain, so a parent slice's limit counts when the service cgroup is unlimited. A finite limit whose `memory.current` or `memory.stat` cannot be read keeps the previous pressure. |
+| `heap` | Anonymous resident memory (`RssAnon`) over `runtime.max_memory_bytes` |
+| `cpu` | Linux PSI stall time, not core utilization: `avg10` (stall averaged over 10 seconds) from the `some` line. On cgroup v2 (kernels ≥ 4.20) the per-cgroup `cpu.pressure` file is read first; without it, host-wide `/proc/pressure/cpu`. |
+| `connections` | Admitted requests over `runtime.max_connections`. Each in-flight HTTP request or active TCP session holds one permit; idle HTTP/1 keep-alive connections hold none, and one HTTP/2 connection may hold many. |
+| `file_descriptors` | Open descriptors over the process limit |
+
+Each sample maps usage to pressure: 0 at or below the scaling threshold, 1 at
+or above the saturation threshold.
 
 | Resource | Scaling threshold | Saturation threshold |
 | ---------- | ----: | ----: |
@@ -339,30 +190,14 @@ saturation threshold.
 | `connections` | 0.70 | 0.95 |
 | `file_descriptors` | 0.70 | 0.95 |
 
-The published gauge smooths these samples. The first sample sets the
-gauge directly. Each later sample moves the gauge 30% of the way
-toward its pressure. A gauge at 0 reads 0.3 after one saturated
-sample, so it can read less than 1 at first saturation.
-Saturation is logged from the raw sample. Three
-consecutive samples at the saturation threshold log
-saturation while the gauge is still climbing. One
-sample does not, and one dip does not clear it.
-
-`cpu` uses the `avg10` value from the `some` line of
-Linux PSI. On cgroup v2 (kernels ≥ 4.20) the per-cgroup
-`cpu.pressure` file is read first so the gauge reflects
-this process's cgroup. When that file is absent the
-monitor falls back to host-wide `/proc/pressure/cpu`,
-which covers the whole node. It averages stall time
-over the preceding 10 seconds.
-
-If a read fails after an earlier sample, the gauge keeps its last
-value. A resource is absent only before its first sample.
+The first sample sets the gauge; each later one moves it 30% of the way
+toward the new pressure. A gauge at 0 reads 0.3 after one saturated sample,
+so it can read below 1 at first saturation. Saturation is logged from raw
+samples: three consecutive samples at the saturation threshold log it while
+the gauge is still climbing. One sample does not, and one dip does not clear
+it.
 
 ##### Label mapping to `praxis_overload_rejects_total`
-
-The pressure gauge and the reject counter use different
-label schemes. The mapping between them is:
 
 | Pressure `resource` | Reject `reason` |
 | -------------------- | -------------------------------- |
@@ -372,36 +207,24 @@ label schemes. The mapping between them is:
 | `file_descriptors` | `file_descriptors` |
 | `cpu` | _(no reject reason today)_ |
 
-`listener_connections` rejects are per-listener and have
-no matching pressure gauge.
+`listener_connections` rejects are per-listener and have no pressure gauge.
 
 #### `praxis_process_open_fds` / `praxis_process_max_fds` (gauges)
 
-File descriptors the process holds open, and its soft
-open file limit (`RLIMIT_NOFILE`). Sampled in the
-background on Linux; absent elsewhere. Alert well
-before the ratio reaches the shedding threshold (the
-limit less 5%, or less 64 on small limits). The admin
-`/api/stats` view reports the same numbers under
-`file_descriptors`.
+Open file descriptors and the soft open file limit (`RLIMIT_NOFILE`), sampled
+in the background on Linux and absent elsewhere. Alert well before the ratio
+reaches the shedding threshold (the limit less 5%, or less 64 on small
+limits). `/api/stats` reports the same numbers under `file_descriptors`. See
+[Capacity Planning](capacity-planning.md).
 
 ### Rate Limit Metrics
 
 #### `praxis_rate_limit_limited_total` (counter)
 
-Requests that exceeded a `rate_limit` filter's
-bucket, summed over every `rate_limit` entry in the
-process.
-
-| Label | Values |
-| -------- | --------------- |
-| `shadow` | `true`, `false` |
-
-`shadow="false"` counts requests rejected with
-`429`. `shadow="true"` counts requests that a
-`shadow: true` limit would have rejected but let
-through: the number to watch when tuning a new
-limit before enforcing it.
+Requests over a `rate_limit` filter's bucket, summed over every `rate_limit`
+entry in the process. `shadow="false"` counts requests rejected with `429`.
+`shadow="true"` counts requests a `shadow: true` limit would have rejected
+but let through, the number to watch when tuning a limit before enforcing it.
 
 ### Upstream Metrics
 
@@ -415,53 +238,34 @@ Requests that reached an upstream endpoint.
 | `endpoint` | Configured upstream address (`host:port`), or `forward_proxy` |
 | `status_class` | `1xx`, `2xx`, `3xx`, `4xx`, `5xx`, `unknown` |
 
-Counted once per request, so a request retried across
-endpoints increments once, against the endpoint that
-answered. Requests that never reached an upstream
-(filter rejections, connect failures) are absent
-here but still counted by
-`praxis_http_requests_total`, so the difference
-between the two is proxy-generated responses.
+Counted once per request, against the endpoint that answered, even when the
+request was retried across endpoints. Requests that never reached an upstream
+(filter rejections, connect failures) are absent here but counted in
+`praxis_http_requests_total`; the difference is proxy-generated responses.
 
-The `endpoint` label is the address as configured,
-not the resolved peer, so its cardinality is bounded
-by the config rather than by DNS. Series are never
-removed, though, even across reloads: a deployment
-whose endpoints change over time (for example
-endpoints generated from pod IPs) keeps a set of
-series for every address it has ever configured, and
-`/metrics` grows with each one. Disable the `endpoint`
-dimension there (see [Metric Label Sets](#metric-label-sets)).
+`endpoint` is the configured address, not the resolved peer, so DNS does not
+grow its cardinality. Series are never removed, even across reloads, so a
+deployment whose endpoints change over time (for example, endpoints from pod
+IPs) keeps a series for every address it has ever configured. Disable the
+`endpoint` dimension there (see [Metric Label Sets](#metric-label-sets)).
 
-A forward-proxy listener (`forward-proxy` builds) that
-forwards an absolute-form request
-(`GET http://host/path`) to the destination its
-target names labels it `endpoint="forward_proxy"`,
-whatever the destination: the client chooses it, so
-labeling each by address would grow one series per
-destination without bound. A request the pipeline
-routes to a cluster instead keeps that endpoint's
-configured address.
+On a forward-proxy listener (`forward-proxy` builds), an absolute-form
+request (`GET http://host/path`) forwarded to the destination its target
+names is labeled `endpoint="forward_proxy"`, because the client picks the
+destination and per-address labels would grow without bound. A request the
+pipeline routes to a cluster keeps that endpoint's configured address.
 
 ### TCP Connection Metrics
 
-These are recorded automatically for every TCP
-connection when the admin endpoint is enabled.
+Recorded for every TCP connection. Every TCP metric carries `listener`
+(listener name from config).
 
 #### `praxis_tcp_connection_duration_seconds` (histogram)
 
-Wall-clock lifetime of a TCP connection from accept
-to close, in seconds.
+Connection lifetime from accept to close, in seconds. The `reason` label says
+why it closed:
 
-| Label | Values |
-| ---------- | ---------------------------------------- |
-| `listener` | Listener name from config |
-| `reason` | `completed`, `error`, `shutdown`, `session_timeout`, `max_duration`, `sni_timeout`, `filter_rejection`, `connect_failure`, `peeked_write_error` |
-
-The `reason` label captures why the connection
-closed:
-
-| Reason | Meaning |
+| `reason` | Meaning |
 | --------------------- | ---------------------------------------- |
 | `completed` | Normal forwarding finished (both directions saw EOF) |
 | `error` | Forwarding stopped on an I/O error |
@@ -473,64 +277,36 @@ closed:
 | `connect_failure` | Upstream connection failed |
 | `peeked_write_error` | Writing peeked bytes to upstream failed |
 
-The first five reasons are reported after the
-forwarding phase; the last four are early closes that
-never reached forwarding.
+The first five are reported after forwarding; the last four are early closes
+that never reached it.
 
 #### `praxis_tcp_connections_total` (counter)
 
-Total accepted TCP connections.
-
-| Label | Values |
-| ---------- | ---------------------------------------- |
-| `listener` | Listener name from config |
-
-Incremented once per accepted connection after
-overload checks pass. Use with
-`praxis_tcp_active_connections` to derive connection
+Accepted TCP connections, incremented once per connection after overload
+checks pass. Combine with `praxis_tcp_active_connections` for connection
 rates and concurrency.
 
 #### `praxis_tcp_bytes_sent_total` / `praxis_tcp_bytes_received_total` (counters)
 
-Bytes forwarded over TCP connections, from the
-proxy's point of view: `received` is the
-client-to-upstream direction, `sent` is
-upstream-to-client.
-
-| Label | Values |
-| ---------- | ---------------------------------------- |
-| `listener` | Listener name from config |
-
-Recorded once per connection after forwarding ends.
-A session ended by an idle timeout, a server
-shutdown, or the `max_duration` force-close still
-reports the bytes it actually forwarded. Peeked TLS
-`ClientHello` bytes are included in `received`.
+Bytes forwarded, from the proxy's side: `received` is client to upstream,
+`sent` is upstream to client. Recorded once per connection after forwarding
+ends. A session closed by idle timeout, shutdown, or the `max_duration`
+force-close still reports what it forwarded. Peeked TLS `ClientHello` bytes
+count in `received`.
 
 #### `praxis_tcp_active_connections` (gauge)
 
-TCP connections currently open, incremented on accept
-and decremented when the session ends.
-
-| Label | Values |
-| ---------- | ---------------------------------------- |
-| `listener` | Listener name from config |
-
-Connections rejected by overload protection are never
-accepted and do not appear here. Early closes (SNI
-timeout, filter rejection, connect failure) decrement
-the gauge on the same path they log on.
-
-This series carries only TCP connections; HTTP
-requests are tracked separately by
+Open TCP connections, incremented on accept and decremented when the session
+ends. Connections rejected by overload protection are never accepted and
+never appear. Early closes (SNI timeout, filter rejection, connect failure)
+decrement the gauge on the same path they log on. HTTP requests are in
 `praxis_http_active_requests`.
 
 ### Metric Label Sets
 
-Every label dimension is emitted by default. In
-large deployments the combination of dimensions can
-produce more time series than a Prometheus server
-should hold, so each can be turned off individually:
+Every label dimension is on by default. In large deployments the combinations
+can produce more series than Prometheus should hold, so each can be turned
+off:
 
 ```yaml
 metrics:
@@ -549,53 +325,34 @@ metrics:
 | `route` | on | Configured routes, or path templates |
 | `status_class` | on | Bounded: six values |
 
-Disabling a dimension drops it from every metric
-that carries it; the metric itself stays available,
-with the series that differed only by that dimension
-collapsed into one. `endpoint` and `route` are the
-usual candidates, since they grow with traffic shape
-rather than with config size.
+Disabling a dimension drops it from every metric that carries it; the metric
+stays, with series that differed only by that dimension merged. `endpoint`
+and `route` are the usual candidates, since they grow with traffic shape
+rather than config size.
 
-The one exception is `cluster` on the per-cluster
-health gauges (`praxis_upstream_healthy_endpoints`
-and `praxis_upstream_total_endpoints`): those gauges
-are set rather than summed, so dropping the label
-would collapse every cluster onto one last-writer
-series rather than lowering cardinality. Disabling
-`cluster` therefore drops it from the additive
-cluster metrics but keeps it on those two gauges.
+The exception is `cluster` on `praxis_upstream_healthy_endpoints` and
+`praxis_upstream_total_endpoints`. Those gauges are set, not summed, so
+dropping the label would collapse every cluster into one last-writer series.
+Disabling `cluster` keeps it on those two gauges.
 
-Label selection is read once at startup and is not
-hot-reloadable; changing the label set requires a
-restart.
-
-Templates are compiled at startup and indexed by
-segment count, so matching costs one walk of the
-request's path segments and uses no regular
-expressions.
+The label set is read once at startup; changing it needs a restart. Path
+templates are compiled at startup and indexed by segment count, so matching
+is one walk of the request's path segments, with no regular expressions.
 
 ### Filter Duration Histograms
 
-Per-filter hook timing is opt-in. Enable it in the
-`metrics` section:
-
-```yaml
-metrics:
-  filter_duration: true
-```
+Per-filter hook timing is opt-in with `metrics.filter_duration: true`; see
+[Metrics](configuration.md#metrics) for the setting and its startup warning.
 
 #### `praxis_filter_duration_seconds` (histogram)
 
-Wall-clock duration of a single filter hook
-invocation in seconds.
+Wall-clock duration of one filter hook call, in seconds.
 
 | Label | Values |
 | -------- | ------------------------------ |
 | `filter` | Filter name (e.g. `router`, `rate_limiter`, `access_log`) |
 | `phase` | `request_head`, `request`, `bound_upstream`, `selected_upstream`, or `response` |
 | `stream` | `headers` or `body` |
-
-The seven hook combinations are:
 
 | Phase + Stream | Hook |
 | -------------------- | -------------------- |
@@ -607,20 +364,10 @@ The seven hook combinations are:
 | `response` + `headers` | `on_response` |
 | `response` + `body` | `on_response_body` |
 
-`request_head` pairs only with `headers`; it has no body hook. `bound_upstream`
-and `selected_upstream` pair only with `body`; neither phase has a header hook.
-
-Enabling `filter_duration` without `admin.metrics_address`
-records metrics internally but does not expose them.
-A startup warning is logged in this case.
-
 ## Prometheus Scrape Configuration
 
-The `/metrics` endpoint returns Prometheus text
-exposition format with content type
+`/metrics` returns Prometheus text exposition format with content type
 `text/plain; version=0.0.4; charset=utf-8`.
-
-Example `prometheus.yml` scrape config:
 
 ```yaml
 scrape_configs:
@@ -632,18 +379,10 @@ scrape_configs:
 ```
 
 When Prometheus scrapes pod IPs, bind the metrics listener to a non-loopback
-interface. This listener does not require `insecure_options.allow_public_admin`;
-that setting applies only to the admin API listener:
-
-```yaml
-admin:
-  metrics_address: "0.0.0.0:9902"
-```
-
-Restrict access to the metrics port with network controls.
-
-For Kubernetes deployments with multiple replicas,
-use service discovery:
+interface (for example `metrics_address: "0.0.0.0:9902"`) and restrict the
+port with network controls. `insecure_options.allow_public_admin` is not
+needed; it applies only to the admin API listener. For multiple replicas on
+Kubernetes, use service discovery:
 
 ```yaml
 scrape_configs:
@@ -666,8 +405,6 @@ scrape_configs:
 
 ## PromQL Queries
 
-### Request Rate
-
 Requests per second by status class:
 
 ```promql
@@ -676,9 +413,7 @@ sum by (status_class) (
 )
 ```
 
-### Error Rate
-
-Percentage of 5xx responses:
+Share of 5xx responses:
 
 ```promql
 sum(rate(praxis_http_requests_total{status_class="5xx"}[5m]))
@@ -686,29 +421,8 @@ sum(rate(praxis_http_requests_total{status_class="5xx"}[5m]))
 sum(rate(praxis_http_requests_total[5m]))
 ```
 
-### Request Latency Percentiles
-
-p50, p95, and p99 latency:
-
-```promql
-histogram_quantile(0.50,
-  sum by (le) (
-    rate(praxis_http_request_duration_seconds_bucket[5m])
-  )
-)
-```
-
-```promql
-histogram_quantile(0.99,
-  sum by (le) (
-    rate(praxis_http_request_duration_seconds_bucket[5m])
-  )
-)
-```
-
-### Latency by Cluster
-
-p99 latency broken down by upstream cluster:
+p99 latency per cluster. Change `0.99` for other percentiles, and drop
+`cluster` for the overall figure:
 
 ```promql
 histogram_quantile(0.99,
@@ -718,9 +432,7 @@ histogram_quantile(0.99,
 )
 ```
 
-### Slowest Filters
-
-p95 filter execution time, ranked:
+The ten slowest filters at p95:
 
 ```promql
 topk(10,
@@ -732,10 +444,7 @@ topk(10,
 )
 ```
 
-### Filter Duration by Phase
-
-Compare request vs response processing time for a
-specific filter:
+Request against response time for one filter:
 
 ```promql
 histogram_quantile(0.95,
@@ -749,16 +458,10 @@ histogram_quantile(0.95,
 
 ## Access Logging
 
-Praxis uses the `access_log` filter for structured
-request/response logging. By default each record is
-emitted through the `tracing` subscriber, alongside
-process logs. A `sink` can instead write records
-straight to stdout or a dedicated file — see
-[Output Sinks](#output-sinks).
-
-### Enabling Access Logs
-
-Add the `access_log` filter to your filter chain:
+The [`access_log`](../filters/http/observability/access_log.md) filter writes
+one structured record per completed request. Its page lists every option
+(`fields`, `template`, `conditions`, `sink`). By default records go through
+the `tracing` subscriber with process logs.
 
 ```yaml
 filter_chains:
@@ -768,8 +471,7 @@ filter_chains:
       - filter: access_log
 ```
 
-Each completed request emits a structured log entry
-with these fields:
+The default fields:
 
 | Field | Description |
 | ---------------------- | --------------------------------- |
@@ -784,12 +486,15 @@ with these fields:
 | `request_body_bytes` | Request body size |
 | `response_body_bytes` | Response body size |
 
+`sample_rate` (in `(0.0, 1.0]`) cuts volume with a deterministic counter, not
+random selection: of the first N requests, exactly `floor(N × sample_rate)`
+are logged.
+
 ### gRPC Fields
 
-A gRPC call's outcome is not its HTTP status — that is
-`200` even for a failed call. It arrives in the response
-trailers instead, so these fields are opt-in via `fields:`
-and render `-` for non-gRPC responses:
+A failed gRPC call still has HTTP status `200`; the outcome is in the
+response trailers. These fields are opt-in through `fields:` and render `-`
+for non-gRPC responses:
 
 | Field | Description |
 | ------------------------- | ------------------------------------------- |
@@ -803,50 +508,21 @@ and render `-` for non-gRPC responses:
   fields: [method, path, status, grpc_status, grpc_status_name]
 ```
 
-Trailers exist only on an HTTP/2 upstream leg, so the
-cluster must set `http.version: h2` — see
+Trailers exist only on an HTTP/2 upstream leg, so the cluster must set
+`http.version: h2`; see
 [Upstream HTTP Version](load-balancing.md#upstream-http-version).
-`grpc_message` is logged in its wire form: decoding it
-would put control characters into a log line.
-
-### Sampling
-
-For high-traffic deployments, reduce log volume with
-`sample_rate`:
-
-```yaml
-filter_chains:
-  - name: observability
-    filters:
-      - filter: access_log
-        sample_rate: 0.1
-```
-
-`sample_rate` accepts values in `(0.0, 1.0]`. The
-value `0.1` logs 10% of requests. Sampling uses a
-deterministic counter (of the first N requests,
-exactly `floor(N × sample_rate)` are logged), not
-random selection.
+`grpc_message` stays in wire form, since decoding it would put control
+characters into a log line.
 
 ### Log Format
 
-Set `PRAXIS_LOG_FORMAT=json` for structured JSON
-output suitable for log aggregation pipelines:
-
-```console
-PRAXIS_LOG_FORMAT=json cargo run -p praxis-proxy
-```
-
-The default format is human-readable text. Both
-formats include the same structured fields.
+`PRAXIS_LOG_FORMAT=json` switches process and access logs from the default
+human-readable text to JSON. Both formats carry the same fields.
 
 ### Output Sinks
 
-By default access records flow through the `tracing`
-subscriber, so they share formatting, level filtering,
-and destination with process logs. A `sink` detaches
-them onto a dedicated writer that always emits NDJSON
-(one JSON object per line), bypassing the subscriber and
+A `sink` moves access records off the subscriber onto a dedicated writer that
+always emits NDJSON (one JSON object per line), skipping the subscriber and
 its INFO-level gate:
 
 ```yaml
@@ -856,70 +532,46 @@ its INFO-level gate:
     path: /var/log/praxis/access.log   # required for `file`
 ```
 
-Sinks are **best effort**. Each sink hands records to a
-background writer through a bounded queue (8192 records);
-once the queue is full — a slow or stalled disk, a burst
-faster than the writer drains — further records are
-dropped rather than blocking request handling, and a
-warning reports the running drop count. Use a sink for
-operational visibility, not as the system of record for
-audit-grade logging.
+Sinks are best effort. Each hands records to a background writer through
+a bounded queue (8192 records). When the queue is full (slow disk, or a burst
+faster than the writer drains), records are dropped rather than blocking
+requests, and a warning reports the running drop count. Use a sink for
+operational visibility, not as an audit-grade system of record.
 
-`{type: stdout}` writes to the same stdout as the
-process logs, so the two interleave unless you send
-process logs elsewhere with `runtime.logging.output`
-(`stderr` or `file`) — see
-[Process Logging Destination](#process-logging-destination).
-`{type: file}` opens the path in append mode (no
-rotation); secure its permissions and rotate it
-externally.
+`{type: stdout}` shares stdout with process logs, so the two interleave
+unless `runtime.logging.output` sends process logs elsewhere (see
+[Process Logging Destination](#process-logging-destination)).
+`{type: file}` opens the path in append mode with no rotation; secure its
+permissions and rotate it externally.
 
-Warnings raised while the config is loaded and
-validated (active `insecure_options`, degraded upstream
-TLS, likely filter config typos) are emitted before the
-configured subscriber exists, so they go to stderr in
-this format. `--validate` and `--dump` stop there. On
-the serving path the active `insecure_options` are
-warned about again once logging is initialized, so
-`runtime.logging.output` records them as well.
+Warnings raised while the config loads (active `insecure_options`, degraded
+upstream TLS, likely filter config typos) come before the configured
+subscriber exists, so they go to stderr in the `PRAXIS_LOG_FORMAT` format;
+`--validate` and `--dump` stop there. When serving, active `insecure_options`
+are warned about again after logging starts, so `runtime.logging.output`
+records them too.
 
 ### Log Level Overrides
 
-Control per-module log verbosity via
-`runtime.log_overrides` in your config:
+`runtime.log_overrides` sets per-module levels (see
+[Logging](configuration.md#logging) for the YAML). The base level comes from
+`RUST_LOG` (default `info`). Overrides are additive: they set levels for
+specific modules without changing the base. Valid levels: `error`, `warn`,
+`info`, `debug`, `trace`.
 
-```yaml
-runtime:
-  log_overrides:
-    praxis_filter::pipeline: trace
-    praxis_protocol: debug
-```
-
-The base log level comes from the `RUST_LOG`
-environment variable (defaults to `info`). Overrides
-are additive - they set the level for specific
-modules without changing the base level. Valid
-levels: `error`, `warn`, `info`, `debug`, `trace`.
-
-Each filter hook runs in its own `filter` span
-(`filter:<name>:<phase>` in OpenTelemetry). These spans
-are at `debug` level, so the default `info` level does
-not create them and adds no per-filter tracing cost. To
-export them, raise the pipeline module:
+Each filter hook runs in its own `filter` span (`filter:<name>:<phase>` in
+OpenTelemetry) at `debug` level, so at the default `info` the spans are not
+created and cost nothing. To export them, set
 `praxis_filter::pipeline: debug`.
 
 ### Process Logging Destination
 
-`runtime.logging` controls where Praxis writes process
-logs (the `tracing` subscriber backing access logs and
-startup messages). It is separate from
-`runtime.log_overrides`, which only adjusts per-module
-filter levels.
+`runtime.logging` sets where process logs go (the `tracing` subscriber behind
+access logs and startup messages). `runtime.log_overrides` only adjusts
+levels.
 
 ```yaml
 runtime:
-  log_overrides:
-    praxis_filter::pipeline: debug
   logging:
     output: stdout        # stdout (default) | stderr | file
     file_path: /var/log/praxis/proxy.log
@@ -927,74 +579,14 @@ runtime:
     buffer_size: 8192     # buffered lines; default 128000
 ```
 
-Defaults keep today's behavior: non-blocking stdout,
-text or JSON via `PRAXIS_LOG_FORMAT`, lossy overflow
-when the buffer is full.
+The defaults are non-blocking stdout, text or JSON per `PRAXIS_LOG_FORMAT`,
+and lossy overflow when the buffer is full. `buffer_size` sizes the
+non-blocking queue, so it is rejected when `non_blocking` is `false`.
 
-`buffer_size` sizes the non-blocking queue, so it is
-rejected when `non_blocking` is `false`.
+Praxis does not rotate log files: with `output: file` the log grows at
+`file_path`, and rotation and retention belong to the platform (journald,
+`logrotate`, or a container log driver). Logging to `stdout` or `stderr` and
+letting the platform capture and rotate is simplest.
 
-Praxis does not rotate log files. With `output: file`
-the log grows in place at `file_path`; rotation and
-retention are the platform's responsibility (journald,
-`logrotate`, or a container log driver). The simplest
-setup is to log to `stdout`/`stderr` and let the
-platform capture and rotate.
-
-Changing `runtime.logging` requires a process restart;
-reload validates the block but does not re-init the
-subscriber.
-
-## Full Example
-
-A complete config enabling all observability
-features:
-
-```yaml
-admin:
-  address: "127.0.0.1:9901"
-  metrics_address: "127.0.0.1:9902"
-  verbose: true
-
-metrics:
-  filter_duration: true
-
-listeners:
-  - name: web
-    address: "0.0.0.0:8080"
-    filter_chains:
-      - observability
-      - routing
-
-filter_chains:
-  - name: observability
-    filters:
-      - filter: request_id
-      - filter: access_log
-
-  - name: routing
-    filters:
-      - filter: router
-        routes:
-          - path_prefix: "/"
-            cluster: backend
-      - filter: load_balancer
-        clusters:
-          - name: backend
-            endpoints:
-              - "10.0.0.1:8080"
-            health_check:
-              type: http
-              interval_ms: 5000
-              path: /healthz
-```
-
-This enables:
-
-- Prometheus scraping on `127.0.0.1:9902/metrics`
-- Liveness and readiness probes with verbose cluster
-  detail
-- Per-filter hook duration histograms
-- Structured access logs with request correlation
-  IDs
-- Active health checks on the backend cluster
+Changing `runtime.logging` needs a restart; a reload validates the block but
+does not re-initialize the subscriber.

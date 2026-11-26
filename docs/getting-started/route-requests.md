@@ -1,20 +1,17 @@
 # Route requests to two backends
 
-This walkthrough extends the [quickstart](quickstart.md): one listener sends
-requests under `/catalog/` to a second backend and every other path to the
-first, and you check which backend answers each request. It uses the same
-image, working directory and `backend.yaml`.
+This extends the [quickstart](quickstart.md): one listener sends paths under
+`/catalog/` to a second backend and every other path to the first.
 
 ## Before you start
 
-Complete the quickstart, including its clean-up step, so port 8080, the
-container names and the `praxis-quickstart` network are free. Keep
-`PRAXIS_IMAGE` exported and stay in the working directory that holds
-`backend.yaml`.
+Finish the quickstart, including clean-up, so port 8080, the container names,
+and the `praxis-quickstart` network are free. Keep `PRAXIS_IMAGE` exported and
+stay in the working directory that holds `backend.yaml`.
 
 ## Write the configs
 
-The second backend is a copy of the first with a different response body:
+The second backend is the first with a different response body:
 
 ```console
 sed 's/quickstart-backend/catalog-backend/' backend.yaml > catalog.yaml
@@ -60,15 +57,12 @@ order of the routes, so `/catalog/items` goes to `catalog` and `/` falls back
 to `backend`. Each cluster trusts only its own container name; see the
 quickstart for why `trusted_private_endpoints` is needed.
 
-Check the proxy config before starting it:
+Validate it (append `,Z` to the volume options on SELinux hosts):
 
 ```console
 docker run --rm -v "$PWD/routes.yaml:/etc/praxis/config.yaml:ro" \
   "$PRAXIS_IMAGE" --validate
 ```
-
-The command prints nothing and exits with status 0 when the config is valid.
-On SELinux hosts, append `,Z` to each volume option (`:ro,Z`).
 
 ## Start the backends and the proxy
 

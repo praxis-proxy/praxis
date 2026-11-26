@@ -1,16 +1,8 @@
 # HTTP Correctness
 
-A proxy must enforce HTTP invariants that upstream servers
-and downstream clients may not. These are critical
-correctness and security concerns.
-
-The Praxis project _strongly_ prefers relying on
-[Cloudflare]'s protocol implementations whenever feasible.
-Praxis is modular, so it is possible to swap in other
-implementations, but Cloudflare has a good track record of
-providing correct, hardened and high performance protocol
-implementations which are battle-tested with years of
-production experience.
+A proxy has to enforce HTTP invariants that upstream servers and downstream
+clients may not. Praxis prefers [Cloudflare]'s protocol implementations where
+feasible, though its modular design allows swapping in others:
 
 - For TCP, we rely on [Pingora]
 - For HTTP/1 + HTTP/2, we rely on [Pingora]
@@ -22,8 +14,7 @@ production experience.
 
 ## What Pingora Handles
 
-The pinned renamed Pingora 0.11.4 fork handles several
-correctness concerns at the framework level:
+The pinned renamed Pingora 0.11.4 fork handles these at the framework level:
 
 - **Request smuggling**: Content-Length vs
   Transfer-Encoding validation per
@@ -82,24 +73,23 @@ correctness concerns at the framework level:
 
 ## HTTP QUERY
 
-Both network backends forward [RFC 10008] QUERY requests, including the
-request body, over HTTP/1.1 and HTTP/2. QUERY uses the normal body path;
-body filters and configured hedging can request buffering as usual.
+Both network backends forward [RFC 10008] QUERY requests, body included, over
+HTTP/1.1 and HTTP/2. QUERY takes the normal body path, so body filters and
+configured hedging can request buffering as usual.
 
-QUERY is safe and idempotent, so it joins GET, HEAD, and OPTIONS in the
-automatic replay policy. Retry conditions, attempt and budget limits,
-deadlines, and body replay limits still apply. Replaying a consumed request
-body is limited to 64 KiB; larger requests can still be forwarded. Configured
-hedging on Pingora also admits QUERY under its existing attempt and body limits.
+QUERY is safe and idempotent, so it gets automatic replay like GET, HEAD, and
+OPTIONS, under the usual retry conditions, attempt and budget limits,
+deadlines, and body replay limits. Replaying a consumed request body is
+limited to 64 KiB; larger requests are still forwarded. Configured hedging on
+Pingora also admits QUERY under its attempt and body limits.
 
 The origin implements the query operation and validates its media type and
 content. Praxis forwards the origin's `Accept-Query`, `Allow`, and redirect
-responses. QUERY's cacheability does not add a response cache to Praxis.
+responses, and adds no response cache for QUERY.
 
-For browser use, explicitly add QUERY to the CORS `allow_methods` list and
-allow the request's `Content-Type` header. The CSRF filter keeps its existing
-defaults: QUERY requires a trusted origin unless explicitly included in
-`safe_methods`. See the functional
+For browser use, add QUERY to the CORS `allow_methods` list and allow the
+request's `Content-Type` header. The CSRF filter requires a trusted origin for
+QUERY unless it is listed in `safe_methods`. See the
 [HTTP QUERY example](../../examples/configs/traffic-management/http-query.yaml).
 
 [RFC 10008]: https://datatracker.ietf.org/doc/html/rfc10008
