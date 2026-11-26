@@ -18,6 +18,16 @@ use crate::http::upgrade::WebSocketOffer;
 // PingoraRequestCtx
 // -----------------------------------------------------------------------------
 
+/// Source of a refused protocol switch, used for retry and endpoint health.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum UpgradeFailure {
+    /// The backend sent an invalid switching response.
+    #[cfg(feature = "pingora")]
+    Upstream,
+    /// Local policy or a filter prevented an otherwise ordinary exchange.
+    Local,
+}
+
 /// Per-request context carrying filter pipeline results through Pingora hooks.
 ///
 /// ```
@@ -48,7 +58,7 @@ pub struct PingoraRequestCtx {
 
     /// Valid client WebSocket handshake admitted by this request's pinned pipeline.
     #[cfg(feature = "pingora")]
-    pub(crate) admitted_websocket: Option<WebSocketOffer>,
+    pub(crate) admitted_websocket: Option<Box<WebSocketOffer>>,
 
     /// Connection permit from the per-listener semaphore.
     ///
@@ -112,6 +122,9 @@ pub struct PingoraRequestCtx {
     /// Body filter hooks skip processing when true, since post-upgrade
     /// bytes are raw protocol frames (e.g. `WebSocket`), not HTTP bodies.
     pub connection_upgraded: bool,
+
+    /// Final upgrade refusal, independent of the first error recorded for metrics.
+    pub(crate) upgrade_failure: Option<UpgradeFailure>,
 
     /// Type-safe request-scoped extension container. Swapped into each
     /// [`HttpFilterContext`] and written back after filter execution,
@@ -428,6 +441,12 @@ pub struct PingoraRequestCtx {
     /// request that never reached the cluster. Reset per request.
     pub upstream_contacted: bool,
 
+    /// Whether `upstream` is a client-chosen forward-proxy destination rather
+    /// than an endpoint from configuration. Metrics then label it with a
+    /// fixed endpoint, so each destination a client names does not add a
+    /// series that is never removed.
+    pub(crate) upstream_is_forward_destination: bool,
+
     /// Set in the logging phase when the client went away before the
     /// upstream answered, so the cleanup response pass does not report the
     /// upstream as reached and a circuit breaker releases instead of
@@ -485,6 +504,7 @@ macro_rules! filter_context {
             request_body_mode: $ctx.request_body_mode,
             request_start: $ctx.request_start,
             response_body_bytes: $ctx.response_body_bytes,
+            response_delivery_complete: Some($ctx.response_delivery_complete),
             response_body_mode: $ctx.response_body_mode,
             response_header: $response_header,
             response_headers_modified: false,
@@ -653,6 +673,7 @@ impl Default for PingoraRequestCtx {
             client_http_version: None,
             cluster: None,
             connection_upgraded: false,
+            upgrade_failure: None,
             downstream_tls: false,
             peer_identity: None,
             extensions: praxis_filter::RequestExtensions::new(),
@@ -714,6 +735,7 @@ impl Default for PingoraRequestCtx {
             upstream: None,
             upstream_for_retry: None,
             upstream_contacted: false,
+            upstream_is_forward_destination: false,
             ended_by_client: false,
         }
     }

@@ -26,7 +26,7 @@ use super::{
     super::super::convert::{request_header_from_session, send_rejection_for},
     error_handling::handle_pre_read_io_error,
     header_mutations::{apply_pre_read_mutations, apply_request_mutations_to_session},
-    request_utils::{create_request_span, snapshot_for_early_exit},
+    request_utils::{create_request_span, record_exported_trace_id, snapshot_for_early_exit},
     stream_buffer::PreReadError,
     terminal_responses::{run_streaming_terminal_response, run_terminal_response},
 };
@@ -97,6 +97,10 @@ struct CanonicalRequestBody(Bytes);
 ///
 /// Host header validation runs first (before the pipeline) to reject
 /// ambiguous requests early.
+///
+/// `Ok(false)` means the filters let the request through and nothing has
+/// contacted an upstream yet: the caller still gates forward-proxy egress
+/// and starts any hedged attempts.
 #[cfg(feature = "pingora")]
 #[expect(clippy::too_many_lines, reason = "orchestration function")]
 #[expect(
@@ -144,6 +148,7 @@ pub(in crate::http) async fn execute(
     ctx.request_is_idempotent = praxis_core::retry::replays_without_opt_in(&session.req_header().method);
 
     ctx.request_span = create_request_span(session, ctx);
+    record_exported_trace_id(&ctx.request_span, &mut ctx.extensions);
 
     let caps = pipeline.body_capabilities();
     ctx.request_body_mode = caps.request_body_mode;
@@ -234,10 +239,6 @@ pub(in crate::http) async fn execute(
                 };
             }
             if reject_mutated_websocket(session, ctx).await {
-                return Ok(true);
-            }
-            #[cfg(feature = "hedged-requests")]
-            if super::hedge::dispatch(pipeline, session, ctx).await? {
                 return Ok(true);
             }
             Ok(false)
@@ -342,7 +343,7 @@ async fn admit_websocket_upgrade(
         pipeline.permits_upgrade("websocket"),
     ) {
         Ok(offer) => {
-            ctx.admitted_websocket = offer;
+            ctx.admitted_websocket = offer.map(Box::new);
             if ctx.admitted_websocket.is_some() {
                 FilterPipeline::mark_opaque_upgrade_requested(&mut ctx.extensions);
             }

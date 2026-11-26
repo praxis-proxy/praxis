@@ -68,6 +68,7 @@ pub(crate) fn make_ctx(req: &Request) -> HttpFilterContext<'_> {
         request_body_mode: praxis_filter::BodyMode::Stream,
         request_start: std::time::Instant::now(),
         response_body_bytes: 0,
+        response_delivery_complete: None,
         response_body_mode: praxis_filter::BodyMode::Stream,
         response_header: None,
         response_headers_modified: false,

@@ -358,6 +358,29 @@ impl PendingCredentials {
     }
 }
 
+/// The clusters a filter queued credentials for in `extra_request_headers`.
+///
+/// `credential_injection` picks its header from `ctx.cluster` and records the
+/// cluster here. A callout staged at a cluster fails closed when any recorded
+/// cluster differs from the staged one, so a chain that points `ctx.cluster`
+/// elsewhere and back cannot deliver another cluster's secret.
+#[derive(Debug, Default)]
+pub(crate) struct QueuedCredentialClusters(Vec<std::sync::Arc<str>>);
+
+impl QueuedCredentialClusters {
+    /// Note that a credential for `cluster` was queued.
+    pub(crate) fn record(&mut self, cluster: &std::sync::Arc<str>) {
+        if !self.0.contains(cluster) {
+            self.0.push(std::sync::Arc::clone(cluster));
+        }
+    }
+
+    /// The first recorded cluster that is not `staged`, if any.
+    pub(crate) fn other_than(&self, staged: &str) -> Option<&str> {
+        self.0.iter().map(AsRef::as_ref).find(|cluster| *cluster != staged)
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------

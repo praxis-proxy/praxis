@@ -22,7 +22,9 @@ tls-health-check = ["pingora", "praxis-core/tls-health-check"]
 # probes stay) so lean builds can be checked. See
 # docs/developing/adding-backends.md.
 default = ["pingora"]
-pingora = ["dep:pingora-core", "dep:pingora-http", "dep:pingora-proxy", "praxis-core/pingora"]
+# Transport for locally admitted HTTP/1.1 upgrades.
+managed-websocket = ["pingora"]
+pingora = ["dep:openssl", "dep:pingora-core", "dep:pingora-http", "dep:pingora-proxy", "praxis-core/pingora"]
 # The hyper network backend: the HTTP and TCP adapters, the admin glue and
 # `backend::{Http, Tcp}` resolve to hyper. Off by default and experimental.
 # The two backend features are mutually exclusive; a hyper build starts from
@@ -53,7 +55,7 @@ upstream-binding = ["praxis-filter/upstream-binding"]
 # SPIFFE X.509-SVID mTLS peer identity. Off by default; experimental.
 spiffe = ["praxis-tls/spiffe"]
 # W3C remote parenting and exported HTTP client spans. Off by default.
-otel = ["praxis-core/otel", "dep:tracing-opentelemetry"]
+otel = ["praxis-core/otel", "dep:opentelemetry", "dep:tracing-opentelemetry"]
 # Test-only hooks (the upstream retry gate) for the integration suites. Off
 # by default so release builds carry no test synchronization on the data path.
 test-support = []
@@ -95,6 +97,7 @@ workspace = true
 arc-swap = { workspace = true }
 async-trait = { workspace = true }
 base64 = { workspace = true }
+openssl = { workspace = true, optional = true }
 bytes = { workspace = true }
 futures = { workspace = true }
 h2 = { workspace = true }
@@ -104,6 +107,7 @@ hyper = { workspace = true, features = ["http1", "http2", "server"], optional = 
 hyper-util = { workspace = true, features = ["http1", "http2", "server", "server-auto", "server-graceful", "tokio"], optional = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
+opentelemetry = { workspace = true, optional = true }
 pingora-core = { workspace = true, optional = true }
 pingora-http = { workspace = true, optional = true }
 pingora-proxy = { workspace = true, optional = true }

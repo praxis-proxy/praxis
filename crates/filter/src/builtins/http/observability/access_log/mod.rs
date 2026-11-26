@@ -264,6 +264,13 @@ impl TryFrom<RawSinkConfig> for SinkConfig {
     type Error = String;
 
     fn try_from(raw: RawSinkConfig) -> Result<Self, Self::Error> {
+        if raw
+            .path
+            .as_ref()
+            .is_some_and(|path| path.is_empty() || path.contains('\0'))
+        {
+            return Err("access_log: sink path must be nonempty and contain no NUL bytes".to_owned());
+        }
         match raw.kind {
             SinkKind::Stdout => {
                 #[cfg(feature = "access-log-syslog")]
@@ -1219,6 +1226,8 @@ fn dial_tcp(address: &str, timeout: Duration) -> std::io::Result<std::net::TcpSt
 /// Cached response metadata for emit on the body phase.
 #[derive(Clone, Debug)]
 struct AccessLogState {
+    /// Wait for the written status when response filters can still change the head.
+    bodyless: bool,
     status: u16,
     response_headers: Option<http::HeaderMap>,
 }
@@ -1236,12 +1245,26 @@ impl AccessLogFilter {
     ///
     /// [`FilterError`]: crate::FilterError
     pub fn from_config(config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
+        Self::from_config_with_mode(config, false)
+    }
+
+    /// Build an access-log filter while deferring sink I/O in validation mode.
+    pub(crate) fn from_config_with_mode(
+        config: &serde_yaml::Value,
+        validation_only: bool,
+    ) -> Result<Box<dyn HttpFilter>, FilterError> {
         let cfg: AccessLogConfig = parse_filter_config("access_log", config)?;
-        Ok(Box::new(Self::build(cfg)?))
+        Ok(Box::new(Self::build_with_mode(cfg, validation_only)?))
+    }
+
+    /// Construct the serving filter for the test fixture.
+    #[cfg(test)]
+    fn build(cfg: AccessLogConfig) -> Result<Self, FilterError> {
+        Self::build_with_mode(cfg, false)
     }
 
     #[expect(clippy::too_many_lines, reason = "config validation and emit plan assembly")]
-    fn build(cfg: AccessLogConfig) -> Result<Self, FilterError> {
+    fn build_with_mode(cfg: AccessLogConfig, validation_only: bool) -> Result<Self, FilterError> {
         // NaN compares false against both bounds, so a plain range check
         // lets it through and then every sampling comparison fails.
         if !cfg.sample_rate.is_finite() || cfg.sample_rate <= 0.0 || cfg.sample_rate > 1.0 {
@@ -1311,7 +1334,11 @@ impl AccessLogFilter {
 
         validate_emit_conditions(cfg.conditions.as_ref())?;
 
-        let sink = build_runtime_sink(cfg.sink)?;
+        let sink = if validation_only {
+            RuntimeSink::Tracing
+        } else {
+            build_runtime_sink(cfg.sink)?
+        };
 
         Ok(Self {
             sample_rate: cfg.sample_rate,
@@ -1651,8 +1678,7 @@ fn request_is_grpc(ctx: &HttpFilterContext<'_>) -> bool {
 ///
 /// The protocol-layer fallback checks for it via
 /// [`access_record_already_emitted`] so a request the filter already logged
-/// (e.g. a bodyless response whose `on_response` emitted before a later
-/// response filter rejected) does not gain a duplicate fallback record.
+/// at end of stream does not gain a duplicate fallback record.
 struct AccessRecordEmitted;
 
 /// Whether an access record has already been emitted for this request.
@@ -1858,6 +1884,25 @@ impl HttpFilter for AccessLogFilter {
         true
     }
 
+    fn finish_bodyless_access_record(&self, ctx: &mut HttpFilterContext<'_>, status: u16) {
+        if access_record_already_emitted(ctx) {
+            return;
+        }
+        let Some(state) = ctx
+            .get_filter_state_mut::<AccessLogState>()
+            .filter(|state| state.bodyless)
+        else {
+            return;
+        };
+        let headers = state.response_headers.take();
+        if ctx.response_delivery_complete == Some(true) {
+            self.maybe_emit(ctx, status, headers.as_ref());
+        } else if self.emit_deferred_record(ctx, status) {
+            // Incomplete delivery uses the eligible sink's unsampled fallback.
+            mark_access_record_emitted(ctx);
+        }
+    }
+
     async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         let Some(resp) = &ctx.response_header else {
             return Ok(FilterAction::Continue);
@@ -1871,13 +1916,16 @@ impl HttpFilter for AccessLogFilter {
         let bodyless = Self::is_bodyless(resp.status, &ctx.request.method);
         let response_headers = self.needs_response_headers.then(|| resp.headers.clone());
 
-        // Emit from the captured map before storing it: re-reading the
-        // freshly inserted state cloned the header map a second time on
-        // every bodyless response.
+        // Filtered subrequests have no protocol completion callback.
         if bodyless {
-            self.maybe_emit(ctx, status, response_headers.as_ref());
+            if ctx.response_delivery_complete.is_some() {
+                ctx.extensions.insert(crate::pipeline::PendingBodylessAccessLog);
+            } else {
+                self.maybe_emit(ctx, status, response_headers.as_ref());
+            }
         }
         ctx.insert_filter_state(AccessLogState {
+            bodyless,
             status,
             response_headers,
         });
@@ -1897,9 +1945,12 @@ impl HttpFilter for AccessLogFilter {
         if end_of_stream {
             // The record is emitted at most once, so the stored map can
             // be moved out rather than cloned per response.
-            let (status, headers) = ctx
-                .get_filter_state_mut::<AccessLogState>()
-                .map_or((0, None), |state| (state.status, state.response_headers.take()));
+            let adapter_managed = ctx.response_delivery_complete.is_some();
+            let state = ctx.get_filter_state_mut::<AccessLogState>();
+            if adapter_managed && state.as_ref().is_some_and(|state| state.bodyless) {
+                return Ok(FilterAction::Continue);
+            }
+            let (status, headers) = state.map_or((0, None), |state| (state.status, state.response_headers.take()));
             self.maybe_emit(ctx, status, headers.as_ref());
         }
         Ok(FilterAction::Continue)

@@ -3598,6 +3598,8 @@ async fn skip_to_excludes_skipped_filters_from_response() {
         kv_stores: None,
         session_stores: None,
         slow_start_registry: None,
+        #[cfg(all(feature = "chain-binding", feature = "slow-start"))]
+        bound_clusters: Vec::new(),
         subrequest_client: None,
         may_select_streaming_subrequest_response: false,
         trace_context_filter_indices: Vec::new(),
@@ -3684,6 +3686,8 @@ async fn skip_to_excludes_skipped_filters_from_body_hooks() {
         kv_stores: None,
         session_stores: None,
         slow_start_registry: None,
+        #[cfg(all(feature = "chain-binding", feature = "slow-start"))]
+        bound_clusters: Vec::new(),
         may_select_streaming_subrequest_response: false,
         trace_context_filter_indices: Vec::new(),
         subrequest_client: None,
@@ -3767,6 +3771,8 @@ async fn body_hooks_run_for_every_filter_before_the_request_phase() {
         kv_stores: None,
         session_stores: None,
         slow_start_registry: None,
+        #[cfg(all(feature = "chain-binding", feature = "slow-start"))]
+        bound_clusters: Vec::new(),
         may_select_streaming_subrequest_response: false,
         trace_context_filter_indices: Vec::new(),
         subrequest_client: None,
@@ -3844,6 +3850,8 @@ async fn all_executed_filters_run_on_response() {
         kv_stores: None,
         session_stores: None,
         slow_start_registry: None,
+        #[cfg(all(feature = "chain-binding", feature = "slow-start"))]
+        bound_clusters: Vec::new(),
         subrequest_client: None,
         may_select_streaming_subrequest_response: false,
         trace_context_filter_indices: Vec::new(),
@@ -4058,6 +4066,8 @@ async fn skipped_filter_skips_its_branches() {
         kv_stores: None,
         session_stores: None,
         slow_start_registry: None,
+        #[cfg(all(feature = "chain-binding", feature = "slow-start"))]
+        bound_clusters: Vec::new(),
         subrequest_client: None,
         may_select_streaming_subrequest_response: false,
         trace_context_filter_indices: Vec::new(),
@@ -5706,6 +5716,8 @@ fn test_pipeline(body_capabilities: BodyCapabilities, filters: Vec<PipelineFilte
         kv_stores: None,
         session_stores: None,
         slow_start_registry: None,
+        #[cfg(all(feature = "chain-binding", feature = "slow-start"))]
+        bound_clusters: Vec::new(),
         subrequest_client: None,
         may_select_streaming_subrequest_response: false,
         trace_context_filter_indices: Vec::new(),
@@ -6152,6 +6164,8 @@ fn make_pipeline(filters: Vec<Box<dyn HttpFilter>>) -> FilterPipeline {
         kv_stores: None,
         session_stores: None,
         slow_start_registry: None,
+        #[cfg(all(feature = "chain-binding", feature = "slow-start"))]
+        bound_clusters: Vec::new(),
         subrequest_client: None,
         may_select_streaming_subrequest_response: false,
         trace_context_filter_indices: Vec::new(),
@@ -6196,6 +6210,8 @@ fn make_pipeline_with_conditions(
         kv_stores: None,
         session_stores: None,
         slow_start_registry: None,
+        #[cfg(all(feature = "chain-binding", feature = "slow-start"))]
+        bound_clusters: Vec::new(),
         subrequest_client: None,
         may_select_streaming_subrequest_response: false,
         trace_context_filter_indices: Vec::new(),
@@ -6240,6 +6256,8 @@ fn make_pipeline_with_response_conditions(
         kv_stores: None,
         session_stores: None,
         slow_start_registry: None,
+        #[cfg(all(feature = "chain-binding", feature = "slow-start"))]
+        bound_clusters: Vec::new(),
         subrequest_client: None,
         may_select_streaming_subrequest_response: false,
         trace_context_filter_indices: Vec::new(),
@@ -6912,6 +6930,8 @@ fn streaming_capability_detected_when_filter_declares_it() {
         kv_stores: None,
         session_stores: None,
         slow_start_registry: None,
+        #[cfg(all(feature = "chain-binding", feature = "slow-start"))]
+        bound_clusters: Vec::new(),
         pipeline_extensions: Vec::new(),
         record_filter_duration_metrics: false,
         route_templates: Arc::default(),
@@ -9205,6 +9225,48 @@ async fn response_short_circuit_still_runs_terminal_observer() {
 
     pipeline.emit_request_completion(&mut ctx, 500);
     assert_eq!(*seen.lock().unwrap(), [(0, 500)]);
+}
+
+#[tokio::test]
+async fn bodyless_completion_preserves_response_order_across_access_logs() {
+    for (delivered, status) in [(true, 200), (false, 502)] {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first.ndjson");
+        let last = dir.path().join("last.ndjson");
+        let yaml: String = [&first, &last]
+            .iter()
+            .map(|path| {
+                format!(
+                    "- filter: access_log\n  fields: [status]\n  sink: {{type: file, path: '{}'}}\n",
+                    path.display()
+                )
+            })
+            .collect();
+        let mut entries: Vec<FilterEntry> = serde_yaml::from_str(&yaml).unwrap();
+        let pipeline = FilterPipeline::build(&mut entries, &FilterRegistry::with_builtins()).unwrap();
+        assert!(
+            !pipeline.has_request_completion_observer(),
+            "access logs also support subrequests"
+        );
+        let request = crate::test_utils::make_request(Method::HEAD, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&request);
+        ctx.executed_filter_indices = vec![true, true];
+        let mut response = crate::test_utils::make_response();
+        ctx.response_header = Some(&mut response);
+        assert!(matches!(
+            pipeline.execute_http_response(&mut ctx).await.unwrap(),
+            FilterAction::Continue
+        ));
+        ctx.response_header = None;
+        ctx.response_delivery_complete = Some(delivered);
+        pipeline.finish_bodyless_access_logs(&mut ctx, status);
+        assert!(
+            wait_for_deferred_access_record(&last)
+                .await
+                .contains(&format!(r#""status":"{status}""#))
+        );
+        assert!(std::fs::read_to_string(first).unwrap_or_default().is_empty());
+    }
 }
 
 /// Wait for exactly one deferred access record without blocking the runtime.

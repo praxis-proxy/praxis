@@ -523,6 +523,7 @@ fn filter_behind(path: String, trusted_proxies: Vec<String>) -> PolicyFilter {
 pub(super) fn filter_config(path: String) -> PolicyFilterConfig {
     PolicyFilterConfig {
         config_path: path,
+        environment: None,
         allow_private_idp: false,
         trusted_private_endpoints: vec![],
         trusted_proxies: vec![],

@@ -77,12 +77,20 @@ pub fn build_full_registry() -> FilterRegistry {
 /// Returns an error when `runtime.upstream_ca_file` is set and the file
 /// cannot be read or parsed.
 pub fn build_subrequest_client(config: &Config) -> Result<SubRequestClient, Box<dyn std::error::Error + Send + Sync>> {
+    build_subrequest_client_with(config, SubRequestConnector::with_options)
+}
+
+/// Build the client with the connector appropriate for serving or offline validation.
+pub(crate) fn build_subrequest_client_with(
+    config: &Config,
+    connector_factory: fn(SubRequestConnectorOptions) -> SubRequestConnector,
+) -> Result<SubRequestClient, crate::StartupError> {
     let pool_size = config
         .runtime
         .subrequest_pool_size
         .unwrap_or(DEFAULT_SUBREQUEST_POOL_SIZE);
 
-    let connector = SubRequestConnector::with_options(SubRequestConnectorOptions {
+    let connector = connector_factory(SubRequestConnectorOptions {
         keepalive_pool_size: pool_size,
         max_connections: config.runtime.subrequest_max_connections,
         circuit_breaker: config
@@ -113,10 +121,46 @@ pub fn build_subrequest_client(config: &Config) -> Result<SubRequestClient, Box<
 // Pipeline Resolution
 // -----------------------------------------------------------------------------
 
+/// Unpublished listener pipelines and their shared health registry.
+pub(crate) struct PipelineCandidate {
+    /// Candidate pipelines, keyed by listener name.
+    pub(crate) pipelines: ListenerPipelines,
+    /// Health registry shared by the candidate pipelines.
+    pub(crate) health_registry: praxis_core::health::HealthRegistry,
+}
+
+/// Build a candidate without publishing pipelines or starting health checks.
+#[expect(clippy::too_many_arguments, reason = "candidate uses shared registries and client")]
+pub(crate) fn resolve_pipeline_candidate(
+    config: &Config,
+    registry: &FilterRegistry,
+    kv_stores: &praxis_core::kv::KvStoreRegistry,
+    session_stores: &Arc<praxis_filter::SessionStoreRegistry>,
+    slow_start_registry: &Arc<praxis_filter::SlowStartRegistry>,
+    subrequest_client: &SubRequestClient,
+    composition: &PipelineComposition,
+) -> Result<PipelineCandidate, crate::StartupError> {
+    praxis_protocol::tcp::validate_tcp_groups(config)?;
+    let health_registry = praxis_core::health::build_health_registry(&config.clusters);
+    let pipelines = resolve_pipelines_with_composition(
+        config,
+        registry,
+        &health_registry,
+        kv_stores,
+        session_stores,
+        slow_start_registry,
+        subrequest_client,
+        composition,
+    )?;
+    Ok(PipelineCandidate {
+        pipelines,
+        health_registry,
+    })
+}
+
 /// Build a [`FilterPipeline`] for each listener by resolving named chains.
 ///
-/// This is the config-to-runtime bridge used by the CLI validate/dump path and
-/// by callers that need no downstream composition: it applies no pipeline
+/// This is the config-to-runtime bridge for callers that need no downstream composition: it applies no pipeline
 /// extensions and no validators. Embedded servers that customize per-listener
 /// pipelines go through [`run_server_with_composition`](crate::run_server_with_composition)
 /// instead.
@@ -204,13 +248,6 @@ pub(crate) fn resolve_pipelines_with_composition(
     let chains = expanded_chains.as_slices();
     let mut pipelines = HashMap::with_capacity(config.listeners.len());
     for listener in &config.listeners {
-        if listener.upgrade_policy.is_some() {
-            return Err(format!(
-                "listener '{}': explicit upgrade_policy requires protocol admission support, which is not available yet",
-                listener.name
-            )
-            .into());
-        }
         #[cfg(feature = "hyper")]
         if listener
             .upgrade_policy
@@ -446,9 +483,9 @@ mod tests {
         }
     }
 
-    /// Explicit denials must not be accepted before adapters enforce them.
+    /// Explicit denials must reach the pipeline used to admit upgrades.
     #[test]
-    fn resolve_pipelines_rejects_unenforced_upgrade_policy() {
+    fn resolve_pipelines_applies_explicit_upgrade_policy() {
         let mut config = valid_config();
         config.listeners[0].upgrade_policy = Some(serde_yaml::from_str("default: deny").unwrap());
         let result = resolve_pipelines(
@@ -459,12 +496,8 @@ mod tests {
             &empty_session_stores(),
             &empty_subrequest_client(),
         );
-        let error = result.err().expect("an unenforced policy must fail startup");
-        assert!(
-            error
-                .to_string()
-                .contains("explicit upgrade_policy requires protocol admission support")
-        );
+        let pipelines = result.unwrap();
+        assert!(!pipelines.get("web").unwrap().load().permits_upgrade("websocket"));
     }
 
     #[test]

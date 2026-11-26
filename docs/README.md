@@ -14,6 +14,8 @@ material. Extension and contributor material is last.
 - [Getting started](getting-started/README.md): where to begin
 - [Quickstart](getting-started/quickstart.md):
   run the container image in front of a backend and send a request
+- [Route requests](getting-started/route-requests.md):
+  send two paths to two backends through one listener
 - [Build from source](getting-started/build-from-source.md):
   build the binary and run a local proxy
 - [Example configs](../examples/README.md):
@@ -28,6 +30,8 @@ To proxy model APIs or agent protocols, use the
 
 - [Configuration](operating/configuration.md):
   YAML config, listeners, chains, runtime
+- [Rehearse a Reload](operating/reload.md):
+  validate a change and apply it to a running proxy
 - [Security Hardening](operating/security-hardening.md):
   production deployment guidance
 - [TLS](operating/tls.md):
@@ -49,6 +53,8 @@ To proxy model APIs or agent protocols, use the
   file descriptor budget, limits, and load shedding
 - [Build Features](operating/build-features.md):
   compile-time feature flags and when to toggle them
+- [WebSocket Handling](operating/websocket.md):
+  upgrade admission policy, body requirements, and transport limits
 - [FIPS 140-3](operating/fips.md):
   the FIPS build, host prerequisites,
   `PRAXIS_REQUIRE_FIPS`, verifying a deployment

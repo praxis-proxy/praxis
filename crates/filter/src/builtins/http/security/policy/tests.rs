@@ -928,6 +928,7 @@ routes:
 fn build_filter_with_meta(config_path: String, context_meta: ContextMetaConfig) -> PolicyFilter {
     PolicyFilter::new(
         PolicyFilterConfig {
+            environment: None,
             config_path,
             allow_private_idp: false,
             trusted_private_endpoints: vec![],
@@ -1050,6 +1051,7 @@ fn build_filter_with_context(
 ) -> PolicyFilter {
     PolicyFilter::new(
         PolicyFilterConfig {
+            environment: None,
             config_path,
             allow_private_idp: false,
             trusted_private_endpoints: vec![],
@@ -1372,6 +1374,7 @@ fn build_filter(config_path: String) -> PolicyFilter {
 
 fn filter_config(config_path: String) -> PolicyFilterConfig {
     PolicyFilterConfig {
+        environment: None,
         config_path,
         allow_private_idp: false,
         trusted_private_endpoints: vec![],
@@ -1608,6 +1611,7 @@ fn config_parses_minimal_yaml() {
 #[test]
 fn rejects_zero_max_buffer_bytes() {
     let cfg = PolicyFilterConfig {
+        environment: None,
         config_path: "/nonexistent/policy.yaml".to_owned(),
         allow_private_idp: false,
         trusted_private_endpoints: vec![],
@@ -1630,6 +1634,7 @@ fn rejects_zero_max_buffer_bytes() {
 #[test]
 fn rejects_oversized_max_buffer_bytes() {
     let cfg = PolicyFilterConfig {
+        environment: None,
         config_path: "/nonexistent/policy.yaml".to_owned(),
         allow_private_idp: false,
         trusted_private_endpoints: vec![],
@@ -1722,6 +1727,68 @@ global:
     (dir, path_str)
 }
 
+/// A validation candidate checks policy configuration without initializing JWKS clients.
+#[test]
+fn policy_validation_skips_jwks_initialization() {
+    praxis_tls::provider::install();
+    let (_dir, path) = write_jwks_url_config("    capabilities:\n      - perform_http\n");
+    let registry = FilterRegistry::with_builtins().with_validation_only(true);
+
+    let filter = registry
+        .build_policy(&policy_filter_config(&path))
+        .expect("static policy validation");
+    assert!(!filter.engine_is_initialized());
+}
+
+/// Authentication overrides must meet the same JWKS transport requirements as base plugins.
+#[test]
+fn jwks_override_is_checked_before_serving() {
+    praxis_tls::provider::install();
+    let (_dir, path) = write_single_plugin_config();
+    let base = std::fs::read_to_string(&path).expect("policy fixture");
+    for (grant, insecure, expected) in [
+        ("", "true", Some("perform_http")),
+        ("    capabilities: [perform_http]\n", "false", Some("insecure_http")),
+        ("    capabilities: [perform_http]\n", "true", None),
+    ] {
+        let yaml = base.replace("    config:", &format!("{grant}    config:")).replace(
+            "    - jwt-user",
+            &format!("    - name: jwt-user\n      config:\n        trusted_issuers:\n          - issuer: https://issuer.example\n            audiences: [gateway]\n            algorithms: [RS256]\n            decoding_key:\n              kind: jwks_url\n              url: http://127.0.0.1:1/jwks.json\n              insecure_http: {insecure}"),
+        );
+        std::fs::write(&path, yaml).expect("write override");
+        for validation_only in [true, false] {
+            let result = FilterRegistry::with_builtins()
+                .with_validation_only(validation_only)
+                .build_policy(&policy_filter_config(&path));
+            match expected {
+                Some(message) => assert!(
+                    result.is_err_and(|error| error.to_string().contains(message)),
+                    "expected {message}"
+                ),
+                None => assert!(result.is_ok(), "explicitly opted-in override should build"),
+            }
+        }
+    }
+}
+
+/// Plaintext JWKS needs explicit opt-in even when the HTTP capability is granted.
+#[test]
+fn validation_refuses_plaintext_jwks_without_opt_in() {
+    praxis_tls::provider::install();
+    let (_dir, path) = write_jwks_url_config("    capabilities: [perform_http]\n");
+    let yaml = std::fs::read_to_string(&path).expect("JWKS fixture");
+    std::fs::write(&path, yaml.replace("insecure_http: true", "insecure_http: false")).expect("disable plaintext");
+    let registry = FilterRegistry::with_builtins().with_validation_only(true);
+    let err = registry
+        .build_policy(&policy_filter_config(&path))
+        .err()
+        .expect("plaintext must be rejected");
+    assert!(
+        err.to_string().contains("insecure_http"),
+        "expected the 'insecure_http' diagnostic"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_jwks_issuer_constructs_with_the_installed_transport() {
     let (_dir, path) = write_jwks_url_config("    capabilities:\n      - perform_http\n");
@@ -1733,6 +1800,15 @@ async fn a_jwks_issuer_constructs_with_the_installed_transport() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_jwks_issuer_without_perform_http_fails_to_construct() {
     let (_dir, path) = write_jwks_url_config("");
+    let registry = FilterRegistry::with_builtins().with_validation_only(true);
+    let offline = registry
+        .build_policy(&policy_filter_config(&path))
+        .err()
+        .expect("offline validation must reject a missing HTTP grant");
+    assert!(
+        offline.to_string().contains("perform_http"),
+        "expected the 'perform_http' diagnostic"
+    );
     let err = try_build_filter_allowing_private(path, true)
         .err()
         .expect("a withheld capability must refuse to start");
@@ -2660,6 +2736,7 @@ async fn missing_entity_name_rejects_after_successful_identity_gate() {
 async fn missing_protocol_metadata_passes_when_not_required() {
     let (_dir, path) = write_tool_route_config();
     let cfg = PolicyFilterConfig {
+        environment: None,
         config_path: path,
         allow_private_idp: false,
         trusted_private_endpoints: vec![],
@@ -3506,6 +3583,7 @@ fn on_response_body_continues_on_partial_chunks() {
 async fn response_phase_without_request_identity_fails_closed() {
     let (_dir, path) = write_tool_route_config();
     let cfg = PolicyFilterConfig {
+        environment: None,
         config_path: path,
         allow_private_idp: false,
         trusted_private_endpoints: vec![],
@@ -4035,6 +4113,7 @@ fn try_build_filter_allowing_private(
     let connector = crate::test_support::connector(praxis_core::config::DEFAULT_SUBREQUEST_POOL_SIZE, None);
     PolicyFilter::new(
         PolicyFilterConfig {
+            environment: None,
             config_path,
             allow_private_idp,
             trusted_private_endpoints: vec![],
@@ -4738,13 +4817,22 @@ async fn an_asserted_secret_stays_redacted_on_the_response_half() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_file_backed_secret_is_refused_at_load() {
     let (_dir, path) = write_secret_assertion_config("file", "upstream.key");
+    let registry = FilterRegistry::with_builtins().with_validation_only(true);
+    let offline = registry
+        .build_policy(&policy_filter_config(&path))
+        .err()
+        .expect("validation must reject file providers");
     let err = PolicyFilter::new(filter_config(path), None)
         .err()
         .expect("a `file` provider must not load");
+    assert!(
+        offline.to_string().contains("not registered"),
+        "expected the 'not registered' diagnostic"
+    );
     let msg = err.to_string();
     assert!(
         msg.contains("`file`") && msg.contains("not registered"),
-        "the error must name the unregistered kind; got {msg}"
+        "the error must name the unregistered kind"
     );
 }
 
@@ -4787,6 +4875,7 @@ routes:
     );
     std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
     let cfg = PolicyFilterConfig {
+        environment: None,
         config_path: cfg_path.to_str().expect("utf8 path").to_owned(),
         allow_private_idp: false,
         trusted_private_endpoints: vec![],
@@ -5361,6 +5450,7 @@ fn write_llm_response_fact_config() -> (TempDir, String) {
 fn build_filter_with_llm(config_path: String, llm: super::config::LlmOptions) -> PolicyFilter {
     PolicyFilter::new(
         PolicyFilterConfig {
+            environment: None,
             config_path,
             allow_private_idp: false,
             trusted_private_endpoints: vec![],
@@ -5747,6 +5837,7 @@ fn the_lower_ceiling_binds_when_both_apply() {
     let (_dir, path) = write_llm_route_config();
     let filter = PolicyFilter::new(
         PolicyFilterConfig {
+            environment: None,
             config_path: path,
             allow_private_idp: false,
             trusted_private_endpoints: vec![],
@@ -5829,6 +5920,7 @@ fn rejects_an_out_of_range_inference_ceiling() {
         let (_dir, path) = write_llm_route_config();
         let err = PolicyFilter::new(
             PolicyFilterConfig {
+                environment: None,
                 config_path: path,
                 allow_private_idp: false,
                 trusted_private_endpoints: vec![],
@@ -5905,6 +5997,7 @@ async fn inference_request_without_a_token_is_rejected_by_identity() {
 fn build_read_write_filter(config_path: String) -> PolicyFilter {
     PolicyFilter::new(
         PolicyFilterConfig {
+            environment: None,
             config_path,
             allow_private_idp: false,
             trusted_private_endpoints: vec![],
@@ -5930,6 +6023,7 @@ fn build_hook_read_write_filter(config_path: String) -> PolicyFilter {
     };
     PolicyFilter::new(
         PolicyFilterConfig {
+            environment: None,
             config_path,
             allow_private_idp: false,
             trusted_private_endpoints: vec![],
@@ -5978,6 +6072,74 @@ const NON_JSON_RESPONSE: &str = "upstream failure, not JSON";
 
 /// Return a JSON-RPC tool result.
 const MCP_RESPONSE: &str = r#"{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"ok, with enough room for the round-trip"}]}}"#;
+
+/// Both CMF paths must reuse correlation even after the shared context changes.
+#[tokio::test(flavor = "multi_thread")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "linear request/response lifecycle for both CMF paths"
+)]
+async fn request_context_reaches_llm_and_mcp_body_hooks() {
+    use crate::trace_context::TraceContext;
+
+    for tool in [false, true] {
+        let (_dir, path) = write_llm_post_config();
+        let mut yaml = std::fs::read_to_string(&path).unwrap()
+            .replace("require(authenticated)", "require(authenticated, request.environment == 'production', request.request_id == 'correlated', exists(request.trace_id), exists(request.timestamp))")
+            .replace("completion.tokens.total > 100: deny('completion too long', 'completion_too_long')", "request.request_id == 'correlated': deny('correlation_seen', 'correlation_seen')");
+        if tool {
+            yaml = yaml.replace("llm: \"*\"", "tool: echo");
+        }
+        std::fs::write(&path, yaml).unwrap();
+        let mut cfg = filter_config(path);
+        cfg.environment = Some("production".into());
+        cfg.body_access = BodyAccessMode::ReadWrite;
+        let filter = PolicyFilter::new(cfg, None).unwrap();
+        let req = request_for_alice();
+        let mut ctx = make_filter_context(&req);
+        ctx.current_filter_id = Some(0);
+        ctx.extensions
+            .insert(TraceContext::new("correlated".into(), "trace".into(), "01".into()));
+        let request = if tool {
+            ctx.filter_metadata
+                .insert("mcp.method", "tools/call")
+                .expect("entry must fit in the filter's metadata");
+            ctx.filter_metadata
+                .insert("mcp.name", "echo")
+                .expect("entry must fit in the filter's metadata");
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{}}}"#
+        } else {
+            r#"{"model":"gpt-4o","messages":[]}"#
+        };
+        let action = filter
+            .on_request_body(&mut ctx, &mut Some(bytes::Bytes::from_static(request.as_bytes())), true)
+            .await
+            .unwrap();
+        assert!(
+            matches!(action, FilterAction::BodyDone),
+            "request metadata must satisfy policy: {action:?}"
+        );
+        ctx.extensions
+            .get_mut::<TraceContext>()
+            .unwrap()
+            .set_request_id("later".into());
+        let mut response = crate::test_utils::make_response();
+        response
+            .headers
+            .insert("content-type", HeaderValue::from_static("application/json"));
+        ctx.response_header = Some(&mut response);
+        let response_body = if tool { MCP_RESPONSE } else { WITHIN_BUDGET_RESPONSE };
+        let mut padded = response_body.as_bytes().to_vec();
+        padded.resize(4096, b' ');
+        let mut body = Some(bytes::Bytes::from(padded));
+        drop(filter.on_response_body(&mut ctx, &mut body, true).unwrap());
+        let parsed: serde_json::Value = serde_json::from_slice(&body.unwrap()).unwrap();
+        assert!(
+            parsed.to_string().contains("correlation_seen"),
+            "the response must retain the request metadata: {parsed}"
+        );
+    }
+}
 
 /// Run an inference request and response through the filter.
 async fn inference_round_trip(
@@ -9265,6 +9427,7 @@ fn an_http_route_scoping_only_authentication_still_loads() {
 fn an_http_route_beside_entity_routes_fails_filter_construction() {
     let (_dir, path) = write_http_route_beside_tool_route_config();
     let cfg = PolicyFilterConfig {
+        environment: None,
         config_path: path,
         allow_private_idp: false,
         trusted_private_endpoints: vec![],
@@ -9471,6 +9634,7 @@ fn build_in_concurrent_runtimes(
 
 fn minimal_cfg() -> PolicyFilterConfig {
     PolicyFilterConfig {
+        environment: None,
         body_access: BodyAccessMode::default(),
         config_path: String::new(),
         init_timeout_secs: 30,
@@ -9518,6 +9682,7 @@ fn policy_filter_new_rejects_non_reserved_context_header() {
     let mut context_headers = HashMap::new();
     context_headers.insert(ContextField::AgentAgentId, "x-custom-agent-id".to_owned());
     let cfg = PolicyFilterConfig {
+        environment: None,
         config_path: "/nonexistent/policy.yaml".to_owned(),
         allow_private_idp: false,
         trusted_private_endpoints: vec![],

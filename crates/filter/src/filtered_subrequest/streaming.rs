@@ -124,6 +124,7 @@ impl FilteredStreamingBody {
                 request_header_mutations: Vec::new(),
                 request_start: cont.request_start,
                 response_body_bytes: cont.response_body_bytes,
+                response_delivery_complete: None,
                 response_body_mode: cont.response_body_mode,
                 response_header: None,
                 response_headers_modified: false,
@@ -724,6 +725,8 @@ mod tests {
             request_start: Instant::now(),
             step_deadline: Instant::now() + Duration::from_secs(30),
             peer_identity: None,
+            #[cfg(feature = "chain-binding")]
+            lease: None,
         };
         let mut filtered = FilteredStreamingBody::new(Box::new(response.body), continuation);
         let mut body = Some(Bytes::from_static(b"first chunk"));
@@ -803,6 +806,8 @@ mod tests {
             request_start: Instant::now(),
             step_deadline,
             peer_identity: None,
+            #[cfg(feature = "chain-binding")]
+            lease: None,
         };
         let mut filtered = FilteredStreamingBody::new(Box::new(response.body), continuation);
         assert_eq!(

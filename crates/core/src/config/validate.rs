@@ -13,6 +13,7 @@ pub(in crate::config) mod cluster;
 mod filter_chain;
 mod forward_proxy;
 mod inline_clusters;
+pub(super) use inline_clusters::STEP_BEARING_FILTER;
 mod listener;
 mod rules;
 

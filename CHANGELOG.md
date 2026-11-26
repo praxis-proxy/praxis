@@ -19,6 +19,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Embedders can validate configuration with their own `ServerComposition`
+  using `validate_config_with_composition`. Startup, reload, validation, and
+  configuration dump share the same pipeline candidate builder. Validation and
+  dump compile built-in policy configuration without initializing plugins and
+  check access-log configuration without opening sinks.
+
+- Config loading warns when a deprecated filter or field is configured, naming
+  its location, affected listener, and replacement when one is available.
+  This includes `basic_auth` and explicitly supplied
+  `credential_injection.clusters[].strip_client_credential` settings. The scan
+  warns if its work or warning limits prevent it from reporting every setting.
 - Add the `jobs:` config section behind the off-by-default `jobs-config`
   feature: bounded queue capacity, worker count, per-job timeout, and a
   queued-payload byte ceiling for the coming background job runtime, each
@@ -40,6 +51,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   and links from onboarding, architecture, and security documentation.
 - Expose compact JSON sizing and capped serialization utilities in
   `praxis_filter::json_size` for built-in and external filters.
+- Add cluster-staged callouts behind the experimental `chain-binding` feature
+  (#1557). A chain-binding filter resolves a top-level cluster at config load
+  with `ChainBindingContext::cluster` and stages it per call with
+  `StagedCluster`; the executor picks the endpoint with the cluster's
+  strategy, health, and slow start, and pins `ctx.cluster` and
+  `ctx.upstream`. `credential_injection` now applies inside such callouts'
+  outbound chains.
+
+- Policy request metadata now carries the exported root HTTP request span's
+  trace ID when the `otel` feature is compiled in and an exporter is
+  configured, so PPE audit records join the trace a collector exports. The
+  `trace_context` filter's trace ID remains the source when no exporter is
+  active, and still supplies the request ID either way.
 
 - Add `shutdown_drain_delay_secs` for readiness-first SIGTERM handoff. The
   process becomes unready, waits for the configured delay, then begins
@@ -59,6 +83,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Add a Kubernetes rollout acceptance harness covering pod loss,
   rollouts, config reloads, TLS rotation, node drain, and upstream failure
   under continuous HTTP/1.1, HTTP/2, and HTTPS traffic.
+- Policy rules and hooks receive request and trace IDs and a stable request
+  timestamp when trace context is available. The optional policy `environment`
+  field supplies `request.environment`, including without tracing; blank labels
+  are rejected at startup. Unrepresentable clock values leave the timestamp unset.
+
 
 - Fuzz testing (`tests/fuzz`, `make fuzz`/`fuzz-build`): a differential
   fuzz target checks the SIMD-accelerated JSON string-delimiter scanner
@@ -185,13 +214,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Deprecation warnings describe settings in the candidate configuration without
+  implying that the configuration is already active.
+- Validate the final WebSocket handshake after response filters and reject
+  invalid or synthesized HTTP 101 responses before opening a tunnel.
 - Correct PPE documentation links in the security guides, policy filter
   reference, and rustdoc to follow the reorganized pages. Preserve the
   claim-mapping, use-case, and Vault recipe anchors.
 
-- Reject explicit listener `upgrade_policy` settings until protocol admission
-  enforcement is available, rather than silently accepting unenforced denials.
+- Apply explicit listener `upgrade_policy` settings at startup and reload.
 
+- Send a server-wide `OPTIONS *` unchanged on a hedged route whose cluster
+  sets `http.base_path`, as a single attempt does, instead of prefixing it
+  into a resource request (`OPTIONS /api*`).
 - Return gRPC `DEADLINE_EXCEEDED` when Pingora's rounded upstream timeout fires just before the call's exact deadline, while preserving earlier transport timeouts.
 - Strip reserved and hop-by-hop headers from preformatted gRPC rejections while retaining safe gRPC fields, and frame empty HTTP/1 responses with one correct zero length even when filters supply stale or conflicting lengths.
 - Preserve final body-filter bytes with forwarded trailers on Hyper; abort Pingora delivery when both outputs cannot be represented or EOF filtering fails, while retaining ordinary trailers and deliberate conversion.
@@ -354,8 +389,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   destination failure as `upstream_protocol`, which also marks the request
   span as an error, and a client failure as `downstream`, and the tunnel's
   access record is written whatever the sampling. The destination host is
-  read in one canonical form that filters (through the URI and `Host`),
-  the destination rules, and the dialer all share: a name lowercased
+  read in one canonical form that filters (through the URI and `Host`,
+  which is supplied when an HTTP/1.0 CONNECT omits it), the destination
+  rules, and the dialer all share: a name lowercased
   without a trailing dot, an IP literal in its standard text form
   (`[2001:DB8:0::1]` reads as `2001:db8::1`, and IPv4-mapped
   `[::ffff:93.184.216.34]` as
@@ -367,10 +403,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   is answered in plain HTTP, never in `grpc_status`'s 200-based gRPC
   shape, and a 2xx refusal from any filter phase is sent as 502, since a
   2xx would claim a tunnel that was never opened. HTTP/2 CONNECT is answered
-  with 501. Tunneled payloads are opaque to body-inspecting filters. On a
-  listener that also reverse-proxies, a CONNECT that matches a route
-  leaves that cluster's `circuit_breaker` alone: it neither takes the
-  half-open probe nor counts as a success or failure.
+  with 501. Absolute-form plain requests (`GET http://host/path`, what
+  `HTTP_PROXY` clients send for `http://` URLs) run the same pipeline and
+  pass the same destination rules, with private and reserved
+  destinations, literal or resolved, refused unless
+  `insecure_options.allow_private_upstreams` is set. The filters see such
+  a request with the canonical `Host` its target names, whatever `Host`
+  the client sent or omitted (RFC 9112 Section 3.2.2), and an origin
+  receives that `Host`: an HTTP/1.0 request without `Host` still meets a
+  `Host` condition or `policy` rule, and a padded, empty, or default port
+  (`:08080`, `:`, `:80`) reaches them spelled one way (`:8080`, or no
+  port). A request the pipeline routes to a cluster (a `router` and
+  `load_balancer` on the listener) takes that route under the cluster's
+  TLS and connection settings. Any other is forwarded to the origin its
+  target names, and only then do these apply: TLS is originated with SNI
+  for `https`; the name resolves under the same bounded per-call DNS
+  limits as a CONNECT's and never enters the shared DNS cache; the
+  connect is bounded to 10 s and each read and write by
+  `idle_timeout_ms`; and every such destination shares the
+  `endpoint="forward_proxy"` metrics label. The destination rules decide
+  before any upstream is contacted, a hedged route's included, and an
+  absolute-form target the proxy cannot forward to (port 0 or out of
+  range, a scheme other than `http`/`https`, a host in a non-canonical
+  spelling) is answered with 400 rather than taking a route. A
+  server-wide `OPTIONS http://host` is forwarded as `OPTIONS *` (RFC 9112
+  Section 3.2.4). Origin-form requests keep using the reverse-proxy
+  pipeline when it selects an upstream, and are answered with 400 when it
+  does not. Tunneled payloads are opaque to
+  body-inspecting filters. On a listener that also reverse-proxies, a
+  CONNECT that matches a route leaves that cluster's `circuit_breaker`
+  alone: it neither takes the half-open probe nor counts as a success or
+  failure.
   Example configs: `security/forward-proxy.yaml` (destination allowlist)
   and `security/forward-proxy-ip-acl.yaml` (client ACL).
 - `praxis_filter::ClusterNotContacted`, a request extension an HTTP

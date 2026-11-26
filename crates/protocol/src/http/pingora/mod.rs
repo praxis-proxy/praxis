@@ -52,6 +52,8 @@ pub mod kv;
 /// Listener configuration and TLS setup.
 #[cfg(feature = "pingora")]
 pub mod listener;
+#[cfg(feature = "managed-websocket")]
+pub mod local_upgrade;
 /// Prometheus metrics: recorder, HTTP request counters, and scrape endpoint.
 pub mod metrics;
 /// Bounded cleanup of unread HTTP/1 uploads after local responses.

@@ -73,6 +73,9 @@ enum RegisteredFilterFactory {
     #[cfg(feature = "chain-binding")]
     ChainBinding(ChainBindingHttpFactory),
 
+    /// The built-in access log filter, which opens sinks only for serving candidates.
+    AccessLog,
+
     /// The built-in `policy` filter, which takes the registry's sub-request
     /// connector at construction.
     #[cfg(feature = "policy-engine")]
@@ -103,20 +106,10 @@ impl RegisteredFilterFactory {
     /// supplies one.
     ///
     /// [`FilterPipeline::build_with_chains`]: crate::FilterPipeline::build_with_chains
-    fn create(
-        &self,
-        config: &serde_yaml::Value,
-        #[cfg_attr(
-            not(any(feature = "iterative-request-router", feature = "policy-engine")),
-            expect(
-                unused_variables,
-                reason = "registry is read only by the gated HttpWithRegistry and Policy arms"
-            )
-        )]
-        registry: &FilterRegistry,
-    ) -> Result<AnyFilter, FilterError> {
+    fn create(&self, config: &serde_yaml::Value, registry: &FilterRegistry) -> Result<AnyFilter, FilterError> {
         match self {
             Self::Standard(factory) => factory.create(config),
+            Self::AccessLog => registry.build_access_log(config),
             // No containing build here, so there is no named-chain table, no
             // shared budgets, and no operator posture: build with a standalone
             // context (empty chains, strict default posture). The real server
@@ -148,21 +141,11 @@ impl RegisteredFilterFactory {
     fn create_with_binding(
         &self,
         config: &serde_yaml::Value,
-        #[cfg_attr(
-            not(any(
-                feature = "iterative-request-router",
-                feature = "chain-binding",
-                feature = "policy-engine"
-            )),
-            expect(
-                unused_variables,
-                reason = "ctx is read only by the gated HttpWithRegistry, ChainBinding, and Policy arms"
-            )
-        )]
         ctx: &ChainBindingContext<'_>,
     ) -> Result<AnyFilter, FilterError> {
         match self {
             Self::Standard(factory) => factory.create(config),
+            Self::AccessLog => ctx.registry().build_access_log(config),
             #[cfg(feature = "iterative-request-router")]
             Self::HttpWithRegistry(factory) => Ok(AnyFilter::Http(factory(config, ctx)?)),
             #[cfg(feature = "chain-binding")]
@@ -199,6 +182,8 @@ pub struct FilterRegistry {
 
     /// Sub-request connector handed to `policy` filters at construction.
     policy_connector: Option<SubRequestConnector>,
+    /// Whether resource initialization is disabled for candidate validation.
+    validation_only: bool,
 }
 
 impl FilterRegistry {
@@ -211,6 +196,7 @@ impl FilterRegistry {
         Self {
             filters,
             policy_connector: None,
+            validation_only: false,
         }
     }
 
@@ -540,6 +526,21 @@ impl FilterRegistry {
         self.policy_connector = Some(connector.clone());
     }
 
+    /// Select whether built-in policy plugins and access-log writers defer initialization.
+    ///
+    /// Custom factories still run and should keep validation free of network
+    /// and worker startup side effects.
+    #[must_use]
+    pub fn with_validation_only(mut self, validation_only: bool) -> Self {
+        self.validation_only = validation_only;
+        self
+    }
+
+    /// Resolve an access log filter without opening a sink during validation.
+    fn build_access_log(&self, config: &serde_yaml::Value) -> Result<AnyFilter, FilterError> {
+        crate::builtins::AccessLogFilter::from_config_with_mode(config, self.validation_only).map(AnyFilter::Http)
+    }
+
     /// Builds a `policy` filter over this registry's sub-request connector.
     ///
     /// # Errors
@@ -548,7 +549,7 @@ impl FilterRegistry {
     /// fails to construct.
     #[cfg(feature = "policy-engine")]
     pub(crate) fn build_policy(&self, config: &serde_yaml::Value) -> Result<crate::PolicyFilter, FilterError> {
-        crate::PolicyFilter::from_config_with_connector(config, self.policy_connector.clone())
+        crate::PolicyFilter::from_config_with_connector(config, self.policy_connector.clone(), self.validation_only)
     }
 }
 
@@ -560,13 +561,19 @@ impl FilterRegistry {
 #[expect(clippy::too_many_lines, reason = "one line per filter, will grow")]
 fn register_http_builtins(filters: &mut HashMap<String, FilterRegistration>) {
     use crate::builtins::{
-        AccessLogFilter, CircuitBreakerFilter, CompressionFilter, CorsFilter, CredentialInjectionFilter, CsrfFilter,
+        CircuitBreakerFilter, CompressionFilter, CorsFilter, CredentialInjectionFilter, CsrfFilter,
         ForwardedHeadersFilter, GrpcDetectionFilter, GrpcStatusFilter, GrpcTimeoutFilter, GrpcWebFilter, HeaderFilter,
         IpAclFilter, JsonBodyFieldFilter, JsonBodyFilter, JsonRpcFilter, PathRewriteFilter, RateLimitFilter,
         RedirectFilter, RequestIdFilter, StaticResponseFilter, TimeoutFilter, TraceContextFilter, UrlRewriteFilter,
     };
 
-    register_http(filters, "access_log", AccessLogFilter::from_config);
+    filters.insert(
+        "access_log".to_owned(),
+        FilterRegistration {
+            factory: RegisteredFilterFactory::AccessLog,
+            security_class: SecurityClass::Standard,
+        },
+    );
     #[cfg(feature = "basic-auth-filter")]
     register_http_security(filters, "basic_auth", crate::BasicAuthFilter::from_config);
     #[cfg(feature = "cloud-events-filter")]
