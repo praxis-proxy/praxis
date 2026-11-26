@@ -1,39 +1,37 @@
 # Protocol Examples
 
-Protocol-specific configurations for HTTP/1.1, HTTP/2, gRPC, WebSocket, TCP, and hybrid scenarios.
+Configs for HTTP/1.1, HTTP/2, gRPC, WebSocket, TCP, and mixed HTTP and TCP
+listeners. The `tls-*` and `tcp-tls-*` configs cover TLS termination, mTLS,
+SNI, and upstream TLS.
 
 ## When to Use
 
-- Proxy gRPC services with protocol translation (gRPC-Web, health checks, timeouts)
+- Proxy gRPC services (gRPC-Web, health checks, timeouts)
 - Handle WebSocket upgrades and bidirectional messaging
-- Implement TCP-level proxying for non-HTTP protocols
-- Mix HTTP and TCP listeners in a single proxy instance
+- Proxy non-HTTP protocols over TCP
+- Mix HTTP and TCP listeners in one proxy
 - Configure protocol-specific features (H2 settings, gRPC status codes)
 
 ## Key Protocols
 
-**HTTP/1.1 & HTTP/2**: Native support with automatic protocol detection and upgrade handling. HTTP/2 multiplexing, flow control, and server push are managed by Pingora.
+**HTTP/1.1 and HTTP/2**: Pingora handles HTTP/2 multiplexing and flow
+control, and upgrade handling.
 
-**gRPC**: First-class support for gRPC proxying with health checks, timeout propagation, status code handling, and metadata inspection.
-
-**gRPC-Web**: Protocol translation between browser-based gRPC-Web clients and backend gRPC services.
+**gRPC**: health checks (`grpc.health.v1.Health/Check`), timeout propagation,
+status code handling, and metadata inspection. **gRPC-Web** is translated
+between browser clients and gRPC backends.
 
 **WebSocket.** Pingora can pass through an explicitly permitted handshake.
 Required body processing known from the request blocks upstream dispatch. If a
 response condition selects required processing on the upstream 101, Praxis
 returns 502 before opening the tunnel. After upgrade, WebSocket frames bypass
-HTTP body filters.
+HTTP body filters. Set timeouts for long-lived connections (WebSocket,
+streaming gRPC).
 
-**TCP**: Raw TCP proxying for non-HTTP protocols with connection metrics and access logging.
-
-## Best Practices
-
-- Use gRPC health checks (`grpc.health.v1.Health/Check`) for gRPC upstreams
-- Configure appropriate timeouts for long-lived connections (WebSocket, streaming gRPC)
-- Enable access logging at the TCP level for non-HTTP traffic
-- Test protocol upgrades (WebSocket, HTTP/2 → HTTP/1.1 downgrade) under load
+**TCP**: raw TCP proxying with connection metrics and access logging.
 
 ## Related Documentation
 
+- [WebSocket Handling](../../../docs/operating/websocket.md)
 - [Adding a Protocol](../../../docs/developing/adding-protocols.md)
 - [gRPC Configuration](../../../docs/filters/http/traffic_management/grpc_timeout.md)

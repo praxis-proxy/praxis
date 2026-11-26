@@ -1,7 +1,6 @@
 # Life of a Request
 
-This document traces a single HTTP request from
-arrival to response through the Praxis proxy.
+How one HTTP request moves through Praxis, from accept to response.
 
 ## Overview
 
@@ -29,56 +28,31 @@ arrival to response through the Praxis proxy.
 10. Pingora sends the response to the client and
     returns the upstream connection to the pool.
 
-The sections below expand each step. Operators can
-stop at the overview; the detail sections are for
-contributors and filter developers.
+Operators can stop here. The sections below are for contributors and filter
+authors. [Pingora Handler Lifecycle](pingora-handler-lifecycle.md) has the
+hook-by-hook detail.
 
-## Step 1: Connection Accept
+## Accept, Protocol, and Pipeline Snapshot
 
-Pingora accepts the TCP connection on the listener's
-bound address. If TLS is configured, Praxis resolves
-the certificate via SNI using `ReloadableCertResolver`
-(`crates/tls/src/`), which supports hot-reload via `ArcSwap`.
+If the listener has TLS, Praxis picks the certificate by SNI with
+`ReloadableCertResolver`, which hot-reloads through `ArcSwap`
+(`crates/tls/src/sni.rs`, `crates/tls/src/reload.rs`).
 
-Relevant files:
-- `crates/tls/src/sni.rs`: SNI resolution
-- `crates/tls/src/reload.rs`: certificate hot-reload
-- `crates/protocol/src/http/pingora/handler/`: HTTP handler
+The listener's `protocol` field (default: `http`) selects the adapter. Each
+adapter implements the `Protocol` trait (`crates/protocol/src/lib.rs`) and
+turns Pingora callbacks into pipeline calls. HTTP listeners go to the
+Pingora HTTP handler (`crates/protocol/src/http/pingora/handler/`) and TCP
+listeners to the Pingora TCP handler. An HTTP listener supports both HTTP and
+TCP filters; a TCP listener supports only TCP filters.
 
-## Step 2: Protocol Detection
+The adapter loads the current pipeline from `Arc<ArcSwap<FilterPipeline>>`
+through `ListenerPipelines::get()` (`crates/protocol/src/pipelines.rs`). The
+`load()` call returns an `Arc` guard pinned for the request's lifetime, so a
+reload (`crates/server/src/reload.rs`) never changes the pipeline under a
+running request. See
+[Dynamic Configuration Reload](overview.md#dynamic-configuration-reload).
 
-The listener's `protocol` field (default: `http`)
-determines which protocol adapter handles the
-connection. Each adapter implements the `Protocol`
-trait (`crates/protocol/src/lib.rs`) and translates
-Pingora callbacks into pipeline invocations.
-
-```text
-HTTP listener  -->  Pingora HTTP handler
-TCP listener   -->  Pingora TCP handler
-```
-
-An HTTP listener supports both HTTP and TCP filters.
-A TCP listener supports only TCP filters.
-
-## Step 3: Pipeline Snapshot
-
-The protocol adapter loads the current pipeline from
-`Arc<ArcSwap<FilterPipeline>>` via
-`ListenerPipelines::get()`. The `load()` call returns
-an `Arc` guard pinned for this request's lifetime.
-
-This is how hot reload works without disrupting
-in-flight requests: a reload stores a new pipeline
-into the `ArcSwap`. The next request loads the new
-pointer, while requests already holding a guard
-continue on the old pipeline.
-
-Relevant files:
-- `crates/protocol/src/pipelines.rs`: `ListenerPipelines`
-- `crates/server/src/reload.rs`: reload orchestration
-
-## Step 4: Request Filter Execution
+## Request Filter Execution
 
 The pipeline executor (`crates/filter/src/pipeline/http.rs`)
 runs a while-loop over the flat filter list:
@@ -93,19 +67,15 @@ while idx < filters.len():
 
 For each filter:
 
-1. **Condition check**: if the filter has `when` or
-   `unless` conditions, they are evaluated against
-   the request (path, method, headers). Unmet
-   conditions skip the filter.
-2. **`on_request`**: the filter processes the request.
-   It may set `ctx.cluster` (router), set
-   `ctx.upstream` (load balancer), write filter
-   results, inject headers, or reject the request.
-3. **Branch evaluation**: if the filter has
-   `branch_chains`, each branch's `on_result`
-   condition is checked against `ctx.filter_results`.
-   The first matching branch fires and its rejoin
-   target controls the loop index:
+1. **Condition check**: `when` and `unless` conditions are evaluated against
+   the request (path, method, headers). If they are unmet, the filter is
+   skipped.
+2. **`on_request`**: the filter may set `ctx.cluster` (router), set
+   `ctx.upstream` (load balancer), write filter results, inject headers, or
+   reject the request.
+3. **Branch evaluation**: for a filter with `branch_chains`, each branch's
+   `on_result` condition is checked against `ctx.filter_results`. The first
+   match fires, and its rejoin target sets the loop index:
 
 | Outcome | Effect |
 |---------|--------|
@@ -115,51 +85,27 @@ For each filter:
 | `Terminal` | Stop the pipeline; forward upstream only if the branch selected an upstream, otherwise 500 |
 | `Reject(status)` | Abort with an error response to the client |
 
-Filter results are cleared after branch evaluation
-at each filter.
+Filter results are cleared after branch evaluation at each filter.
 
-Relevant file: `crates/filter/src/pipeline/http.rs`
+## Request Body Processing
 
-## Step 5: Request Body Processing
+The body phase runs only if a filter in the pipeline declared body access,
+as recorded in the pipeline's `BodyCapabilities` (computed at build time).
+Delivery depends on the pipeline's `BodyMode` (`Stream`, `StreamBuffer`, or
+`SizeLimit`); [Body Buffering](body-buffering.md) explains each mode.
 
-Body processing only occurs if any filter in the
-pipeline declared body access. The pipeline's
-`BodyCapabilities` (pre-computed at build time)
-determines this.
+Body filters run in forward order. A filter that returned `BodyDone` is
+skipped on later chunks. The code is in `crates/filter/src/pipeline/http.rs`.
 
-Body delivery depends on `BodyMode`:
+## Upstream Selection and Request
 
-| Mode | Behavior |
-|------|----------|
-| `Stream` | Chunks forwarded immediately; filters see each chunk once |
-| `StreamBuffer` | Chunks buffered until the filter returns `Release` or end-of-stream |
-| `SizeLimit` | Like `Stream`, but enforces a maximum total size |
+The `router` filter matches path, host, and headers against its routes and
+sets `ctx.cluster`. The `load_balancer` filter picks an endpoint from that
+cluster (round-robin, least connections, P2C, consistent hash) and sets
+`ctx.upstream`. The adapter builds an `HttpPeer` from `ctx.upstream`.
 
-Body filters run in forward order. Filters that
-returned `BodyDone` are skipped on subsequent chunks.
-
-Relevant file: `crates/filter/src/pipeline/http.rs`
-
-## Step 6: Upstream Selection
-
-Two filters collaborate to select the backend:
-
-1. **Router** (`router` filter): matches the request
-   path, host, and headers against configured routes.
-   Sets `ctx.cluster` to the winning cluster name.
-2. **Load balancer** (`load_balancer` filter):
-   selects an endpoint from the cluster using the
-   configured strategy (round-robin, least
-   connections, P2C, consistent hash). Sets
-   `ctx.upstream` to the endpoint address.
-
-The protocol adapter reads `ctx.upstream` to build
-an `HttpPeer` for the Pingora connection.
-
-## Step 7: Upstream Request
-
-Pingora connects to the upstream (or reuses a pooled
-connection). Before sending:
+Pingora connects to the upstream or reuses a pooled connection. Before
+sending:
 
 1. Hop-by-hop headers are stripped (with conditional
    preservation for upgrade requests like WebSocket)
@@ -170,47 +116,25 @@ connection). Before sending:
 4. Reserved internal headers (`x-praxis-*`) are
    stripped
 
-Retry logic handles idempotent failures based on
-the cluster's retry configuration.
+Retries of idempotent failures follow the cluster's retry configuration.
+See `crates/protocol/src/http/pingora/handler/upstream_peer.rs`.
 
-Relevant file:
-`crates/protocol/src/http/pingora/handler/upstream_peer.rs`
+## Response Processing
 
-## Step 8: Response Filter Execution
+Response filters run in **reverse order**, and only those that ran in the
+request phase. A filter skipped by a condition or by `SkipTo` is also
+skipped in the response phase and in both body phases. Each `on_response`
+gets the upstream response headers and can change them or reject the
+response. `response_conditions` on the filter entry can gate it further on
+response status or headers (`crates/filter/src/pipeline/http.rs`).
 
-Response filters execute in **reverse order** (last
-filter first). Only filters that actually executed
-during Step 4 run. Filters skipped by conditions
-or `SkipTo` are also skipped in the response phase,
-and in the request-body and response-body phases.
+Response body filters also run in reverse, with the same `BodyMode` logic
+as the request body and the same `BodyDone` skipping. This phase is
+synchronous: `on_response_body` is a plain `fn` on the `HttpFilter` trait,
+so response body filters cannot await.
 
-Each filter's `on_response` receives the upstream
-response headers and can modify them or reject the
-response.
-
-Response conditions (`response_conditions` on the
-filter entry) can further gate execution based on
-response status or headers.
-
-Relevant file: `crates/filter/src/pipeline/http.rs`
-
-## Step 9: Response Body Processing
-
-Response body filters run in **reverse order**,
-using the same `BodyMode` logic as request body
-processing. This phase is synchronous:
-`on_response_body` is a plain `fn` on the `HttpFilter`
-trait, so response body filters cannot await.
-
-Filters that returned `BodyDone` during earlier
-chunks are skipped.
-
-## Step 10: Response Delivery
-
-Pingora sends the complete response to the client.
-The upstream connection is returned to the
-connection pool for reuse. The `Arc` guard on the
-pipeline snapshot is released.
+Pingora then sends the response, returns the upstream connection to the
+pool, and the request's `Arc` guard on the pipeline snapshot is released.
 
 ## What Can Go Wrong
 

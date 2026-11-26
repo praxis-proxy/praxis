@@ -2,38 +2,13 @@
 
 ## Workspace Crates
 
-**`praxis`** : Binary entry point. Loads YAML config, resolves
-per-listener filter chains into pipelines, registers protocol
-handlers, starts the server. Exposes `run_server` and
-`init_tracing` for extension binaries.
-
-**`praxis-core`** : Configuration types (YAML parsing via
-serde), validation, error types, upstream connectivity
-options, `KvStoreRegistry` (concurrent registry of
-dynamic key-value stores with pluggable backends), and
-the network backend contract: the `ServerRuntime` trait,
-the `egress` connector and session traits with `PeerSpec`,
-and the `backend` module that resolves them to the
-selected backend (Pingora by default; hyper under the
-experimental `hyper` feature).
-
-**`praxis-filter`** : Filter pipeline engine. Defines the
-`HttpFilter` and `TcpFilter` traits, condition evaluation,
-body access declarations, the `FilterPipeline` executor,
-`FilterRegistry`, and all built-in filter implementations.
-
-**`praxis-protocol`** : Thin protocol adapters that translate
-the network backend's callbacks (Pingora, or hyper) into
-filter pipeline invocations. `Protocol` trait,
-`ListenerPipelines`, HTTP and TCP implementations, the
-backend-neutral admin, health and metrics handlers, and the
-`backend` module that exposes the selected backend's adapters.
-
-**`praxis-tls`** : TLS configuration types and runtime
-setup. Defines `ListenerTls` (certificate list, client CA,
-cert mode), `ClusterTls` (upstream TLS settings), TLS
-certificate loading, and SNI-based certificate selection.
-Used by `praxis-core` and `praxis-protocol`.
+| Crate | Contents |
+| ----- | -------- |
+| `praxis` | Binary entry point: loads the YAML config, resolves each listener's filter chains into a pipeline, registers protocol handlers, starts the server. Exposes `run_server` and `init_tracing` for extension binaries. |
+| `praxis-core` | Config types (serde YAML), validation, error types, upstream connectivity options, `KvStoreRegistry` (concurrent registry of dynamic key-value stores with pluggable backends), and the network backend contract: the `ServerRuntime` trait, the `egress` connector and session traits with `PeerSpec`, and the `backend` module that resolves them to the selected backend (Pingora by default; hyper under the experimental `hyper` feature). |
+| `praxis-filter` | Pipeline engine: the `HttpFilter` and `TcpFilter` traits, condition evaluation, body access declarations, the `FilterPipeline` executor, `FilterRegistry`, and every built-in filter. |
+| `praxis-protocol` | Thin adapters from the network backend's callbacks (Pingora or hyper) to pipeline calls: the `Protocol` trait, `ListenerPipelines`, HTTP and TCP implementations, the backend-neutral admin, health and metrics handlers, and the `backend` module that exposes the selected backend's adapters. |
+| `praxis-tls` | TLS config types and runtime setup: `ListenerTls` (certificate list, client CA, cert mode), `ClusterTls` (upstream TLS settings), certificate loading, and SNI-based certificate selection. Used by `praxis-core` and `praxis-protocol`. |
 
 ## Module Tree
 
@@ -328,40 +303,27 @@ sequenceDiagram
     M->>M: drop TracingGuard (flush logs, export spans)
 ```
 
-Configuration resolves through three phases. First,
-YAML is deserialized into `Config` containing
-`Vec<Listener>`, `Vec<FilterChainConfig>`, and
-`Vec<Cluster>`, then validated.
-Second, `resolve_pipelines` indexes chains by name, then
-per listener flattens its named chains into
-`FilterEntry` values, instantiates each via the registry
-into `AnyFilter`, and assembles a `FilterPipeline` with
-pre-computed `BodyCapabilities`. All pipelines collect
-into `ListenerPipelines` (listener name →
-`Arc<FilterPipeline>`). Third, protocol implementations
-bind sockets per listener, attaching handlers that hold
-a reference to the listener's resolved pipeline.
+`resolve_pipelines` produces `ListenerPipelines` (listener name →
+`Arc<FilterPipeline>`). Each protocol then binds its listeners' sockets and
+attaches handlers that hold the listener's resolved pipeline.
 
 ### The backend runtime
 
 `praxis_core::backend::Runtime` is the selected network backend's runtime
 (`PingoraServerRuntime` under the default `pingora` feature, `HyperRuntime`
 under `hyper`); every backend implements
-`praxis_core::server::ServerRuntime`. Protocols call
-`Protocol::register()` to add their listeners, then the
-runtime runs all protocols on a single server. This enables
-mixed HTTP + TCP listeners in one process.
+`praxis_core::server::ServerRuntime`. Each protocol adds its listeners
+with `Protocol::register()`, and the runtime runs every protocol on one
+server, so HTTP and TCP listeners can share a process.
 
-Add new protocols by writing an adapter that implements
-`Protocol::register()`. Add a new backend by implementing the
-contract described in
+A new protocol is an adapter that implements `Protocol::register()`. A new
+backend implements the contract in
 [Adding a Network Backend](../developing/adding-backends.md).
 
 ## Test Structure
 
-All crates have unit tests, but the `tests/` directory contains
-integration, conformance and other test suites that operate at
-a higher level and across multiple crates.
+Every crate has unit tests. The `tests/` directory holds the suites that
+run across crates:
 
 | Crate | Purpose |
 | ------- | --------- |

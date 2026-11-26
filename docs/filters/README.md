@@ -2,75 +2,14 @@
 
 ## Filter Model
 
-Filters are the core processing units in Praxis. Each
-filter is a small (preferably), composable function that
-inspects or transforms traffic at a single point in the
-request/response lifecycle.
+A filter inspects or transforms traffic at one point in the request/response
+lifecycle. Filters are chained into pipelines: the pipeline calls each filter
+in order on requests and in reverse on responses.
 
-Filters are chained into pipelines; the pipeline executor
-calls each filter in order on requests and in reverse on responses.
-
-New to filter development? Start with the
-[HTTP Filter Tutorial](../developing/http-filter-tutorial.md) to build,
-register, test, and run a small filter end to end.
-
-For listener and chain resolution architecture, see
-the [architecture overview](../architecture/overview.md).
-
-### What Filters Receive
-
-**HTTP filters** receive an `HttpFilterContext` containing:
-
-- `client_addr`: downstream IP (from the TCP connection)
-- `downstream_tls`: whether the client connection uses TLS
-- `health_registry`: endpoint health state
-- `request`: method, URI, and headers
-- `response_header`: response status and headers (**only in response phase**)
-- `cluster` / `upstream`: current routing selections (may be set by earlier filters)
-- `rewritten_path`: path set by a preceding rewrite filter (**Praxis will include this in routing decisions**)
-- Request and response body chunks (only if the filter declares `BodyAccess::ReadOnly` or `BodyAccess::ReadWrite`)
-
-**TCP filters** receive a `TcpFilterContext` with
-connection metadata: `remote_addr`, `local_addr`, `sni`
-(SNI hostname from TLS ClientHello), `upstream_addr`
-(mutable via `Cow`), timing, and byte counters.
-
-### What Filters Can Do
-
-Every filter hook returns a `FilterAction`:
-
-- **`Continue`**: pass to the next filter in the pipeline.
-- **`Reject`**: short-circuit with an HTTP response (status code, optional headers and body).
-  Used by `static_response`, `redirect`, `rate_limit`, `guardrails`, `cors` preflight, and similar filters.
-- **`Release`**: forward accumulated body data to upstream when using `StreamBuffer` mode.
-  Behaves as `Continue` when body data is not relevant.
-
-Filters also mutate `HttpFilterContext` fields to
-influence downstream processing:
-
-- `ctx.cluster`: select which upstream cluster to route to.
-- `ctx.upstream`: select a specific endpoint.
-- `ctx.rewritten_path`: rewrite the upstream request path.
-- `ctx.extra_request_headers`: inject headers into the
-  upstream request.
-- `ctx.request_headers_to_set`: overwrite headers on the
-  upstream request.
-- `ctx.request_headers_to_remove`: remove headers from the
-  upstream request.
-- `ctx.filter_metadata`: write durable per-request metadata
-  (`FilterMetadata`: keys up to 64 bytes, values up to 256
-  bytes, at most 128 entries).
-- `ctx.filter_results`: write key-value results for
-  [branch chain](branch-chains.md) evaluation. Results
-  are keyed by the filter's TYPE name (the return value
-  of `HttpFilter::name()`). See
-  [Pipeline Concepts: Filter Results](../architecture/pipeline-concepts.md#filter-results)
-  for the full lifecycle.
-- `ctx.response_header`: mutate response headers and status
-  directly in `on_response`.
-- `ctx.response_headers_modified`: optional hint that response
-  headers were changed. Not required for correctness; the
-  protocol layer detects changes on its own.
+New to filter development? The
+[HTTP Filter Tutorial](../developing/http-filter-tutorial.md) builds,
+registers, tests, and runs a small filter end to end. For listener and chain
+resolution, see the [architecture overview](../architecture/overview.md).
 
 ### Lifecycle Hooks
 
@@ -85,65 +24,64 @@ influence downstream processing:
 | `on_response_body` | Reverse | Response body chunks |
 
 `on_request_head` runs once, before any body is read, for filters that opt in
-via `runs_request_head`. It only runs for **top-level** filters: a filter
-nested inside a branch chain never runs its head hook (a `head_classifier`
-placed inside a branch chain silently does nothing), and a head filter inside
-an `iterative_request_router` step is rejected at config build — the head phase
-runs once at ingress, never inside an iterative exchange — unless it declares
-`repeats_request_head`, because its `on_request` does the same work. Facts it publishes
-(extensions, metadata, filter results, trusted header mutations) are visible
-both during a later `stream_buffer` pre-read and the request phase.
+via `runs_request_head`. Only top-level filters run it: a filter nested in a
+branch chain never does (a `head_classifier` placed there silently does
+nothing). A head filter inside an `iterative_request_router` step is rejected
+at config build, because the head phase runs once at ingress and never inside
+an iterative exchange, unless it declares `repeats_request_head` (its
+`on_request` does the same work). What the head hook publishes (extensions,
+metadata, filter results, trusted header mutations) is visible to a later
+`stream_buffer` pre-read and to the request phase.
 
-A filter whose head hook may reject the request, as an admission check does,
-declares `admits_at_request_head`. The pipeline skips that hook when an
-earlier top-level filter, or a filter in one of its branches, can end the
-request in its request phase (one
-that answers like `static_response` or `redirect`, or any filter that does not
-declare `may_end_request` false, as `forwarded_headers` and `headers` do), and
-the filter admits in `on_request` instead, so the earlier filter still
-runs first. A `stream_buffer` pre-read runs body hooks before any request
-phase, so there the pipeline holds that filter's body-phase rejection until
-the request phase reaches it, and runs no later body hook. A filter with
-request `conditions` skips its head hook and admits in `on_request`, where its
-conditions see the headers that head filters publish; a pre-read still runs
-its body hook first when those conditions already match. The `policy` filter uses the head
-phase this way: where it can, it rate-limits and authenticates before any
-filter reads the body. When a route replaces or extends authentication in a
-way the head can't match, the head only rate-limits and identity waits for
-the route, with the body buffered until then; see
-[`policy`](http/security/policy.md).
+A filter whose head hook may reject the request, such as an admission check,
+declares `admits_at_request_head`. The pipeline skips that head hook, and the
+filter admits in `on_request` instead, in two cases:
 
-Request `conditions` gate the request and ordinary body hooks. Response
+- An earlier top-level filter, or a filter in one of its branches, can end the
+  request in its request phase: one that answers, like `static_response` or
+  `redirect`, or any filter that does not declare `may_end_request` false (as
+  `forwarded_headers` and `headers` do). This keeps the earlier filter
+  running first. A `stream_buffer` pre-read runs body hooks before any
+  request phase, so the pipeline holds the admitting filter's body-phase
+  rejection until the request phase reaches it, and runs no later body hook.
+- The filter has request `conditions`. Admitting in `on_request` lets those
+  conditions see the headers head filters publish. A pre-read still runs its
+  body hook first when the conditions already match.
+
+The `policy` filter uses the head phase this way: where it can, it
+rate-limits and authenticates before any filter reads the body. When a route
+replaces or extends authentication in a way the head can't match, the head
+only rate-limits, and identity waits for the route with the body buffered
+until then; see [`policy`](http/security/policy.md).
+
+Request `conditions` gate `on_request` and the ordinary body hooks;
 `response_conditions` gate only the response hooks. A filter skipped on
 request is also skipped on response and on every body hook, ordinary and
-selected-upstream. The bound-upstream body hook is the deliberate exception:
-its conditions are evaluated at the freeze, right after the binding router, so
-a later top-level participant receives the body before its own `on_request`
-position is reached, and a condition on a header or result that a later filter
-would produce does not match, because that filter has not run yet.
+selected-upstream. There are two exceptions:
 
-The one exception is a `stream_buffer` pre-read, which
-runs the request-body hooks *before* the request phase.
-Nothing has been skipped at that point, so every filter
-declaring request-body access runs.
+- A `stream_buffer` pre-read runs the request-body hooks *before* the request
+  phase. Nothing has been skipped yet, so every filter declaring request-body
+  access runs.
+- The bound-upstream body hook's conditions are evaluated at the freeze, right
+  after the binding router. A later top-level participant receives the body
+  before its own `on_request` position, so a condition on a header or result
+  that a later filter would produce does not match: that filter has not run
+  yet.
 
 Filters that need the logical route declare
 `bound_upstream_request_body_access` and implement
-`on_bound_upstream_request_body`, which requires the experimental
-`bound-upstream-request-body` build feature. That hook runs at most once after
-the binding router freezes `BoundUpstream`; a read-write
-participant replaces the canonical body used by direct
-dispatch, IRR, retries, and selected-upstream adaptation.
-Use `binds_upstream`, `consumes_bound_upstream`,
-`bound_upstream_clusters`, `declared_cluster_metadata`, and
-`nested_bound_upstream_readers` only for routing filters
-whose capabilities must be visible to pipeline validation.
+`on_bound_upstream_request_body` (experimental `bound-upstream-request-body`
+build feature). The hook runs at most once, after the binding router freezes
+`BoundUpstream`. A read-write participant replaces the canonical body used by
+direct dispatch, IRR, retries, and selected-upstream adaptation. Use
+`binds_upstream`, `consumes_bound_upstream`, `bound_upstream_clusters`,
+`declared_cluster_metadata`, and `nested_bound_upstream_readers` only for
+routing filters whose capabilities must be visible to pipeline validation.
 
-A filter may declare *both* `request_body_access` (pre-read) and
-`bound_upstream_request_body_access` (the barrier). Core infers one effective
+A filter may declare both `request_body_access` (pre-read) and
+`bound_upstream_request_body_access` (the barrier). Core picks one effective
 phase per filter from whether it carries a `bound_upstream` request condition,
-and runs the hook exactly once — declaring both defers the body work to the
-barrier when a condition asks for it, and never runs it twice:
+and runs the hook exactly once:
 
 | Declared access | Has `bound_upstream` condition | Runs at |
 | --- | --- | --- |
@@ -155,16 +93,15 @@ barrier when a condition asks for it, and never runs it twice:
 
 ### Common Patterns
 
-See [`examples/configs/`] for working examples of every
-pattern. A few highlights:
+[`examples/configs/`] has a working example of every pattern, including:
 
-- **Host-based routing**: [hosts.yaml]
-- **Path-based routing with rewriting**: [path-based-routing.yaml]
-- **Security chain** (guardrails + IP ACL): [guardrails.yaml], [ip-acl.yaml]
-- **Rate limiting with headers**: [rate-limiting.yaml]
-- **Composed filter chains**: [composed-chains.yaml]
-- **Conditional filters**: [conditional-filters.yaml]
-- **Production gateway**: [production-gateway.yaml]
+- Host-based routing: [hosts.yaml]
+- Path-based routing with rewriting: [path-based-routing.yaml]
+- Security chain (guardrails + IP ACL): [guardrails.yaml], [ip-acl.yaml]
+- Rate limiting with headers: [rate-limiting.yaml]
+- Composed filter chains: [composed-chains.yaml]
+- Conditional filters: [conditional-filters.yaml]
+- Production gateway: [production-gateway.yaml]
 
 [`examples/configs/`]: ../../examples/configs/
 [hosts.yaml]: ../../examples/configs/traffic-management/hosts.yaml
@@ -179,43 +116,22 @@ pattern. A few highlights:
 
 ## Filter Chains (Pipelining)
 
-Filter chains are named, reusable groups of filters defined
-at the top level of the config. A listener references one or
-more chains by name; the filters are concatenated in order
-to form that listener's pipeline. This config-time assembly
-is called **pipelining**; it decides *what processing* a
-request receives. It is distinct from **routing**, where
-the `router` filter selects an upstream cluster at request
-time.
+Filter chains are named groups of filters defined at the top level of the
+config. A listener references one or more chains by name, and their filters
+are concatenated in order into that listener's pipeline, so a "security" chain
+can serve every public listener while internal listeners skip it. This
+config-time assembly is **pipelining**: it decides *what processing* a request
+receives. **Routing** is separate: the `router` filter picks an upstream
+cluster at request time.
 
-```mermaid
-flowchart LR
-    subgraph "Listener: public"
-        direction LR
-        S["security chain"] --> O["observability chain"]
-        O --> R["traffic chain"]
-    end
-
-    subgraph "Listener: internal"
-        direction LR
-        O1["observability chain"] --> R2["traffic chain"]
-    end
-```
-
-This enables reuse without duplication. A "security" chain
-can be shared across public listeners while internal
-listeners skip it entirely.
-
-For conditional branching within pipelines, see
-[Branch Chains](branch-chains.md). For the full mental
-model of how chains become pipelines, see
-[Pipeline Concepts](../architecture/pipeline-concepts.md).
+[Pipeline Concepts](../architecture/pipeline-concepts.md) explains how chains
+become a pipeline; [Branch Chains](branch-chains.md) covers conditional
+branching inside one.
 
 ### Inherited Chain Conditions
 
-A chain can declare a `conditions:` block that every filter
-in the chain inherits, so a shared gate is written once at
-the chain level instead of being repeated on each filter:
+A chain-level `conditions:` block is inherited by every filter in the chain,
+so a shared gate is written once:
 
 ```yaml
 filter_chains:
@@ -236,47 +152,34 @@ filter_chains:
             value: "true"
 ```
 
-Chain conditions are **prepended** to each filter's own
-conditions and compose with them using AND semantics: the
-chain condition is evaluated first, then the filter's local
-conditions (effective = chain AND filter). Above,
-`json_body_field` runs only when the path matches `/api/`
-**and** the method is `POST`, while `headers` runs on any
-`/api/` request. A request-phase condition gates both a
-filter's request and response hooks, so the inherited
-condition skips every hook in the chain (request-body
-promotion and response tagging alike) for non-matching
-traffic. Listener-wide effects are not gated: a
-`StreamBuffer` body filter in a gated chain still buffers
-and size-limits every request (or response) body on the
-listener, and `compression` still applies to every eligible
-response. In this example, `json_body_field` pre-reads even
-`/health` request bodies to end of stream before forwarding.
+Chain conditions are prepended to each filter's own conditions and ANDed
+with them (effective = chain AND filter). Here `json_body_field` runs only for
+`/api/` paths and `POST`, while `headers` runs on any `/api/` request.
+Because a request-phase condition gates a filter's request and response hooks,
+the inherited condition skips every hook in the chain (request-body promotion
+and response tagging alike) for non-matching traffic.
 
-Chain-level conditions get the same well-formedness and
-metadata validation as per-filter conditions and behave
-identically to conditions repeated on each filter, so
-existing configs are unaffected. Inheritance applies wherever
-a named chain is expanded: chains referenced from a listener's
-`filter_chains`, and named references from branch chains and
-outbound bindings. Only request-phase conditions are inherited;
-a branch child still runs its request and response header hooks
-(`on_request`, `on_response`) but not its body hooks
-(`on_request_body`, `on_response_body`), exactly as before. See
+Listener-wide effects are not gated. A `StreamBuffer` body filter in a gated
+chain still buffers and size-limits every request (or response) body on the
+listener, and `compression` still applies to every eligible response. In this
+example, `json_body_field` pre-reads even `/health` request bodies to end of
+stream before forwarding.
+
+Chain-level conditions get the same well-formedness and metadata validation
+as per-filter conditions and behave exactly like conditions repeated on each
+filter, so existing configs are unaffected. Inheritance applies wherever a
+named chain is expanded: from a listener's `filter_chains`, and from named
+references in branch chains and outbound bindings. Only request-phase
+conditions are inherited. A branch child still runs `on_request` and
+`on_response` but not `on_request_body` or `on_response_body`. See
 [inherited-conditions.yaml].
 
 ### Protocol-Specific Filters
 
-Every filter belongs to exactly one protocol level. HTTP
-filters implement the `HttpFilter` trait (`on_request`,
-`on_response`, body hooks). TCP filters implement the
-`TcpFilter` trait (`on_connect`, `on_disconnect`). There
-is no generic filter that operates at both levels. The
-`AnyFilter` enum tags each filter with its protocol for
-storage in a unified pipeline.
-
-Built-in filters are organized by protocol, then by
-category:
+Every filter belongs to exactly one protocol level. HTTP filters implement
+`HttpFilter` (`on_request`, `on_response`, body hooks); TCP filters implement
+`TcpFilter` (`on_connect`, `on_disconnect`). No filter operates at both
+levels. Built-in filters are organized by protocol, then category:
 
 ```text
 builtins/
@@ -291,33 +194,19 @@ builtins/
     traffic_management/       SNI router, TCP load balancer
 ```
 
-At runtime, pipeline execution dispatches to the correct
-filter type. HTTP execution (`execute_http_request`,
-`execute_http_response`, body hooks) calls only HTTP
-filters, skipping TCP entries. TCP execution
-(`execute_tcp_connect`, `execute_tcp_disconnect`) calls
-only TCP filters, skipping HTTP entries.
+HTTP execution (`execute_http_request`, `execute_http_response`, body hooks)
+calls only HTTP filters; TCP execution (`execute_tcp_connect`,
+`execute_tcp_disconnect`) calls only TCP filters. Each skips the other kind's
+entries.
 
-**Protocol stack model.** Higher-level protocols include
-lower levels. HTTP's stack includes TCP, so an HTTP
-listener accepts both HTTP and TCP filters in its
-pipeline. A TCP listener accepts only TCP filters.
-Validation enforces this via `ProtocolKind::supports()`.
+An HTTP listener's protocol stack includes TCP, so it accepts both kinds of
+filter; a TCP listener accepts only TCP filters. Validation enforces this via
+`ProtocolKind::supports()`.
 
 | Listener Protocol | HTTP Filters | TCP Filters |
 | --- | --- | --- |
 | `http` (default) | Yes | Yes |
 | `tcp` | No | Yes |
-
-```mermaid
-flowchart TD
-    AnyFilter --> HttpFilter
-    AnyFilter --> TcpFilter
-
-    HttpListener["HTTP Listener"] -->|supports| HttpFilter
-    HttpListener -->|supports| TcpFilter
-    TcpListener["TCP Listener"] -->|supports| TcpFilter
-```
 
 ## What Stays Outside Filters
 
@@ -346,15 +235,10 @@ pub trait HttpFilter: Send + Sync {
 }
 ```
 
-The trait also defines body access, body mode, and body
-hook methods. See [Body Access](#body-access-http-only)
-below for the full API.
-
-`on_request` runs in order, `on_response` in reverse.
+The body access, body mode, and body hook methods are under
+[Body Access](#body-access-http-only).
 
 ## TcpFilter Trait
-
-TCP-level filters implement `TcpFilter`:
 
 ```rust
 #[async_trait]
@@ -373,20 +257,21 @@ pub trait TcpFilter: Send + Sync {
 }
 ```
 
-`on_connect` fires when a TCP connection is accepted.
-`on_disconnect` fires when the connection closes. Both
-hooks have default implementations that pass through.
+`on_connect` fires when a TCP connection is accepted and `on_disconnect` when
+it closes. Both default to passing through.
 
 ## FilterAction
 
-- `Continue` : pass to next filter
-- `Reject(rejection)` : stop pipeline, respond now
-- `Release` : forward accumulated StreamBuffer data to
-  upstream; behaves as `Continue` in non-StreamBuffer
-  contexts
-- `BodyDone` : signal that this filter has finished body
-  processing; subsequent body chunks skip this filter
-  while other filters continue normally
+Every filter hook returns a `FilterAction`:
+
+- `Continue`: pass to the next filter.
+- `Reject(rejection)`: stop the pipeline and respond now (status code,
+  optional headers and body). Used by `static_response`, `redirect`,
+  `rate_limit`, `guardrails`, `cors` preflight, and similar filters.
+- `Release`: forward accumulated `StreamBuffer` data to upstream. Behaves as
+  `Continue` outside `StreamBuffer` mode.
+- `BodyDone`: this filter has finished body processing. Later body chunks skip
+  it while other filters continue normally.
 
 ```rust
 FilterAction::Reject(Rejection::status(429)
@@ -431,6 +316,35 @@ pub struct HttpFilterContext<'a> {
 }
 ```
 
+The fields filters most often read or write:
+
+- `request` is the method, URI, and headers. `client_addr` is the downstream
+  IP from the TCP connection, `downstream_tls` says whether the client
+  connection uses TLS, and `health_registry` holds endpoint health state.
+- `ctx.cluster` and `ctx.upstream` select the upstream cluster and a specific
+  endpoint. Earlier filters may already have set them.
+- `ctx.rewritten_path` rewrites the upstream request path, and the router
+  routes on it (see [Rewrite and Routing
+  Interaction](#rewrite-and-routing-interaction)).
+- `ctx.extra_request_headers`, `ctx.request_headers_to_set`, and
+  `ctx.request_headers_to_remove` inject, overwrite, and remove upstream
+  request headers.
+- `ctx.filter_metadata` holds durable per-request metadata (`FilterMetadata`:
+  keys up to 64 bytes, values up to 256 bytes, at most 128 entries).
+- `ctx.filter_results` holds key-value results for
+  [branch chain](branch-chains.md) evaluation, keyed by the filter's type name
+  (the return value of `HttpFilter::name()`). See
+  [Pipeline Concepts: Filter Results](../architecture/pipeline-concepts.md#filter-results)
+  for the full lifecycle.
+- `ctx.response_header` holds the response status and headers, only in the
+  response phase; `on_response` can mutate it directly.
+  `ctx.response_headers_modified` is an optional hint that response headers
+  changed. It isn't needed for correctness: the protocol layer detects changes
+  on its own.
+
+Body chunks reach a filter only if it declares `BodyAccess::ReadOnly` or
+`BodyAccess::ReadWrite`.
+
 ## TcpFilterContext
 
 Per-connection state for TCP filters:
@@ -450,20 +364,16 @@ pub struct TcpFilterContext<'a> {
 }
 ```
 
-The `sni` field is populated by the TCP proxy when it peeks
-at the first bytes of a TLS connection and extracts the SNI
-hostname from the ClientHello. Filters like `sni_router` use
-this to select an upstream. The `upstream_addr` field is an
-`Option<Cow>`, `None` until a static upstream or filter
-provides one; filters can replace it with an owned value.
-The `cluster` field names the selected cluster, and
-`health_registry` / `kv_stores` provide access to shared
-runtime state.
+The TCP proxy fills `sni` by peeking at the first bytes of a TLS connection
+and extracting the SNI hostname from the ClientHello; filters like
+`sni_router` use it to select an upstream. `upstream_addr` is `None` until a
+static upstream or a filter provides one, and filters can replace it with an
+owned value. `cluster` names the selected cluster, and `health_registry` /
+`kv_stores` give access to shared runtime state.
 
 ## AnyFilter
 
-The `AnyFilter` enum wraps both filter variants for storage
-in a unified registry and pipeline:
+`AnyFilter` wraps both kinds for storage in a unified registry and pipeline:
 
 ```rust
 pub enum AnyFilter {
@@ -472,12 +382,12 @@ pub enum AnyFilter {
 }
 ```
 
-Each variant reports its `protocol_level()` as
-`ProtocolKind::Http` or `ProtocolKind::Tcp`.
+Each variant reports its `protocol_level()` as `ProtocolKind::Http` or
+`ProtocolKind::Tcp`.
 
 ## Body Access (HTTP only)
 
-Filters see headers only by default. Opt in:
+Filters see headers only, unless they opt in:
 
 ```rust
 fn request_body_access(&self) -> BodyAccess {
@@ -491,10 +401,10 @@ fn request_body_access(&self) -> BodyAccess {
 | `ReadOnly(requirement)`  | Yes | No  |
 | `ReadWrite(requirement)` | Yes | Yes |
 
-`requirement` is `BodyRequirement::Optional` or
-`BodyRequirement::Required`. `Required` also prevents an
-admitted opaque WebSocket tunnel from bypassing that selected
-HTTP body processing. See the [filter extension guide](../developing/extensions.md#declare-body-access-accurately).
+`requirement` is `BodyRequirement::Optional` or `BodyRequirement::Required`.
+`Required` also prevents an admitted opaque WebSocket tunnel from bypassing
+that selected HTTP body processing. See the
+[filter extension guide](../developing/extensions.md#declare-body-access-accurately).
 
 ### Body Mode
 
@@ -504,21 +414,16 @@ HTTP body processing. See the [filter extension guide](../developing/extensions.
 | `StreamBuffer { max_bytes }`  | Deferred stream | Inspection before forward |
 | `SizeLimit { max_bytes }`     | Stream + ceiling | Global size enforcement  |
 
-If any filter requests `StreamBuffer`, the pipeline
-defers upstream forwarding until release. `SizeLimit`
-streams chunks without buffering but enforces a byte
-ceiling, returning 413 on overflow. It is used when no
-filter needs body access but a global size limit is
-configured. Precedence: `StreamBuffer` > `SizeLimit` >
-`Stream`.
+Precedence: `StreamBuffer` > `SizeLimit` > `Stream`.
 
-### StreamBuffer Mode
-
-`StreamBuffer` combines streaming inspection with deferred
-forwarding. Filters see each chunk as it arrives (like
-`Stream`) but the protocol layer accumulates them and does
-not forward to upstream until a filter returns
-`FilterAction::Release` or end-of-stream is reached.
+`StreamBuffer` gives filters each chunk as it arrives, like `Stream`, but the
+protocol layer accumulates the chunks and forwards nothing upstream until a
+filter returns `FilterAction::Release` from `on_request_body` or
+`on_response_body`, or end-of-stream is reached. After release, the remaining
+chunks flow through in stream mode. If any filter requests `StreamBuffer`, the
+pipeline defers forwarding this way. It suits API and security gateways that
+inspect bodies before forwarding (routing on a JSON model field, content
+policy, scanning for PII or injection with early rejection).
 
 ```rust
 fn request_body_mode(&self) -> BodyMode {
@@ -530,25 +435,12 @@ fn request_body_mode(&self) -> BodyMode {
 }
 ```
 
-A filter signals release by returning
-`FilterAction::Release` from `on_request_body` or
-`on_response_body`. After release, remaining chunks flow
-through in stream mode.
+With `max_bytes: None` (the default), `StreamBuffer` accumulates without
+limit; with `Some(n)`, requests over `n` bytes get 413.
 
-When `max_bytes` is `None` (default), StreamBuffer
-accumulates without limit. When `Some(n)`, requests
-exceeding `n` bytes receive 413.
-
-This mode is useful for:
-
-- **API gateways**: inspect request bodies for routing,
-  content policy, or field extraction before forwarding
-- **Security gateways**: scan payloads for malware
-  signatures, PII, or injection attacks with early
-  rejection
-- **Body-based routing**: peek at request body content
-  (e.g. JSON model field) to select a cluster, then
-  release and forward
+`SizeLimit` streams chunks without buffering but enforces a byte ceiling,
+returning 413 on overflow. The pipeline uses it when no filter needs body
+access but a global size limit is configured.
 
 ### Body Hooks
 
@@ -568,16 +460,16 @@ fn on_response_body(
 ) -> Result<FilterAction, FilterError>;
 ```
 
-Override `needs_request_context() -> true` to access request
-headers in body hooks.
+Override `needs_request_context() -> true` to access request headers in body
+hooks.
 
 ## Conditional Execution
 
-Add `conditions` to any HTTP filter chain entry. Fields within
-a condition are ANDed; all conditions must pass. TCP filters
-take no `conditions`, `response_conditions` or
-`branch_chains`; a config that sets them on a TCP filter is
-rejected.
+Add `conditions` to any HTTP filter chain entry. Fields within a condition are
+ANDed, and all conditions must pass. TCP filters take no `conditions`,
+`response_conditions` or `branch_chains`; a config that sets them on a TCP
+filter is rejected. A filter skipped on request is skipped on its other hooks
+too, with the exceptions in [Lifecycle Hooks](#lifecycle-hooks).
 
 | Field               | Matches when                                    |
 | ------------------- | ----------------------------------------------- |
@@ -590,15 +482,15 @@ rejected.
 | `selected_upstream` | Load-balancer-selected upstream metadata match  |
 
 `grpc` classifies the request from its `content-type` header
-(`application/grpc`, `application/grpc+proto`, `application/grpc+json`,
-or any other `application/grpc+<codec>`). It reads the header directly,
-so it works without the `grpc_detection` filter and does not depend on
-filter ordering. `application/grpc-web` is a distinct protocol and does
-not match.
+(`application/grpc`, `application/grpc+proto`, `application/grpc+json`, or
+any other `application/grpc+<codec>`). It reads the header directly, so it
+works without the `grpc_detection` filter and does not depend on filter
+ordering. `application/grpc-web` is a distinct protocol and does not match.
 
-For `path_prefix`, `/api` matches `/api` and `/api/v1`, but not
-`/apikeys`. One trailing slash on a configured prefix is ignored, so
-`/api/` is equivalent to `/api`.
+`path` matches exactly (for example, health checks on `/`). For
+`path_prefix`, `/api` matches `/api` and `/api/v1`, but not `/apikeys`. One
+trailing slash on a configured prefix is ignored, so `/api/` is equivalent to
+`/api`.
 
 ```yaml
 # Rate limit only gRPC calls.
@@ -628,16 +520,23 @@ filter_chains:
             value: "v2"
 ```
 
-`headers_present` takes a list of header names and matches
-when every one of them is on the request, whatever the value
-(an empty value counts). Names are case-insensitive. Under
-`unless` it runs a filter only when a header is missing,
-which suits filling in defaults without overwriting what the
-client sent. In the pre-read body phase it also sees headers
-that earlier body filters promoted. Request headers come from
-the client, so any client can skip a filter gated this way by
-sending the header; only use it where that's fine or where a
-trusted hop sets or strips the header. See
+```yaml
+- filter: static_response
+  conditions:
+    - when:
+        path: "/"
+  status: 200
+  body: "ok"
+```
+
+`headers_present` takes a list of header names and matches when every one is
+on the request, whatever the value (an empty value counts). Names are
+case-insensitive. Under `unless` it runs a filter only when a header is
+missing, which suits filling in defaults without overwriting what the client
+sent. In the pre-read body phase it also sees headers that earlier body
+filters promoted. Request headers come from the client, so any client can skip
+a filter gated this way by sending the header; only use it where that's fine
+or where a trusted hop sets or strips the header. See
 [header-presence-condition.yaml].
 
 ```yaml
@@ -653,30 +552,14 @@ trusted hop sets or strips the header. See
 
 [header-presence-condition.yaml]: ../../examples/configs/pipeline/header-presence-condition.yaml
 
-Use `path` for exact matching (e.g., health checks on `/`):
-
-```yaml
-- filter: static_response
-  conditions:
-    - when:
-        path: "/"
-  status: 200
-  body: "ok"
-```
-
-Skipped on request = skipped on response and on ordinary
-body hooks. The bound-upstream body hook is the exception
-described above: it is gated at the binding barrier.
-
 ### Selected-Upstream Conditions
 
 `selected_upstream` matches the application metadata
-(`http.application_protocol`, `http.application_provider`) of
-the routed cluster (the cluster the router selected). The
-load balancer publishes it when it selects an upstream, and
-also when an earlier filter such as `endpoint_selector` has
-already set the endpoint. It has two optional sub-fields;
-when both are set they are ANDed:
+(`http.application_protocol`, `http.application_provider`) of the routed
+cluster (the one the router selected). The load balancer publishes it when it
+selects an upstream, and also when an earlier filter such as
+`endpoint_selector` has already set the endpoint. Both sub-fields are
+optional and ANDed when both are set:
 
 | Sub-field              | Matches when                              |
 | ---------------------- | ----------------------------------------- |
@@ -693,35 +576,32 @@ when both are set they are ANDed:
   # ...path_rewrite config...
 ```
 
-The metadata comes only from the load balancer's selection,
-never from a request header or filter-writable metadata. If
-no upstream has been selected yet, or the cluster does not
-set the field, the predicate fails closed: an unset value
-never satisfies a `when` and never trips an `unless`.
+The metadata comes only from the load balancer's selection, never from a
+request header or filter-writable metadata. If no upstream has been selected
+yet, or the cluster does not set the field, the predicate fails closed: an
+unset value never satisfies a `when` and never trips an `unless`.
 
-Pipeline validation therefore requires an *unconditional*
-`load_balancer` to run before the gated filter on every
-reachable path. A conditional load balancer may not run, so it
-does not count. A load balancer in an unconditional branch, or
+Pipeline validation therefore requires an *unconditional* `load_balancer` to
+run before the gated filter on every reachable path. A conditional load
+balancer may not run, so it does not count; one in an unconditional branch, or
 one that hosts the branch containing the gated filter, does.
 
-Selected-upstream predicates are resolved in the request
-phase. The pre-read body path runs before any selection
-exists, so validation rejects a request-body filter that
-combines a `selected_upstream` condition with the
+Selected-upstream predicates are resolved in the request phase. The pre-read
+body path runs before any selection exists, so validation rejects a
+request-body filter that combines a `selected_upstream` condition with the
 `StreamBuffer` body mode.
 
 #### Routed Embeddings and Decisions APIs
 
-Set `http.application_protocol` on each logical cluster to the identifier
-expected by its consuming filters. The proposed identifiers are
-`openai_embeddings` for Embeddings and `openai_decisions` for Decisions.
-Praxis core carries these values as opaque strings. Downstream filters own
-their interpretation, API behavior, and protocol-specific tests.
+Set `http.application_protocol` on each logical cluster to the identifier its
+consuming filters expect. The proposed identifiers are `openai_embeddings` for
+Embeddings and `openai_decisions` for Decisions. Praxis core carries these
+values as opaque strings; downstream filters own their interpretation, API
+behavior, and protocol-specific tests.
 
-This filter chain assumes one upstream address serves both APIs. The router
-selects a cluster by path. Both clusters declare `vllm` as their provider,
-and each declares its own application protocol.
+In this chain one upstream address serves both APIs and the router picks a
+cluster by path. Both clusters declare `vllm` as their provider, and each its
+own application protocol:
 
 ```yaml
 filter_chains:
@@ -753,29 +633,27 @@ filter_chains:
 ```
 
 After the load balancer selects an endpoint, a later filter can match
-`selected_upstream.application_protocol` to distinguish the two APIs.
-It can also match `selected_upstream.application_provider` when its
-behavior depends on the provider.
+`selected_upstream.application_protocol` to tell the two APIs apart, and
+`selected_upstream.application_provider` when its behavior depends on the
+provider.
 
 #### Routed vLLM System One API
 
 vLLM serves System One at `POST /v1/systemone` and OpenAI Decisions at
-`POST /v1/decisions`. Each endpoint has its own request format. For a
-filter that consumes the System One format, use `vllm_systemone` as a
-proposed protocol identifier and keep `vllm` as the provider. See the
+`POST /v1/decisions`, each with its own request format. For a filter that
+consumes the System One format, use `vllm_systemone` as a proposed protocol
+identifier and keep `vllm` as the provider. See the
 [vLLM Structured Decisions documentation][vllm-structured-decisions].
 
-To route System One to the same upstream address, add this entry to
-the router's `routes` list.
+To route System One to the same upstream address, add a route and a cluster
+to the chain above:
 
 ```yaml
+# router routes:
 - path: "/v1/systemone"
   cluster: systemone
-```
 
-Add the corresponding entry to the load balancer's `clusters` list.
-
-```yaml
+# load_balancer clusters:
 - name: systemone
   endpoints: ["api.example.com:443"]
   tls: {}
@@ -789,9 +667,9 @@ Add the corresponding entry to the load balancer's `clusters` list.
 
 ### Response Conditions
 
-Use `response_conditions` to gate `on_response` execution.
-Response predicates: `status` (list of status codes),
-`headers`, `headers_present`.
+`response_conditions` gate `on_response`. The predicates are `status` (a list
+of status codes), `headers`, and `headers_present`. A filter can have both
+`conditions` (request phase) and `response_conditions` (response phase).
 
 ```yaml
 - filter: headers
@@ -803,34 +681,26 @@ Response predicates: `status` (list of status codes),
       value: "public, max-age=60"
 ```
 
-A filter can have both `conditions` (request phase) and
-`response_conditions` (response phase).
-
 ### Security Filter Restrictions
 
-Filters registered as `SecurityClass::Security` (built-in
-examples: `ip_acl`, `forwarded_headers`; also custom
-filters registered as Security) reject `failure_mode: open`
-by default. Open failure mode on these filters means
-runtime errors would bypass security enforcement. To
-override this check, set
-`insecure_options.allow_open_security_filters: true`, which
-demotes the error to a warning.
+Filters registered as `SecurityClass::Security` (built-in examples: `ip_acl`,
+`forwarded_headers`; also custom filters registered as Security) reject
+`failure_mode: open` by default, because open failure mode would let runtime
+errors bypass security enforcement. Setting
+`insecure_options.allow_open_security_filters: true` demotes the error to a
+warning.
 
 ### Rewrite and Routing Interaction
 
-Both `path_rewrite` and `url_rewrite` set
-`ctx.rewritten_path`. The router checks `rewritten_path`
-before the original URI, enabling "rewrite then route"
-pipelines. If both rewrite filters appear in the same
-pipeline, only the last one takes effect. Validation
-rejects this by default; set `allow_rewrite_override: true`
+Both `path_rewrite` and `url_rewrite` set `ctx.rewritten_path`, and the router
+checks `rewritten_path` before the original URI, so a pipeline can rewrite and
+then route. If both rewrite filters are in one pipeline, only the last takes
+effect. Validation rejects this by default; set `allow_rewrite_override: true`
 on the later filter to permit it.
 
 ## Related
 
-- [Filter Reference](reference.md):
-  configuration for all built-in filters
+- [Filter Reference](reference.md): configuration for all built-in filters
 - [Extensions](../developing/extensions.md): writing custom filters
-- [Payload Processing](../architecture/payload-processing.md):
-  body access architecture
+- [Payload Processing](../architecture/payload-processing.md): body access
+  architecture

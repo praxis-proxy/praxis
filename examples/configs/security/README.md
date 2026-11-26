@@ -1,32 +1,48 @@
 # Security Examples
 
-Security filters protect against threats, enforce access control, and validate requests before they reach upstream services.
+Security filters block threats, enforce access control, and validate requests
+before they reach upstream services.
 
 ## When to Use
 
 - Block requests containing forbidden patterns (prompt injection, PII)
-- Enforce CORS policies for browser-based clients
+- Enforce CORS policies for browser clients
 - Validate request structure and reject malformed payloads
-- Implement authentication and authorization workflows
-- Apply per-model guardrails for AI inference endpoints
-- Restrict which destinations `HTTPS_PROXY` clients can tunnel to through a forward proxy (requires the `forward-proxy` build feature)
+- Authenticate and authorize requests
+- Apply per-model guardrails to AI inference endpoints
+- Restrict which destinations `HTTPS_PROXY` clients can tunnel to through a
+  forward proxy (requires the `forward-proxy` build feature)
 
 ## Key Filters
 
-**Guardrails**: Inspects request headers and bodies for forbidden content patterns. Supports regex matching, size limits, and conditional execution (e.g., per-model gating).
+**Guardrails**: inspects request headers and bodies for forbidden content,
+with regex matching, size limits, and conditional execution (for example,
+per-model gating).
 
-**CORS**: Handles cross-origin resource sharing with configurable origins, methods, headers, and credentials.
+**CORS**: cross-origin resource sharing with configurable origins, methods,
+headers, and credentials.
 
-**Policy**: Integrates with external policy engines (PPE) for complex authorization decisions based on identity, resource attributes, and environmental context.
+**Policy**: authorization through the Praxis Policy Engine (PPE), based on
+identity, resource attributes, and environment.
 
-**Forward proxy**: A listener's `forward_proxy` block accepts CONNECT tunnels, gated by a destination allowlist, by `ip_acl`/`policy` filters on the client, or both. An enabled block with neither is rejected at load. That check is for the presence of a control, not its strictness: an `ip_acl` with no entries admits every client, so keep its `allow` list narrow.
+**Forward proxy**: a listener's `forward_proxy` block accepts CONNECT tunnels,
+gated by a destination allowlist, by `ip_acl`/`policy` filters on the client,
+or both. An enabled block with neither is rejected at load. That check is for
+the presence of a control, not its strictness: an `ip_acl` with no entries
+admits every client, so keep its `allow` list narrow.
+
+The category also holds `basic_auth`, `csrf`, `ip_acl`, `credential_injection`,
+`forwarded_headers`, and `peer_identity_trust`.
 
 ## Best Practices
 
-- Use reserved headers (`x-praxis-*`) for metadata promoted from request bodies to prevent client spoofing
-- Enable `insecure_options.skip_pipeline_checks.conditional_security` when intentionally skipping security filters for some requests
-- Combine classifiers with routing and branching for defense-in-depth
-- Read upstream credentials from the environment (`credential_injection` with `env_var`) rather than committing them as `value:`; see [credential-injection-env-vars.yaml](credential-injection-env-vars.yaml)
+- Promote body metadata to reserved headers (`x-praxis-*`) so clients cannot
+  spoof it.
+- Set `insecure_options.skip_pipeline_checks.conditional_security` when you
+  skip security filters for some requests on purpose.
+- Read upstream credentials from the environment (`credential_injection` with
+  `env_var`) rather than committing them as `value:`; see
+  [credential-injection-env-vars.yaml](credential-injection-env-vars.yaml).
 
 ## Related Documentation
 

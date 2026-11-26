@@ -1,6 +1,6 @@
 # Examples
 
-Configuration examples organized by category.
+Configuration examples, grouped by category.
 
 ## Running an Example
 
@@ -9,30 +9,25 @@ cargo run -p praxis-proxy -- -c examples/configs/traffic-management/basic-revers
 curl http://localhost:8080/
 ```
 
-Configs use local ports (`3000`, `3001`, ...) for
-upstreams. For quick experiments without a real backend,
-use `static_response` (see
-[static-response.yaml](configs/traffic-management/static-response.yaml))
-or run Praxis with no config file for a built-in welcome
-page.
+Configs send upstream traffic to local ports (`3000`, `3001`, ...). Without a
+real backend, use `static_response` (see
+[static-response.yaml](configs/traffic-management/static-response.yaml)) or
+run Praxis with no config file for a built-in welcome page.
 
 ## Quick Test Utilities
 
-**Echo server** for testing without configuration:
+`cargo xtask echo` serves static responses without a config, and
+`cargo xtask debug` runs an example with debug logs, an admin API on :9090,
+and one thread:
 
 ```console
 cargo xtask echo
 curl http://127.0.0.1:8080/
-```
-
-**Debug mode** runs examples with dev-friendly settings (debug logs, admin API on :9090, single-threaded):
-
-```console
 cargo xtask debug examples/configs/security/guardrails-per-model.yaml
 ```
 
-See [Build from source](../docs/getting-started/build-from-source.md#quick-test-servers)
-for full options.
+Options are in
+[Build from source](../docs/getting-started/build-from-source.md#quick-test-servers).
 
 ## Configs
 

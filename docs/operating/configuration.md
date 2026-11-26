@@ -1,10 +1,8 @@
 # Configuration
 
-Single YAML file, passed as CLI argument or set via the
-`PRAXIS_CONFIG` environment variable. See
-`examples/configs/` for working examples.
-
-For individual filter configurations, see the
+Praxis reads one YAML file, passed as a CLI argument or through the
+`PRAXIS_CONFIG` environment variable. Working examples are in
+`examples/configs/`, and each filter's options are in the
 [Filter Reference](../filters/reference.md).
 
 ## Structure
@@ -24,66 +22,47 @@ insecure_options:      # Optional. Dev/test overrides. See developing/getting-st
 
 ## Validating Configuration
 
-Use `--validate` (or `-t`) to check configuration
-without starting the server. The flag loads the config
-through the same parsing and validation path used
-during startup, including filter pipeline construction
-and ordering checks.
+`--validate` (or `-t`) checks a config without starting the server. It runs
+the startup parsing and validation path, including filter pipeline
+construction and ordering checks, compiles built-in policies, and validates
+access-log sink configuration. It binds no listener ports and starts no policy
+plugins or log writers, so startup still checks whether the configured
+resources can initialize.
 
 ```console
 praxis --validate --config praxis.yaml
 praxis -t -c praxis.yaml
 ```
 
-Exits `0` on success. Exits non-zero and prints an
-error to stderr on failure. Validation warnings (active
-`insecure_options`, degraded upstream TLS, likely filter
-config typos) are printed to stderr either way, in the
-`PRAXIS_LOG_FORMAT` format. Validation leaves listener ports
-unbound. It compiles built-in policies and validates access-log
-sink configuration without starting policy plugins or log writers.
-Startup still checks whether the configured resources can initialize.
+It exits `0` on success, or non-zero with the error on stderr. Warnings
+(active `insecure_options`, degraded upstream TLS, likely filter config typos)
+go to stderr either way, in the `PRAXIS_LOG_FORMAT` format.
 
 ## Dumping Effective Configuration
 
-Use `--dump` (or `-T`) to validate and dump the
-effective parsed configuration as YAML to stdout. The
-output includes the effective parsed config (with
-defaults applied) plus resolved top-level listener
-chains.
+`--dump` (or `-T`) runs the same validation, then writes the parsed config to
+stdout as YAML, with defaults applied and top-level listener chains resolved.
 
 ```console
 praxis --dump --config praxis.yaml
 praxis -T -c praxis.yaml
 ```
 
-Exits `0` on valid config, writing YAML to stdout.
-Exits non-zero and writes errors to stderr on failure.
-Validation warnings go to stderr, as with `--validate`.
-Dump uses the same validation rules as `--validate`.
-The two flags are mutually exclusive.
+Exit codes and warnings work as with `--validate`. The two flags are mutually
+exclusive.
 
 ## Dynamic Configuration Reload
 
-Praxis watches the config file for changes and
-automatically reloads filter pipelines without restart
-or disruption. When the file is modified, the server
-validates the new config, rebuilds pipelines, and swaps
-them atomically. In-flight requests complete on the old
-pipeline; new requests pick up the new config.
+Praxis watches the config file. When it changes, the server validates the new
+config, rebuilds the filter pipelines, and swaps them atomically, without a
+restart. In-flight requests finish on the old pipeline and new requests use
+the new one. If the new config is invalid (bad YAML, unknown filter,
+validation failure), the server logs the error and keeps the old config.
+[Rehearse a reload](reload.md) walks through a reload on a running container.
 
-If the new config is invalid (bad YAML, unknown filter,
-validation failure), the server logs the error and
-continues serving with the old config.
-
-[Rehearse a reload](reload.md) walks through validating
-a change and applying it to a running container.
-
-The watcher compares the file against the exact text
-the running config was parsed from, so an edit that
-lands while the server is still starting (before the
-watch exists) is applied by the watcher's first pass
-rather than silently adopted as the baseline.
+The watcher compares the file with the exact text the running config was
+parsed from, so an edit made while the server is still starting (before the
+watch exists) is applied on the watcher's first pass.
 
 **Dynamically reloadable:**
 
@@ -99,156 +78,106 @@ rather than silently adopted as the baseline.
 
 - `runtime.logging` destination or buffering
 - Listener add, remove, or address rebind
-- Listener `max_connections`,
-  `downstream_read_timeout_ms`, and
+- Listener `max_connections`, `downstream_read_timeout_ms`, and
   `downstream_keepalive_timeout_ms`
 - Compression module addition
-- TLS enable/disable, and any change inside a
-  listener's `tls` block (certificate *file contents*
-  are hot-reloaded by the certificate watcher;
-  config-level TLS changes are not)
-- Startup-only `runtime` settings (`threads`,
-  `work_stealing`, `global_queue_interval`,
-  `max_connections`, `max_memory_bytes`,
-  `max_open_files`, `overload_gauges`,
-  `shed_on_fd_pressure`,
-  `subrequest_pool_size`,
-  `subrequest_max_connections`,
+- TLS enable/disable, and any change inside a listener's `tls` block
+  (the certificate watcher hot-reloads certificate *file contents*, not
+  config-level TLS changes)
+- Startup-only `runtime` settings (`threads`, `work_stealing`,
+  `global_queue_interval`, `max_connections`, `max_memory_bytes`,
+  `max_open_files`, `overload_gauges`, `shed_on_fd_pressure`,
+  `subrequest_pool_size`, `subrequest_max_connections`,
   `subrequest_circuit_breaker`, `upstream_ca_file`,
   `upstream_keepalive_pool_size`)
-- The `admin` section (both listener addresses bind at
-  startup)
+- The `admin` section (both listener addresses bind at startup)
 
 **Rejected (reload fails, nothing changes):**
 
-- Protocol change (HTTP to TCP or back) on an existing
-  listener. Its handler executes only filters of the
-  protocol it was started with, so the reload is refused
-  until the change is reverted or the process restarts.
-- Grouped TCP listeners (same upstream, cluster and
-  timeouts) whose `filter_chains` or `max_connections`
-  disagree.
-- A change to a bound TCP listener's `upstream`,
-  `cluster`, `tcp_session_timeout_ms` or
-  `tcp_max_duration_secs`, removal of a bound TCP
-  listener, or a change to
-  `insecure_options.allow_private_upstreams` while TCP
-  listeners exist. The TCP service captures these at
-  startup.
-- A change to a bound HTTP listener's `forward_proxy`
-  block (`forward-proxy` builds; including adding or
-  removing the block), removal of a bound listener that
-  has one, or a change to
-  `insecure_options.allow_private_upstreams` while a
-  bound listener has an enabled block. The CONNECT
-  runtime captures the CONNECT gate, destination rules,
-  tunnel timeouts, and the private-address setting when
-  the handler starts, so these reloads are refused:
-  applying only the new pipeline could leave CONNECT open
-  with the egress filters removed.
+- A protocol change (HTTP to TCP or back) on an existing listener. Its
+  handler runs only filters of the protocol it started with, so the reload is
+  refused until the change is reverted or the process restarts.
+- Grouped TCP listeners (same upstream, cluster and timeouts) whose
+  `filter_chains` or `max_connections` disagree.
+- A change to a bound TCP listener's `upstream`, `cluster`,
+  `tcp_session_timeout_ms` or `tcp_max_duration_secs`, removal of a bound TCP
+  listener, or a change to `insecure_options.allow_private_upstreams` while
+  TCP listeners exist. The TCP service captures these at startup.
+- A change to a bound HTTP listener's `forward_proxy` block (`forward-proxy`
+  builds; including adding or removing the block), removal of a bound
+  listener that has one, or a change to
+  `insecure_options.allow_private_upstreams` while a bound listener has an
+  enabled block. The CONNECT runtime captures the CONNECT gate, destination
+  rules, tunnel timeouts, and the private-address setting when the handler
+  starts. Applying only the new pipeline could leave CONNECT open with the
+  egress filters removed.
 
-Stateful filters (rate limiter, circuit breaker) reset
-their state on reload. Operators should expect a brief
-burst window for rate limiters and a closed circuit for
-circuit breakers immediately after reload.
+Stateful filters reset on reload: expect a brief burst window for rate
+limiters and a closed circuit for circuit breakers right after.
 
-Three kinds of state survive a reload: key-value store
-entries; sticky-session bindings for a cluster whose
-`max_entries`, `ttl` and eviction policy did not change
-(a change to any of them starts that cluster's sessions
-afresh); and endpoint health (which endpoints are marked
-unhealthy) for a cluster whose `health_check` did not
-change. Only the unhealthy flag is carried, not the
-failure count behind it, so the new probes must confirm
-recovery before such an endpoint rejoins rotation. Clear
-or rewrite key-value entries through the admin API when
-a reload changes what they mean.
+Three kinds of state survive a reload:
 
-See [hot-reload.yaml] for an example.
+- key-value store entries;
+- sticky-session bindings for a cluster whose `max_entries`, `ttl` and
+  eviction policy did not change (changing any of them starts that cluster's
+  sessions afresh);
+- endpoint health for a cluster whose `health_check` did not change. Only the
+  unhealthy flag carries over, not the failure count, so new probes must
+  confirm recovery before such an endpoint rejoins rotation.
+
+When a reload changes what key-value entries mean, clear or rewrite them
+through the admin API. See [hot-reload.yaml] for an example.
 
 [hot-reload.yaml]: ../../examples/configs/operations/hot-reload.yaml
 
 ## Admin
 
-`admin.address` binds the management API listener for `/api/*` routes.
-`admin.metrics_address` independently binds the health and metrics listener
-for `/healthy`, `/ready`, and `/metrics`. Either listener can be configured
-without the other; the two listeners must not overlap.
+`admin.address` binds the management API, and `admin.metrics_address` binds
+the health and metrics listener. Either can be set without the other. Validation
+rejects either address when it overlaps the other or a proxy listener. Paths
+not listed here return `404 NOT FOUND`. Neither listener has authentication.
 
-- `/healthy` returns `200 OK` with `{"status":"ok"}`
-  once the server is accepting connections (liveness).
-- `/ready` returns per-cluster health status with
-  healthy/unhealthy/total counts when active health
-  checks are configured. The default `readiness: serving`
-  returns `200 OK` once the replica is serving, even when
-  an upstream cluster is degraded. Set `readiness: upstreams`
-  to return `503 SERVICE UNAVAILABLE` when any checked cluster
-  has zero healthy endpoints. Without health checks, both modes
-  return `{"status":"ok"}`. While the replica is initializing,
-  draining, or stopped, `/ready` returns `503` with
-  `{"status":"initializing"}`, `{"status":"draining"}`, or
-  `{"status":"stopped"}`.
-- `/metrics` returns Prometheus text exposition format
-  with HTTP request metrics (`praxis_http_requests_total`,
-  `praxis_http_request_duration_seconds`). When
-  `metrics.filter_duration` is enabled, also exposes
-  per-filter hook duration histograms
-  (`praxis_filter_duration_seconds`, labels: `filter`,
-  `phase`, `stream`).
+| Listener | Serves |
+| -------- | ------ |
+| `admin.metrics_address` | `/healthy`, `/ready`, `/metrics` |
+| `admin.address` | `/api/kv/*`, `/api/pipelines`, `/api/log-level`, `/api/stats` |
 
-- `/api/kv/{store}/{key}` reads and writes entries in
-  configured key-value stores (when any are configured).
-- `/api/pipelines` (GET) returns a JSON snapshot of every
-  listener's resolved filter pipeline, including branch
-  chains and rejoin targets — the runtime introspection
-  view of the pipeline configuration. Known sensitive
-  header matcher values, including session identifiers, are redacted.
-  Filter it with `?listener=NAME`.
-
-The health and metrics listener only serves those three endpoints; the admin
-listener serves `/api/kv/*`, `/api/pipelines`, `/api/log-level`, and
-`/api/stats`. Other paths return
-`404 NOT FOUND`. Neither listener has authentication. The admin API must bind
-to loopback unless `insecure_options.allow_public_admin` is enabled; the
-health and metrics listener can bind to any interface, so restrict access with
-network controls when it is not bound to loopback.
-
-**Migration:** Existing deployments that sent `/healthy`, `/ready`, or
-`/metrics` to `admin.address` must configure `admin.metrics_address` and move
-those probes and scrapes to that listener. The container health check now uses
-`http://127.0.0.1:9902/healthy`; update custom health checks from port 9901 to
-the configured metrics port.
+- `/healthy` returns `200 OK` with `{"status":"ok"}` once the server is
+  accepting connections (liveness).
+- `/ready` returns per-cluster health counts when active health checks are
+  configured. With the default `readiness: serving` it returns `200 OK` once
+  the replica is serving, even when an upstream cluster is degraded.
+  `readiness: upstreams` returns `503 SERVICE UNAVAILABLE` when any checked
+  cluster has zero healthy endpoints. Response bodies, including the `503`
+  states while initializing, draining, or stopped, are in
+  [Health Checking](health-checking.md#ready-readiness).
+- `/metrics` returns Prometheus text exposition format; see the
+  [Metrics Reference](observability.md#metrics-reference).
+- `/api/kv/{store}/{key}` reads and writes entries in configured
+  [key-value stores](#key-value-stores).
+- `/api/pipelines` (GET) returns a JSON snapshot of every listener's resolved
+  filter pipeline, including branch chains and rejoin targets. Known sensitive
+  header matcher values, including session identifiers, are redacted. Filter
+  it with `?listener=NAME`.
 
 ```yaml
 admin:
   address: "127.0.0.1:9901"
   metrics_address: "127.0.0.1:9902"
   readiness: serving # or upstreams for upstream-dependent readiness
-```
-
-When `admin.verbose: true`, the `/ready` response
-includes per-cluster detail (cluster names, health
-counts). Default is `false` to avoid leaking internal
-topology.
-
-`admin.readiness` defaults to `serving`. It is a startup
-setting: changing it in a watched file logs a restart warning
-and leaves the running listener unchanged.
-
-```yaml
-admin:
-  address: "127.0.0.1:9901"
-  metrics_address: "127.0.0.1:9902"
   verbose: true
 ```
 
-By default, the admin API must bind to a loopback
-address (`127.0.0.1` or `[::1]`). Binding it to any
-non-loopback address (including `0.0.0.0` / `[::]` or a
-LAN IP) is a validation error unless
-`insecure_options.allow_public_admin: true` is set. The health and metrics
-listener has no loopback-only validation; bind it to a specific interface and
-use network controls to limit access when exposing it.
+- `admin.readiness` defaults to `serving`. It is a startup setting: changing
+  it in a watched file logs a restart warning and leaves the running listener
+  unchanged.
+- `admin.verbose: true` adds per-cluster detail (cluster names, health counts)
+  to `/ready`. It defaults to `false` to avoid leaking internal topology.
+- The admin API must bind to a loopback address (`127.0.0.1` or `[::1]`). Any
+  other address, including `0.0.0.0` / `[::]` or a LAN IP, is a validation
+  error unless `insecure_options.allow_public_admin: true` is set. The health
+  and metrics listener has no loopback check: when it is not on loopback,
+  bind it to a specific interface and limit access with network controls.
 
 ## Annotated Example
 
@@ -286,12 +215,12 @@ filter_chains:
 
 ## Listeners
 
-Each listener has a required `name`, an `address`, optional
-`tls`, optional `protocol` (defaults to `http`), and a list
-of `filter_chains` to apply. HTTP listeners require at least
-one filter chain; `filter_chains` may only be omitted on
-`protocol: tcp` listeners that route via `upstream` or
-`cluster` instead.
+Each listener has a required, unique `name` (used to resolve its pipeline at
+startup), an `address`, an optional `tls` block ([TLS](tls.md)), an optional
+`protocol` (default `http`), and a list of `filter_chains`. HTTP listeners
+need at least one filter chain; only `protocol: tcp` listeners that route via
+`upstream` or `cluster` may omit it. HTTP and TCP listeners can run in the
+same server.
 
 ```yaml
 listeners:
@@ -308,36 +237,23 @@ listeners:
           key_path: /etc/praxis/tls/key.pem
 ```
 
-The `name` field uniquely identifies the listener and is
-used to resolve its pipeline at startup.
-
 ### Network Binding
 
-Binding to `0.0.0.0` or `[::]` exposes the listener
-on all network interfaces. For local development,
-prefer `127.0.0.1`. In production, bind to specific
-internal IPs and use firewall rules to restrict
-access. The default configuration binds to
-`127.0.0.1:8080` as a security precaution.
+`0.0.0.0` or `[::]` exposes the listener on all network interfaces. Use
+`127.0.0.1` for local development, and specific internal IPs with firewall
+rules in production. The default configuration binds to `127.0.0.1:8080`.
 
 ### TCP Listeners
 
-TCP listeners set `protocol: tcp` and require either a
-static `upstream` address or a `cluster` name for load-
-balanced routing. Filter chains are optional. The two
-fields are mutually exclusive.
+TCP listeners set `protocol: tcp` and exactly one of `upstream` (a static
+address) or `cluster` (load-balanced). Filter chains are optional.
 
-```yaml
-listeners:
-  - name: postgres
-    address: "0.0.0.0:5432"
-    protocol: tcp
-    upstream: "10.0.0.1:5432"
-```
+- `tcp_session_timeout_ms` is a hard deadline after which active connections
+  are terminated, regardless of activity.
+- `tcp_max_duration_secs` caps the total session duration, regardless of
+  activity.
 
-Optional `tcp_session_timeout_ms` sets a hard deadline
-for TCP connections. Active connections are terminated
-after this duration regardless of activity:
+[TCP Proxy](../architecture/tcp-proxy.md) explains when each clock starts.
 
 ```yaml
 listeners:
@@ -346,25 +262,15 @@ listeners:
     protocol: tcp
     upstream: "10.0.0.1:5432"
     tcp_session_timeout_ms: 300000   # 5 minutes
-```
-
-Optional `tcp_max_duration_secs` caps the total session
-duration regardless of activity:
-
-```yaml
-listeners:
-  - name: postgres
-    address: "0.0.0.0:5432"
-    protocol: tcp
-    upstream: "10.0.0.1:5432"
-    tcp_max_duration_secs: 3600   # 1 hour
+    tcp_max_duration_secs: 3600      # 1 hour
 ```
 
 ### Downstream Read Timeout
 
-Optional `downstream_read_timeout_ms` sets how long the
-proxy waits for data from downstream clients during body
-reads. Mitigates slow-body attacks on HTTP listeners.
+`downstream_read_timeout_ms` sets how long the proxy waits for data from a
+downstream client during body reads, which mitigates slow-body attacks on HTTP
+listeners. Initial request header reads on fresh connections use Pingora's own
+60s default.
 
 ```yaml
 listeners:
@@ -374,20 +280,13 @@ listeners:
     filter_chains: [main]
 ```
 
-Pingora applies its own 60s default for initial request
-header reads on fresh connections. This setting controls
-body read timeouts within an active request.
-
 ### Downstream Keep-Alive Timeout
 
-Optional `downstream_keepalive_timeout_ms` closes an idle
-HTTP/1.x keep-alive client connection once it has waited
-that long for its next request. Without it, idle
-keep-alive connections stay open until the client closes
-them, and each one holds a file descriptor, so a fleet of
-idle or half-dead clients can exhaust the process limit.
-The timeout is applied in whole seconds, rounded up, and
-does not affect HTTP/2 connections or TCP listeners.
+`downstream_keepalive_timeout_ms` closes an idle HTTP/1.x keep-alive client
+connection once it has waited that long for its next request. Without it,
+idle keep-alive connections stay open until the client closes them, each
+holding a file descriptor, so many idle or half-dead clients can exhaust the
+process limit.
 
 ```yaml
 listeners:
@@ -397,20 +296,19 @@ listeners:
     filter_chains: [main]
 ```
 
-The timeout is applied in whole seconds, rounded up
-(1 to 3600000 ms), and replaces any `Keep-Alive:
-timeout` hint a client sends. It never turns keep-alive
-on: `Connection: close` and HTTP/1.0 clients without
-`Connection: keep-alive` are still closed after their
-response. HTTP/2 connections are not affected. Like the
-other listener settings, a change needs a restart.
+The value (1 to 3600000 ms) is applied in whole seconds, rounded up, and
+replaces any `Keep-Alive: timeout` hint a client sends. It never turns
+keep-alive on: `Connection: close` and HTTP/1.0 clients without
+`Connection: keep-alive` are still closed after their response. It does not affect HTTP/2
+connections or TCP listeners.
 
 ### Max Connections
 
-Optional `max_connections` caps concurrent connections
-per listener. HTTP listeners reject excess requests
-with `503 Service Unavailable` and a `Retry-After: 1`
-header. TCP listeners close the socket immediately.
+`max_connections` caps concurrent connections per listener. HTTP listeners
+reject excess requests with `503 Service Unavailable` and a `Retry-After: 1`
+header; TCP listeners close the socket immediately. A slot is held for the
+request (HTTP) or connection (TCP) and freed on completion, error, or timeout.
+Each listener has its own limit.
 
 ```yaml
 listeners:
@@ -420,72 +318,21 @@ listeners:
     filter_chains: [main]
 ```
 
-A slot is held for the request lifetime (HTTP) or
-connection lifetime (TCP) and freed on completion,
-error, or timeout. Each listener has an independent
-limit.
-
 See [max-connections.yaml] for an example.
 
 [max-connections.yaml]: ../../examples/configs/operations/max-connections.yaml
 
-### Mixed Protocols
-
-HTTP and TCP listeners can run on a single server instance.
-Each listener gets its own filter chains appropriate to its
-protocol.
-
-```yaml
-listeners:
-  - name: web
-    address: "0.0.0.0:8080"
-    filter_chains: [routing]
-
-  - name: db
-    address: "0.0.0.0:5432"
-    protocol: tcp
-    upstream: "10.0.0.1:5432"
-```
-
-See [tls.md](tls.md) for TLS details.
-
 ## Filter Chains
 
-Named filter chains are defined at the top level. Each chain
-has a `name` and an ordered list of `filters`. Listeners
-reference chains by name via `filter_chains:`.
-
-```yaml
-filter_chains:
-  - name: security
-    filters:
-      - filter: headers
-        response_set:
-          - name: "X-Content-Type-Options"
-            value: "nosniff"
-
-  - name: observability
-    filters:
-      - filter: request_id
-      - filter: access_log
-
-  - name: routing
-    filters:
-      - filter: router
-        routes:
-          - path_prefix: "/"
-            cluster: backend
-      - filter: load_balancer
-        clusters:
-          - name: backend
-            endpoints: ["10.0.0.1:8080"]
-```
+Filter chains are defined at the top level, each with a `name` and an ordered
+list of `filters`. Listeners reference chains by name in `filter_chains:`.
+The [annotated example](#annotated-example) shows two chain definitions.
 
 ### Chain Composition
 
-A listener can reference multiple chains. The filters from
-each chain are concatenated in order to form the listener's
-complete pipeline. This enables reuse without duplication.
+A listener's pipeline is its chains' filters concatenated in order. Here the
+public listener runs security, observability, and routing, and the internal
+listener reuses observability and routing without security:
 
 ```yaml
 listeners:
@@ -503,55 +350,18 @@ listeners:
       - routing
 ```
 
-The public listener runs security + observability + routing.
-The internal listener skips security but shares the same
-observability and routing chains.
-
 ### Protocol Compatibility
 
-Filters are protocol-aware. HTTP filters (e.g. `router`,
-`load_balancer`) only work on HTTP listeners. TCP filters
-(e.g. `tcp_access_log`) work on both HTTP and TCP listeners.
-An HTTP listener's protocol stack includes TCP, so it
-supports TCP-level filters too.
+HTTP filters (e.g. `router`, `load_balancer`) only work on HTTP listeners.
+TCP filters (e.g. `tcp_access_log`) work on both, because an HTTP listener's
+protocol stack includes TCP.
 
 ## Payload Size Limits
 
-Global hard ceilings on request and response payload
-size. These apply across all body modes (Stream,
-StreamBuffer). When a filter also declares a per-filter
-`max_bytes`, the smaller of the two limits is enforced.
-Requests exceeding the limit receive 413 (Payload Too
-Large), subject to the gRPC mapping below.
-
-Request-body limit failures log a warning with the limit,
-bytes seen, and rejection phase. Body-phase failures return
-a JSON 413 response, or a gRPC Trailers-Only response when
-the `grpc_status` filter has armed the request. A declared
-`Content-Length` above the effective input limit is rejected
-before reading the body or sending 100 Continue and returns JSON 413.
-This includes matching comma-separated lengths accepted by the HTTP parser.
-
-For a local HTTP/1 response that closes the connection
-with an unread upload, the Pingora backend sends the
-response, records request completion, shuts down the write
-side, and discards remaining body data. Streaming body
-rejections release the upstream connection before sending
-the response. Access logs and request duration metrics
-exclude the subsequent cleanup time. Cleanup has a
-30-second deadline and a 128 MiB discard budget;
-downstream read timeouts still apply. The budget is checked
-between native body reads, so the last chunk can cross it.
-This also covers early responses
-such as 401, 403, and 429. HTTP/2 uses its native stream
-cleanup. Clients should stop uploading after a rejection.
-Overload admission failures still close promptly.
-
-Rejected uploads retain any listener and runtime connection
-permits until cleanup finishes. Account for this grace period
-when sizing `max_connections`: stalled rejected uploads can
-occupy those slots for up to 30 seconds. A configured
-`downstream_read_timeout_ms` can end a stalled read sooner.
+`body_limits` sets global hard ceilings on request and response payload size,
+across all body modes (Stream, StreamBuffer). When a filter also declares a
+per-filter `max_bytes`, the smaller limit applies. Requests over the limit
+get 413 (Payload Too Large), subject to the gRPC mapping below.
 
 ```yaml
 body_limits:
@@ -560,64 +370,80 @@ body_limits:
   max_response_bytes: 5242880    # 5 MiB, cumulative response bytes
 ```
 
-`max_request_bytes` and `max_response_bytes` default to
-10 MiB (10,485,760 bytes) when omitted. Setting either to
-`null` removes the ceiling
-but requires `insecure_options.allow_unbounded_body:
-true`; without that flag, startup fails with a
-validation error. `max_buffer_bytes` defaults to 64 MiB and can be
-raised or lowered with a positive integer byte count. Zero, null,
-and values beyond an addressable allocation are rejected. It caps
-static and runtime-selected buffering, nested pipelines, buffered
-subrequest responses, and iterative-router state. Incremental
-streams use only their cumulative transfer limits.
+- `max_request_bytes` and `max_response_bytes` default to 10 MiB (10,485,760
+  bytes). Setting either to `null` removes the ceiling but requires
+  `insecure_options.allow_unbounded_body: true`; without it, startup fails
+  with a validation error.
+- `max_buffer_bytes` defaults to 64 MiB and takes a positive integer byte
+  count. Zero, null, and values beyond an addressable allocation are
+  rejected. It caps static and runtime-selected buffering, nested pipelines,
+  buffered subrequest responses, and iterative-router state. Incremental
+  streams use only their cumulative transfer limits.
 
 When a pipeline statically buffers requests (`StreamBuffer`), a finite
-`body_limits.max_request_bytes` must not exceed
-`body_limits.max_buffer_bytes`. Startup, config validation, and reload reject
-that combination with an error naming both fields and values. Lower the request
-limit or raise the buffer cap to accommodate it. This also applies to nested
-pipelines and filters that can release their buffer early. Streaming request
-pipelines may keep higher transfer limits, including when only responses buffer.
-A rejected reload leaves the running configuration intact.
+`body_limits.max_request_bytes` must not exceed `body_limits.max_buffer_bytes`.
+Startup, config validation, and reload reject that combination with an error
+naming both fields and values, and a rejected reload leaves the running
+configuration intact. Lower the request limit or raise the buffer cap. The
+rule also covers nested pipelines and filters that can release their buffer
+early. Streaming request pipelines may keep higher transfer limits, including
+when only responses buffer.
 
 For a 128 MiB buffered request, set `max_buffer_bytes: 134217728`,
-`max_request_bytes: 134217728`, and raise the relevant filter's
-inspection limit (for example `json_body_field.max_body_bytes`).
-Raise `max_response_bytes` too if responses need the extra capacity.
-The smallest applicable limit wins; `allow_unbounded_body` does not
-remove the buffering cap. Reloads update new requests while in-flight
-requests keep their pinned limits. This bounds accumulated bytes,
-not parsed-object memory or aggregate memory across concurrent requests.
+`max_request_bytes: 134217728`, and raise the relevant filter's inspection
+limit (for example `json_body_field.max_body_bytes`), plus
+`max_response_bytes` if responses need the room too. The smallest applicable
+limit wins, and `allow_unbounded_body` does not remove the buffering cap.
+Reloads apply to new requests; in-flight requests keep their pinned limits.
+These limits bound accumulated bytes, not parsed-object memory or aggregate
+memory across concurrent requests.
+
+### Rejections and Unread Uploads
+
+A request-body limit failure logs a warning with the limit,
+bytes seen, and rejection phase. Body-phase failures return a JSON 413, or a
+gRPC Trailers-Only response when the `grpc_status` filter has armed the
+request. A declared `Content-Length` above the effective input limit,
+including matching comma-separated lengths the HTTP parser accepts, is
+rejected with JSON 413 before the body is read or 100 Continue is sent.
+
+When a local HTTP/1 response closes the connection with an
+unread upload (this includes early responses such as 401, 403, and 429), the
+Pingora backend sends the response, records request completion, shuts down
+the write side, and discards the remaining body. Streaming body rejections
+release the upstream connection before sending the response. Access logs and
+request duration metrics exclude the cleanup time. Cleanup has a 30-second
+deadline and a 128 MiB discard budget, checked between native body reads, so
+the last chunk can cross it; downstream read timeouts still apply. HTTP/2 uses
+its native stream cleanup, and overload admission failures still close
+promptly. Clients should stop uploading after a rejection.
+
+Rejected uploads keep their listener and runtime connection permits until
+cleanup finishes, so stalled rejected uploads can hold `max_connections`
+slots for up to 30 seconds; size for that. A configured
+`downstream_read_timeout_ms` can end a stalled read sooner.
 
 ## Metrics
 
-Optional Prometheus metric collection toggles. HTTP
-request metrics are recorded when either admin listener
-is configured; `/metrics` is exposed only when
-`admin.metrics_address` is set. Per-filter hook duration
-histograms are opt-in.
+HTTP request metrics are recorded when either admin listener is configured,
+but `/metrics` is exposed only on `admin.metrics_address`. Per-filter hook
+duration histograms are opt-in:
 
 ```yaml
 metrics:
   filter_duration: true
 ```
 
-`filter_duration` defaults to `false`. When enabled,
-records wall-clock duration for each HTTP filter hook
-(request/response headers and body). Histogram labels:
-`filter` (filter name), `phase` (`request` or
-`response`), `stream` (`headers` or `body`).
-
-Requires `admin.metrics_address` to scrape via `/metrics`.
-Enabling `filter_duration` without a metrics listener logs a startup
-warning; metrics are recorded but not exposed.
+`filter_duration` defaults to `false`. When enabled, it records wall-clock
+duration for each HTTP filter hook as
+[`praxis_filter_duration_seconds`](observability.md#praxis_filter_duration_seconds-histogram),
+which lists its `filter`, `phase`, and `stream` labels. Enabling it without `admin.metrics_address` logs a
+startup warning: metrics are recorded but not exposed.
 
 ## Header and Request Limits
 
-Praxis inherits header and request limits from Pingora's
-HTTP/1.x parser. These are compile-time constants in
-Pingora and are not currently configurable in Praxis.
+Header and request limits come from Pingora's HTTP/1.x parser. They are
+compile-time constants in Pingora and not configurable in Praxis.
 
 | Limit | Value | Notes |
 | ------- | ------- | ------- |
@@ -627,99 +453,14 @@ Pingora and are not currently configurable in Praxis.
 | Header read timeout | 60 s | Pingora default |
 | Body buffer chunk | 65,536 B (64 KiB) | Per-read buffer |
 
-HTTP/2 header limits are governed by the `h2` crate's
-HPACK and frame-level settings (typically 16 KiB for
-HEADERS frames by default, negotiated via SETTINGS).
-
-Requests that exceed header size or count limits receive
-a 400 Bad Request from Pingora before reaching the filter
-pipeline.
+HTTP/2 header limits come from the `h2` crate's HPACK and frame-level settings
+(typically 16 KiB for HEADERS frames, negotiated via SETTINGS). Requests over
+the header size or count limits get a 400 Bad Request from Pingora before
+reaching the filter pipeline.
 
 ## Runtime
 
-Worker thread pool and scheduling configuration.
-
-```yaml
-runtime:
-  threads: 8             # 0 = auto-detect (default)
-  work_stealing: true    # default: true
-```
-
-- `threads`: number of worker threads per service.
-  When set to 0 (the default), the thread count is
-  auto-detected from available CPUs.
-- `work_stealing`: allow work-stealing between worker
-  threads of the same service. Enabled by default.
-- `global_queue_interval`: Tokio scheduler global queue check
-  interval, in ticks. Positive values apply with the Hyper
-  backend. Pingora warns and ignores them because it manages
-  its own runtime. `Option<u32>`, defaults to `null` (unset);
-  zero is rejected by config validation.
-- `upstream_keepalive_pool_size`: maximum number of idle
-  upstream connections kept per thread. `Option<usize>`,
-  defaults to `Some(64)`. Set to `null` to use Pingora's
-  default of 128 per thread.
-- `max_connections`: process-wide maximum concurrent
-  connections across all listeners. When set, new
-  connections beyond this limit are rejected.
-  `Option<u32>`, defaults to `None` (disabled).
-  Distinct from per-listener `max_connections`.
-- `max_memory_bytes`: process-wide RSS memory limit for
-  load shedding. When set, the proxy monitors resident
-  memory and rejects new requests with `503 Service
-  Unavailable` when usage exceeds the threshold.
-  `Option<usize>`, defaults to `None` (disabled).
-- `max_open_files`: soft limit on open file descriptors
-  (`RLIMIT_NOFILE`) the process sets for itself at
-  startup. Every connection, pooled connection, and DNS
-  lookup holds one. `Option<u64>` (128 to 2^30), defaults
-  to `None`, which raises the soft limit to the hard
-  limit; that needs no privileges and lifts the 1024
-  soft limit containers commonly start with. A value
-  above the hard limit is clamped with a warning.
-  Startup logs the limit in effect and warns when it is
-  below 4096, or below what `max_connections` implies.
-  See [Capacity Planning](capacity-planning.md).
-- `overload_gauges`: publish `praxis_overload_pressure`
-  for cgroup memory, anonymous resident memory, CPU
-  stall time, connections, and file descriptors.
-  `bool`, defaults to `false`. This does not refuse
-  work or change timeouts. Scraped at `/metrics` on
-  `admin.metrics_address`; `admin.address` does not
-  serve these gauges. Cgroup pressure uses the
-  highest working-set ratio of this process's cgroup
-  and its ancestors, so a parent slice limit still
-  counts when `memory.max` is `max` on the service
-  cgroup. Heap pressure needs `max_memory_bytes`.
-  Connection pressure needs `max_connections`. The
-  task starts at process start, so changing it needs
-  a restart. See [Observability](observability.md).
-- `shed_on_fd_pressure`: reject new requests with `503
-  Service Unavailable` (and close new TCP connections)
-  when open file descriptors near the process limit,
-  keeping a reserve of 5% or 64 descriptors, whichever
-  is larger, for health probes, DNS, and logs. Counted
-  as `praxis_overload_rejects_total{reason=
-  "file_descriptors"}`. `bool`, defaults to `true`; set
-  `false` to let requests run into the limit instead.
-- `subrequest_circuit_breaker`: per-peer circuit breaker
-  for the shared sub-request connector used by
-  `iterative_request_router`. When configured, the
-  connector tracks consecutive transport failures per
-  upstream `SocketAddr` and rejects sub-requests while a
-  peer's circuit is open. Fields:
-  - `consecutive_failures`: failure threshold before the
-    circuit opens (required, must be > 0).
-  - `recovery_window_secs`: seconds the circuit stays
-    open before allowing a probe (required, 1..=3600).
-  - `half_open_timeout_secs`: seconds a half-open probe
-    may remain in-flight before the circuit resets to open
-    (default 30, 1..=3600).
-
-  The circuit breaker state is preserved across config
-  reloads. Use the `transport_error: circuit_open`
-  transition in `iterative_request_router` step rules
-  to match circuit-open rejections.
+Worker thread pool, scheduling, and process limits.
 
 ```yaml
 runtime:
@@ -734,29 +475,73 @@ runtime:
     recovery_window_secs: 30
 ```
 
+- `threads`: worker threads per service. `0` (the default) auto-detects from
+  available CPUs.
+- `work_stealing`: allow work-stealing between worker threads of the same
+  service. Default `true`.
+- `global_queue_interval`: Tokio scheduler global queue check interval, in
+  ticks. `Option<u32>`, default `null` (unset); zero is rejected by config
+  validation. Positive values apply with the Hyper backend; Pingora warns and
+  ignores them because it manages its own runtime.
+- `upstream_keepalive_pool_size`: maximum idle upstream connections kept per
+  thread. `Option<usize>`, default `Some(64)`. `null` uses Pingora's default
+  of 128 per thread.
+- `max_connections`: process-wide limit on concurrent connections across all
+  listeners, distinct from per-listener `max_connections`. New connections
+  beyond it are rejected. `Option<u32>`, default `None` (disabled).
+- `max_memory_bytes`: process-wide RSS limit for load shedding. Above it, new
+  requests get `503 Service Unavailable`. `Option<usize>`, default `None`
+  (disabled).
+- `max_open_files`: soft limit on open file descriptors (`RLIMIT_NOFILE`) the
+  process sets for itself at startup. Every connection, pooled connection,
+  and DNS lookup holds one. `Option<u64>` (128 to 2^30). The default `None`
+  raises the soft limit to the hard limit, which needs no privileges and lifts
+  the 1024 soft limit containers commonly start with. A value above the hard
+  limit is clamped with a warning. Startup logs the limit in effect and warns
+  when it is below 4096, or below what `max_connections` implies. See
+  [Capacity Planning](capacity-planning.md).
+- `overload_gauges`: publish `praxis_overload_pressure` for cgroup memory,
+  anonymous resident memory, CPU stall time, connections, and file
+  descriptors. `bool`, default `false`. It does not refuse work or change
+  timeouts. The gauges are served at `/metrics` on `admin.metrics_address`,
+  not `admin.address`. Heap pressure needs `max_memory_bytes`, and connection
+  pressure needs `max_connections`. How cgroup pressure is computed is in
+  [Observability](observability.md#praxis_overload_pressure-gauge).
+- `shed_on_fd_pressure`: when open file descriptors near the process limit,
+  reject new requests with `503 Service Unavailable` and close new TCP
+  connections, keeping a reserve of 5% or 64 descriptors, whichever is
+  larger, for health probes, DNS, and logs. Counted as
+  `praxis_overload_rejects_total{reason="file_descriptors"}`. `bool`, default
+  `true`; set `false` to let requests run into the limit.
+- `subrequest_circuit_breaker`: per-peer circuit breaker for the shared
+  sub-request connector used by `iterative_request_router`. It tracks
+  consecutive transport failures per upstream `SocketAddr` and rejects
+  sub-requests while a peer's circuit is open. Its state survives config
+  reloads. Match circuit-open rejections with the
+  `transport_error: circuit_open` transition in `iterative_request_router` step rules. Fields:
+  - `consecutive_failures`: failure threshold before the circuit opens
+    (required, must be > 0).
+  - `recovery_window_secs`: seconds the circuit stays open before allowing a
+    probe (required, 1..=3600).
+  - `half_open_timeout_secs`: seconds a half-open probe may stay in flight
+    before the circuit resets to open (default 30, 1..=3600).
+
 ### Upstream CA
 
-`upstream_ca_file` sets a PEM CA file used as the root
-certificate store for all upstream TLS connections.
-Per-cluster `tls.ca` overrides this for individual
-clusters.
+`upstream_ca_file` sets a PEM CA file as the root certificate store for all
+upstream TLS connections. It replaces the system trust store instead of
+adding to it. Per-cluster `tls.ca` overrides it. See [tls.md](tls.md) for CA
+trust precedence and combined bundles.
 
 ```yaml
 runtime:
   upstream_ca_file: /etc/praxis/tls/internal-ca.pem
 ```
 
-This **replaces** the system trust store (not additive).
-See [tls.md](tls.md) for details on CA trust
-precedence and combined bundles.
-
 ### Logging
 
-Set `PRAXIS_LOG_FORMAT=json` to emit structured JSON log
-output instead of the default human-readable format.
-
-Per-module log level overrides can be configured under
-`runtime.log_overrides`:
+`PRAXIS_LOG_FORMAT=json` switches log output from the default human-readable
+format to structured JSON. `runtime.log_overrides` sets per-module log levels:
 
 ```yaml
 runtime:
@@ -765,30 +550,20 @@ runtime:
     praxis_protocol: debug
 ```
 
-This is useful for debugging a specific subsystem without
-flooding output from every module.
-
 ## Key-Value Stores
 
-Key-value stores for runtime-updatable mappings. A
-store is created in code:
-`KvStoreRegistry::get_or_create_memory` creates an
-in-memory store, and `KvStoreRegistry::register` adds a
-caller-supplied `KvBackend` under a new name, for
-example one that stores data outside the process. The
-admin API reads and updates entries in stores that
-already exist but does not create them. No built-in filter or
-configuration section creates a store yet, so in a
-standard deployment the registry is empty and the
-admin key-value endpoints answer 404 for every store
-name.
+Key-value stores hold runtime-updatable mappings. Stores are created in code:
+`KvStoreRegistry::get_or_create_memory` creates an in-memory store, and
+`KvStoreRegistry::register` adds a caller-supplied `KvBackend` under a new
+name, for example one that stores data outside the process. No built-in
+filter or configuration section creates a store yet, so in a standard
+deployment the registry is empty and the admin key-value endpoints answer 404
+for every store name.
 
-Filters access stores by name through
-`HttpFilterContext` and `TcpFilterContext`.
+Filters access stores by name through `HttpFilterContext` and
+`TcpFilterContext`.
 
 ### Match Types
-
-Stores support four match types for key lookup:
 
 | Type | Behavior |
 | ---- | -------- |
@@ -799,8 +574,8 @@ Stores support four match types for key lookup:
 
 ### Admin API
 
-When `admin.address` is configured, CRUD endpoints
-are available:
+When `admin.address` is configured, these endpoints read and update existing
+stores (they do not create stores):
 
 | Method | Path | Description |
 | ------ | ---- | ----------- |
@@ -809,276 +584,201 @@ are available:
 | `PUT` | `/api/kv/{store}/{key}` | Set a value (body) |
 | `DELETE` | `/api/kv/{store}/{key}` | Delete a key |
 
-Writes are immediately visible to all filters on all
-threads. Unknown store names return 404.
+Writes are immediately visible to all filters on all threads. Unknown store
+names return 404.
 
 ### Runtime Cache Semantics
 
-Key-value stores are **runtime caches, not durable
-storage**. Every store survives config reloads. With
-`InMemoryKvBackend`, entries live in process memory and
-are lost on process exit; a backend added with
-`KvStoreRegistry::register` keeps them wherever it
-stores them.
-
-The store is designed for operational overrides (routing
-tables, feature flags, config knobs) that can be
-reconstructed from an external source of truth. Do not
-use it as a primary data store.
+Key-value stores are runtime caches, not durable storage. Every store
+survives config reloads. With `InMemoryKvBackend` (the default), entries live
+in process memory and are lost on exit; a backend added with
+`KvStoreRegistry::register` keeps them wherever it stores them. Use stores for
+operational overrides (routing tables, feature flags, config knobs) that can
+be rebuilt from an external source of truth, not as a primary data store.
 
 ### Pluggable Backends
 
-The `KvBackend` trait allows alternative implementations
-(e.g. Redis). The default `InMemoryKvBackend` keeps
-entries in memory. See the `praxis_core::kv`
-module docs for the trait definition.
+The `KvBackend` trait allows other implementations (e.g. Redis). The trait is
+defined in the `praxis_core::kv` module docs.
 
 ## Graceful Shutdown
 
-With the default Pingora backend, `shutdown_timeout_secs`
-sets the total SIGTERM-to-exit budget, including the
-readiness-first drain delay:
+With the default Pingora backend, `shutdown_timeout_secs` is the total
+SIGTERM-to-exit budget, including the readiness-first drain delay:
 
 ```yaml
 shutdown_timeout_secs: 60    # default: 30
 shutdown_drain_delay_secs: 2 # optional readiness-first handoff delay
 ```
 
-On SIGTERM listeners become unready immediately but continue accepting new
-connections during `shutdown_drain_delay_secs`. Eligible HTTP/1 responses for
-connections accepted during this handoff carry `Connection: close`; HTTP/2
-and upgraded connections do not use that header. After the delay, listeners
-stop accepting and graceful connection shutdown begins. The delay must not
-exceed `shutdown_timeout_secs` and consumes that budget; zero preserves the
-immediate handoff.
+On SIGTERM, listeners become unready immediately but keep accepting new
+connections during `shutdown_drain_delay_secs`. Eligible HTTP/1 responses on
+connections accepted during this handoff carry `Connection: close`; HTTP/2 and
+upgraded connections do not use that header. The delay must not exceed
+`shutdown_timeout_secs` and consumes that budget; zero keeps the immediate
+handoff.
 
-Listeners stop accepting new connections.
-In-flight requests have a grace period of
-`min(shutdown_timeout_secs - shutdown_drain_delay_secs, 5)` seconds. Runtime shutdown
-then cancels remaining async tasks; the rest of the budget
-bounds the wait for blocking work. A setting of `60`
-therefore still gives requests at most five seconds to
-finish. This limit also applies to streaming responses and
-SSE; a stream that has not completed when the grace period
-ends can be cut short. Drain traffic before SIGTERM when
-requests need longer; see
+After the delay, listeners stop accepting and graceful connection shutdown
+begins. In-flight requests get
+`min(shutdown_timeout_secs - shutdown_drain_delay_secs, 5)` seconds. Runtime
+shutdown then cancels remaining async tasks, and the rest of the budget
+bounds the wait for blocking work. So a setting of `60` still gives requests
+at most five seconds, and the full grace period is spent even when nothing is
+in flight.
+
+The requests cut at the end of the grace period are the long-running ones:
+streaming and SSE responses, slow uploads and downloads, and WebSocket or
+other upgraded connections. Their clients see the connection or stream close
+early and should reconnect, retrying only idempotent requests. When requests
+need longer, drain traffic before SIGTERM; see
 [Diagnostics](diagnostics.md#draining-before-shutdown).
 
-The full grace period is spent even when nothing is in
-flight. The requests cut when it ends are the
-long-running ones: streaming and SSE responses, slow
-uploads and downloads, and WebSocket or other upgraded
-connections. Clients of those see the connection or
-stream close before the request completes and should be
-ready to reconnect, retrying only idempotent requests.
-
 On Kubernetes, `terminationGracePeriodSeconds` must cover
-`shutdown_timeout_secs` (which already includes
-`shutdown_drain_delay_secs`), any `preStop` hook, and time
-for final cleanup. A smaller value lets the kubelet kill
-the container before the shutdown budget completes.
-Streams still open when the window ends are closed on
-every pod deletion, rolling update, and node drain.
+`shutdown_timeout_secs` (which already includes `shutdown_drain_delay_secs`),
+any `preStop` hook, and time for final cleanup, or the kubelet kills the
+container before the shutdown budget completes. Streams still open when the
+window ends are closed on every pod deletion, rolling update, and node drain.
 
-On the experimental hyper backend, HTTP listeners let
-in-flight connections finish for up to
-`shutdown_timeout_secs` minus `shutdown_drain_delay_secs`
-and a 1 s reserve, so `shutdown_timeout_secs: 1` leaves
-them no drain time.
+On the experimental hyper backend, HTTP listeners let in-flight connections
+finish for up to `shutdown_timeout_secs` minus `shutdown_drain_delay_secs`
+and a 1 s reserve, so `shutdown_timeout_secs: 1` leaves them no drain time.
 Active TCP forwarding may continue during a nonzero
-`shutdown_drain_delay_secs` after SIGTERM, stops when the
-runtime signals services to shut down, and can stop
-earlier if SIGINT ends the delay. See
+`shutdown_drain_delay_secs`, stops when the runtime signals services to shut
+down, and can stop earlier if SIGINT ends the delay. See
 [Hyper Backend](../architecture/hyper-backend.md#runtime-and-shutdown).
 
-Once runtime shutdown completes, Praxis flushes queued
-log lines and attempts to export pending OTLP spans, then
-exits `0`. OTLP shutdown errors go to stderr and do not
-change the exit status.
-
-Praxis logs and flushes errors returned while building
-filters or registering listeners, then exits `1`.
+Once runtime shutdown completes, Praxis flushes queued log lines, attempts to
+export pending OTLP spans, and exits `0`. OTLP shutdown errors go to stderr
+and do not change the exit status. Errors while building filters or
+registering listeners are logged and flushed, and Praxis exits `1`.
 
 ## Default Configuration
 
-When no configuration file is provided, Praxis starts with
-a built-in default config that listens on `127.0.0.1:8080`
-and responds with `{"status": "ok", "server": "praxis"}`
-on `/` (exact match) and 404 elsewhere. The default binds
-to localhost only, preventing accidental exposure to
-public networks during initial setup. This allows zero
-config startup for testing. The source lives in
-[default.yaml]. For a realistic starting point, see
-[basic-reverse-proxy.yaml].
+With no configuration file, Praxis starts with a built-in config that listens
+on `127.0.0.1:8080` (localhost only, so a first run is not exposed) and
+responds with `{"status": "ok", "server": "praxis"}` on `/` (exact match) and
+404 elsewhere. The source is [default.yaml]. For a realistic starting point,
+see [basic-reverse-proxy.yaml]. The [examples index](../../examples/README.md)
+lists every example config by category.
 
 [default.yaml]: ../../crates/core/src/config/default.yaml
 [basic-reverse-proxy.yaml]: ../../examples/configs/traffic-management/basic-reverse-proxy.yaml
 
-## Example Configs
-
-Working examples live under `examples/configs/`, organized
-by category:
-
-| Directory | Contents |
-| ----------- | ---------- |
-| `branching` | Branch chains: conditional skip, terminal, reentrance, cross-chain |
-| `traffic-management` | Router, load balancing, slow start, timeouts, redirects, rate limiting, static responses, P2C, canary, circuit breaker, health checks, gRPC detection |
-| `payload-processing` | Compression, JSON Pointer rewrite, JSON field extraction, stream buffering, size limits |
-| `security` | CORS, CSRF, IP ACL, guardrails, policy (feature-gated), forwarded headers, downstream read timeout |
-| `observability` | Access logs, request IDs, TCP access logs |
-| `transformation` | Headers, path rewrite, URL rewrite |
-| `protocols` | TCP, TLS, mixed protocol configs |
-| `pipeline` | Chain composition, conditions, failure mode, branch chains |
-| `operations` | Hot reload, admin, multi-listener, max connections, production gateway |
-
 ## Branch Chains
 
-Conditional sub-pipelines based on filter results:
-short-circuit responses, skip filters, retry loops, and
-cross-chain routing. See [Branch Chains](../filters/branch-chains.md)
-and [Pipeline Concepts](../architecture/pipeline-concepts.md).
+Branch chains are conditional sub-pipelines based on filter results:
+short-circuit responses, skipped filters, retry loops, and cross-chain
+routing. See [Branch Chains](../filters/branch-chains.md) and
+[Pipeline Concepts](../architecture/pipeline-concepts.md).
 
 ## Health Checks
 
-Per-cluster active HTTP, TCP, gRPC and optional TLS probes and passive inline
-failure tracking remove unhealthy endpoints from rotation.
-See [health-checks.yaml](../../examples/configs/traffic-management/health-checks.yaml).
+Per-cluster active HTTP, TCP, gRPC and optional TLS probes, plus passive
+inline failure tracking, remove unhealthy endpoints from rotation. See
+[Health Checking](health-checking.md) and
+[health-checks.yaml](../../examples/configs/traffic-management/health-checks.yaml).
 
-The top-level `clusters:` section feeds health checks (and
-the `/api/stats` admin view and startup key-permission
-checks), never proxied traffic: the data path builds its
-upstreams from the clusters defined inline in the
-`load_balancer` or `tcp_load_balancer` filter. A health
-probe uses a cluster's `endpoints` and `health_check` block. With the
-experimental `tls-health-check` build feature, TLS and HTTPS probes also use
-its `tls` and `http.authority` settings; handshake probes honor `http.version`
-for ALPN. See [health checking](health-checking.md#tls-and-https-probes).
-Without that feature, HTTP probes remain plaintext. Top-level data-path
-settings such as `retry_policy`, connection timeouts, `load_balancer_strategy`
-and `trusted_private_endpoints` do not configure proxied traffic. Configure
-those on the inline load-balancer cluster instead.
+The top-level `clusters:` section feeds health checks (and the `/api/stats`
+admin view and startup key-permission checks), never proxied traffic: the
+data path builds its upstreams from the clusters defined inline in the
+`load_balancer` or `tcp_load_balancer` filter. A probe uses a cluster's
+`endpoints` and `health_check` block. With the experimental
+`tls-health-check` build feature, TLS and HTTPS probes also use its `tls` and
+`http.authority` settings, and handshake probes honor `http.version` for ALPN
+(see [health checking](health-checking.md#tls-and-https-probes)); without it,
+HTTP probes stay plaintext. Top-level data-path settings such as
+`retry_policy`, connection timeouts, `load_balancer_strategy` and
+`trusted_private_endpoints` do not affect proxied traffic; set them on the
+inline load-balancer cluster.
 
-An inline cluster that shares its name with a top-level declaration can
-omit its endpoints: validation fills them in from the declaration, so the
-routed and health-checked addresses stay together. If the inline list is
-present it stays the routing truth, and validation warns when it diverges
-from the declaration — a diverged endpoint is routed but never
-health-gated, or probed but never routed. An inline `health_check` is
-rejected: probes are configured only at top level.
+An inline cluster with the same name as a top-level declaration can omit its
+endpoints, and validation fills them in from the declaration, so routed and
+health-checked addresses stay together. An inline list that is present stays
+the routing truth, and validation warns when it diverges from the
+declaration: a diverged endpoint is routed but never health-gated, or probed
+but never routed. An inline `health_check` is rejected; probes are configured
+only at top level.
 
-Filled endpoints are copied per reference, so the copies are capped at
-16 MiB of endpoint string data (addresses, zones, and metadata). Config
-validation applies the cap across all filter chains, and pipeline
-construction applies it again across the inline outbound chains it binds;
-a config that exceeds either is rejected.
+Filled endpoints are copied per reference, so the copies are capped at 16 MiB
+of endpoint string data (addresses, zones, and metadata). Config validation
+applies the cap across all filter chains, and pipeline construction applies
+it again across the inline outbound chains it binds. A config over either cap
+is rejected.
 
 ## Slow Start
 
-Optional per-cluster `slow_start` names a window and an
-aggression curve. It requires the `slow-start` Cargo
-feature, which is off by default and experimental.
-Without that feature the key is rejected as an unknown
-field.
-
-The baseline is the membership present when `slow_start`
-is first enabled for that cluster name. A reload that
-turns the setting on and adds an endpoint in the same
-change records that endpoint at full weight. An address
-added in a later reload, and an endpoint that becomes
-healthy again, ramp from zero. Round robin, random,
-least-connections, and power-of-two-choices apply that
-weight while selecting, including inside subset,
-priority, and zone-aware selection. Round robin
-interleaves the scaled weights instead of handing each
-endpoint a long contiguous run. Hash strategies ignore
-the ramp. See
-[Slow Start](load-balancing.md#slow-start) and
+A cluster's `slow_start` ramps new and recovering endpoints up to full weight.
+It needs the experimental `slow-start` Cargo feature (off by default); without
+it, the key is rejected as an unknown field. The ramp also applies inside
+subset, priority, and zone-aware selection. Fields, baseline rules, and
+strategy support are in [Slow Start](load-balancing.md#slow-start); see also
 [slow-start.yaml](../../examples/configs/traffic-management/slow-start.yaml).
 
 ## Hedged Requests
 
-A route may set `hedge_policy` to race one idempotent client request across
-healthy endpoints in its cluster. The proxy must be built with the
-`hedged-requests` feature. GET, HEAD, OPTIONS, and QUERY are eligible.
-`initial_requests` start at once. Each later copy
-waits `per_try_timeout_ms`, unless nothing is left in flight, in which case
-the next copy starts immediately while `max_attempts` and the budget allow
-it. A 2xx, 3xx, or 4xx response is terminal: it is returned and the other
-attempts stop. A 5xx response or an attempt that fails before receiving an
-HTTP response does not win, so the race starts another available attempt. If
-no attempt produces a 2xx–4xx response, the proxy returns the retained
-failure status and body when one is available. If no HTTP status is
-available, the failure is answered like a single-upstream error: a timeout
-is 504, and a connect or read failure is 502.
+A route's `hedge_policy` races one idempotent client request across healthy
+endpoints in its cluster. It needs the `hedged-requests` build feature. The
+[router filter](../filters/http/traffic_management/router.md) page lists the
+fields and how `budget_percent` caps copies.
 
-The policy is parsed with the route. `max_attempts: 1`, `CONNECT`,
-`Upgrade`, non-idempotent methods (`POST`, `PUT`, `PATCH`, `DELETE`),
-`application/grpc` requests, and requests that accept `text/event-stream`
-stay on one upstream. A hedged response is buffered up to the response
-ceiling, so this policy is a poor fit for any other response that must
-stream. The per-request
-`max_attempts` cap applies even when the shared budget would allow another
-copy. While no copy is in flight, any positive `budget_percent` admits one,
-so a single active request can still hedge. Further copies stay within that
-percent of the requests in flight. That cap includes the initial fan-out:
-at `100`, one active request can hold one copy, so `initial_requests: 3`
-starts the primary and one copy. A copy reserves budget before an endpoint
-is chosen. The reservation
-is held while the copy is in flight, and returned when no endpoint can take
-the copy or when the attempt finishes. When the cluster has no `tls.ca`, a
-hedged attempt uses `runtime.upstream_ca_file`. See the
-[router filter](../filters/http/traffic_management/router.md).
+- GET, HEAD, OPTIONS, and QUERY are eligible. `max_attempts: 1`, `CONNECT`,
+  `Upgrade`, non-idempotent methods (`POST`, `PUT`, `PATCH`, `DELETE`),
+  `application/grpc` requests, and requests that accept `text/event-stream`
+  stay on one upstream. The policy is parsed with the route.
+- `initial_requests` start at once. Each later copy waits
+  `per_try_timeout_ms`, unless nothing is left in flight; then the next copy
+  starts immediately while `max_attempts` and the budget allow it. The
+  per-request `max_attempts` cap applies even when the shared budget would
+  allow another copy.
+- A 2xx, 3xx, or 4xx response wins: it is returned and the other attempts
+  stop. A 5xx, or an attempt that fails before an HTTP response, does not
+  win, and the race starts another available attempt. If no attempt produces
+  a 2xx to 4xx response, the proxy returns the retained failure status and body
+  when there is one; otherwise a timeout is 504 and a connect or read failure
+  is 502, as for a single upstream.
+- A copy reserves budget before an endpoint is chosen, holds it while in
+  flight, and returns it when no endpoint can take the copy or when the
+  attempt finishes.
+- A hedged response is buffered up to the response ceiling, so the policy is
+  a poor fit for any other response that must stream.
+- When the cluster has no `tls.ca`, a hedged attempt uses
+  `runtime.upstream_ca_file`.
 
 ## Failure Mode
 
-Filters declare `failure_mode: open` (continue on error)
-or `closed` (reject the request). Security-critical
-filters reject open mode by default. See
+Filters declare `failure_mode: open` (continue on error) or `closed` (reject
+the request). Security-critical filters reject open mode by default. See
 [failure-mode.yaml](../../examples/configs/pipeline/failure-mode.yaml).
 
-## Validation and Security
+## Validation and Errors
 
-Praxis validates configuration at startup and fails
-closed. Ambiguous or risky settings are errors, not
-warnings. Insecure overrides (see
-[getting-started.md](../developing/getting-started.md))
-require explicit opt-in and emit warnings at startup.
+Praxis validates configuration at startup and fails closed: ambiguous or
+risky settings are errors, not warnings. Validation covers listener name
+uniqueness, filter chain reference resolution, TLS path traversal, admin
+endpoint binding, health check SSRF protection, upstream TLS SNI
+requirements, and payload size enforcement.
 
-Key validations: listener name uniqueness, filter chain
-reference resolution, TLS path traversal rejection,
-admin endpoint binding restrictions, health check SSRF
-protection, upstream TLS SNI requirements, and payload
-size enforcement.
+The process exits before serving on:
 
-## Error Behavior
-
-Praxis fails fast at startup for configuration problems.
-Common failure modes:
-
-- **Invalid YAML or missing required fields**: the process
-  exits with a descriptive error before any listener binds.
-- **Unknown filter chain reference**: a listener references
-  a chain name not defined in `filter_chains:`; caught at
-  config validation.
-- **TLS certificate load failure**: the process exits if
-  a certificate's `cert_path` or `key_path` cannot be
-  read or parsed.
-- **Address bind failure**: if the listen address is already
-  in use or invalid, the server fails to start.
+- **Invalid YAML or missing required fields**: a descriptive error before any
+  listener binds.
+- **Unknown filter chain reference**: a listener names a chain not defined in
+  `filter_chains:`.
+- **TLS certificate load failure**: a certificate's `cert_path` or `key_path`
+  cannot be read or parsed.
+- **Address bind failure**: the listen address is in use or invalid.
 
 At runtime:
 
-- **Unreachable upstream**: the request returns 502 (Bad
-  Gateway). Connection timeouts are configurable per
-  cluster.
-- **Filter error**: an `Err` from a filter results in a
-  500 response to the client. The error is logged.
-- **Payload too large**: exceeding
-  `body_limits.max_request_bytes` or a filter's
-  `max_bytes` returns 413.
+- **Unreachable upstream**: 502 (Bad Gateway). Connection timeouts are
+  configurable per cluster.
+- **Filter error**: an `Err` from a filter returns 500 and is logged.
+- **Payload too large**: exceeding `body_limits.max_request_bytes` or a
+  filter's `max_bytes` returns 413.
 
 ## Overrides
 
-Some validations and features can be overridden for development
-and testing purposes. See `insecure_options` in
+Some validations and features can be overridden for development and testing
+with `insecure_options`. They need explicit opt-in and log warnings at
+startup; see
 [getting-started.md](../developing/getting-started.md#insecure-options).

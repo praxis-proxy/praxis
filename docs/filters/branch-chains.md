@@ -1,26 +1,16 @@
 # Branch Chains
 
-Branch chains add conditional paths to your filter
-pipeline. A filter produces a result, and a branch
-condition reads it to decide whether to divert,
-short-circuit, skip ahead, or loop back.
-
-## What Branch Chains Do
-
-- **Short-circuit responses**: block a request and
-  return a static response without reaching the
-  backend
-- **Skip filters**: bypass middleware (CORS, headers)
-  for requests that don't need it
-- **Retry loops**: re-run a section of the pipeline
-  after mutating headers or refreshing tokens
-- **Protocol-specific paths**: route gRPC and
-  JSON-RPC requests through different filter chains
+Branch chains add conditional paths to a filter pipeline. A filter writes a
+result, and a branch condition reads it to divert, short-circuit, skip ahead,
+or loop back. Uses include returning a static response without reaching the
+backend, skipping browser middleware (CORS, headers) for API requests,
+re-running part of the pipeline after mutating headers or refreshing tokens,
+and sending gRPC and JSON-RPC requests through different filter chains.
 
 ## Quick Start
 
-This example blocks requests when the `guardrails`
-filter detects a dangerous header:
+This config blocks requests when the `guardrails` filter detects a dangerous
+header:
 
 ```yaml
 filter_chains:
@@ -54,44 +44,34 @@ filter_chains:
             endpoints: ["127.0.0.1:3000"]
 ```
 
-When guardrails flags a request, it writes
-`status=blocked` to its filter results. The branch
-condition matches, the static 403 fires, and
-`rejoin: terminal` stops the pipeline. Normal
-requests pass through to routing.
-
-See
-`examples/configs/branching/conditional-terminal.yaml`
-for the complete runnable config.
+When guardrails flags a request, it writes `status=blocked` to its filter
+results. The branch condition matches, the static 403 fires, and
+`rejoin: terminal` stops the pipeline. Other requests continue to routing.
+The runnable config is
+`examples/configs/branching/conditional-terminal.yaml`.
 
 ## How It Works
 
 ### Writing Filter Results
 
-Filters write key-value pairs to a
-`FilterResultSet`, keyed by the filter's **type
-name** (from `HttpFilter::name()`). Results are
-cleared after branch evaluation. Results a filter
-writes while the request body is buffered ahead of
-the request phase (for example `json_rpc`, or
-`guardrails` body rules) are held until that
-filter's turn in the pipeline, so its branches see
-them wherever it sits. Two instances of the same
-filter type share one result slot. For the full
-lifecycle and API, see
-[Pipeline Concepts: Filter Results](../architecture/pipeline-concepts.md#filter-results).
+Filters write key-value pairs to a `FilterResultSet` keyed by the filter's
+type name, and the pipeline clears them after branch evaluation; see
+[Pipeline Concepts: Filter Results](../architecture/pipeline-concepts.md#filter-results)
+for the lifecycle and API. Results a filter writes while the request body is
+buffered ahead of the request phase (for example `json_rpc`, or `guardrails`
+body rules) are held until that filter's turn in the pipeline, so its branches
+see them wherever it sits.
 
 Built-in filters that write results:
+
 - `guardrails`: `status` = `blocked` | `passed`
-- `json_rpc`: `kind`, `method`, `id`, `id_kind`,
-  `batch_len`
-- `grpc_detection`: `kind` = `grpc` | `grpc+proto` |
-  `grpc+json` | `grpc+other`
+- `json_rpc`: `kind`, `method`, `id`, `id_kind`, `batch_len`
+- `grpc_detection`: `kind` = `grpc` | `grpc+proto` | `grpc+json` |
+  `grpc+other`
 
 ### Defining Branches
 
-Branches are defined in the `branch_chains` field on
-a filter entry:
+Branches go in the `branch_chains` field of a filter entry:
 
 ```yaml
 - filter: guardrails
@@ -108,44 +88,33 @@ a filter entry:
               status: 403
 ```
 
-**`on_result.filter`** must name the **host filter**
-the branch is attached to: its filter **type name**
-(the return value of `HttpFilter::name()`, e.g.
-`"guardrails"`), not the user-assigned `name:` on the
-entry, and not some other filter in the chain. A
-branch only ever sees its own host filter's results:
-the pipeline clears `filter_results` after each
-filter's branch evaluation, so a condition naming a
-different filter could never match and is rejected at
-startup. See
+`on_result.filter` must name the host filter the branch is attached to, by
+its type name (the return value of `HttpFilter::name()`, e.g.
+`"guardrails"`), not the `name:` on the entry and not another filter in the
+chain. The pipeline clears `filter_results` after each filter's branch
+evaluation, so a condition naming a different filter could never match, and
+startup rejects it. See
 [Pipeline Concepts: Two Meanings of "Name"][names].
 
 [names]: ../architecture/pipeline-concepts.md#the-two-meanings-of-name
 
-**`on_result.result`** is the expected value: a plain
-value matches exactly, or an operator matches a
-family of values (see [Result Matchers](#result-matchers)).
-In the Rust code, this field is called `value` but is
-serialized as `result` in YAML for readability.
+`on_result.result` is the expected value: a plain value matches exactly, and
+an operator matches a family of values (see [Result Matchers](#result-matchers)).
+The Rust field is `value`, serialized as `result` in YAML.
 
-**`on_result.key`** defaults to `"status"`. Override
-it to match other result keys (e.g., `key: kind`
-for `grpc_detection`).
+`on_result.key` defaults to `"status"`. Override it to match another result
+key (e.g., `key: kind` for `grpc_detection`).
 
-**Unconditional branches** omit `on_result` entirely
-and always fire.
-
-**Multiple branches** on one filter are evaluated in
-order; the first match with a non-`next` rejoin wins.
-Up to 16 branches per filter.
+A branch without `on_result` is unconditional and always fires. Several
+branches on one filter are evaluated in order, and the first match with a
+non-`next` rejoin wins. A filter can have up to 16 branches.
 
 ### Result Matchers
 
-A plain `result:` matches one exact value. When a
-filter reports a family of values (a guardrail that
-answers `safe` or `unsafe01` through `unsafe13`, or a
-severity of `0`, `2`, `4`, or `6`), use a single-key
-mapping that names an operator instead:
+A plain `result:` matches one exact value. When a filter reports a family of
+values (a guardrail that answers `safe` or `unsafe01` through `unsafe13`, or a
+severity of `0`, `2`, `4`, or `6`), use a single-key mapping that names an
+operator:
 
 ```yaml
 on_result:
@@ -164,72 +133,67 @@ on_result:
 | `not: <value>` | the value is anything else | **yes** |
 | `any_of: [<value>, ...]` | the value equals one entry | no |
 
-`not` is the one that fires when the filter wrote no
-value for the key. That's deliberate: a deny branch
-written as `not: safe` must not let a request through
-just because the guardrail gave no verdict. It replaces
-the older two-branch pattern (a `result: safe` branch
-that skips ahead past an unconditional deny branch),
-which fails closed the same way. If a missing value
-should let the request through instead, list the bad
-values with `contains` or `any_of`; those never fire
+`not` fires when the filter wrote no value for the key, so a deny branch
+written as `not: safe` doesn't let a request through just because the
+guardrail gave no verdict. It replaces the older two-branch pattern (a
+`result: safe` branch that skips ahead past an unconditional deny branch),
+which fails closed the same way. If a missing value should let the request
+through, list the bad values with `contains` or `any_of`, which never fire
 without a value.
 
-Every value follows the same rules as a plain
-`result:`: it can't be empty, it's at most 256 bytes,
-and it uses ASCII letters, digits, `_`, and `-`.
-Matching is case-sensitive. Unquoted numbers and
-booleans are read as their plain text (`0`, `true`);
-quote anything YAML would rewrite, like `"007"`.
-
-See `examples/configs/branching/result-matchers.yaml`.
+Every value follows the rules for a plain `result:`: not empty, at most 256
+bytes, ASCII letters, digits, `_`, and `-`. Matching is case-sensitive.
+Unquoted numbers and booleans are read as their plain text (`0`, `true`);
+quote anything YAML would rewrite, like `"007"`. See
+`examples/configs/branching/result-matchers.yaml`.
 
 ### Rejoin Points
 
-After a branch's filters execute, the pipeline
-resumes at the rejoin point:
+After a branch's filters run, the pipeline resumes at the rejoin point:
 
 | Rejoin value | Behavior |
 |-------------|----------|
 | `next` (default) | Continue with the filter after the branch point |
-| `terminal` or `client` | Stop the pipeline. In an ordinary routing pipeline, a branch can select a cluster via `router` + `load_balancer` and forward upstream. A binding-enabled pipeline must publish its request-scoped binding from a top-level router instead; branch routers are rejected. Otherwise the branch must produce the response (e.g. a `static_response` filter); a terminal branch that neither selects an upstream itself nor produces a response fails closed with a 500 (a cluster or upstream chosen before the branch does not count). A nested terminal branch must always produce a response; selecting an upstream there fails closed with a 500. |
+| `terminal` or `client` | Stop the pipeline (see below) |
 | `<filter_name>` (forward) | Skip to the named filter (must be after the branch point) |
 | `<filter_name>` (backward) | Re-enter at the named filter; requires `max_iterations` |
 
-Named rejoin targets use the **entry name** (the
-user-assigned `name:` on a filter entry), not the
-filter type name.
+A `terminal` branch either produces the response (e.g. a `static_response`
+filter) or, in an ordinary routing pipeline, selects a cluster via `router` +
+`load_balancer` and forwards upstream. A binding-enabled pipeline must publish
+its request-scoped binding from a top-level router; branch routers are
+rejected there. A terminal branch that does neither fails closed with a 500,
+and a cluster or upstream chosen before the branch does not count. A nested
+terminal branch must always produce a response; selecting an upstream there
+fails closed with a 500.
 
-**Re-entrance** (backward rejoin) requires
-`max_iterations` to prevent infinite loops. The
-counter increments each time the branch fires; when
+Named rejoin targets use the entry name (the `name:` on a filter entry), not
+the filter type name.
+
+Re-entrance (backward rejoin) requires `max_iterations` to prevent infinite
+loops. The counter increments each time the branch fires; once it is
 exceeded, the branch falls through to `Continue`.
 
 ### Chain References
 
-Branch chains reference filters via `chains:`, which
-accepts two formats:
-
-**Named reference** points to a top-level chain:
-
-```yaml
-chains:
-  - utility_chain
-```
-
-**Inline definition** defines filters directly:
+`chains:` takes named references to top-level chains, inline definitions
+(an object with `name` and `filters`), or a mix of both, concatenated in
+order:
 
 ```yaml
 chains:
-  - name: inline_chain
+  - utility_chain           # named reference
+  - name: inline_chain      # inline definition
     filters:
       - filter: static_response
         status: 403
 ```
 
-Both can be mixed and are concatenated in order.
+See `examples/configs/branching/named-chain-ref.yaml`.
 
 ## Patterns
+
+The conditional terminal pattern is the [Quick Start](#quick-start).
 
 ### Unconditional Sub-Chain
 
@@ -243,27 +207,6 @@ branch_chains:
 ```
 
 See `examples/configs/branching/unconditional-branch.yaml`.
-
-### Conditional Terminal
-
-Short-circuit on a condition to block and respond
-without reaching the backend:
-
-```yaml
-branch_chains:
-  - name: block_request
-    on_result:
-      filter: guardrails
-      result: blocked
-    rejoin: terminal
-    chains:
-      - name: response
-        filters:
-          - filter: static_response
-            status: 403
-```
-
-See `examples/configs/branching/conditional-terminal.yaml`.
 
 ### Skip-Forward
 
@@ -299,8 +242,7 @@ See `examples/configs/branching/conditional-skip-to.yaml`.
 
 ### Re-Entrance Loop
 
-Re-run classification after mutating headers, capped
-at 2 iterations:
+Re-run classification after mutating headers, at most 2 iterations:
 
 ```yaml
 - filter: headers
@@ -326,8 +268,8 @@ See `examples/configs/branching/reentrance.yaml`.
 
 ### Multiple Branches
 
-Multiple conditional branches on one filter act like
-a switch/case with first-match-wins:
+Several conditional branches on one filter act like a switch with
+first-match-wins:
 
 ```yaml
 branch_chains:
@@ -349,9 +291,8 @@ See `examples/configs/branching/multiple-branches.yaml`.
 
 ### Cross-Chain Rejoin
 
-A branch in one chain can rejoin at a named filter
-in another chain, because all listener chains are
-concatenated into one flat pipeline:
+All of a listener's chains are concatenated into one flat pipeline, so a
+branch in one chain can rejoin at a named filter in another:
 
 ```yaml
 listeners:
@@ -384,61 +325,55 @@ See `examples/configs/branching/cross-chain-flat.yaml`.
 | Branches per filter | 16 |
 | Total branches across config | 256 |
 
-**Response hooks** (`on_response`) run for every
-branch filter whose `on_request` ran, so filters such
-as `cors`, `headers` response operations, and
-`credential_injection` behave the same inside a
-branch as on the main path. They unwind in reverse,
-just like top-level filters: a branch's filters run
-`on_response` in reverse order immediately before
-their host filter's `on_response`, and a nested
-branch unwinds immediately before the branch filter
-that hosts it. A branch filter that rejected or
-answered the request still runs `on_response`; one
-skipped by its `conditions`, left unreached because
-the branch stopped early, or whose error propagated
-under `failure_mode: closed` does not.
-`response_conditions` and `failure_mode` apply
-exactly as at top level, and a rejection from a
-branch filter's `on_response` stops the response
-phase. Re-entrance
-(`max_iterations` loops) does not repeat the hook:
-each branch filter runs `on_response` at most once
-per request, however many passes ran its
-`on_request`. Filters that `rejoin` skips over, or
-that a `terminal` rejoin never reaches, do not run
-`on_response`.
+### Response Hooks
 
-**Body hooks** (`on_request_body`, `on_response_body`)
-do **not** run for filters inside branch chains.
-Body-transforming filters must be in the main
-pipeline path. This is enforced at build time: a
-filter that declares body access inside a branch
-chain is rejected as a pipeline ordering error, and
-body access declared by branch filters never enables
-pipeline-wide body buffering.
+`on_response` runs for every branch filter whose
+`on_request` ran, so `cors`, `headers` response operations, and
+`credential_injection` behave the same inside a branch as on the main path.
+They unwind in reverse like top-level filters: a branch's filters run
+`on_response` in reverse order just before their host filter's
+`on_response`, and a nested branch unwinds just before the branch filter that
+hosts it.
 
-**Security filters** inside branch sub-chains are held
-to the same rules as at top level: a security-critical
-filter (for example `ip_acl` or `rate_limit`) that
-carries request `conditions` or sets
-`failure_mode: open` is rejected at build time,
-however deeply it is nested. The branch executor
-honours both, so such a filter would otherwise be
-silently skipped for non-matching requests or have
-its errors swallowed. The same overrides apply:
-`insecure_options.skip_pipeline_checks.conditional_security`
-and `insecure_options.allow_open_security_filters`.
+- A branch filter that rejected or answered the request still runs
+  `on_response`. One skipped by its `conditions`, left unreached because the
+  branch stopped early, or whose error propagated under
+  `failure_mode: closed` does not.
+- `response_conditions` and `failure_mode` apply as at top level, and a
+  rejection from a branch filter's `on_response` stops the response phase.
+- Re-entrance (`max_iterations` loops) does not repeat the hook: each branch
+  filter runs `on_response` at most once per request, however many passes ran
+  its `on_request`.
+- Filters that `rejoin` skips over, or that a `terminal` rejoin never reaches,
+  do not run `on_response`.
 
-The branch's *own* `on_result` gate is a separate
-matter. A conditional branch runs only when its
-condition matches, so a security filter inside one is
-skipped for every other request, even when the filter
-itself is unconditional and fail-closed. That is
-frequently deliberate (the branch is the operator's
-admission decision, as in
-`examples/configs/branching/nested-branches.yaml`), so
-it is reported as a startup **advisory**, not an error:
+### Body Hooks
+
+`on_request_body` and `on_response_body` do not run for
+filters inside branch chains, so body-transforming filters must be on the
+main pipeline path. The build enforces this: a filter that declares body
+access inside a branch chain is rejected as a pipeline ordering error, and
+body access declared by branch filters never enables pipeline-wide body
+buffering.
+
+### Security Filters
+
+Inside branch sub-chains, security filters follow the
+top-level rules: a security-critical filter (for example `ip_acl` or
+`rate_limit`) that carries request `conditions` or sets
+`failure_mode: open` is rejected at build time, however deeply it is nested.
+The branch executor honours both settings, so otherwise such a filter would
+be skipped silently for non-matching requests or have its errors swallowed.
+The same overrides apply:
+`insecure_options.skip_pipeline_checks.conditional_security` and
+`insecure_options.allow_open_security_filters`.
+
+The branch's own `on_result` gate is separate. A security filter in a
+conditional branch is skipped for every request the condition doesn't match,
+even when the filter itself is unconditional and fail-closed. That is often
+deliberate (the branch is the operator's admission decision, as in
+`examples/configs/branching/nested-branches.yaml`), so startup reports it as
+an advisory, not an error:
 
 ```text
 security filter 'ip_acl' is reached only through
@@ -446,28 +381,25 @@ conditional branch 'gated'; it runs only for matching
 requests
 ```
 
-The gate is inherited, so the advisory also fires for a
-security filter in an unconditional branch nested inside
-a conditional one, naming the outermost gating branch.
-Put the filter on the main pipeline path, or in an
-unconditional branch, when it must apply to every
-request.
+The gate is inherited: the advisory also fires for a security filter in an
+unconditional branch nested inside a conditional one, and names the outermost
+gating branch. Put the filter on the main pipeline path, or in an
+unconditional branch, when it must apply to every request.
 
-**Nested control flow**: `SkipTo` and `ReEnter` from
-nested branches (branches within branches) are
-discarded. Only `Terminal` and `Reject` propagate
-upward from nested branches. A nested `terminal`
-branch must produce a response: selecting an
-upstream inside a nested terminal branch fails
-closed with a 500.
+### Nested Control Flow
 
-**Results from pre-request hooks**: `on_result.filter` uses the filter
-type name, but results published by head or pre-read body hooks are held
-for the instance that published them. Each instance receives only its
-own staged results before its request hook and branches run. This also
-applies when an instance publishes no result or its hook is skipped.
-Promoted headers and flat metadata remain shared request values, so
-later writes to those values still take precedence.
+`SkipTo` and `ReEnter` from nested branches
+(branches within branches) are discarded. Only `Terminal` and `Reject`
+propagate upward from nested branches.
+
+### Results From Pre-Request Hooks
+
+`on_result.filter` uses the filter type
+name, but results published by head or pre-read body hooks are held for the
+instance that published them. Each instance receives only its own staged
+results before its request hook and branches run, including when it publishes
+no result or its hook is skipped. Promoted headers and flat metadata remain
+shared request values, so later writes to them still take precedence.
 
 ## Configuration Reference
 
@@ -476,7 +408,7 @@ later writes to those values still take precedence.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `name` | string | required | Globally unique branch name |
-| `chains` | list | required | Chain references (named or inline) |
+| `chains` | list | required | [Chain references](#chain-references) (named or inline) |
 | `on_result` | object | `null` | Condition; omit for unconditional |
 | `rejoin` | string | `"next"` | Where to resume (`next`, `terminal`, `client`, or filter name) |
 | `max_iterations` | integer | `null` | Required for backward rejoin; range 1-100 |
@@ -488,25 +420,6 @@ later writes to those values still take precedence.
 | `filter` | string | required | Filter TYPE name (from `HttpFilter::name()`) |
 | `key` | string | `"status"` | Result key to check |
 | `result` | string | required | Expected value |
-
-### ChainRef
-
-Named reference (plain string):
-
-```yaml
-chains:
-  - utility_chain
-```
-
-Inline definition (object with `name` and `filters`):
-
-```yaml
-chains:
-  - name: inline
-    filters:
-      - filter: static_response
-        status: 200
-```
 
 ## Related
 

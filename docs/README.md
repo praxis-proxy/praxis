@@ -1,17 +1,13 @@
 # Praxis Documentation
 
-Praxis is a high-performance, security-first **proxy framework**
-with a composable filter pipeline for routing, load balancing,
-and security. AI Gateway docs live in
+Praxis is a **proxy framework** with a composable filter pipeline for
+routing, load balancing, and security. AI Gateway docs are in the
 [praxis-ai overview](https://github.com/praxis-proxy/ai/blob/main/docs/overview.md).
-
-The sections below are ordered for a first deployment: get a proxy running,
-operate it, choose filters, understand the design, then look up reference
-material. Extension and contributor material is last.
+Sections follow the order of a first deployment.
 
 ## Getting started
 
-- [Getting started](getting-started/README.md): where to begin
+- [Getting started](getting-started/README.md): reading order
 - [Quickstart](getting-started/quickstart.md):
   run the container image in front of a backend and send a request
 - [Route requests](getting-started/route-requests.md):
@@ -20,9 +16,7 @@ material. Extension and contributor material is last.
   build the binary and run a local proxy
 - [Example configs](../examples/README.md):
   working YAML for each feature
-
-To proxy model APIs or agent protocols, use the
-[Praxis AI quickstart][ai-quickstart].
+- [Praxis AI quickstart][ai-quickstart]: proxy model APIs or agent protocols
 
 [ai-quickstart]: https://github.com/praxis-proxy/ai/blob/main/docs/getting-started/quickstart.md
 
@@ -99,7 +93,6 @@ To proxy model APIs or agent protocols, use the
 ## Reference
 
 - [Features](features.md)
-- [Filter Reference](filters/reference.md)
 - [Benchmarks](benchmarks.md)
 - [Proposals](https://github.com/praxis-proxy/enhancements)
 

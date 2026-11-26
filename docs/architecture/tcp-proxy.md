@@ -1,27 +1,16 @@
 # TCP Proxy
 
-Design of the raw TCP/L4 bidirectional forwarding
-protocol adapter.
+The TCP proxy forwards opaque byte streams between clients and upstreams at
+L4. The upstream comes from one of two places:
 
-## Overview
+- **Static upstream**: the listener sets a fixed `upstream` address (e.g.
+  `10.0.0.1:5432`).
+- **Filter-routed**: no upstream is configured, and TCP filters (e.g.
+  `sni_router`, `tcp_load_balancer`) set it during `on_connect`.
 
-The TCP proxy forwards opaque byte streams between
-clients and upstreams without interpreting application
-protocols. It operates at L4 and supports two upstream
-resolution modes:
-
-- **Static upstream**: the listener config provides a
-  fixed `upstream` address (e.g. `10.0.0.1:5432`).
-- **Filter-routed**: no upstream is configured; TCP
-  filters (e.g. `sni_router`, `tcp_load_balancer`)
-  set the upstream during `on_connect`.
-
-TCP listeners sharing the same
-`(upstream, cluster, timeout, max_duration)` tuple
-are grouped into a single Pingora `Service`. The
-grouping logic validates that listeners in the same
-group use identical `filter_chains` and
-`max_connections`, rejecting mismatches at startup.
+TCP listeners with the same `(upstream, cluster, timeout, max_duration)` tuple
+share one Pingora `Service`. Listeners in a group must use identical
+`filter_chains` and `max_connections`; a mismatch fails startup.
 
 ## Connection Lifecycle
 
@@ -29,69 +18,49 @@ group use identical `filter_chains` and
 accept -> admission -> TLS (if configured) -> SNI peek -> filters -> connect -> forward -> disconnect
 ```
 
-1. **Accept**: the backend accepts the TCP connection.
-   Hyper admits before spawning its connection task;
-   Pingora admits in its pre-TLS callback, after its
-   accept task and L4 buffers exist.
-
-2. **Admission gates**: the shared token is acquired
-   before a TLS handshake or at plain TCP entry:
-   - Memory pressure: if the process exceeds its
-     memory threshold, the connection is dropped.
-   - Connection limits: a global semaphore
-     (`runtime.max_connections`) and a TCP-group
-     semaphore (`max_connections`) must both have
-     available permits.
-   - File descriptor pressure: a forecast claim is held
-     until an upstream connection opens or the session ends.
-
-3. **SNI peek** (filter-routed mode only): reads the
-   initial bytes to extract the TLS `ClientHello`
-   SNI. See [SNI Peek-and-Forward](#sni-peek-and-forward).
-
-4. **Connect filters**: the filter pipeline runs
-   `on_connect` in declared order. Filters may set
+1. **Accept**: Hyper admits the connection before spawning its connection
+   task. Pingora admits in its pre-TLS callback, after its accept task and L4
+   buffers exist.
+2. **Admission gates**: the shared token is acquired before a TLS handshake,
+   or at plain TCP entry:
+   - Memory pressure: over the process memory threshold, the connection is
+     dropped.
+   - Connection limits: the global semaphore (`runtime.max_connections`) and
+     the TCP-group semaphore (`max_connections`) must both have a permit.
+   - File descriptor pressure: a forecast claim is held until an upstream
+     connection opens or the session ends.
+3. **SNI peek** (filter-routed mode only): reads the TLS `ClientHello` to
+   extract the SNI. See [SNI Peek-and-Forward](#sni-peek-and-forward).
+4. **Connect filters**: `on_connect` runs in declared order. Filters may set
    `ctx.upstream_addr` or reject the connection.
+5. **SSRF check**: DNS resolution runs and every resolved IP is checked. See
+   [SSRF Protection](#ssrf-protection).
+6. **Peeked byte replay**: bytes consumed by the SNI peek are written to the
+   upstream first.
+7. **Bidirectional forwarding**: `copy_bidirectional` streams bytes both ways,
+   bounded by the [timeouts](#timeout-layering).
+8. **Disconnect filters**: `on_disconnect` runs in reverse order with final
+   byte counts.
 
-5. **SSRF check**: before connecting to the resolved
-   upstream, DNS resolution runs and every resolved
-   IP is checked against private/reserved ranges.
-   See [SSRF Protection](#ssrf-protection).
-
-6. **Peeked byte replay**: if SNI peeking consumed
-   bytes, they are written to the upstream before
-   bidirectional forwarding begins.
-
-7. **Bidirectional forwarding**: `copy_bidirectional`
-   streams bytes in both directions, governed by
-   timeout layering.
-
-8. **Disconnect filters**: `on_disconnect` runs in
-   reverse order with final byte counts.
-
-Connections are not pooled. Each TCP session uses a
-dedicated upstream socket that is closed when the
-session ends.
+Connections are not pooled. Each session gets its own upstream socket, closed
+when the session ends.
 
 ## SNI Peek-and-Forward
 
-When no static upstream is configured, the proxy
-must inspect the initial TLS `ClientHello` to
-extract the SNI hostname before filters run. The
-challenge: the peeked bytes are part of the TLS
-handshake and must reach the upstream intact.
+Without a static upstream, the proxy must read the SNI hostname from the TLS
+`ClientHello` before filters run, and those bytes must still reach the
+upstream intact.
 
 ### Peek Strategy
 
-The proxy reads (not peeks) from the downstream
-`Stream` into a growing buffer:
+The proxy reads (not peeks) from the downstream `Stream` into a growing
+buffer:
 
 ```text
 1024 B initial -> double on NeedMore -> cap at 16 KiB
 ```
 
-Each read attempt is parsed through the SNI parser
-in `praxis-tls`. Three outcomes:
+After each read the buffer goes through the SNI parser in `praxis-tls`:
 
 | Result     | Action                              |
 |------------|-------------------------------------|
@@ -99,29 +68,20 @@ in `praxis-tls`. Three outcomes:
 | `NeedMore` | Grow buffer, read again             |
 | `NotTls`   | Truncate buffer, return None + bytes|
 
-The parser walks the TLS record
-header, handshake header, `ClientHello` fixed
-fields, skips variable-length fields (session ID,
-cipher suites, compression), and iterates extensions
-looking for type `0x0000` (SNI). It validates the
-hostname per RFC 6066 (rejects IP literals, empty
-hostnames, non-DNS characters).
+The parser walks the TLS record header, the handshake header and the
+`ClientHello` fixed fields, skips the variable-length fields (session ID,
+cipher suites, compression), and looks for extension type `0x0000` (SNI). It
+validates the hostname per RFC 6066, rejecting IP literals, empty hostnames,
+and non-DNS characters.
 
 ### Replay
 
-The peeked bytes are written to the upstream socket
-with `write_all` before `copy_bidirectional` starts.
-From the upstream's perspective, the connection
-begins with a complete `ClientHello` - the peek is
-invisible.
-
-Static-upstream mode skips SNI peeking entirely.
-The `ClientHello` flows through `copy_bidirectional`
-without interception.
+The peeked bytes are written to the upstream with `write_all` before
+`copy_bidirectional` starts, so the upstream sees a complete `ClientHello`.
+Static-upstream mode skips the peek and the `ClientHello` flows through
+`copy_bidirectional` untouched.
 
 ## Timeout Layering
-
-Three independent timeouts protect different phases:
 
 ```text
 |-- TLS --|-- SNI peek --|-- filters --|-- connect --|-- forward --|
@@ -129,78 +89,44 @@ Three independent timeouts protect different phases:
                                            |-- session timeout --|
 ```
 
-### SNI Peek Timeout (5 seconds)
+| Timeout | Value | Covers |
+| ------- | ----- | ------ |
+| SNI peek | 5 seconds, fixed | The `ClientHello` read, filter-routed mode only. On expiry the connection closes without running filters. It stops a slow-drip client from holding a connection and semaphore permit. |
+| Session (`tcp_session_timeout_ms`) | per listener | The `copy_bidirectional` phase. Active connections end at the deadline even with data in flight. |
+| Max duration (`tcp_max_duration_secs`) | per listener | Everything from admission: shared setup, forwarding, and Hyper's TLS handshake. |
+| Upstream connect | 10 seconds, fixed | DNS resolution and TCP connect, wrapped in `tokio::time::timeout`. |
 
-Bounds the time a client can hold a connection
-during the initial `ClientHello` read. Without this,
-a slow-drip client could hold a connection and
-semaphore permit indefinitely. Only applies in
-filter-routed mode. If exceeded, the connection is
-closed without running filters.
-
-### Session Timeout (`tcp_session_timeout_ms`)
-
-A hard deadline on the `copy_bidirectional` phase.
-Active connections are terminated after this
-duration regardless of whether data is in flight.
-Configured per-listener. The forwarding loop uses
-`tokio::select!` with biased polling so that a
-graceful shutdown signal takes priority over data
-transfer.
-
-### Max Duration (`tcp_max_duration_secs`)
-
-An absolute budget counted from admission, covering
-shared setup and forwarding and Hyper's TLS handshake.
-The forwarding-only session timeout remains separate.
-Pingora's pre-TLS callback starts this budget before
-its handshake, but Pingora fixes that handshake's own
-timeout at 60 seconds. A stalled Pingora handshake can
-therefore exceed the configured maximum until Pingora
-returns; the proxy then rejects the expired token.
-
-### Upstream Connect Timeout (10 seconds)
-
-A fixed timeout on DNS resolution and TCP connect
-to the upstream. Not configurable. Applied via
-`tokio::time::timeout` around the resolve-and-connect
-sequence.
+Pingora's pre-TLS callback starts the max-duration budget before its
+handshake, but Pingora fixes that handshake's own timeout at 60 seconds. A
+stalled Pingora handshake can overrun the configured maximum until Pingora
+returns, and the proxy then rejects the expired token.
 
 ### Graceful Shutdown
 
-All forwarding variants monitor a `ShutdownWatch`
-receiver. When the server initiates shutdown, the
-`tokio::select!` biased branch fires first, ending
-the session cleanly.
+Every forwarding variant watches a `ShutdownWatch` receiver in a
+`tokio::select!` with biased polling, so a shutdown signal wins over data
+transfer and ends the session cleanly.
 
 ## TLS Setup
 
-TCP listeners support optional TLS termination.
-The TLS configuration is shared with HTTP listeners
-through `build_tls_settings` (context label `"TCP"`).
-Certificate hot-reload is supported: watcher tasks
-return shutdown senders that the caller must keep
-alive.
-
-Listeners are registered as either plain TCP or TLS:
+TCP listeners can terminate TLS. They share TLS configuration with HTTP
+listeners through `build_tls_settings` (context label `"TCP"`). Certificates
+hot-reload; the watcher tasks return shutdown senders that the caller must
+keep alive.
 
 ```text
 listener.tls: Some(_) -> service.add_tls_with_settings()
 listener.tls: None    -> service.add_tcp()
 ```
 
-TLS termination and SNI peeking serve different
-purposes. TLS termination decrypts traffic at the
-proxy. SNI peeking reads the `ClientHello` from an
-encrypted stream that will be forwarded as-is to the
-upstream (the proxy does not terminate TLS in this
-case).
+TLS termination decrypts traffic at the proxy. SNI peeking reads the
+`ClientHello` of an encrypted stream that is forwarded as-is, without
+termination.
 
 ## SSRF Protection
 
-Before connecting to any upstream, the proxy resolves
-DNS and checks every returned IP against
-private/reserved ranges:
+Before connecting to any upstream, the proxy resolves DNS and refuses the
+connection if any returned IP is in a private or reserved range:
 
 - IPv4 loopback (`127.0.0.0/8`)
 - RFC 1918 (`10/8`, `172.16/12`, `192.168/16`)
@@ -212,21 +138,13 @@ private/reserved ranges:
 - IPv6 link-local (`fe80::/10`)
 - IPv6 unique local (`fc00::/7`)
 
-IPv4-mapped IPv6 addresses (`::ffff:A.B.C.D`) are
-normalized before checking, preventing bypass via
-mixed-family resolution.
-
-This protects against DNS rebinding attacks where a
-hostname resolves to a public IP at config time but a
-private IP at connection time. The check runs at
-connection time, not config time.
-
-The check is skipped when
-`insecure_options.allow_private_upstreams` is set.
+IPv4-mapped IPv6 addresses (`::ffff:A.B.C.D`) are normalized first, so
+mixed-family resolution can't bypass the check. The check runs at connection
+time, which defeats DNS rebinding (a name that resolves publicly at config
+time and privately later). `insecure_options.allow_private_upstreams` turns it
+off.
 
 ## TCP Filter Pipeline
-
-TCP filters implement a two-phase model:
 
 ```rust
 #[async_trait]
@@ -239,27 +157,19 @@ trait TcpFilter: Send + Sync {
 }
 ```
 
-Compared to HTTP's multi-phase model (request,
-request body, response, response body), TCP filters
-are simpler:
+- `on_connect` runs in forward order when the connection is accepted, before
+  the upstream connect. `FilterAction::Reject` stops the pipeline and closes
+  the connection.
+- `on_disconnect` runs in reverse order after the session ends, with final
+  byte counts.
+- `failure_mode` (open/closed) decides whether filter errors are fatal.
+- Conditions, branch chains, and body processing are HTTP-only. HTTP filters
+  in a mixed pipeline are skipped during TCP execution.
 
-- `on_connect` runs in forward order at connection
-  acceptance, before upstream connect.
-- `on_disconnect` runs in reverse order after the
-  session ends, with final byte counts.
-- No conditions, branch chains, or body processing.
-  Those features are HTTP-only.
-- HTTP filters in a mixed pipeline are skipped
-  during TCP execution.
-
-`FilterAction::Reject` in `on_connect` stops the
-pipeline and closes the connection. The
-`failure_mode` setting (open/closed) controls
-whether filter errors are fatal.
+The pipeline sits behind `ArcSwap`, so hot-reload swaps it without disturbing
+in-flight connections.
 
 ### TcpFilterContext
-
-The context carries per-connection state:
 
 | Field              | Purpose                          |
 |--------------------|----------------------------------|
@@ -274,35 +184,15 @@ The context carries per-connection state:
 | `bytes_in`         | Client bytes (post-forward)      |
 | `bytes_out`        | Upstream bytes (post-forward)    |
 
-The pipeline is held behind `ArcSwap` for atomic
-hot-reload without disrupting in-flight connections.
-
 ## Built-in TCP Filters
 
-### sni_router
-
-Routes TLS connections by SNI hostname. Performs
-exact-match lookup first, then longest-suffix
-wildcard match (e.g. `*.example.com`). Matching is
-case-insensitive per RFC 4343. Falls back to
-`default_upstream` or rejects with 421.
-
-### tcp_load_balancer
-
-Selects an upstream endpoint from a named cluster
-using the configured strategy (round-robin,
-least-connections, consistent-hash, random,
-weighted). Reads `ctx.cluster` (set by listener
-config), writes `ctx.upstream_addr`. Releases
-least-connections counters on disconnect. Enters
-panic mode (routes to all) when every endpoint is
-unhealthy.
-
-### tcp_access_log
-
-Logs connection and disconnection events via
-`tracing::info` with remote address, upstream, SNI,
-duration, and byte counts.
+- [`sni_router`](../filters/tcp/traffic_management/sni_router.md): routes by
+  SNI hostname. With no match and no `default_upstream`, it rejects with 421.
+- [`tcp_load_balancer`](../filters/tcp/traffic_management/tcp_load_balancer.md):
+  picks an endpoint from `ctx.cluster` and writes `ctx.upstream_addr`.
+- [`tcp_access_log`](../filters/tcp/observability/tcp_access_log.md): logs
+  connect and disconnect events via `tracing::info` with remote address,
+  upstream, SNI, duration, and byte counts.
 
 ## Related
 
