@@ -145,7 +145,7 @@ fn rate_limiting_example_returns_rate_limit_headers() {
     panic!("rate limiter should have returned 429 within 50 requests");
 }
 
-/// Report the selected cluster's image guarantee to the echo backend.
+/// Report the selected cluster's image declaration to the echo backend.
 struct ReportImageModality;
 
 #[async_trait::async_trait]
@@ -172,34 +172,40 @@ impl praxis_filter::HttpFilter for ReportImageModality {
     async fn on_selected_upstream_request_body(
         &self,
         ctx: &mut praxis_filter::HttpFilterContext<'_>,
-        body: &mut Option<bytes::Bytes>,
+        _body: &mut Option<bytes::Bytes>,
     ) -> Result<praxis_filter::SelectedUpstreamBodyOutcome, praxis_filter::FilterError> {
-        assert_eq!(
-            ctx.selected_application_provider(),
-            Some("vllm"),
-            "both routes must select vLLM"
-        );
-        assert_eq!(
-            ctx.selected_application_protocol(),
-            Some("openai_chat_completions"),
-            "both routes must select Chat Completions"
-        );
-        assert!(
-            ctx.selected_input_modality_declared(praxis_core::config::InputModality::Text),
-            "both clusters declare text input"
-        );
-        let image = ctx.selected_input_modality_declared(praxis_core::config::InputModality::Image);
-        *body = Some(bytes::Bytes::from_static(if image { b"image" } else { b"text" }));
+        use praxis_core::config::InputModality;
+
+        if ctx.selected_application_provider() != Some("vllm") {
+            return Err(format!("expected vLLM, selected {:?}", ctx.selected_application_provider()).into());
+        }
+        if ctx.selected_application_protocol() != Some("openai_chat_completions") {
+            return Err(format!(
+                "expected Chat Completions, selected {:?}",
+                ctx.selected_application_protocol()
+            )
+            .into());
+        }
+        if !ctx.selected_input_modality_declared(InputModality::Text) {
+            return Err("the selected cluster must declare text input".into());
+        }
+        let modality = if ctx.selected_input_modality_declared(InputModality::Image) {
+            "image"
+        } else {
+            "text"
+        };
+        ctx.extra_request_headers
+            .push(("x-test-input-modality".into(), modality.to_owned()));
         Ok(praxis_filter::SelectedUpstreamBodyOutcome::Continue)
     }
 }
 
 #[test]
 fn cluster_application_metadata_example_reports_selected_modalities() {
-    use praxis_test_utils::{http_post, registry_with, start_echo_backend, start_proxy_with_registry};
+    use praxis_test_utils::{http_post, registry_with, start_proxy_with_registry, start_tagged_header_echo_backend};
 
-    let text = start_echo_backend();
-    let vision = start_echo_backend();
+    let text = start_tagged_header_echo_backend("text backend");
+    let vision = start_tagged_header_echo_backend("vision backend");
     let mut config = super::load_example_config(
         "traffic-management/cluster-application-metadata.yaml",
         free_port(),
@@ -216,9 +222,18 @@ fn cluster_application_metadata_example_reports_selected_modalities() {
     let registry = registry_with("report_image_modality", || Box::new(ReportImageModality));
     let proxy = start_proxy_with_registry(&config, &registry);
 
-    for (path, expected) in [("/v1/chat/completions", "text"), ("/vision", "image")] {
+    for (path, backend, expected) in [
+        ("/v1/chat/completions", "text backend", "text"),
+        ("/vision", "vision backend", "image"),
+    ] {
         let (status, body) = http_post(proxy.addr(), path, "same request");
-        assert_eq!((status, body.as_str()), (200, expected), "{path}");
+        assert_eq!(status, 200, "{path} returned {body}");
+        assert_eq!(body.lines().next(), Some(backend), "{path} reached the wrong backend");
+        let modality = format!("x-test-input-modality: {expected}");
+        assert!(
+            body.lines().any(|line| line.eq_ignore_ascii_case(&modality)),
+            "{path} returned {body}"
+        );
     }
 }
 

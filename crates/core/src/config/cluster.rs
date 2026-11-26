@@ -79,7 +79,7 @@ impl fmt::Display for UpstreamHttpVersion {
     }
 }
 
-/// A kind of request content the selected HTTP deployment guarantees it accepts.
+/// A kind of request content declared for the routed HTTP cluster.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum InputModality {
@@ -161,8 +161,8 @@ pub struct ClusterHttpOptions {
     #[serde(default)]
     pub application_provider: Option<Arc<str>>,
 
-    /// Input content guaranteed across all eligible endpoints and models.
-    /// Omission and an empty list declare no guarantees.
+    /// Accepted input content declared for the routed cluster.
+    /// Omission and an empty list declare no modalities. TCP load balancers ignore this HTTP field.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub input_modalities: std::collections::BTreeSet<InputModality>,
 
