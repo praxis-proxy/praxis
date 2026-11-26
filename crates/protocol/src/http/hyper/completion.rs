@@ -52,6 +52,7 @@ async fn finish(flight: &mut Flight) {
     release_retry_state(ctx);
     ctx.ended_by_client = ended_by_client_origin(flight.error, ctx.upstream_response_status);
     logging_cleanup(pipeline, ctx).await;
+    praxis_filter::settle_bandwidth(&mut ctx.extensions, flight.error.is_none());
     emit_completion_observers(pipeline, flight.written_status, ctx);
 }
 

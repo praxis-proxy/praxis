@@ -10,6 +10,8 @@
 //! header mutation is applied to it in the order Pingora applies it to the
 //! forwarded head.
 
+use std::sync::Arc;
+
 use http::request::Parts;
 use praxis_core::connectivity::normalize_mapped_ipv4;
 use praxis_filter::{BodyMode, FilterAction, Rejection, Request, StreamingTerminalResponse};
@@ -24,12 +26,15 @@ use super::{
     service::Flight,
 };
 use crate::http::pingora::{
-    handler::request_filter::{
-        header_mutations::apply_pre_read_mutations_to_request,
-        pipeline::{PipelineResult, run_pipeline},
-        request_head::run_head_filters,
-        request_utils::{create_request_span_for, record_exported_trace_id},
-        stream_buffer::{PreReadMutations, PreReadPass, PreReadStop},
+    handler::{
+        health_util::ErrorOrigin,
+        request_filter::{
+            header_mutations::apply_pre_read_mutations_to_request,
+            pipeline::{PipelineResult, run_pipeline},
+            request_head::run_head_filters,
+            request_utils::{create_request_span_for, record_exported_trace_id},
+            stream_buffer::{PreReadMutations, PreReadPass, PreReadStop},
+        },
     },
     metrics,
 };
@@ -48,13 +53,16 @@ pub(super) enum RequestPhase {
 
     /// Answer with a filter's streaming terminal response.
     Stream(Box<StreamingTerminalResponse>),
+
+    /// Drop the connection without writing a response.
+    Close,
 }
 
 /// Run the request phase over the request head and, for `StreamBuffer`,
 /// its body.
 pub(super) async fn run(
     flight: &mut Flight,
-    connection: &ConnectionFacts,
+    connection: &Arc<ConnectionFacts>,
     mut parts: Parts,
     body: &mut DownstreamBody,
 ) -> RequestPhase {
@@ -67,6 +75,7 @@ pub(super) async fn run(
         return RequestPhase::Reply(reply::plain_rejection(answer));
     }
 
+    remember_bandwidth_connection(flight, connection);
     let mut request = capture_client(flight, connection, parts);
     if let Some(phase) = reject_unsupported_upgrade(flight, &request) {
         return phase;
@@ -83,6 +92,15 @@ pub(super) async fn run(
     let span = flight.ctx.request_span.clone();
     let result = Box::pin(run_pipeline(&flight.pipeline, request, &mut flight.ctx).instrument(span)).await;
     Box::pin(outcome(flight, result)).await
+}
+
+/// Attach the downstream identity and lifetime used by connection-scoped limits.
+fn remember_bandwidth_connection(flight: &mut Flight, connection: &Arc<ConnectionFacts>) {
+    crate::http::pingora::handler::bandwidth::remember_connection(
+        &mut flight.ctx.extensions,
+        crate::http::pingora::handler::bandwidth::pointer_key(Arc::as_ptr(connection).addr()),
+        Some(praxis_filter::ConnectionAlive::watch(connection)),
+    );
 }
 
 /// Refuse malformed, denied, or adapter-unsupported HTTP upgrade requests.
@@ -184,6 +202,15 @@ async fn run_head_phase(flight: &mut Flight, request: &mut Request) -> Result<()
 /// Snapshot `request` and answer it with `refusal`.
 fn refuse(flight: &mut Flight, request: &Request, refusal: Rejection) -> RequestPhase {
     flight.ctx.request_snapshot = Some(request.clone());
+    rejection_phase(flight, refusal)
+}
+
+/// Write `refusal`, or drop the connection when it carries a close cause.
+fn rejection_phase(flight: &mut Flight, refusal: Rejection) -> RequestPhase {
+    if reply::drops_connection(&flight.ctx) {
+        flight.error = Some(ErrorOrigin::Other);
+        return RequestPhase::Close;
+    }
     RequestPhase::Reply(reply::rejection(refusal, &flight.ctx, flight.version))
 }
 
@@ -281,7 +308,7 @@ async fn outcome(flight: &mut Flight, result: Result<PipelineResult, praxis_filt
         Ok(FilterAction::Continue | FilterAction::Release | FilterAction::BodyDone) => RequestPhase::Proxy,
         Ok(FilterAction::Reject(refusal)) => {
             flight.ctx.stamp_error_type(metrics::ERROR_TYPE_FILTER_REJECT);
-            RequestPhase::Reply(reply::rejection(refusal, &flight.ctx, flight.version))
+            rejection_phase(flight, refusal)
         },
         Ok(FilterAction::TerminalResponse(terminal)) => {
             RequestPhase::Reply(Box::pin(reply::terminal(flight, *terminal)).await)
@@ -308,22 +335,15 @@ async fn outcome(flight: &mut Flight, result: Result<PipelineResult, praxis_filt
     reason = "tests"
 )]
 mod tests {
-    use std::{
-        net::IpAddr,
-        sync::{Arc, Mutex},
-        time::Duration,
-    };
+    use std::{net::IpAddr, sync::Mutex, time::Duration};
 
     use bytes::Bytes;
     use http::{Method, StatusCode, Version};
     use praxis_filter::{FilterPipeline, TerminalResponse};
 
     use super::*;
-    use crate::http::{
-        hyper::test_utils::{
-            BodyHook, Client, Pull, Script, Source, client_request, empty_pipeline, scripted_pipeline,
-        },
-        pingora::handler::health_util::ErrorOrigin,
+    use crate::http::hyper::test_utils::{
+        BodyHook, Client, Pull, Script, Source, client_request, empty_pipeline, scripted_pipeline,
     };
 
     #[tokio::test]
@@ -447,7 +467,9 @@ mod tests {
             serial_number: Some("12:34".to_owned()),
         });
         let mut connection = facts("127.0.0.1:40000", true);
-        connection.peer_identity = Some(Arc::clone(&identity));
+        Arc::get_mut(&mut connection)
+            .expect("new connection facts are unshared")
+            .peer_identity = Some(Arc::clone(&identity));
         for _request in 0..2 {
             let mut flight = Flight::for_tests(empty_pipeline());
             let _captured = capture_client(&mut flight, &connection, head(Method::GET, "/"));
@@ -890,12 +912,14 @@ mod tests {
     }
 
     /// The facts of a connection from `peer`.
-    fn facts(peer: &str, tls: bool) -> ConnectionFacts {
-        ConnectionFacts {
+    ///
+    /// Shared so [`run`](super::run) can watch the connection for the call.
+    fn facts(peer: &str, tls: bool) -> Arc<ConnectionFacts> {
+        Arc::new(ConnectionFacts {
             peer: peer.parse().unwrap(),
             tls,
             peer_identity: None,
-        }
+        })
     }
 
     /// A request head for `method` to `target` with a `Host`.
@@ -938,7 +962,7 @@ mod tests {
     fn local_reply(phase: RequestPhase) -> Option<LocalReply> {
         match phase {
             RequestPhase::Reply(reply) => Some(reply),
-            RequestPhase::Proxy | RequestPhase::Stream(_) => None,
+            RequestPhase::Proxy | RequestPhase::Stream(_) | RequestPhase::Close => None,
         }
     }
 

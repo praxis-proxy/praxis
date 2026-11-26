@@ -829,6 +829,41 @@ mod continuous_tests {
         );
     }
 
+    /// Stop the load worker even when its test peer exits through unwinding.
+    struct StopWorkerOnExit(Arc<AtomicBool>);
+
+    impl Drop for StopWorkerOnExit {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn http2_worker_stops_when_goaway_peer_panics() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listen");
+        let endpoint = listener.local_addr().expect("address").to_string();
+        let stop = Arc::new(AtomicBool::new(false));
+        let server_stop = Arc::clone(&stop);
+        let server = std::thread::spawn(move || {
+            let _stop_on_exit = StopWorkerOnExit(server_stop);
+            let (_stream, _) = listener.accept().expect("accept");
+            panic!("GOAWAY peer failed before completing the exchange");
+        });
+        let worker_stop = Arc::clone(&stop);
+        let (finished, completion) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            http2_worker(&worker_stop, &ContinuousLoadReport::default(), &endpoint);
+            finished.send(()).expect("worker completion");
+        });
+        let result = completion.recv_timeout(IO_TIMEOUT + Duration::from_secs(1));
+        let stopped = stop.load(Ordering::SeqCst);
+        stop.store(true, Ordering::SeqCst);
+        worker.join().expect("worker");
+        assert!(server.join().is_err(), "the peer failure must remain observable");
+        result.expect("the failed peer must stop the retrying worker");
+        assert!(stopped, "the peer must stop its worker before fallback cleanup");
+    }
+
     /// Unprocessed streams may be replayed per [RFC 9113 Section 6.8].
     ///
     /// [RFC 9113 Section 6.8]: https://datatracker.ietf.org/doc/html/rfc9113#section-6.8
@@ -844,17 +879,16 @@ mod continuous_tests {
             let stop = Arc::new(AtomicBool::new(false));
             let server_stop = Arc::clone(&stop);
             let server = std::thread::spawn(move || {
+                let _stop_on_exit = StopWorkerOnExit(Arc::clone(&server_stop));
                 worker_runtime().block_on(async {
                     for index in 1..=rejections {
                         let (stream, _) = listener.accept().expect("accept GOAWAY connection");
-                        stream.set_nonblocking(true).expect("nonblocking stream");
-                        let stream = tokio::net::TcpStream::from_std(stream).expect("Tokio stream");
-                        let mut connection = h2::server::handshake(stream).await.expect("handshake");
-                        connection.abrupt_shutdown(h2::Reason::NO_ERROR);
-                        if index == 2 {
-                            server_stop.store(true, Ordering::SeqCst);
-                        }
-                        let _ = connection.accept().await;
+                        tokio::time::timeout(
+                            IO_TIMEOUT,
+                            reject_unprocessed_http2_request(stream, (index == 2).then_some(server_stop.as_ref())),
+                        )
+                        .await
+                        .expect("request must start before GOAWAY");
                     }
                     if rejections == 1 {
                         let (stream, _) = listener.accept().expect("accept replay");
@@ -890,6 +924,62 @@ mod continuous_tests {
                 "each logical request permits only one safe replay"
             );
         }
+    }
+
+    /// Wait for a request without processing it before sending last-stream-ID zero.
+    async fn reject_unprocessed_http2_request(stream: TcpStream, stop: Option<&AtomicBool>) {
+        use tokio::io::AsyncReadExt as _;
+
+        stream.set_nonblocking(true).expect("nonblocking stream");
+        let mut stream = tokio::net::TcpStream::from_std(stream).expect("Tokio stream");
+        let mut preface = [0_u8; 24];
+        stream.read_exact(&mut preface).await.expect("client preface");
+        assert_eq!(&preface, b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
+        write_http2_test_frame(&mut stream, &[0, 0, 0, 4, 0, 0, 0, 0, 0]).await;
+        loop {
+            let header = read_http2_test_frame(&mut stream).await;
+            if header[3] == 1 {
+                assert_eq!(&header[5..], &[0, 0, 0, 1], "first request is unprocessed");
+                break;
+            }
+            if header[3] == 4 && header[4] == 0 {
+                write_http2_test_frame(&mut stream, &[0, 0, 0, 4, 1, 0, 0, 0, 0]).await;
+            }
+        }
+        if let Some(stop) = stop {
+            stop.store(true, Ordering::SeqCst);
+        }
+        write_http2_test_frame(&mut stream, &[0, 0, 8, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).await;
+        drain_http2_test_peer(&mut stream).await;
+    }
+
+    /// Drain pending client frames so closing after GOAWAY cannot cause a TCP reset.
+    async fn drain_http2_test_peer(stream: &mut tokio::net::TcpStream) {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        stream.shutdown().await.expect("GOAWAY write shutdown");
+        let mut buffer = [0_u8; 512];
+        while stream.read(&mut buffer).await.expect("drain client frames") != 0 {}
+    }
+
+    /// Flush one complete test frame before the peer can observe connection closure.
+    async fn write_http2_test_frame(stream: &mut tokio::net::TcpStream, frame: &[u8]) {
+        use tokio::io::AsyncWriteExt as _;
+
+        stream.write_all(frame).await.expect("HTTP/2 test frame");
+    }
+
+    /// Read one bounded frame from the trusted test client's health request.
+    async fn read_http2_test_frame(stream: &mut tokio::net::TcpStream) -> [u8; 9] {
+        use tokio::io::AsyncReadExt as _;
+
+        let mut header = [0_u8; 9];
+        stream.read_exact(&mut header).await.expect("HTTP/2 frame header");
+        let length = u32::from_be_bytes([0, header[0], header[1], header[2]]);
+        assert!(length <= 16_384, "test client uses the default frame size");
+        let mut payload = vec![0_u8; usize::try_from(length).expect("frame size fits usize")];
+        stream.read_exact(&mut payload).await.expect("HTTP/2 frame payload");
+        header
     }
 
     #[test]

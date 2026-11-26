@@ -3388,3 +3388,215 @@ async fn forwarding_progress_stays_false_before_contact() {
         }
     }
 }
+
+/// Admit at most one byte before parking at a known upload admission boundary.
+#[derive(Debug)]
+struct ForwardingAdmission {
+    /// Whether the first prefix may dispatch before admission blocks.
+    first: std::sync::atomic::AtomicBool,
+    /// Signals that the exchange is waiting for its next prefix.
+    waiting: tokio::sync::Notify,
+}
+
+impl super::UploadControl for ForwardingAdmission {
+    fn prepare(&self, _available: usize) -> std::pin::Pin<Box<dyn Future<Output = Result<usize, String>> + Send + '_>> {
+        Box::pin(async move {
+            if self.first.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                return Ok(1);
+            }
+            self.waiting.notify_one();
+            std::future::pending().await
+        })
+    }
+
+    fn sent(&self, _bytes: usize) {}
+}
+
+#[tokio::test]
+async fn forwarding_progress_follows_dispatch_across_upload_admission() {
+    use tokio::io::AsyncReadExt as _;
+
+    for streaming in [false, true] {
+        for first in [false, true] {
+            for cancel in [false, true] {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let peer = peer_for(listener.local_addr().unwrap());
+                let backend = tokio::spawn(async move {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let mut buffer = [0; 1024];
+                    while socket.read(&mut buffer).await.unwrap_or(0) != 0 {}
+                });
+                let control = Arc::new(ForwardingAdmission {
+                    first: std::sync::atomic::AtomicBool::new(first),
+                    waiting: tokio::sync::Notify::new(),
+                });
+                let upload: Arc<dyn super::UploadControl> = Arc::<ForwardingAdmission>::clone(&control);
+                let client = super::SubRequestClient::new(test_connector(4, None)).with_upload_control(upload);
+                let progress = RequestProgress::default();
+                let observed = progress.clone();
+                let worker = tokio::spawn(async move {
+                    let mut request = get_request("/");
+                    request.method = http::Method::POST;
+                    request
+                        .headers
+                        .insert(http::header::CONTENT_LENGTH, HeaderValue::from_static("2"));
+                    request.body = Bytes::from_static(b"ab");
+                    if streaming {
+                        Box::pin(client.send_streaming_with_progress(
+                            &peer,
+                            &request,
+                            Duration::from_secs(60),
+                            StreamLimits {
+                                idle_timeout: Duration::from_secs(60),
+                                max_stream_duration: None,
+                                max_total_bytes: Some(1024),
+                            },
+                            None,
+                            Some(&observed),
+                        ))
+                        .await
+                        .map(|_| ())
+                    } else {
+                        Box::pin(client.execute_with_progress(
+                            &peer,
+                            &request,
+                            1024,
+                            Duration::from_secs(60),
+                            None,
+                            &observed,
+                        ))
+                        .await
+                        .map(|_| ())
+                    }
+                });
+                tokio::time::timeout(Duration::from_secs(10), control.waiting.notified())
+                    .await
+                    .unwrap();
+                let dispatched = cfg!(feature = "pingora") || first;
+                assert_eq!(
+                    progress.forwarded(),
+                    dispatched,
+                    "staged Hyper headers are not dispatched"
+                );
+                if cancel {
+                    worker.abort();
+                    assert!(worker.await.unwrap_err().is_cancelled());
+                } else {
+                    tokio::time::pause();
+                    tokio::time::advance(Duration::from_secs(61)).await;
+                    assert!(matches!(worker.await.unwrap(), Err(SubRequestError::DeadlineExceeded)));
+                    tokio::time::resume();
+                }
+                assert_eq!(
+                    progress.forwarded(),
+                    dispatched,
+                    "terminal paths preserve dispatch evidence"
+                );
+                backend.abort();
+            }
+        }
+    }
+}
+
+/// Park the next prefix until the peer has sent its final rejection.
+#[cfg(feature = "hyper")]
+#[derive(Debug, Default)]
+struct EarlyRejectionUpload {
+    /// Distinguishes the first admitted byte from the gated second prefix.
+    calls: std::sync::atomic::AtomicUsize,
+    /// The backend has written and closed its response.
+    responded: tokio::sync::Notify,
+    /// Accepted bytes per prefix, including the refunded failed prefix.
+    sent: std::sync::Mutex<Vec<usize>>,
+}
+
+#[cfg(feature = "hyper")]
+impl super::UploadControl for EarlyRejectionUpload {
+    fn prepare(&self, _available: usize) -> std::pin::Pin<Box<dyn Future<Output = Result<usize, String>> + Send + '_>> {
+        Box::pin(async move {
+            if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1 {
+                self.responded.notified().await;
+            }
+            Ok(1)
+        })
+    }
+
+    fn sent(&self, bytes: usize) {
+        self.sent.lock().unwrap().push(bytes);
+    }
+}
+
+#[cfg(feature = "hyper")]
+#[tokio::test]
+async fn paced_upload_preserves_early_rejection_and_refunds_unaccepted_prefix() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    for streaming in [false, true] {
+        for informational in [false, true] {
+            let control = Arc::new(EarlyRejectionUpload::default());
+            let server_control = Arc::clone(&control);
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let peer = peer_for(listener.local_addr().unwrap());
+            let backend = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut head = Vec::new();
+                while !head.ends_with(b"\r\n\r\n") {
+                    head.push(socket.read_u8().await.unwrap());
+                }
+                assert_eq!(socket.read_u8().await.unwrap(), b'a');
+                if informational {
+                    socket
+                        .write_all(b"HTTP/1.1 103 Early Hints\r\nLink: </asset>\r\n\r\n")
+                        .await
+                        .unwrap();
+                }
+                socket.write_all(b"HTTP/1.1 413 Content Too Large\r\nContent-Length: 3\r\nConnection: close\r\nX-Rejection: preserved\r\n\r\nbad").await.unwrap();
+                socket.shutdown().await.unwrap();
+                server_control.responded.notify_one();
+            });
+            let upload: Arc<dyn super::UploadControl> = Arc::<EarlyRejectionUpload>::clone(&control);
+            let client = super::SubRequestClient::new(test_connector(4, None)).with_upload_control(upload);
+            let mut request = get_request("/");
+            request.method = http::Method::POST;
+            request.body = Bytes::from(vec![b'a'; 1_048_576]);
+            request
+                .headers
+                .insert(http::header::CONTENT_LENGTH, HeaderValue::from_static("1048576"));
+            let (status, headers, body) = if streaming {
+                let mut response = Box::pin(client.send_streaming(
+                    &peer,
+                    &request,
+                    Duration::from_secs(5),
+                    StreamLimits {
+                        idle_timeout: Duration::from_secs(5),
+                        max_stream_duration: None,
+                        max_total_bytes: Some(1024),
+                    },
+                    None,
+                ))
+                .await
+                .unwrap();
+                let mut body = Vec::new();
+                while let Some(chunk) = response.body.next_chunk().await.unwrap() {
+                    body.extend_from_slice(&chunk);
+                }
+                (response.status, response.headers, body)
+            } else {
+                let response = Box::pin(client.execute(&peer, &request, 1024, Duration::from_secs(5), None))
+                    .await
+                    .unwrap();
+                (response.status, response.headers, response.body.to_vec())
+            };
+            assert_eq!(status, 413);
+            assert_eq!(headers.get("x-rejection").unwrap(), "preserved");
+            assert_eq!(body, b"bad");
+            backend.await.unwrap();
+            let accepted = control.sent.lock().unwrap();
+            assert_eq!(accepted.first(), Some(&1), "the first prefix was accepted");
+            assert_eq!(accepted.last(), Some(&0), "the unaccepted prefix is refunded");
+            assert!(
+                accepted.len() < request.body.len(),
+                "the response interrupted the upload"
+            );
+        }
+    }
+}

@@ -18,7 +18,7 @@ use praxis_core::{
     egress::{Session as _, hyper::HyperSession},
     server::LifecyclePhase,
 };
-use praxis_filter::{FilterAction, FilterError};
+use praxis_filter::{FilterAction, FilterError, Rejection};
 use tracing::{Instrument as _, error, warn};
 
 use super::{
@@ -113,7 +113,8 @@ pub(super) async fn head(
     let ran = Box::pin(run_filters(flight, &mut head.response)).await;
     match settle(listener, flight, session, head, ran) {
         Outcome::Answered(answer) if !answer.bodyless => Box::pin(read_first(listener, flight, *answer)).await,
-        other @ (Outcome::Answered(_) | Outcome::Failed(_) | Outcome::Reply(_) | Outcome::Retry(_)) => other,
+        other
+        @ (Outcome::Answered(_) | Outcome::Close | Outcome::Failed(_) | Outcome::Reply(_) | Outcome::Retry(_)) => other,
     }
 }
 
@@ -121,7 +122,8 @@ pub(super) async fn head(
 /// body filter that fails on it is still answered with an error response,
 /// as Pingora answers when the head and the bytes behind it are written
 /// together. A body that is slower than [`FIRST_CHUNK_GRACE`] is relayed
-/// after the head instead.
+/// after the head instead. Any bandwidth wait for this chunk is left
+/// pending: the relay sleeps after the response head is available.
 async fn read_first(listener: &ListenerShared, flight: &mut Flight, mut answer: Answer) -> Outcome {
     let read = read_chunk(&mut answer.session, answer.read_timeout);
     let Ok(first) = tokio::time::timeout(FIRST_CHUNK_GRACE, read).await else {
@@ -229,6 +231,17 @@ async fn run_filters(
     Some(ran.0)
 }
 
+/// Turn a response-phase rejection into a local reply or a connection close.
+fn rejected_response(flight: &mut Flight, refusal: Rejection) -> Outcome {
+    flight.ctx.stamp_error_type(metrics::ERROR_TYPE_FILTER_REJECT);
+    flight.error = Some(ErrorOrigin::Other);
+    if reply::drops_connection(&flight.ctx) {
+        return Outcome::Close;
+    }
+    warn!(status = refusal.status, "filter rejected response");
+    Outcome::Reply(reply::pending_rejection(refusal, &flight.ctx, flight.version))
+}
+
 /// Ask a draining data plane to close its non-HTTP/2 client connection.
 fn close_connection_on_drain(flight: &Flight, response: &mut praxis_filter::Response) {
     if matches!(flight.lifecycle.phase(), LifecyclePhase::Draining)
@@ -272,11 +285,8 @@ fn settle(
             | FilterAction::StreamingTerminalResponse(_),
         ) => finish_response(listener, flight, session, head),
         Ok(FilterAction::Reject(refusal)) => {
-            warn!(status = refusal.status, "filter rejected response");
             release(&listener.connector, session, false);
-            flight.ctx.stamp_error_type(metrics::ERROR_TYPE_FILTER_REJECT);
-            flight.error = Some(ErrorOrigin::Other);
-            Outcome::Reply(reply::pending_rejection(refusal, &flight.ctx, flight.version))
+            rejected_response(flight, refusal)
         },
         Err(err) => {
             error!(error = %err, "filter pipeline error during response");
@@ -518,7 +528,7 @@ mod tests {
     };
     use praxis_filter::{
         BodyAccess, BodyMode, BodyRequirement, FilterEntry, FilterFactory, FilterPipeline, FilterRegistry, HttpFilter,
-        HttpFilterContext, Rejection,
+        HttpFilterContext,
     };
     use tokio::{
         io::{AsyncReadExt as _, AsyncWriteExt as _},
@@ -1350,7 +1360,7 @@ mod tests {
     fn answer_of(outcome: Outcome) -> Option<Box<Answer>> {
         match outcome {
             Outcome::Answered(answer) => Some(answer),
-            Outcome::Failed(_) | Outcome::Reply(_) | Outcome::Retry(_) => None,
+            Outcome::Close | Outcome::Failed(_) | Outcome::Reply(_) | Outcome::Retry(_) => None,
         }
     }
 

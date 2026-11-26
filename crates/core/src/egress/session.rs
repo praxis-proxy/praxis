@@ -3,7 +3,13 @@
 
 //! The connection contract a backend implements: open, send, receive, release.
 
-use std::time::Duration;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use bytes::Bytes;
 use http::{HeaderMap, Method, Version};
@@ -150,12 +156,41 @@ pub trait Session: Send + 'static {
     /// Send the request line and headers.
     fn send_request_head(&mut self, head: RequestHead) -> impl Future<Output = Result<(), EgressError>> + Send;
 
+    /// Track dispatch after a successful head operation, before sending a body.
+    ///
+    /// Direct writers have already sent the head. Backends that stage it must
+    /// override this method and notify only when they dispatch the request.
+    fn track_request_dispatch(&mut self, dispatched: Arc<AtomicBool>) {
+        dispatched.store(true, Ordering::Release);
+    }
+
     /// Send one body chunk; `end_of_stream` marks it as the last.
     fn send_request_body(
         &mut self,
         chunk: Bytes,
         end_of_stream: bool,
     ) -> impl Future<Output = Result<(), EgressError>> + Send;
+
+    /// Send a controlled prefix, acknowledging ownership at the body writer.
+    fn send_request_body_controlled(
+        &mut self,
+        chunk: Bytes,
+        end_of_stream: bool,
+    ) -> impl Future<Output = Result<(), EgressError>> + Send {
+        self.send_request_body(chunk, end_of_stream)
+    }
+
+    /// Prevent an unaccepted controlled prefix from being forwarded after cancellation.
+    fn cancel_pending_request_body(&mut self) {}
+
+    /// Body bytes accepted by the writer, excluding headers and framing.
+    ///
+    /// The optional counter lets controlled uploads settle partial progress when
+    /// a write is cancelled. Backends without a counter still report complete
+    /// successful prefixes through `send_request_body`.
+    fn request_body_bytes_sent(&self) -> Option<u64> {
+        None
+    }
 
     /// Mark the request complete when no body chunk carried `end_of_stream`.
     fn finish_request(&mut self) -> impl Future<Output = Result<(), EgressError>> + Send;
@@ -164,6 +199,14 @@ pub trait Session: Send + 'static {
     /// head. Inspect it with [`response_head`](Self::response_head) before
     /// reading again: callers skip interim `1xx` statuses, except final `101`.
     fn read_response_head(&mut self) -> impl Future<Output = Result<(), EgressError>> + Send;
+
+    /// Recover an already available final response after an upload write fails.
+    ///
+    /// Staging transports may override this nonblocking probe. A true result
+    /// leaves the final head and body available through the response accessors.
+    fn try_read_final_response_head(&mut self) -> impl Future<Output = bool> + Send {
+        async { false }
+    }
 
     /// Borrow the most recently read response head without copying its headers.
     /// The transport retains the original headers for body framing and reuse;

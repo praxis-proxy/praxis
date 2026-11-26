@@ -15,7 +15,7 @@
 use std::collections::VecDeque;
 
 use bytes::Bytes;
-use praxis_filter::{BodyMode, FilterAction, FilterPipeline, Rejection};
+use praxis_filter::{BodyMode, FilterAction, FilterPipeline, Rejection, cancel_bandwidth};
 use tracing::error;
 
 use super::{
@@ -126,6 +126,10 @@ pub(super) async fn execute(
 
 /// Run body filters on a request body chunk, enforcing size limits; the
 /// backend-neutral core of `execute`.
+///
+/// A positive upload wait is recorded as a deadline and left uncommitted.
+/// The caller races that deadline with the upstream response and the read
+/// timeout, and commits only when the reserved bytes are released.
 ///
 /// # Errors
 ///
@@ -266,6 +270,7 @@ pub(in crate::http) async fn run_request_body(
             Ok(())
         },
         Ok(FilterAction::Reject(rejection)) => {
+            cancel_bandwidth(&mut ctx.extensions);
             ctx.stamp_error_type(crate::http::pingora::metrics::ERROR_TYPE_FILTER_REJECT);
             Err(RequestBodyHalt::refused(
                 "request body rejected by filter pipeline",
@@ -273,6 +278,7 @@ pub(in crate::http) async fn run_request_body(
             ))
         },
         Err(e) => {
+            cancel_bandwidth(&mut ctx.extensions);
             error!(error = %e, "filter pipeline error during request body");
             ctx.stamp_error_type(crate::http::pingora::metrics::ERROR_TYPE_INTERNAL);
             Err(RequestBodyHalt::internal(

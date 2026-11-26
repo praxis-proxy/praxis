@@ -131,6 +131,7 @@ pub(in crate::http) async fn execute(
         .and_then(|a| a.as_inet())
         .map(std::net::SocketAddr::ip)
         .map(normalize_mapped_ipv4);
+    remember_downstream_connection(session, ctx);
     let ssl_digest = session.digest().and_then(|d| d.ssl_digest.as_ref());
     ctx.downstream_tls = ssl_digest.is_some();
     ctx.peer_identity = ssl_digest
@@ -181,6 +182,10 @@ pub(in crate::http) async fn execute(
                 // silently drop the request from praxis_errors_total.
                 stamp_body_rejection(ctx);
                 ctx.request_snapshot = Some(request);
+                if let Some(reason) = praxis_filter::connection_close_reason(&ctx.extensions) {
+                    ctx.pending_rejection = Some(rejection);
+                    return Err(super::super::bandwidth::close_error(reason));
+                }
                 send_rejection_for(session, rejection, ctx).await;
                 return Ok(true);
             },
@@ -248,6 +253,10 @@ pub(in crate::http) async fn execute(
             ..
         }) => {
             stamp_body_rejection(ctx);
+            if let Some(reason) = praxis_filter::connection_close_reason(&ctx.extensions) {
+                ctx.pending_rejection = Some(rejection);
+                return Err(super::super::bandwidth::close_error(reason));
+            }
             send_rejection_for(session, rejection, ctx).await;
             Ok(true)
         },
@@ -358,6 +367,36 @@ async fn admit_websocket_upgrade(
             Ok(true)
         },
     }
+}
+
+// -----------------------------------------------------------------------------
+// Connection Identity
+// -----------------------------------------------------------------------------
+
+/// Watch the socket digest so a per-connection budget ends with the connection.
+#[cfg(feature = "pingora")]
+fn remember_downstream_connection(session: &Session, ctx: &mut PingoraRequestCtx) {
+    if let Some(id) = socket_connection_id(session) {
+        super::super::bandwidth::remember_connection(&mut ctx.extensions, id, connection_watch(session));
+    }
+}
+
+/// Watch the socket digest while the connection stays open.
+#[cfg(feature = "pingora")]
+fn connection_watch(session: &Session) -> Option<praxis_filter::ConnectionAlive> {
+    session
+        .digest()
+        .and_then(|digest| digest.socket_digest.as_ref())
+        .map(praxis_filter::ConnectionAlive::watch)
+}
+
+/// Pointer identity of the connection digest, shared by HTTP/2 streams.
+#[cfg(feature = "pingora")]
+fn socket_connection_id(session: &Session) -> Option<u64> {
+    session
+        .digest()
+        .and_then(|digest| digest.socket_digest.as_ref())
+        .map(|socket| super::super::bandwidth::pointer_key(Arc::as_ptr(socket).addr()))
 }
 
 // -----------------------------------------------------------------------------

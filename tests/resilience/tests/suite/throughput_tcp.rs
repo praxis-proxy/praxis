@@ -74,8 +74,8 @@ fn start_tcp_proxy(proxy_port: u16, backend_port: u16) -> String {
 
 /// Start a TCP echo server on a free port.
 fn start_tcp_echo_backend() -> u16 {
-    let port = free_port();
-    let listener = TcpListener::bind(format!("127.0.0.1:{port}")).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
             std::thread::spawn(move || {

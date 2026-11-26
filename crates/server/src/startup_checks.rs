@@ -405,6 +405,7 @@ pub(crate) fn warn_insecure_sink_file_permissions(_config: &Config) {}
 #[cfg(any(test, feature = "experimental"))]
 const EXPERIMENTAL_FEATURES: &[(&str, bool)] = &[
     ("access-log-syslog", cfg!(feature = "access-log-syslog")),
+    ("bandwidth", cfg!(feature = "bandwidth")),
     ("basic-auth-filter", cfg!(feature = "basic-auth-filter")),
     (
         "bound-upstream-request-body",
