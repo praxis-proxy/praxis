@@ -545,13 +545,19 @@ impl PolicyFilter {
     /// fails (e.g., a JWKS endpoint is unreachable).
     ///
     /// [`FilterError`]: FilterError
-    #[expect(
-        clippy::too_many_lines,
-        reason = "linear construction + init steps; splitting obscures the startup flow"
-    )]
     pub(crate) fn new(
         cfg: PolicyFilterConfig,
         subrequest_connector: Option<SubRequestConnector>,
+    ) -> Result<Self, FilterError> {
+        Self::build(cfg, subrequest_connector, false)
+    }
+
+    /// Compile policy and optionally initialize runtime resources.
+    #[expect(clippy::too_many_lines, reason = "linear construction and policy shape validation")]
+    fn build(
+        cfg: PolicyFilterConfig,
+        subrequest_connector: Option<SubRequestConnector>,
+        validation_only: bool,
     ) -> Result<Self, FilterError> {
         cfg.validate_context_headers()
             .map_err(|e| -> FilterError { format!("policy: {e}").into() })?;
@@ -624,12 +630,7 @@ impl PolicyFilter {
         // other provider kind fails at `initialize()`, naming `env`.
         let mut secret_providers = ppe::SecretProviderRegistry::new();
         secret_providers.register(Box::new(EnvSecretProviderFactory));
-        if !mgr.set_secret_providers(secret_providers) {
-            tracing::warn!(
-                target: "policy.filter",
-                "policy: secret providers were already registered on a fresh engine"
-            );
-        }
+
 
         // Host-supplied factories, for `kind:` values the engine does not
         // bundle. After the builtins on purpose: the factory registry is
@@ -641,6 +642,7 @@ impl PolicyFilter {
         // would fail the reload with "no factory registered" for a config that
         // had been serving traffic.
         let host_factories = super::host_plugins::host_plugin_factories();
+        let builtin_jwt = !host_factories.iter().any(|(kind, _)| kind == "identity/jwt");
         if !host_factories.is_empty() {
             tracing::info!(
                 count = super::host_plugins::host_plugin_count(),
@@ -658,58 +660,29 @@ impl PolicyFilter {
         // error is reported after the engine's own, more specific one.
         let parsed = ppe::praxis_policy_core::config::parse_config(&yaml);
         if let Ok(document) = &parsed {
+            if validation_only {
+                for (name, provider) in &document.secrets.providers {
+                    secret_providers.build(name, provider)?;
+                }
+            }
             require_dpop_external_base_url(document)?;
             refuse_query_credentials_with_delegation(document)?;
+        }
+        if !mgr.set_secret_providers(secret_providers) {
+            tracing::warn!(
+                target: "policy.filter",
+                "policy: secret providers were already registered on a fresh engine"
+            );
         }
         mgr.load_config_yaml(&yaml)
             .map_err(|e: Box<PluginError>| engine_error("load_config_yaml", &cfg.config_path, &e))?;
 
-        // `initialize()` is async. The praxis filter-factory signature
-        // is sync, so we drive init to completion here. We spawn a
-        // dedicated OS thread to build a single-threaded runtime and
-        // call `block_on` there — running `block_on` on the current
-        // thread would panic if any caller (notably `#[tokio::test]`)
-        // already has a runtime attached. Production startup has no
-        // caller runtime; tests do; the thread hop is correct in both.
-        //
-        // The init future is wrapped in `tokio::time::timeout` so a
-        // misbehaving plugin's `initialize()` future can't hang startup
-        // / hot-reload indefinitely. The bundled identity-jwt plugin
-        // already has its own JWKS connect/request timeouts plus
-        // soft-fail-at-boot, so this is defense-in-depth for other
-        // init paths (custom plugins, future hooks) where a future
-        // could legitimately stall.
-        let mgr_for_init = Arc::clone(&mgr);
-        let init_timeout = std::time::Duration::from_secs(cfg.init_timeout_secs);
-        let config_path = cfg.config_path.clone();
-        let init: Result<(), FilterError> = std::thread::spawn(move || -> Result<(), FilterError> {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|e| format!("policy: failed to build init runtime: {e}"))?;
-            rt.block_on(async move {
-                match tokio::time::timeout(init_timeout, mgr_for_init.initialize()).await {
-                    Ok(Ok(())) => Ok(()),
-                    Ok(Err(e)) => Err(engine_error("PolicyEngine::initialize", &config_path, &e)),
-                    Err(_) => Err(format!(
-                        "policy: PolicyEngine::initialize timed out after {}s \
-                         (init_timeout_secs); likely a JWKS / OAuth endpoint is unreachable",
-                        init_timeout.as_secs(),
-                    )
-                    .into()),
-                }
-            })
-        })
-        .join()
-        .map_err(|panic| {
-            let msg = panic
-                .downcast_ref::<&str>()
-                .map(|s| (*s).to_owned())
-                .or_else(|| panic.downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "<no panic message>".to_owned());
-            format!("policy: PolicyEngine::initialize panicked in init thread: {msg}")
-        })?;
-        init?;
+        if builtin_jwt && let Ok(document) = &parsed {
+            super::construction::validate_jwks_sources(&mgr, document)?;
+        }
+        if !validation_only {
+            Self::initialize_policy(&mgr, &cfg.config_path, cfg.init_timeout_secs)?;
+        }
 
         // Derive the evaluation shape from the loaded policy so the filter
         // needs no operator-set mode. `has_hooks_for` reports whether a hook
@@ -756,7 +729,7 @@ impl PolicyFilter {
                         &filtered,
                         &cfg.config_path,
                         Arc::clone(&transport),
-                        cfg.init_timeout_secs,
+                        (!validation_only).then_some(cfg.init_timeout_secs),
                         Arc::clone(&session_store),
                     )
                 })
@@ -764,7 +737,7 @@ impl PolicyFilter {
         } else {
             None
         };
-        if entity_routes {
+        if entity_routes && !validation_only {
             ensure_dispatch_runtime()
                 .map_err(|e| -> FilterError { format!("policy: response hooks cannot run: {e}").into() })?;
         }
@@ -841,6 +814,57 @@ impl PolicyFilter {
         })
     }
 
+    /// Run policy initialization on a bounded temporary runtime.
+    #[expect(clippy::too_many_lines, reason = "bounded initialization and panic diagnostics")]
+    fn initialize_policy(manager: &Arc<PolicyEngine>, source: &str, timeout_secs: u64) -> Result<(), FilterError> {
+        // `initialize()` is async. The praxis filter-factory signature
+        // is sync, so we drive init to completion here. We spawn a
+        // dedicated OS thread to build a single-threaded runtime and
+        // call `block_on` there — running `block_on` on the current
+        // thread would panic if any caller (notably `#[tokio::test]`)
+        // already has a runtime attached. Production startup has no
+        // caller runtime; tests do; the thread hop is correct in both.
+        //
+        // The init future is wrapped in `tokio::time::timeout` so a
+        // misbehaving plugin's `initialize()` future can't hang startup
+        // / hot-reload indefinitely. The bundled identity-jwt plugin
+        // already has its own JWKS connect/request timeouts plus
+        // soft-fail-at-boot, so this is defense-in-depth for other
+        // init paths (custom plugins, future hooks) where a future
+        // could legitimately stall.
+        let mgr_for_init = Arc::clone(manager);
+        let init_timeout = std::time::Duration::from_secs(timeout_secs);
+        let config_path = source.to_owned();
+        let init: Result<(), FilterError> = std::thread::spawn(move || -> Result<(), FilterError> {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| format!("policy: failed to build init runtime: {e}"))?;
+            rt.block_on(async move {
+                match tokio::time::timeout(init_timeout, mgr_for_init.initialize()).await {
+                    Ok(Ok(())) => Ok(()),
+                    Ok(Err(e)) => Err(engine_error("PolicyEngine::initialize", &config_path, &e)),
+                    Err(_) => Err(format!(
+                        "policy: PolicyEngine::initialize timed out after {}s \
+                         (init_timeout_secs); likely a JWKS / OAuth endpoint is unreachable",
+                        init_timeout.as_secs(),
+                    )
+                    .into()),
+                }
+            })
+        })
+        .join()
+        .map_err(|panic| {
+            let msg = panic
+                .downcast_ref::<&str>()
+                .map(|s| (*s).to_owned())
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "<no panic message>".to_owned());
+            format!("policy: PolicyEngine::initialize panicked in init thread: {msg}")
+        })?;
+        init
+    }
+
     /// Load and initialize one PPE view of the policy document.
     #[expect(
         clippy::too_many_lines,
@@ -850,7 +874,7 @@ impl PolicyFilter {
         yaml: &str,
         source: &str,
         transport: Arc<PolicyHttpTransport>,
-        init_timeout_secs: u64,
+        init_timeout_secs: Option<u64>,
         session_store: Arc<dyn ppe::SessionStore>,
     ) -> Result<Arc<PolicyEngine>, FilterError> {
         let manager = Arc::new(PolicyEngine::default());
@@ -887,36 +911,16 @@ impl PolicyFilter {
                 format!("policy: load_config_yaml failed for {source}: {error}").into()
             })?;
 
-        let manager_for_init = Arc::clone(&manager);
-        let init_timeout = std::time::Duration::from_secs(init_timeout_secs);
-        let init = std::thread::spawn(move || -> Result<(), String> {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|error| format!("policy: failed to build init runtime: {error}"))?;
-            runtime.block_on(async move {
-                match tokio::time::timeout(init_timeout, manager_for_init.initialize()).await {
-                    Ok(Ok(())) => Ok(()),
-                    Ok(Err(error)) => Err(format!("policy: PolicyEngine::initialize failed: {error}")),
-                    Err(_) => Err(format!(
-                        "policy: PolicyEngine::initialize timed out after {}s \
-                         (init_timeout_secs); likely a JWKS / OAuth endpoint is unreachable",
-                        init_timeout.as_secs(),
-                    )),
-                }
-            })
-        })
-        .join()
-        .map_err(|panic| {
-            let message = panic
-                .downcast_ref::<&str>()
-                .map(|value| (*value).to_owned())
-                .or_else(|| panic.downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "<no panic message>".to_owned());
-            format!("policy: PolicyEngine::initialize panicked in init thread: {message}")
-        })?;
-        init.map_err(|message: String| -> FilterError { message.into() })?;
+        if let Some(timeout_secs) = init_timeout_secs {
+            Self::initialize_policy(&manager, source, timeout_secs)?;
+        }
         Ok(manager)
+    }
+
+    /// Test whether the validation filter initialized runtime resources.
+    #[cfg(all(test, feature = "policy-builtins"))]
+    pub(super) fn engine_is_initialized(&self) -> bool {
+        self.mgr.is_initialized()
     }
 
     /// Test accessor for the transport installed on the engine.
@@ -1132,9 +1136,10 @@ impl PolicyFilter {
     pub(crate) fn from_config_with_connector(
         config: &serde_yaml::Value,
         subrequest_connector: Option<SubRequestConnector>,
+        validation_only: bool,
     ) -> Result<Self, FilterError> {
         let cfg: PolicyFilterConfig = parse_filter_config("policy", config)?;
-        Self::new(cfg, subrequest_connector)
+        Self::build(cfg, subrequest_connector, validation_only)
     }
 
     /// The current request's headers, lowercased, duplicate field lines
