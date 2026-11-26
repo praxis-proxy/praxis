@@ -766,6 +766,43 @@ async fn on_request_errors_when_cluster_has_no_endpoints() {
 // Selected Cluster Application Tests
 // -----------------------------------------------------------------------------
 
+/// Cluster selection publishes declared modalities and clears them on reselection.
+#[tokio::test]
+async fn selected_application_input_modalities_follow_cluster() {
+    use praxis_core::config::InputModality::{Image, Text};
+
+    let mut vision = cluster_with_application(
+        "vision",
+        &["127.0.0.1:8080"],
+        Some("openai_chat_completions"),
+        Some("vllm"),
+    );
+    vision.http.input_modalities.extend([Text, Image]);
+    let mut text = vision.clone();
+    text.name = Arc::from("text");
+    text.http.input_modalities.remove(&Image);
+    let mut modality_only = test_cluster("modality-only", &["127.0.0.1:8080"]);
+    modality_only.http.input_modalities.insert(Image);
+    let untagged = test_cluster("untagged", &["127.0.0.1:8080"]);
+    let lb = LoadBalancerFilter::new(&[vision, text, modality_only, untagged]);
+    let req = crate::test_utils::make_request(http::Method::POST, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    assert!(!ctx.selected_input_modality_declared(Image));
+
+    for (cluster, has_text, has_image) in [
+        ("vision", true, true),
+        ("text", true, false),
+        ("modality-only", false, true),
+        ("untagged", false, false),
+    ] {
+        ctx.upstream = None;
+        ctx.cluster = Some(Arc::from(cluster));
+        drop(lb.on_request(&mut ctx).await.unwrap());
+        assert_eq!(ctx.selected_input_modality_declared(Text), has_text, "{cluster}");
+        assert_eq!(ctx.selected_input_modality_declared(Image), has_image, "{cluster}");
+    }
+}
+
 #[tokio::test]
 async fn on_request_publishes_selected_application_ordinary_path() {
     let lb = LoadBalancerFilter::new(&[cluster_with_application(

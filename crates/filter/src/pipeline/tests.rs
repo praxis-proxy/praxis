@@ -9310,7 +9310,7 @@ fn conditions_match_selected_honors_published_selection() {
     let pipeline = access_log_scoped_to_provider("vllm");
     let req = crate::test_utils::make_request(Method::GET, "/");
     let mut ctx = crate::test_utils::make_filter_context(&req);
-    ctx.publish_selected_application(None, Some(Arc::from("vllm")));
+    ctx.publish_selected_application(None, Some(Arc::from("vllm")), None);
     assert!(
         pipeline.filter_request_conditions_match("access_log", &ctx),
         "a selected_upstream-scoped filter must match when the published selection (as the fallback path restores it) satisfies its predicate"
@@ -9333,7 +9333,7 @@ fn conditions_match_selected_rejects_mismatched_selection() {
     let pipeline = access_log_scoped_to_provider("vllm");
     let req = crate::test_utils::make_request(Method::GET, "/");
     let mut ctx = crate::test_utils::make_filter_context(&req);
-    ctx.publish_selected_application(None, Some(Arc::from("openai")));
+    ctx.publish_selected_application(None, Some(Arc::from("openai")), None);
     assert!(
         !pipeline.filter_request_conditions_match("access_log", &ctx),
         "a mismatched published provider must not match, so the fallback record is withheld"

@@ -593,3 +593,15 @@ Use this flowchart to choose a strategy:
 4. **Unsure?** Start with `round_robin` (the
    default) and switch if monitoring reveals uneven
    load.
+
+## Declaring accepted input modalities
+
+Set `clusters[].http.input_modalities` to declare the request content a cluster
+guarantees it can accept. The supported values are `text` and `image`. Include
+a value only when every eligible endpoint and model serving that route accepts it.
+Omission and an empty list declare no guarantees.
+
+For example, two Chat Completions clusters using vLLM can declare `[text]` and
+`[text, image]` respectively. A filter can query
+`HttpFilterContext::selected_input_modality_declared` after upstream selection.
+The declaration supplies metadata for filters to use when enforcing their own policies.

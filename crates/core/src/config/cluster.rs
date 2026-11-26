@@ -79,6 +79,16 @@ impl fmt::Display for UpstreamHttpVersion {
     }
 }
 
+/// A kind of request content the selected HTTP deployment guarantees it accepts.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InputModality {
+    /// Text supplied as input.
+    Text,
+    /// An image supplied as input.
+    Image,
+}
+
 /// HTTP-specific options for a cluster.
 ///
 /// These apply only when the cluster serves HTTP listeners; TCP load
@@ -150,6 +160,11 @@ pub struct ClusterHttpOptions {
     /// rationale — as `application_protocol`.
     #[serde(default)]
     pub application_provider: Option<Arc<str>>,
+
+    /// Input content guaranteed across all eligible endpoints and models.
+    /// Omission and an empty list declare no guarantees.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub input_modalities: std::collections::BTreeSet<InputModality>,
 
     /// HTTP version used for upstream connections to this cluster.
     ///
@@ -498,6 +513,23 @@ impl Cluster {
 )]
 mod tests {
     use super::*;
+
+    /// Declarations are optional, set-valued, and reject unknown modalities.
+    #[test]
+    fn input_modalities_schema() {
+        use super::{ClusterHttpOptions, InputModality};
+
+        for yaml in ["{}", "input_modalities: []"] {
+            let options: ClusterHttpOptions = serde_yaml::from_str(yaml).unwrap();
+            assert!(options.input_modalities.is_empty());
+        }
+        let options: ClusterHttpOptions = serde_yaml::from_str("input_modalities: [text, image, image]").unwrap();
+        assert_eq!(
+            options.input_modalities,
+            [InputModality::Text, InputModality::Image].into()
+        );
+        assert!(serde_yaml::from_str::<ClusterHttpOptions>("input_modalities: [imgae]").is_err());
+    }
 
     #[test]
     fn parse_cluster_minimal() {

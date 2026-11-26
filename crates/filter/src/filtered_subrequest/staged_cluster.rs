@@ -96,6 +96,5 @@ pub(super) fn repin_cluster(ctx: &mut HttpFilterContext<'_>, pinned: Option<&Pin
         return;
     };
     ctx.cluster = Some(std::sync::Arc::clone(pinned.cluster.name_arc()));
-    let (protocol, provider) = pinned.cluster.entry().application();
-    ctx.publish_selected_application(protocol, provider);
+    pinned.cluster.entry().publish_application(ctx);
 }
