@@ -2,22 +2,14 @@
 
 ## Design Principles
 
-**Fast.** Performance is a primary design goal.
-
-**Secure by default.** Security is a primary design goal.
-
-**Composable.** Everything is a filter. Cluster routing,
-load balancing, rate limiting, body-based routing: all
-filters, all using the same traits, all assembled into
-pipelines through named chains.
-
-**Extensible.** Your filters implement the same [`HttpFilter`]
-and [`TcpFilter`] traits as built-in filters. Register with
-one macro.
-
-**Adaptive.** Praxis is a framework for building proxies,
-not just a proxy. Use a provided build out of the box, or
-compose a bespoke proxy server from the same primitives.
+- **Fast** and **secure by default**: both are primary design goals.
+- **Composable**: cluster routing, load balancing, rate limiting and
+  body-based routing are all filters, using the same traits and assembled
+  into pipelines through named chains.
+- **Extensible**: your filters implement the same [`HttpFilter`] and
+  [`TcpFilter`] traits as the built-in ones and register with one macro.
+- **Adaptive**: Praxis is a framework for building proxies. Use a provided
+  build, or compose your own proxy server from the same primitives.
 
 [`HttpFilter`]:../filters/README.md
 [`TcpFilter`]:../filters/README.md
@@ -39,10 +31,8 @@ compose a bespoke proxy server from the same primitives.
 
 ### Protocol Adapters
 
-Adapters translate upstream library callbacks into pipeline
-invocations. When feasible, Praxis owns no protocol logic,
-instead handing it off to well-maintained and battle-tested
-upstream solutions.
+Adapters translate upstream library callbacks into pipeline invocations.
+Where it can, Praxis leaves protocol logic to the upstream library.
 
 ```text
 HTTP  --> praxis-protocol/http  --> Pingora
@@ -50,15 +40,10 @@ TCP   --> praxis-protocol/tcp   --> Pingora
 QUIC  --> praxis-protocol/http3 --> Quiche  (planned, not yet implemented)
 ```
 
-These adapters are modular. The design enables adding new
-protocols by writing new adapters, and even having multiple
-implementations of a single protocol that can be swapped via
-build features or runtime configuration.
+A new protocol is a new adapter, and one protocol can have several
+implementations, swapped by build feature or runtime configuration.
 
 ### Filter-First Design
-
-Every behavior is a filter. Built-in filters use the same
-traits as user-provided filters.
 
 ```mermaid
 sequenceDiagram
@@ -82,13 +67,11 @@ sequenceDiagram
     F1 -->> C:  response
 ```
 
-Request filters run in declared order, response filters in
-reverse. Any filter can short-circuit, and multiple payload
-processing options are available to do filtering, routing,
-caching and load-balancing based on request or response bodies.
-
-See the [filter system documentation] for details, and
-the [extensions guide] for how to write your own.
+Request filters run in declared order, response filters in reverse. Any
+filter can short-circuit, and filters can read request and response bodies
+to filter, route, cache or load-balance on them. See the
+[filter system documentation] and, to write your own, the
+[extensions guide].
 
 [filter system documentation]:../filters/README.md
 [extensions guide]:../developing/extensions.md
@@ -108,21 +91,16 @@ flowchart LR
     Chains["filter_chains:"] -. per listener .-> Resolve
 ```
 
-Each listener has a `name` and a list of `filter_chains`.
-At startup, the referenced chains are resolved and
-concatenated into a single pipeline per listener
-(**pipelining**). Different listeners can compose
-different subsets of chains. This is distinct from
-**routing**, where the `router` filter selects an
-upstream cluster at request time based on path, host,
-and headers.
+Each listener has a `name` and a list of `filter_chains`. Filter chains
+are named groups of filters defined at the top level of the config. At
+startup, a listener's chains are concatenated in order into one pipeline
+(**pipelining**). This differs from **routing**, where the `router` filter
+picks an upstream cluster at request time from path, host, and headers.
 
 ### Filters
 
-Filter chains are named, reusable groups of filters defined
-at the top level of the config. A listener references one or
-more chains by name; the filters are concatenated in order
-to form that listener's pipeline.
+Listeners can share chains. A "security" chain can run on public listeners
+while internal listeners skip it:
 
 ```mermaid
 flowchart LR
@@ -138,21 +116,13 @@ flowchart LR
     end
 ```
 
-This enables reuse without duplication. A "security" chain
-can be shared across public listeners while internal
-listeners skip it entirely.
-
 #### Protocol-Aware Filters
 
-Filters are protocol-aware. HTTP filters implement the
-`HttpFilter` trait (`on_request`, `on_response`, body hooks).
-TCP filters implement the `TcpFilter` trait (`on_connect`,
-`on_disconnect`). The `AnyFilter` enum wraps both variants
-for storage in a unified pipeline.
-
-Protocol compatibility is enforced via `ProtocolKind::stack()`
-and `supports()`. An HTTP listener supports both HTTP and TCP
-filters. A TCP listener supports only TCP filters.
+HTTP filters implement `HttpFilter` (`on_request`, `on_response`, body
+hooks); TCP filters implement `TcpFilter` (`on_connect`, `on_disconnect`).
+The `AnyFilter` enum wraps both so one pipeline can hold either.
+`ProtocolKind::stack()` and `supports()` enforce compatibility: an HTTP
+listener accepts HTTP and TCP filters, a TCP listener only TCP filters.
 
 ```mermaid
 flowchart TD
@@ -166,41 +136,28 @@ flowchart TD
 
 ### What Stays Outside Filters
 
-- TCP/TLS, HTTP framing, connection pooling: adapters
-- Config loading and validation: `praxis-core`
-- Pipeline executor and `HttpFilterContext`: `praxis-filter`
+See [What Stays Outside Filters](../filters/README.md#what-stays-outside-filters).
 
 ## Dynamic Configuration Reload
 
-Praxis swaps filter pipelines at runtime without
-restarting the server or disrupting in-flight requests.
+Praxis swaps filter pipelines at runtime without a restart. Each handler
+holds an `Arc<ArcSwap<FilterPipeline>>` and calls `pipeline.load()` once per
+request, pinning that snapshot for the request's lifetime. A reload stores a
+new pipeline into the `ArcSwap`: the next request gets it, while in-flight
+requests drain on the old one.
 
-Each handler holds an `Arc<ArcSwap<FilterPipeline>>`
-instead of a plain `Arc<FilterPipeline>`. On every
-request, the handler calls `pipeline.load()` to get a
-snapshot pinned for that request's lifetime. A reload
-stores a new pipeline into the `ArcSwap`; the next
-request loads the new pointer while in-flight requests
-drain on the old one.
+A file watcher (`notify` crate, 500ms debounce) monitors the config file. On
+change it validates the new config, rebuilds all pipelines, and swaps them.
+If validation fails, nothing changes. Each successful reload cancels the
+health check tasks and respawns them with a fresh registry. Pipelines are
+swapped one listener at a time, so two listeners may briefly run different
+generations.
 
-A file watcher (`notify` crate, 500ms debounce) monitors
-the config file. On change it validates the new config,
-rebuilds all pipelines, and swaps them atomically. If
-validation fails, nothing changes. Health check tasks
-are cancelled and respawned with a fresh registry on
-each successful reload.
-
-Changes that cannot be applied dynamically (listener
-topology, compression module, TLS toggle) are detected
-by diffing old and new configs and logged as warnings.
-A protocol change on a bound listener is rejected as a
-reload failure, since its handler executes only filters
-of the protocol it was started with.
-Changes to a bound TCP listener's upstream, cluster or
-timeouts, its removal, and inconsistent TCP listener
-groups are also rejected. Pipelines are swapped one
-listener at a time, so two listeners may briefly run
-different generations during a swap.
+Changes that cannot apply live (listener topology, compression module, TLS
+toggle) are found by diffing the old and new configs and logged as
+warnings. Some changes reject the whole reload, such as a protocol change on
+a bound listener or a change to a bound TCP listener's upstream. The full
+lists are in [Dynamic Configuration Reload](../operating/configuration.md#dynamic-configuration-reload).
 
 ## Related
 

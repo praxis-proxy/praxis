@@ -46,29 +46,23 @@ sequenceDiagram
     P->>P: logging (response-filter cleanup)
 ```
 
-1. TCP accept, TLS handshake, HTTP decode (Pingora)
-2. `request_filter`: pipeline runs filters in order; router
-   sets `ctx.cluster`, load balancer sets `ctx.upstream`
-3. `request_body_filter`: buffer or stream body chunks
-   through filters (if any filter declares body access)
-4. `upstream_peer`: converts `ctx.upstream` to `HttpPeer`
-5. Connect to upstream; `fail_to_connect` retries
-   idempotent requests on failure
-6. `upstream_request_filter`: strips hop-by-hop headers
-7. Request forwarded, response headers received
-8. `response_filter`: pipeline runs filters in reverse
-9. `response_body_filter`: stream response body through
-   filters (synchronous: `on_response_body` is a plain `fn`)
-10. `logging`: re-runs response filters if response
-    phase was skipped (upstream error, filter rejection)
-11. Connection returned to pool
+Request filters run in declared order and response filters in reverse.
+`request_body_filter` runs only if a filter declares body access.
+`response_body_filter` is `async`, but the `on_response_body` hooks it runs are
+plain `fn`s.
+`logging` re-runs the response filters when the response phase was skipped
+(upstream error, filter rejection), and the upstream connection then goes back
+to the pool. [Pingora Handler Lifecycle](pingora-handler-lifecycle.md)
+describes each hook.
 
 ## TCP Connection Lifecycle
 
 1. TCP accept, optional TLS handshake
-2. `on_connect` : TCP filters run in order
+2. `on_connect`: TCP filters run in order
 3. Bidirectional byte forwarding to upstream
-4. `on_disconnect` : TCP filters run on close
+4. `on_disconnect`: TCP filters run on close
+
+[TCP Proxy](tcp-proxy.md) covers SNI routing and timeouts.
 
 ## Related
 

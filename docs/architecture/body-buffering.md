@@ -1,13 +1,12 @@
 # Body Buffering and StreamBuffer
 
-How body chunks flow through the filter pipeline, how
-delivery modes interact, and how size limits layer.
+How body chunks move through the filter pipeline, how delivery modes combine,
+and how size limits layer.
 
 ## BodyMode Variants
 
-Each filter declares its preferred delivery mode for
-request and response bodies via `request_body_mode()`
-and `response_body_mode()`. Three variants exist:
+Each filter declares a delivery mode for request and response bodies through
+`request_body_mode()` and `response_body_mode()`.
 
 | Variant | Buffering | Forwarding | Size enforcement |
 |---------|-----------|------------|------------------|
@@ -15,79 +14,54 @@ and `response_body_mode()`. Three variants exist:
 | `StreamBuffer` | Accumulate | On `Release` / EOS | `max_bytes`, then global ceiling after `Release` |
 | `SizeLimit` | None | Immediate | Running byte count |
 
-**Stream** (default): chunks pass through filters and
-forward to upstream as they arrive. Lowest latency and
-memory. The global `body_limits` ceiling still applies:
-even when a filter selects `Stream` mode, the
-handler counts bytes and rejects (413 request / abort
-response) once the running total exceeds the ceiling.
-The ceiling can only be lifted with
-`insecure_options.allow_unbounded_body`.
+`Stream` (the default) passes chunks through filters and forwards them as
+they arrive. The handler still counts bytes against the global `body_limits`
+ceiling and rejects (413 on a request, abort on a response) once the running
+total exceeds it. Only `insecure_options.allow_unbounded_body` lifts the
+ceiling.
 
-**StreamBuffer**: chunks are delivered to filters
-incrementally (each `on_request_body` /
-`on_response_body` call receives the current chunk),
-but the handler withholds them from upstream. When a
-filter returns `FilterAction::Release` or
-end-of-stream arrives, all accumulated bytes are
-frozen into a single `Bytes` and forwarded. The
-`max_bytes` cap bounds the buffered phase; after
-`Release`, subsequent chunks flow in stream mode and
-the global ceiling bounds them.
+`StreamBuffer` delivers each chunk to `on_request_body` / `on_response_body`
+as it arrives, but the handler holds the chunks back from the upstream. When a
+filter returns `FilterAction::Release` or end-of-stream arrives, the
+accumulated bytes are frozen into one `Bytes` and forwarded. `max_bytes`
+bounds the buffered phase. After `Release`, later chunks stream and the
+global ceiling bounds them.
 
-**SizeLimit**: pure pass-through with a running byte
-counter. Returns 413 (request) or aborts (response)
-when the total exceeds `max_bytes`. Never buffers.
-Not directly declared by filters - injected by
-`apply_body_limits` when a global ceiling exists but
-no filter needs body access.
+A request `StreamBuffer` that the pipeline declares at build time is
+[pre-read](#pre-read-body) instead. `Release` doesn't end that buffering: the
+whole body is forwarded at end-of-stream, and a chunk that takes the buffer
+past `max_bytes` returns 413.
+
+`SizeLimit` passes chunks through with a running byte counter and returns 413
+(request) or aborts (response) once the total exceeds `max_bytes`. It never
+buffers. Filters don't declare it: `apply_body_limits` injects it when a
+global ceiling exists but no filter needs body access.
 
 ## Mode Merging
 
-At pipeline build time, `compute_body_capabilities`
-walks every filter (including branch sub-chains) and
-merges their declared modes into a single resolved
-mode per direction (request, response). Merging is a
-ratchet - modes only upgrade, never downgrade:
+At pipeline build time, `compute_body_capabilities` merges the declared modes
+of top-level filters into one mode per direction. Branch sub-chains never run
+body hooks, so their filters contribute only request-context needs. Modes only
+ratchet up:
 
 ```text
 StreamBuffer > SizeLimit > Stream
 ```
 
-When two `StreamBuffer` modes merge, the **largest**
-`max_bytes` wins (`None` counts as unbounded, which
-is larger than any finite value). This ensures every
-filter in the pipeline gets enough buffer to operate.
+When two `StreamBuffer` modes merge, the largest `max_bytes` wins (`None`
+counts as unbounded), so every filter gets enough buffer. `SizeLimit` and
+`Stream` are no-ops in the merge (`merge_body_mode` in
+`crates/filter/src/pipeline/body.rs`), because `StreamBuffer` always wins and
+`apply_body_limits` sets `SizeLimit` only after the merge.
 
-```rust
-// merge_body_mode in crates/filter/src/pipeline/body.rs
-match filter_mode {
-    StreamBuffer { max_bytes } => {
-        *current = match *current {
-            Stream | SizeLimit { .. } => StreamBuffer { max_bytes },
-            StreamBuffer { max_bytes: existing } =>
-                StreamBuffer {
-                    max_bytes: merge_optional_limits(existing, max_bytes),
-                },
-        };
-    },
-    SizeLimit { .. } | Stream => {},
-}
-```
-
-`SizeLimit` and `Stream` are no-ops in the merge
-because `StreamBuffer` always wins, and `SizeLimit`
-is only set by `apply_body_limits` after the merge.
-
-Filters can also upgrade the mode per-request at
-runtime via `ctx.set_request_body_mode()` and
-`ctx.set_response_body_mode()`, which use the same
-ratchet-up merge.
+Filters can also raise the mode for one request at runtime with
+`ctx.set_request_body_mode()` and `ctx.set_response_body_mode()`, which use
+the same merge.
 
 ## BodyCapabilities
 
-The merged result is stored in `BodyCapabilities`,
-a struct computed once at pipeline build time:
+The merge result is stored in `BodyCapabilities`, computed once per pipeline
+build:
 
 ```rust
 pub struct BodyCapabilities {
@@ -103,48 +77,41 @@ pub struct BodyCapabilities {
 }
 ```
 
-The handler layer reads `BodyCapabilities` to decide
-whether to enable body hooks at all (`needs_*_body`),
-and which buffering strategy to use (`*_body_mode`).
+The handler reads `needs_*_body` to decide whether to enable body hooks at
+all, and `*_body_mode` to pick the buffering strategy.
 
 ## BodyAccess
 
-Filters declare body needs via two orthogonal axes:
+Filters declare body needs on two independent axes:
 
-- **Access level**: `BodyAccess::None` (default),
-  `ReadOnly`, or `ReadWrite`. Determines whether
-  `on_*_body` is called and whether the filter may
-  mutate the `&mut Option<Bytes>`.
-- **Delivery mode**: `BodyMode` as above.
+- Access level: `BodyAccess::None` (default), `ReadOnly`, or `ReadWrite`. It
+  decides whether `on_*_body` is called and whether the filter may mutate the
+  `&mut Option<Bytes>`.
+- Delivery mode: the `BodyMode` above.
 
-A filter that returns `BodyAccess::None` for both
-directions causes no body overhead - the handler
-skips body hooks entirely when no filter declares
-access.
+When no filter declares access in a direction, the handler skips body hooks
+entirely, so there is no body overhead.
 
 ## BodyBuffer
 
-`BodyBuffer` is the accumulation primitive used by
-`StreamBuffer` mode. It copies accepted chunks into an
-owned, contiguous `Vec<u8>` with a byte ceiling. Storage
-grows with the payload rather than the chunk count or the
-size of an incoming chunk's backing allocation:
+`BodyBuffer` is the accumulator behind `StreamBuffer`. It copies accepted
+chunks into an owned, contiguous `Vec<u8>` with a byte ceiling, so storage
+grows with the payload, not with the chunk count or the size of a chunk's
+backing allocation.
 
-- `push(chunk)` checks the ceiling before copying and
-  returns `BodyBufferOverflow` if the new payload would
-  exceed `max_bytes`. It releases the incoming `Bytes`
-  owner after copying.
-- `freeze()` discards spare capacity before returning a
-  single `Bytes`. Shrinking may copy the payload if the
-  allocator cannot resize the allocation in place.
+- `push(chunk)` checks the ceiling before copying and returns
+  `BodyBufferOverflow` if the payload would exceed `max_bytes`. It drops the
+  incoming `Bytes` owner after copying.
+- `freeze()` discards spare capacity and returns one `Bytes`. Shrinking may
+  copy the payload if the allocator can't resize in place.
 
-The handler creates a `BodyBuffer` lazily on the
-first chunk and stores it in the request context
-(`request_body_buffer` / `response_body_buffer`).
+The handler creates the `BodyBuffer` on the first chunk and keeps it in the
+request context (`request_body_buffer` / `response_body_buffer`).
 
 ## Global Body Limits
 
-`BodyLimitsConfig` provides global size ceilings:
+`BodyLimitsConfig` holds the global ceilings. Their fields and defaults are in
+[Payload Size Limits](../operating/configuration.md#payload-size-limits):
 
 ```yaml
 body_limits:
@@ -152,57 +119,44 @@ body_limits:
   max_response_bytes: 10485760  # 10 MiB (default)
 ```
 
-After pipeline build, `apply_body_limits` layers
-these ceilings on top of the filter-declared modes:
+After the pipeline is built, `apply_body_limits` layers the ceilings over the
+filter-declared modes:
 
-1. If no filter needs body access (mode is `Stream`),
-   convert to `SizeLimit { max_bytes: ceiling }` so
-   the limit is enforced without buffering.
-2. If a filter declared `Stream` explicitly
-   (`filter_declared = true`), leave it as `Stream`
-   - the filter is streaming intentionally.
-3. If mode is `StreamBuffer`, tighten its `max_bytes`
-   to `min(existing, ceiling)`.
-
-Setting `max_request_bytes: null` removes the ceiling
-but requires `insecure_options.allow_unbounded_body:
-true` in the config, otherwise the proxy refuses to
-start.
+1. Mode `Stream` because no filter needs body access: convert to
+   `SizeLimit { max_bytes: ceiling }`, which enforces the limit without
+   buffering.
+2. `Stream` declared explicitly by a filter (`filter_declared = true`): leave
+   it, since the filter streams on purpose.
+3. `StreamBuffer`: tighten `max_bytes` to `min(existing, ceiling)`.
 
 ## Configured Buffering Cap
 
-`body_limits.max_buffer_bytes` defaults to 64 MiB
-(`DEFAULT_MAX_BUFFER_BYTES`). It limits each accumulated body,
-including finite filter declarations, runtime mode changes, nested
-pipelines, buffered subrequest responses, and iterative-router state.
-The shared buffer checks its effective limit before copying a chunk.
+`body_limits.max_buffer_bytes` (default 64 MiB, `DEFAULT_MAX_BUFFER_BYTES`)
+caps each accumulated body: finite filter declarations, runtime mode changes,
+nested pipelines, buffered subrequest responses, and iterative-router state.
+The shared buffer checks its effective limit before copying a chunk. Accepted
+values, the `allow_unbounded_body` interaction, and a sizing example are in
+[Payload Size Limits](../operating/configuration.md#payload-size-limits).
 
-The cap is a positive integer byte count. It cannot be zero, null,
-or larger than an addressable byte allocation. Operators can raise it
-without patching Praxis. Raising it does not raise the global request
-or response transfer limits (10 MiB by default), or a filter's own
-inspection limit. All applicable limits must accommodate the body.
+Raising the cap doesn't raise the transfer limits or a filter's own
+inspection limit; every applicable limit must fit the body. Incremental
+streams don't retain the whole body, so their transfer limits may exceed the
+cap. For a statically declared request `StreamBuffer`, a finite
+`body_limits.max_request_bytes` must not exceed `body_limits.max_buffer_bytes`,
+even if a filter can release early. The shared `configure_body_limits` entry
+point rejects a mismatch at startup, config validation, and reload, nested
+pipelines included. Response-only buffering and runtime-selected body modes
+keep their clamping behavior instead.
 
-`allow_unbounded_body` permits null cumulative transfer limits for
-incremental streams. It never removes the buffering cap. Transfer
-limits may exceed the buffering cap for incremental streams, which do
-not retain the complete body. For a statically declared request `StreamBuffer`,
-a finite `body_limits.max_request_bytes` must not exceed
-`body_limits.max_buffer_bytes`, even if a filter can release early. The shared
-`configure_body_limits` entry point rejects a mismatch at startup, config
-validation, and reload, including in nested pipelines. Lower the request limit
-or raise the buffer cap to correct it. Response-only buffering and
-runtime-selected body modes retain their existing clamping behavior.
+Reloads apply the new cap to new pipelines and their subrequest clients.
+In-flight requests keep their pinned pipeline's limits, and a rejected reload
+keeps the running configuration.
 
-Reloads apply the new cap to new pipelines and their subrequest clients;
-in-flight requests keep their
-pinned pipeline's limits. Rejected reloads keep the running configuration.
-
-This limits accumulated payload bytes, not total process memory.
-Concurrent bodies, rewritten output, parsed metadata, and transport
-allocations need separate capacity planning. Generic JSON filters
-default to `DEFAULT_JSON_BODY_MAX_BYTES` (10 MiB); explicit larger
-limits are still constrained by the pipeline's buffering cap.
+The cap bounds accumulated payload bytes, not process memory. Concurrent
+bodies, rewritten output, parsed metadata, and transport allocations need
+their own capacity planning. Generic JSON filters default to
+`DEFAULT_JSON_BODY_MAX_BYTES` (10 MiB), and a larger explicit limit is still
+held to the pipeline's buffering cap.
 
 ## Limit Layering Summary
 
@@ -215,23 +169,14 @@ Filter max_bytes (StreamBuffer { max_bytes: Some(N) })
       -> Configured max_buffer_bytes (64 MiB default)
 ```
 
-A filter requesting `StreamBuffer { max_bytes:
-Some(1 MiB) }` and a global limit of 10 MiB results
-in `StreamBuffer { max_bytes: Some(1 MiB) }` because
-`min(1 MiB, 10 MiB) = 1 MiB`. Two filters requesting
-1 MiB and 4 MiB merge to 4 MiB (largest wins), then
-clamp to `min(4 MiB, 10 MiB) = 4 MiB`.
+Two filters requesting 1 MiB and 4 MiB merge to 4 MiB, then clamp to
+`min(4 MiB, 10 MiB) = 4 MiB` under a 10 MiB global limit.
 
 ## Handler Integration (Pingora)
 
-The protocol layer bridges Pingora's body hook
-callbacks to the filter pipeline. Request and
-response paths follow the same pattern with one key
-difference: `on_request_body` is async,
-`on_response_body` is synchronous. Both Pingora hooks
-are async; the response side is synchronous because
-the `HttpFilter` trait declares `on_response_body` as
-a plain `fn`.
+The protocol layer bridges Pingora's body hooks to the filter pipeline. Both
+Pingora hooks are async, but the pipeline's `on_response_body` is synchronous
+because the `HttpFilter` trait declares it as a plain `fn`.
 
 ### Request Body Flow
 
@@ -258,37 +203,27 @@ Pingora request_body_filter(chunk, eos)
         Reject: send error response
 ```
 
-### Response Body Flow
-
-Same structure, but synchronous. Response
-`StreamBuffer` overflow produces a connection abort
-rather than a 413 response (the response headers have
-already been sent).
+The response flow has the same structure, run synchronously. A response
+`StreamBuffer` overflow aborts the connection instead of sending 413, because
+the response headers are already sent.
 
 ### Pre-Read Body
 
-When `StreamBuffer` mode is active for requests, the
-protocol layer pre-reads the body during the request
-phase (before upstream selection). This allows body
-filters to influence routing decisions. The pre-read
-chunks are stored in a `VecDeque<Bytes>` and drained
-on subsequent `request_body_filter` calls.
+With a request `StreamBuffer`, the protocol layer pre-reads the body during
+the request phase, before upstream selection, so body filters can influence
+routing. The pre-read chunks go into a `VecDeque<Bytes>` that later
+`request_body_filter` calls drain.
 
 ## FilterAction Body Semantics
 
-- **Continue**: proceed to next filter. In
-  `StreamBuffer` mode, the chunk is withheld from
-  upstream.
-- **Release**: freeze the accumulated buffer and
-  forward it. Only meaningful in `StreamBuffer` mode;
-  equivalent to `Continue` otherwise. Marks the
-  context as released so subsequent chunks stream
-  through.
-- **BodyDone**: this filter is finished inspecting
-  body chunks. The pipeline skips it for remaining
-  chunks but continues calling other filters.
-- **Reject**: abort with an error response (request)
-  or connection abort (response).
+- `Continue`: proceed to the next filter. In `StreamBuffer` mode the chunk is
+  held back from the upstream.
+- `Release`: freeze the buffer, forward it, and mark the context released so
+  later chunks stream. Outside `StreamBuffer` it acts like `Continue`. A
+  request pre-read ignores it and buffers to end-of-stream.
+- `BodyDone`: this filter is done inspecting. The pipeline skips it for the
+  remaining chunks and keeps calling the others.
+- `Reject`: an error response (request) or connection abort (response).
 
 ## Request vs Response Differences
 

@@ -1,27 +1,18 @@
 # Health Checking
 
-Praxis monitors upstream endpoint availability using
-active probes and passive observation. Unhealthy
-endpoints are automatically removed from load balancer
-rotation and restored when they recover.
+Praxis finds unhealthy upstream endpoints with active probes and with passive
+observation of real traffic. Unhealthy endpoints leave load balancer rotation
+and return when they recover. When every endpoint in a cluster is unhealthy,
+the load balancer routes to all of them; see
+[Panic Mode](load-balancing.md#panic-mode).
 
 ## Active Health Checks
 
-Active health checks send periodic probes to each
-endpoint in a cluster. A background task runs
-independently per cluster, probing all endpoints in
-parallel on a configurable interval.
-
-Active health checks are configured per cluster in the
-top-level `clusters` section. Only clusters with a
-`health_check` block are monitored; clusters without
-one are always considered healthy.
-
-### HTTP Probes
-
-HTTP probes send a `GET` request to a configurable
-path and compare the response status code against an
-expected value.
+Active checks are configured per cluster in the top-level `clusters` section.
+A background task per cluster probes all of its endpoints in parallel on each
+interval. Only clusters with a `health_check` block are monitored; clusters
+without one are always healthy. [health-checks.yaml] is a complete config
+with HTTP and TCP probes.
 
 ```yaml
 clusters:
@@ -37,6 +28,19 @@ clusters:
       timeout_ms: 2000
       healthy_threshold: 2
       unhealthy_threshold: 3
+      passive_unhealthy_threshold: 5
+      passive_healthy_threshold: 3
+
+  - name: database
+    endpoints:
+      - "10.0.0.1:5432"
+      - "10.0.0.2:5432"
+    health_check:
+      type: tcp
+      interval_ms: 10000
+      timeout_ms: 3000
+      healthy_threshold: 1
+      unhealthy_threshold: 2
 ```
 
 | Field | Default | Description |
@@ -48,22 +52,27 @@ clusters:
 | `timeout_ms` | `2000` | Per-probe timeout in milliseconds |
 | `healthy_threshold` | `2` | Consecutive successes to mark healthy |
 | `unhealthy_threshold` | `3` | Consecutive failures to mark unhealthy |
+| `passive_unhealthy_threshold` | (disabled) | See [Passive Health Checks](#passive-health-checks) |
+| `passive_healthy_threshold` | (disabled) | See [Passive Health Checks](#passive-health-checks) |
 
-The probe sends a raw `HTTP/1.1 GET` with a
-`Host: health-check` header and `Connection: close`.
-Any status code other than `expected_status` counts as
-a failure.
+[health-checks.yaml]: ../../examples/configs/traffic-management/health-checks.yaml
+
+### HTTP Probes
+
+An HTTP probe sends a raw `HTTP/1.1 GET` to `path` with a
+`Host: health-check` header and `Connection: close`. Any status other than
+`expected_status` is a failure.
 
 Without `tls-health-check`, HTTP probes connect in plaintext. A TLS cluster
 with an HTTP probe logs a startup warning; use a TCP probe or enable the
-feature described below. Plain HTTP retains `Host: health-check` with either
+feature described below. Plain HTTP keeps `Host: health-check` in either
 build.
 
 ### TLS and HTTPS Probes
 
 Build with `--features tls-health-check` to enable experimental TLS probes.
-The initial transport implementation uses the Pingora backend; selecting this
-feature also selects `pingora` in the protocol crate.
+The transport uses the Pingora backend, so this feature also selects
+`pingora` in the protocol crate.
 
 ```yaml
 clusters:
@@ -80,65 +89,66 @@ clusters:
       type: tls
 ```
 
-`type: tls` requires cluster `tls` settings and completes a TLS handshake.
-To check an HTTPS application endpoint, use `type: http` on that TLS cluster
-and set `path` and `expected_status`. HTTPS probes use HTTP/1.1 even when
-`http.version` selects HTTP/2 for proxied traffic. Handshake-only probes honor
-`http.version` during ALPN negotiation and can check an h2-only TLS endpoint.
-The path still defaults to `/`, and the
-expected status defaults to `200`. Handshake-only probes ignore both fields.
+There are two modes:
 
-Probes use the cluster's CA, client certificate and `verify` settings.
-Disabling verification still requires the existing insecure opt-in. Without a
-cluster CA, `runtime.upstream_ca_file` replaces system trust when configured;
-otherwise system trust applies. Runtime trust is captured at startup and
-requires a restart to change, including when probe tasks reload. Cluster TLS
-material reloads with the config. Failed certificate loading makes probes
-fail, without falling back to another trust source or plaintext.
+- `type: tls` requires cluster `tls` settings and only completes a TLS
+  handshake. It ignores `path` and `expected_status`, and honors
+  `http.version` during ALPN negotiation, so it can check an h2-only TLS
+  endpoint.
+- `type: http` on a TLS cluster checks an HTTPS application endpoint, with
+  `path` (default `/`) and `expected_status` (default `200`). HTTPS probes
+  use HTTP/1.1 even when `http.version` selects HTTP/2 for proxied traffic.
 
-The verification name comes from explicit `tls.sni`, then a fixed DNS
-`http.authority`, then the endpoint hostname or IP address. An IP authority
-keeps endpoint certificate verification when no explicit SNI is set. A
-background probe has no downstream Host to inherit. Existing SNI validation
-and opt-in rules still apply to cluster config. HTTPS Host uses configured
-`http.authority`, including IP literals and `{ from: endpoint }`; otherwise it
-uses explicit SNI or the endpoint. IPv6 Hosts use brackets; endpoint-derived
-Hosts omit port 443 and keep other ports.
+Probes use the cluster's CA, client certificate, and `verify`
+settings. Disabling verification still requires the existing insecure opt-in.
+Without a cluster CA, `runtime.upstream_ca_file` replaces system trust when
+configured; otherwise system trust applies. Runtime trust is captured at
+startup and needs a restart to change, even when probe tasks reload. Cluster
+TLS material reloads with the config. If certificate loading fails, probes
+fail; they never fall back to another trust source or to plaintext.
 
-Each probe uses a new connection with session resumption disabled, so a
-resumed session cannot conceal a changed server certificate. One timeout
-covers DNS, connection, handshake, HTTP exchange and close. Successful probes
-send `close_notify`. Handshake-only probes then wait for a fatal TLS alert
-rejecting client credentials. The grace period is the greater of 100 ms and
-the time spent resolving, connecting, and completing the handshake, capped by
-the remaining probe timeout. Silence at that deadline succeeds if the
-handshake completed; a handshake that times out still fails. A normal
-`close_notify` is returned as EOF and succeeds. Application data, EOF without
-`close_notify` (`UnexpectedEof`), or a
-silent peer after that grace period also succeed. Other read errors and fatal
-TLS alerts fail the probe. HTTPS probes
-read only a bounded HTTP status line, not the entire response body, and do not
-wait for a reciprocal close alert.
+The verification name comes from explicit `tls.sni`, then a fixed
+DNS `http.authority`, then the endpoint hostname or IP address. An IP
+authority keeps endpoint certificate verification when no explicit SNI is
+set. A background probe has no downstream Host to inherit. Existing SNI
+validation and opt-in rules still apply. The HTTPS Host header uses the
+configured `http.authority`, including IP literals and `{ from: endpoint }`;
+otherwise it uses explicit SNI or the endpoint. IPv6 Hosts use brackets;
+endpoint-derived Hosts omit port 443 and keep other ports.
 
-TLS closure and error alerts are defined in [RFC 8446 Section 6] for TLS 1.3
-and [RFC 5246 Section 7.2] for TLS 1.2. The grace period and acceptance of
-transport EOF above are Praxis health-check policy. HTTP/1.1 status-line
-syntax is defined in [RFC 9112 Section 4]; the bounded read follows the
-resource-limit guidance in [RFC 9110 Section 17.5]. See the
-[TLS conformance tests] for protocol-version and client-authentication
-coverage, and [HTTP correctness] for the proxy's protocol responsibilities.
+Each probe opens a new connection with session resumption
+disabled, so a resumed session cannot hide a changed server certificate. One
+timeout covers DNS, connection, handshake, HTTP exchange, and close.
+Successful probes send `close_notify`. HTTPS probes read only a bounded HTTP
+status line, not the whole body, and do not wait for a reciprocal close
+alert.
 
-A verified handshake establishes server identity. Configured client
-credentials are sent only when the server requests client authentication
-([RFC 8446 Section 4.4.2], [RFC 5246 Section 7.4.6]). TLS 1.3 client-side
-handshake completion does not prove that the server accepted those
-credentials, and a rejection arriving after the grace period can still be
-missed. Use an HTTPS response check to verify
+After `close_notify`, a handshake-only probe waits for a fatal TLS alert that
+rejects the client credentials. The grace period is the greater of 100 ms and
+the time spent resolving, connecting, and handshaking, capped by the remaining
+probe timeout. The probe succeeds on silence at that deadline (if the
+handshake completed), a normal `close_notify` (returned as EOF), application
+data, or EOF without `close_notify` (`UnexpectedEof`). A handshake that times
+out still fails, as do other read errors and fatal TLS alerts.
+
+TLS closure and error alerts are defined in [RFC 8446 Section 6] (TLS 1.3)
+and [RFC 5246 Section 7.2] (TLS 1.2). The grace period and accepting
+transport EOF are Praxis policy. HTTP/1.1 status-line syntax is in
+[RFC 9112 Section 4]; the bounded read follows the resource-limit guidance in
+[RFC 9110 Section 17.5]. The [TLS conformance tests] cover protocol versions
+and client authentication; [HTTP correctness] covers the proxy's protocol
+responsibilities.
+
+A verified handshake proves server identity. Client credentials are sent only
+when the server requests client authentication ([RFC 8446 Section 4.4.2],
+[RFC 5246 Section 7.4.6]). In TLS 1.3 a completed client handshake does not
+prove the server accepted those credentials, and a rejection that arrives
+after the grace period can be missed. Use an HTTPS response check to verify
 client authorization and application health. Upstream revocation checking is
-not supported; these probes make no certificate revocation guarantee.
+not supported, so these probes make no revocation guarantee.
 
-See the [TLS health-check example][tls-health-check]
-for both modes. TCP stays connect-only, and gRPC probes remain plaintext.
+The [TLS health-check example][tls-health-check] shows both modes. TCP probes
+stay connect-only, and gRPC probes stay plaintext.
 
 [tls-health-check]: ../../examples/configs/observability/tls-health-check.yaml
 [RFC 8446 Section 6]: https://datatracker.ietf.org/doc/html/rfc8446#section-6
@@ -156,34 +166,16 @@ for both modes. TCP stays connect-only, and gRPC probes remain plaintext.
 
 ### TCP Probes
 
-TCP probes attempt a connection to the endpoint. A
-successful TCP handshake within the timeout counts as
-healthy. The connection is closed immediately after.
-
-```yaml
-clusters:
-  - name: database
-    endpoints:
-      - "10.0.0.1:5432"
-      - "10.0.0.2:5432"
-    health_check:
-      type: tcp
-      interval_ms: 10000
-      timeout_ms: 3000
-      healthy_threshold: 1
-      unhealthy_threshold: 2
-```
-
-TCP probes ignore `path` and `expected_status`. Use
-TCP probes for non-HTTP services (databases, caches,
-message brokers) where a successful connection implies
-availability.
+A TCP probe counts an endpoint healthy when a TCP handshake completes within
+the timeout, then closes the connection. It ignores `path` and
+`expected_status`. Use it for non-HTTP services (databases, caches, message
+brokers) where a connection implies availability.
 
 ### gRPC Probes
 
-gRPC probes call `grpc.health.v1.Health/Check` and
-count an endpoint healthy only when the call returns
-`SERVING`.
+A gRPC probe calls `grpc.health.v1.Health/Check`. Use it for gRPC upstreams:
+a gRPC server does not serve `/healthz`, and one that has stopped serving
+still completes an HTTP/2 handshake, so HTTP and TCP probes report it healthy.
 
 ```yaml
 clusters:
@@ -201,94 +193,33 @@ clusters:
       unhealthy_threshold: 2
 ```
 
-Use a gRPC probe for a gRPC upstream. A gRPC server
-does not serve `/healthz`, and one that has stopped
-serving still completes an HTTP/2 handshake, so both
-the HTTP and TCP probes report it healthy. Only this
-probe can tell "reachable" from "serving".
+`grpc_service` names one registered service. Empty (the default) asks for the
+server's overall status, as the health protocol defines.
 
-`grpc_service` names one registered service. Left
-empty (the default) it asks for the server's overall
-status, which is what the health protocol defines an
-empty name to mean.
-
-An endpoint is healthy only when all three hold: HTTP
-200, `grpc-status: 0`, and a decoded `SERVING`. A
-server that answers `NOT_SERVING`, or that does not
-implement the health service at all, is marked
-unhealthy.
-
-gRPC probes ignore `path` and `expected_status`. They
-speak plaintext h2c on their own connection, so they
-cannot be combined with cluster TLS — that
-combination is rejected at config load rather than
-silently failing every probe.
+An endpoint is healthy only with HTTP 200, `grpc-status: 0`, and a decoded
+`SERVING`. A server that answers `NOT_SERVING`, or does not implement the
+health service, is unhealthy. gRPC probes ignore `path` and
+`expected_status`. They speak plaintext h2c on their own connection, so
+config load rejects them on a cluster with TLS.
 
 ## Passive Health Checks
 
-Passive health checks observe real request outcomes
-instead of sending dedicated probe traffic. When an
-upstream response returns a 5xx status code or the
-connection fails, the endpoint records a failure.
-Successful responses (status < 500) record a success.
+Passive checks watch real requests instead of sending probes. A request fails
+when the upstream connection fails (connect error, timeout, reset) or the
+response status is >= 500. Every other completed response is a success.
 
-Passive checking is configured alongside active
-checking via two optional threshold fields:
+- `passive_unhealthy_threshold`: consecutive failures that mark an endpoint
+  unhealthy.
+- `passive_healthy_threshold`: consecutive successes that recover an
+  unhealthy endpoint.
 
-```yaml
-clusters:
-  - name: backend
-    endpoints:
-      - "10.0.0.1:8080"
-      - "10.0.0.2:8080"
-    health_check:
-      type: http
-      path: "/healthz"
-      interval_ms: 5000
-      timeout_ms: 2000
-      healthy_threshold: 2
-      unhealthy_threshold: 3
-      passive_unhealthy_threshold: 5
-      passive_healthy_threshold: 3
-```
-
-| Field | Default | Description |
-| ----- | ------- | ----------- |
-| `passive_unhealthy_threshold` | (disabled) | Consecutive failures to mark unhealthy |
-| `passive_healthy_threshold` | (disabled) | Consecutive successes to recover |
-
-When `passive_unhealthy_threshold` is set, an endpoint
-that accumulates that many consecutive failures from
-real traffic is marked unhealthy. When
-`passive_healthy_threshold` is set, an unhealthy
-endpoint recovers after that many consecutive
-successful responses.
-
-Setting only `passive_unhealthy_threshold` (without
-`passive_healthy_threshold`) means passive observation
-can mark endpoints down, but only active probes can
-recover them. This is useful when you want fast
-failure detection from real traffic combined with
-controlled recovery via active probes.
-
-Omitting both passive thresholds disables passive
-health checking entirely. Active probes still run
-independently.
-
-### What Counts as a Failure
-
-Passive health considers a request a failure when:
-
-- The upstream connection fails (connect error,
-  timeout, reset)
-- The upstream responds with a status code >= 500
-
-All other completed responses count as successes.
+Set only `passive_unhealthy_threshold` to let real traffic mark endpoints
+down quickly while only active probes recover them. Omit both to disable
+passive checking; active probes run either way.
 
 ## Health State Transitions
 
-Endpoints start healthy. The state machine uses
-consecutive counters with configurable thresholds:
+Endpoints start healthy:
 
 ```text
                   unhealthy_threshold
@@ -300,71 +231,37 @@ consecutive counters with configurable thresholds:
         +--------------------------------------+
 ```
 
-A single success resets the failure counter, and a
-single failure resets the success counter. This
-prevents flapping - an endpoint that alternates
-between success and failure never accumulates enough
-consecutive results to transition.
-
-Active and passive checks share the same counters and
-state. If both are configured, a passive failure
-increments the same failure counter that active probe
-failures use.
+A success resets the failure counter and a failure resets the success
+counter, so an endpoint that alternates never transitions. Active and passive
+checks share the same counters and state.
 
 ## Admin Health Endpoints
 
-The health/metrics listener exposes two health endpoints for
-orchestrator integration (Kubernetes, load balancers,
-monitoring).
+The health and metrics listener (`admin.metrics_address`) serves two
+endpoints for orchestrators, load balancers, and monitoring.
 
 ### /healthy (Liveness)
 
-Returns `200 OK` with `{"status":"ok"}` once the
-server is accepting connections. This endpoint does
-not check upstream health - it confirms the proxy
-process is alive.
+Returns `200 OK` with `{"status":"ok"}` once the server accepts connections.
+It does not check upstreams.
 
 ```console
 curl http://127.0.0.1:9902/healthy
 ```
 
-```json
-{"status":"ok"}
-```
-
 ### /ready (Readiness)
-
-Returns per-cluster health status when active health
-checks are configured. The default `readiness: serving`
-keeps returning `200` once the replica is serving, even
-when a cluster has zero healthy endpoints. Set
-`readiness: upstreams` to return `503` in that case.
 
 ```console
 curl http://127.0.0.1:9902/ready
 ```
 
-Without health checks configured:
+Without health checks, it returns `{"status":"ok"}`. With active health
+checks, it adds per-cluster counts. A cluster is degraded when all of its
+endpoints are unhealthy; one healthy endpoint keeps it healthy.
 
-```json
-{"status":"ok"}
-```
-
-With health checks, all clusters healthy:
-
-```json
-{
-  "status": "ok",
-  "clusters": {
-    "total": 2,
-    "healthy": 2,
-    "degraded": 0
-  }
-}
-```
-
-With a fully-down cluster and the default `readiness: serving`, the replica
-stays ready (HTTP 200) while the body still reports the degraded cluster:
+The default `readiness: serving` returns `200` once the replica is serving,
+even when a cluster has zero healthy endpoints. The body still reports the
+degraded cluster:
 
 ```json
 {
@@ -377,7 +274,8 @@ stays ready (HTTP 200) while the body still reports the degraded cluster:
 }
 ```
 
-Set `admin.readiness: upstreams` to fail readiness for that state:
+Set `admin.readiness: upstreams` to return `503` in that state, with
+`"status": "degraded"` and the same `clusters` object:
 
 ```yaml
 admin:
@@ -385,41 +283,22 @@ admin:
   readiness: upstreams
 ```
 
-```json
-{
-  "status": "degraded",
-  "clusters": {
-    "total": 2,
-    "healthy": 1,
-    "degraded": 1
-  }
-}
-```
-
-A cluster is "degraded" when all of its endpoints are
-unhealthy. A cluster with at least one healthy
-endpoint still counts as healthy.
-
-In both modes, `/ready` returns `503` while the replica is
-initializing, draining or stopped, with
-`{"status":"initializing"}`, `{"status":"draining"}` or
-`{"status":"stopped"}`. Draining starts on `SIGTERM`; see
-[Graceful Shutdown](configuration.md#graceful-shutdown) for
+In both modes, `/ready` returns `503` while the replica is initializing,
+draining, or stopped, with `{"status":"initializing"}`,
+`{"status":"draining"}`, or `{"status":"stopped"}`. Draining starts on
+`SIGTERM`; see [Graceful Shutdown](configuration.md#graceful-shutdown) for
 `shutdown_drain_delay_secs`.
 
 ### Verbose Mode
 
-By default, `/ready` returns aggregate counts without
-cluster names to avoid leaking internal topology. Set
-`admin.verbose: true` to include per-cluster detail:
+`/ready` omits cluster names by default so it does not leak internal
+topology. `admin.verbose: true` adds per-cluster detail:
 
 ```yaml
 admin:
   metrics_address: "127.0.0.1:9902"
   verbose: true
 ```
-
-Verbose response:
 
 ```json
 {
@@ -444,40 +323,31 @@ Verbose response:
 }
 ```
 
+Verbose mode exposes cluster names and endpoint counts, so keep it off in
+production unless the health/metrics listener is network-isolated.
+
 ## Configuration Validation
 
-Praxis validates health check configuration at
-startup and rejects invalid settings:
+Startup rejects a health check config unless:
 
-- `interval_ms` and `timeout_ms` must be greater
-  than zero
-- `timeout_ms` must be less than `interval_ms`
-- `healthy_threshold` and `unhealthy_threshold`
-  must be >= 1
-- `passive_unhealthy_threshold` and
-  `passive_healthy_threshold` must be >= 1 when set
-- `expected_status` must be in the range 100-599
-- `path` must start with `/` and must not contain
-  query strings, fragments, CR/LF, or encoded
+- `interval_ms` and `timeout_ms` are greater than zero, and `timeout_ms` is
+  less than `interval_ms`
+- `healthy_threshold` and `unhealthy_threshold` are >= 1, and so are
+  `passive_unhealthy_threshold` and `passive_healthy_threshold` when set
+- `expected_status` is in the range 100-599
+- `path` starts with `/` and has no query string, fragment, CR/LF, or encoded
   control characters
-- `grpc_service` must be at most 255 bytes of
-  printable ASCII without spaces
-- `type: grpc` cannot be combined with cluster TLS
+- `grpc_service` is at most 255 bytes of printable ASCII without spaces
+- `type: grpc` is not combined with cluster TLS
 
 ### SSRF Prevention
 
-Health check endpoints are validated against
-SSRF-sensitive addresses. Loopback (`127.0.0.0/8`,
-`::1`), link-local (`169.254.0.0/16`,
-`fe80::/10`), and cloud metadata addresses
-(`169.254.169.254`) are blocked by default.
-
-For local development, set
-`insecure_options.allow_private_health_checks: true`
-to allow probing loopback and private addresses. The
-probed endpoints also carry data-plane traffic, so they
-must pass the endpoint check too; set
-`allow_private_endpoints: true` alongside it:
+Health check endpoints may not be loopback (`127.0.0.0/8`, `::1`),
+link-local (`169.254.0.0/16`, `fe80::/10`), or cloud metadata addresses
+(`169.254.169.254`). For local development only, set
+`insecure_options.allow_private_health_checks: true` to probe loopback and
+private addresses. Probed endpoints also carry data-plane traffic and must
+pass the endpoint check, so set `allow_private_endpoints: true` too:
 
 ```yaml
 insecure_options:
@@ -485,109 +355,29 @@ insecure_options:
   allow_private_health_checks: true
 ```
 
-This flag should never be used in production.
-
-## Example Configuration
-
-A complete configuration with both HTTP and TCP active
-health checks, passive observation, and admin
-endpoint:
-
-```yaml
-listeners:
-  - name: default
-    address: "0.0.0.0:8080"
-    filter_chains:
-      - main
-
-admin:
-  metrics_address: "127.0.0.1:9902"
-
-clusters:
-  - name: api
-    endpoints:
-      - "10.0.0.1:8080"
-      - "10.0.0.2:8080"
-      - "10.0.0.3:8080"
-    health_check:
-      type: http
-      path: "/healthz"
-      expected_status: 200
-      interval_ms: 5000
-      timeout_ms: 2000
-      healthy_threshold: 2
-      unhealthy_threshold: 3
-      passive_unhealthy_threshold: 5
-      passive_healthy_threshold: 3
-
-  - name: cache
-    endpoints:
-      - "10.0.1.1:6379"
-      - "10.0.1.2:6379"
-    health_check:
-      type: tcp
-      interval_ms: 10000
-      timeout_ms: 3000
-      healthy_threshold: 1
-      unhealthy_threshold: 2
-
-filter_chains:
-  - name: main
-    filters:
-      - filter: router
-        routes:
-          - path_prefix: "/api"
-            cluster: api
-          - path_prefix: "/"
-            cluster: api
-      - filter: load_balancer
-        clusters:
-          - name: api
-          - name: cache
-```
+Never use these in production.
 
 ## Threshold Tuning
 
-Threshold values control the tradeoff between fast
-detection and stability.
-
-**Fast failure detection** - lower
-`unhealthy_threshold` (e.g. 1-2) removes failing
-endpoints quickly but risks false positives from
-transient errors.
-
-**Stable detection** - higher `unhealthy_threshold`
-(e.g. 3-5) tolerates transient failures but takes
-longer to remove a genuinely failed endpoint.
-
-**Recovery** - set `healthy_threshold` to at least 2
-to confirm an endpoint is consistently responding
-before returning it to rotation.
-
-**Passive thresholds** - set
-`passive_unhealthy_threshold` higher than
-`unhealthy_threshold` to avoid removing endpoints
-based on normal error spikes. Passive checks see
-every request, so the threshold should account for
-expected error rates.
-
-**Interval** - shorter intervals detect failures
-faster but increase probe traffic. For large clusters,
-balance probe frequency against network overhead. The
-timeout must always be less than the interval.
+- `unhealthy_threshold` of 1-2 removes failing endpoints fast but reacts to
+  transient errors; 3-5 tolerates them but removes a dead endpoint later.
+- `healthy_threshold` of at least 2 confirms an endpoint responds
+  consistently before it rejoins rotation.
+- Passive checks see every request, so set `passive_unhealthy_threshold`
+  above `unhealthy_threshold` and allow for your normal error rate.
+- Shorter intervals detect failures sooner but send more probe traffic, which
+  adds up on large clusters.
 
 ## Dynamic Reload
 
-Health check configuration is dynamically reloadable.
-Changing health check settings in the config file
-triggers a rebuild of the health registry and probe
-tasks without restarting the proxy. In-flight requests
-complete on the previous configuration.
+Changing health check settings rebuilds the health registry and probe tasks
+without a restart; in-flight requests finish on the previous config. See
+[Dynamic Configuration Reload](configuration.md#dynamic-configuration-reload)
+for which endpoint health state survives.
 
 ## Monitoring
 
-Health state transitions are logged at `info` level
-(active probes) and `warn` level (passive failures):
+Active probe transitions log at `info`, passive failures at `warn`:
 
 ```text
 INFO endpoint transitioned to healthy
@@ -600,17 +390,11 @@ WARN passive health: endpoint marked unhealthy
   cluster=api endpoint_index=1 threshold=5
 ```
 
-Individual probe results are logged at `trace` level.
-Use `runtime.log_overrides` to enable trace logging
-for the health check module without flooding other
-output:
+Individual probe results log at `trace`. To see them without raising other
+modules' log level:
 
 ```yaml
 runtime:
   log_overrides:
     praxis_protocol::http::pingora::health: trace
 ```
-
-Prometheus metrics on `/metrics` track request counts
-and durations. Combine these with `/ready` polling to
-build health dashboards.

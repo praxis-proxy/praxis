@@ -21,7 +21,10 @@ use pingora_core::{
 };
 use tracing::info;
 
-use super::{LifecycleHandle, RuntimeOptions, ServerRuntime, ShutdownFuture, resolve_thread_count};
+use super::{
+    LifecycleHandle, RuntimeOptions, RuntimeServiceRegistration, ServerRuntime, ShutdownFuture, resolve_thread_count,
+    service,
+};
 use crate::config::Config;
 
 // -----------------------------------------------------------------------------
@@ -46,6 +49,8 @@ pub struct PingoraServerRuntime {
 
     /// Readiness-first handoff delay before Pingora begins graceful shutdown.
     shutdown_drain_delay: Duration,
+    /// Embedding services installed once when the runtime starts.
+    embedding_services: Vec<RuntimeServiceRegistration>,
 }
 
 impl std::fmt::Debug for PingoraServerRuntime {
@@ -76,12 +81,32 @@ impl PingoraServerRuntime {
             server,
             lifecycle,
             shutdown_drain_delay: Duration::from_secs(config.shutdown_drain_delay_secs),
+            embedding_services: Vec::new(),
         }
     }
 
-    /// Access the inner Pingora server for service registration.
+    /// Access Pingora directly. Raw registrations bypass embedding-service readiness.
     pub fn server_mut(&mut self) -> &mut Server {
         &mut self.server
+    }
+
+    /// Install embedding services on the serving backend.
+    pub fn add_runtime_services(&mut self, services: Vec<RuntimeServiceRegistration>) {
+        if !services.is_empty() {
+            service::prepare(&self.lifecycle);
+            self.embedding_services.extend(services);
+        }
+    }
+
+    /// Register a data-plane listener gated on required embedding services.
+    pub fn add_proxy_service<S>(&mut self, service: S)
+    where
+        S: pingora_core::services::ServiceWithDependents + 'static,
+    {
+        self.server.add_service(GatedService {
+            inner: service,
+            lifecycle: self.lifecycle.clone(),
+        });
     }
 
     /// Start all registered services. Blocks forever.
@@ -108,8 +133,29 @@ impl PingoraServerRuntime {
     /// [`run_until_shutdown`]: ServerRuntime::run_until_shutdown
     /// [`run_with_shutdown`]: ServerRuntime::run_with_shutdown
     /// [`RunArgs`]: pingora_core::server::RunArgs
-    pub fn run_with_args(self, args: RunArgs) {
+    pub fn run_with_args(mut self, args: RunArgs) {
         ensure_sighup_ignored();
+        let has_embedding_services = !self.embedding_services.is_empty();
+        if has_embedding_services {
+            self.server.add_service(background_service(
+                "embedding services",
+                EmbeddingServices {
+                    contributions: Mutex::new(self.embedding_services),
+                    lifecycle: self.lifecycle.clone(),
+                },
+            ));
+        }
+        #[cfg(unix)]
+        let args = if has_embedding_services {
+            RunArgs {
+                shutdown_signal: Box::new(StartupShutdownWatch {
+                    original: args.shutdown_signal,
+                    lifecycle: self.lifecycle.clone(),
+                }),
+            }
+        } else {
+            args
+        };
         self.server.run(args);
         self.lifecycle.begin_drain();
         self.lifecycle.mark_stopped();
@@ -130,6 +176,127 @@ impl PingoraServerRuntime {
     #[cfg(not(unix))]
     fn delayed_run_args(&self) -> RunArgs {
         RunArgs::default()
+    }
+}
+
+/// Supervise contributed services on Pingora's background runtime.
+struct EmbeddingServices {
+    /// Contributions taken exactly once at startup.
+    contributions: Mutex<Vec<RuntimeServiceRegistration>>,
+    /// Readiness and beginning-of-drain notification.
+    lifecycle: LifecycleHandle,
+}
+
+#[async_trait]
+impl BackgroundService for EmbeddingServices {
+    async fn start(&self, mut shutdown: ShutdownWatch) {
+        let contributions = std::mem::take(&mut *self.contributions.lock().unwrap_or_else(PoisonError::into_inner));
+        let lifecycle = self.lifecycle.clone();
+        let mut work = std::pin::pin!(service::supervise(contributions, lifecycle.clone()));
+        tokio::select! {
+            () = &mut work => {},
+            () = service::wait_for_backend_shutdown(&mut shutdown) => {
+                lifecycle.begin_drain();
+                work.await;
+            },
+        }
+    }
+}
+
+/// Observe external shutdown and supervised errors using Pingora's shutdown path.
+#[cfg(unix)]
+struct StartupShutdownWatch {
+    /// The runtime's original shutdown signal.
+    original: Box<dyn ShutdownSignalWatch>,
+    /// Service readiness and drain state.
+    lifecycle: LifecycleHandle,
+}
+
+#[cfg(unix)]
+impl ShutdownSignalWatch for StartupShutdownWatch {
+    fn recv<'watch, 'fut>(&'watch self) -> Pin<Box<dyn Future<Output = ShutdownSignal> + Send + 'fut>>
+    where
+        'watch: 'fut,
+        Self: 'fut,
+    {
+        let original = self.original.recv();
+        let lifecycle = self.lifecycle.clone();
+        Box::pin(async move {
+            let failure = lifecycle.runtime_services_gate().startup_failed();
+            let signal = tokio::select! {
+                signal = original => signal,
+                () = failure => ShutdownSignal::GracefulTerminate,
+            };
+            lifecycle.begin_drain();
+            signal
+        })
+    }
+}
+
+/// Gate a listener before Pingora binds or accepts its sockets.
+struct GatedService<S> {
+    /// The original listener service.
+    inner: S,
+    /// The process lifecycle, including required-service readiness.
+    lifecycle: LifecycleHandle,
+}
+
+#[async_trait]
+impl<S: pingora_core::services::ServiceWithDependents> pingora_core::services::ServiceWithDependents
+    for GatedService<S>
+{
+    async fn start_service(
+        &mut self,
+        #[cfg(unix)] fds: Option<pingora_core::server::ListenFds>,
+        mut shutdown: ShutdownWatch,
+        listeners_per_fd: usize,
+        ready_notifier: pingora_core::services::ServiceReadyNotifier,
+    ) {
+        let gate = self.lifecycle.runtime_services_gate();
+        let started = tokio::select! {
+            biased;
+            () = service::wait_for_backend_shutdown(&mut shutdown) => false,
+            ready = gate.wait_for_initialization() => ready,
+        };
+        if started
+            && !matches!(
+                self.lifecycle.phase(),
+                super::LifecyclePhase::Draining | super::LifecyclePhase::Stopped
+            )
+        {
+            self.inner
+                .start_service(
+                    #[cfg(unix)]
+                    fds,
+                    shutdown,
+                    listeners_per_fd,
+                    ready_notifier,
+                )
+                .await;
+        }
+    }
+
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn threads(&self) -> Option<usize> {
+        self.inner.threads()
+    }
+
+    fn runtime_opts_override(
+        &self,
+        global: &pingora_core::server::RuntimeOpts,
+    ) -> Option<pingora_core::server::RuntimeOpts> {
+        self.inner.runtime_opts_override(global)
+    }
+
+    fn listen_addresses(&self) -> Option<Vec<String>> {
+        self.inner.listen_addresses()
+    }
+
+    fn is_listening(&self) -> bool {
+        self.inner.is_listening()
     }
 }
 
@@ -582,6 +749,61 @@ mod tests {
         runtime.run_with_args(RunArgs {
             shutdown_signal: Box::new(ImmediateShutdown),
         });
+    }
+
+    /// Required worker can fail before readiness or signal and serve until drain.
+    struct TestWorker(bool);
+
+    impl crate::server::RuntimeService for TestWorker {
+        fn run(self: Arc<Self>, context: crate::server::RuntimeServiceContext) -> crate::server::RuntimeServiceFuture {
+            Box::pin(async move {
+                if self.0 {
+                    let (mut shutdown, ready) = context.into_parts();
+                    ready.notify_ready();
+                    shutdown.requested().await;
+                }
+            })
+        }
+    }
+
+    /// Serves as the proxy listener and records whether Pingora started it.
+    struct ListenerProbe(tokio::sync::mpsc::UnboundedSender<()>);
+
+    #[async_trait]
+    impl BackgroundService for ListenerProbe {
+        async fn start(&self, mut shutdown: ShutdownWatch) {
+            self.0.send(()).expect("listener probe receiver");
+            service::wait_for_backend_shutdown(&mut shutdown).await;
+        }
+    }
+
+    /// Exercise the actual Pingora runtime with both readiness outcomes.
+    #[test]
+    fn required_services_gate_pingora_listeners() {
+        for ready in [true, false] {
+            let config = Config::from_yaml(crate::config::DEFAULT_CONFIG).unwrap();
+            let mut runtime = PingoraServerRuntime::new(&config);
+            let lifecycle = runtime.lifecycle();
+            runtime.add_runtime_services(vec![(Arc::from("test worker"), Arc::new(TestWorker(ready)))]);
+            let (started, mut listener) = tokio::sync::mpsc::unbounded_channel();
+            runtime.add_proxy_service(background_service("listener probe", ListenerProbe(started)));
+            let observed = Arc::new(AtomicBool::new(false));
+            let probe = Arc::clone(&observed);
+            runtime.run_with_shutdown(Box::pin(async move {
+                if tokio::time::timeout(PHASE_DEADLINE, listener.recv())
+                    .await
+                    .is_ok_and(|event| event.is_some())
+                {
+                    probe.store(true, Ordering::SeqCst);
+                }
+            }));
+            assert_eq!(
+                observed.load(Ordering::SeqCst),
+                ready,
+                "worker readiness controls listener startup"
+            );
+            assert_eq!(lifecycle.phase(), LifecyclePhase::Stopped);
+        }
     }
 
     #[test]

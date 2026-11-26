@@ -1,35 +1,38 @@
 # Traffic Management Examples
 
-Traffic management filters control routing, load balancing, failure handling, and request lifecycle behavior.
+Traffic management filters control routing, load balancing, failure handling,
+and the request lifecycle.
 
 ## When to Use
 
-- Route requests to different upstreams based on path, headers, or body content
-- Distribute load across healthy endpoints with various strategies
+- Route requests to different upstreams by path, headers, or body content
+- Spread load across healthy endpoints
 - Handle failures with retries, circuit breakers, and timeouts
-- Limit request rates or impose quotas per client
-- Enforce deadlines for upstream requests (HTTP and gRPC)
+- Limit request rates per client
+- Enforce deadlines on upstream requests (HTTP and gRPC)
 
 ## Key Filters
 
-**Router**: Selects an upstream cluster based on path prefixes, exact matches, regex patterns, or header values. Supports routing on body-derived metadata.
+- [`router`](../../../docs/filters/http/traffic_management/router.md): picks
+  an upstream cluster by path prefix, exact path, host, or header, including
+  headers promoted from the body. Per-route retry policies set retriable
+  status codes, backoff, and a retry budget.
+- [`load_balancer`](../../../docs/filters/http/traffic_management/load_balancer.md):
+  picks an endpoint in the cluster (`round_robin`, `least_connections`, `p2c`,
+  `random`, `consistent_hash`, `maglev`, `ring_hash`, `subset`, `zone_aware`,
+  `priority`) and works with active health checks.
+- [`circuit_breaker`](../../../docs/filters/http/traffic_management/circuit_breaker.md):
+  stops sending traffic to a failing upstream so it can recover.
+- [`rate_limit`](../../../docs/filters/http/traffic_management/rate_limit.md):
+  token bucket limits, per client or global, with 429 responses.
+- [`timeout`](../../../docs/filters/http/traffic_management/timeout.md) and
+  [`grpc_timeout`](../../../docs/filters/http/traffic_management/grpc_timeout.md):
+  deadlines for upstream requests; `grpc_timeout` honors the `grpc-timeout`
+  header.
 
-**Load Balancer**: Distributes requests across cluster endpoints using round-robin, least-request, or random strategies. Integrates with active health checks.
-
-**Retry**: Retries failed requests with configurable backoff, jitter, and budget limits. Supports per-status-code and per-method retry policies.
-
-**Circuit Breaker**: Temporarily stops sending traffic to failing upstreams to prevent cascading failures and allow recovery time.
-
-**Rate Limit**: Enforces request rate limits using token bucket or leaky bucket algorithms. Supports per-client keying.
-
-**Timeout**: Sets deadlines for upstream requests. For gRPC, translates to `grpc-timeout` headers.
-
-## Best Practices
-
-- Use health checks with circuit breakers for robust failure handling
-- Set retry budgets to prevent retry storms
-- Combine rate limiting with backpressure signals (429 responses)
-- Route on promoted headers (from `json_body_field`) rather than buffering bodies in the router itself
+Pair health checks with circuit breakers, set retry budgets to prevent retry
+storms, and route on headers promoted by `json_body_field` rather than
+buffering bodies in the router.
 
 ## Related Documentation
 

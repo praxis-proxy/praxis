@@ -2,8 +2,7 @@
 
 ## Questions & Discussions
 
-Usage questions, configuration help, and general discussion belong in one
-of these channels:
+Ask usage and configuration questions, and hold general discussion, here:
 
 | Channel | Link |
 | --- | --- |
@@ -15,7 +14,7 @@ reports and feature requests.
 
 ## Bug Reports
 
-Found a bug? Open an issue using the
+Open an issue with the
 [Bug Report](https://github.com/praxis-proxy/praxis/issues/new?template=bug-report.yml)
 template. Include steps to reproduce, the Praxis version, and any relevant
 configuration.
@@ -26,8 +25,8 @@ configuration.
 
 Report them privately through GitHub's
 [private vulnerability reporting](https://github.com/praxis-proxy/praxis/security/advisories/new).
-See [SECURITY.md](SECURITY.md) for full details on our security policy,
-severity classification, and response timeline.
+[SECURITY.md](SECURITY.md) has the full policy, severity classification, and
+response timeline.
 
 ## Feature Requests
 

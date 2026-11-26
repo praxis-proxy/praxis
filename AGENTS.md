@@ -172,6 +172,22 @@ When a lint really doesn't fit, use `#[expect(lint, reason = "...")]`;
 `#[allow]` and reasonless expects are themselves denied. Test suites relax
 the restriction lints once at their crate root.
 
+## Writing Documentation
+
+Write concise, plain docs that a reader finishes. This applies to Markdown
+under `docs/` and to the Rust doc comments that
+`cargo xtask generate-filter-docs` turns into `docs/filters/` pages.
+
+- Write for one reader and one task: an operator configuring, a filter author
+  extending, or a contributor running CI. Each sentence gives that reader a fact
+  they act on (a key, default, limit, command, or behavior).
+- Explain each concept once, on the page that owns it (the filter's page, the
+  `docs/architecture/` page for a mechanism, `docs/operating/configuration.md`
+  for a config field). Other pages give one sentence and a link.
+- Lead with the fact. State it directly in neutral prose, with one example the
+  reader would copy.
+- Keep upgrade and migration notes in `CHANGELOG.md`.
+
 ## Test Requirements
 
 New capabilities require:

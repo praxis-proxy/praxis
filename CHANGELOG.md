@@ -19,6 +19,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- HTTP clusters can declare `input_modalities` for the selected-upstream filters
+  that need to check whether a deployment accepts text or images.
+
+- The core server runtimes can supervise process-lifetime services and gate
+  proxy startup on their readiness.
+
 - Embedders can validate configuration with their own `ServerComposition`
   using `validate_config_with_composition`. Startup, reload, validation, and
   configuration dump share the same pipeline candidate builder. Validation and
