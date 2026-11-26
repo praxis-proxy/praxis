@@ -19,6 +19,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Embedders can validate configuration with their own `ServerComposition`
+  using `validate_config_with_composition`. Startup, reload, validation, and
+  configuration dump share the same pipeline candidate builder. Validation and
+  dump compile built-in policy configuration without initializing plugins and
+  check access-log configuration without opening sinks.
+
 - Config loading warns when a deprecated filter or field is configured, naming
   its location, affected listener, and replacement when one is available.
   This includes `basic_auth` and explicitly supplied

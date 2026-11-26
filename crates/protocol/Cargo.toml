@@ -24,6 +24,8 @@ tls-health-check = ["pingora", "praxis-core/tls-health-check"]
 # probes stay) so lean builds can be checked. See
 # docs/developing/adding-backends.md.
 default = ["pingora"]
+# Transport for locally admitted HTTP/1.1 upgrades.
+managed-websocket = ["pingora"]
 pingora = ["dep:openssl", "dep:pingora-core", "dep:pingora-http", "dep:pingora-proxy", "praxis-core/pingora"]
 # The hyper network backend: the HTTP and TCP adapters, the admin glue and
 # `backend::{Http, Tcp}` resolve to hyper. Off by default and experimental.

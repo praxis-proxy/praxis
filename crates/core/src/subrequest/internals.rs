@@ -124,6 +124,16 @@ impl SubRequestConnector {
             opts.circuit_breaker,
         )
     }
+
+    /// Preserve admission and breaker settings without opening the native trust store.
+    /// The validation connector refuses outbound connections on both network backends.
+    pub fn for_validation(opts: SubRequestConnectorOptions) -> Self {
+        #[cfg(any(feature = "pingora", feature = "hyper"))]
+        let connector = backend::Connector::offline();
+        #[cfg(not(any(feature = "pingora", feature = "hyper")))]
+        let connector = backend::Connector::new(opts.keepalive_pool_size);
+        Self::with_connector(connector, opts.max_connections, opts.circuit_breaker)
+    }
 }
 
 impl<C: Connector> SubRequestConnector<C> {

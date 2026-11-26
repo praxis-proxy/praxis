@@ -118,6 +118,69 @@ pub(super) fn require_dpop_external_base_url(policy: &PolicyConfig) -> Result<()
     Ok(())
 }
 
+/// Check JWKS transport for built-in JWT plugins and their authentication overrides.
+pub(super) fn validate_jwks_sources(engine: &ppe::PolicyEngine, policy: &PolicyConfig) -> Result<(), FilterError> {
+    for plugin in engine.plugin_names().iter().filter_map(|name| engine.get_plugin(name)) {
+        let config = plugin.trusted_config();
+        if config.kind == JWT_KIND {
+            validate_jwks_issuers(
+                config.config.as_ref(),
+                &config.name,
+                config.capabilities.contains("perform_http"),
+            )?;
+        }
+    }
+    for step in authentication_blocks(policy).flat_map(|block| &block.steps) {
+        if let Some(plugin) = engine.get_plugin(&step.name) {
+            let config = plugin.trusted_config();
+            if config.kind == JWT_KIND {
+                // PPE merges overrides by top-level key, so this list replaces the base list.
+                validate_jwks_issuers(
+                    step.config_override.as_ref(),
+                    &step.name,
+                    config.capabilities.contains("perform_http"),
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Check the JWKS sources supplied in a base or replacement issuer list.
+fn validate_jwks_issuers(config: Option<&serde_json::Value>, name: &str, can_fetch: bool) -> Result<(), FilterError> {
+    let issuers = config
+        .and_then(|value| value.get("trusted_issuers"))
+        .and_then(serde_json::Value::as_array);
+    for key in issuers
+        .into_iter()
+        .flatten()
+        .filter_map(|issuer| issuer.get("decoding_key"))
+    {
+        validate_jwks_key(key, name, can_fetch)?;
+    }
+    Ok(())
+}
+
+/// Check transport requirements that the JWT plugin would enforce before its first fetch.
+fn validate_jwks_key(key: &serde_json::Value, name: &str, can_fetch: bool) -> Result<(), FilterError> {
+    if key.get("kind").and_then(serde_json::Value::as_str) != Some("jwks_url") {
+        return Ok(());
+    }
+    if !can_fetch {
+        return Err(format!("policy: JWT plugin '{name}' requires perform_http for a jwks_url issuer").into());
+    }
+    let plaintext = key
+        .get("url")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|url| url.trim_start().to_ascii_lowercase().starts_with("http://"));
+    if plaintext && key.get("insecure_http").and_then(serde_json::Value::as_bool) != Some(true) {
+        return Err(
+            format!("policy: JWT plugin '{name}' requires HTTPS for JWKS unless insecure_http is enabled").into(),
+        );
+    }
+    Ok(())
+}
+
 /// Return a section-specific reason to defer identity resolution to the route.
 ///
 /// Assumes inherited authentication steps decide consistently across HTTP and

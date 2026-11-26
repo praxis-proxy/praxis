@@ -1727,6 +1727,68 @@ global:
     (dir, path_str)
 }
 
+/// A validation candidate checks policy configuration without initializing JWKS clients.
+#[test]
+fn policy_validation_skips_jwks_initialization() {
+    praxis_tls::provider::install();
+    let (_dir, path) = write_jwks_url_config("    capabilities:\n      - perform_http\n");
+    let registry = FilterRegistry::with_builtins().with_validation_only(true);
+
+    let filter = registry
+        .build_policy(&policy_filter_config(&path))
+        .expect("static policy validation");
+    assert!(!filter.engine_is_initialized());
+}
+
+/// Authentication overrides must meet the same JWKS transport requirements as base plugins.
+#[test]
+fn jwks_override_is_checked_before_serving() {
+    praxis_tls::provider::install();
+    let (_dir, path) = write_single_plugin_config();
+    let base = std::fs::read_to_string(&path).expect("policy fixture");
+    for (grant, insecure, expected) in [
+        ("", "true", Some("perform_http")),
+        ("    capabilities: [perform_http]\n", "false", Some("insecure_http")),
+        ("    capabilities: [perform_http]\n", "true", None),
+    ] {
+        let yaml = base.replace("    config:", &format!("{grant}    config:")).replace(
+            "    - jwt-user",
+            &format!("    - name: jwt-user\n      config:\n        trusted_issuers:\n          - issuer: https://issuer.example\n            audiences: [gateway]\n            algorithms: [RS256]\n            decoding_key:\n              kind: jwks_url\n              url: http://127.0.0.1:1/jwks.json\n              insecure_http: {insecure}"),
+        );
+        std::fs::write(&path, yaml).expect("write override");
+        for validation_only in [true, false] {
+            let result = FilterRegistry::with_builtins()
+                .with_validation_only(validation_only)
+                .build_policy(&policy_filter_config(&path));
+            match expected {
+                Some(message) => assert!(
+                    result.is_err_and(|error| error.to_string().contains(message)),
+                    "expected {message}"
+                ),
+                None => assert!(result.is_ok(), "explicitly opted-in override should build"),
+            }
+        }
+    }
+}
+
+/// Plaintext JWKS needs explicit opt-in even when the HTTP capability is granted.
+#[test]
+fn validation_refuses_plaintext_jwks_without_opt_in() {
+    praxis_tls::provider::install();
+    let (_dir, path) = write_jwks_url_config("    capabilities: [perform_http]\n");
+    let yaml = std::fs::read_to_string(&path).expect("JWKS fixture");
+    std::fs::write(&path, yaml.replace("insecure_http: true", "insecure_http: false")).expect("disable plaintext");
+    let registry = FilterRegistry::with_builtins().with_validation_only(true);
+    let err = registry
+        .build_policy(&policy_filter_config(&path))
+        .err()
+        .expect("plaintext must be rejected");
+    assert!(
+        err.to_string().contains("insecure_http"),
+        "expected the 'insecure_http' diagnostic"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_jwks_issuer_constructs_with_the_installed_transport() {
     let (_dir, path) = write_jwks_url_config("    capabilities:\n      - perform_http\n");
@@ -1738,6 +1800,15 @@ async fn a_jwks_issuer_constructs_with_the_installed_transport() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_jwks_issuer_without_perform_http_fails_to_construct() {
     let (_dir, path) = write_jwks_url_config("");
+    let registry = FilterRegistry::with_builtins().with_validation_only(true);
+    let offline = registry
+        .build_policy(&policy_filter_config(&path))
+        .err()
+        .expect("offline validation must reject a missing HTTP grant");
+    assert!(
+        offline.to_string().contains("perform_http"),
+        "expected the 'perform_http' diagnostic"
+    );
     let err = try_build_filter_allowing_private(path, true)
         .err()
         .expect("a withheld capability must refuse to start");
@@ -4746,13 +4817,22 @@ async fn an_asserted_secret_stays_redacted_on_the_response_half() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_file_backed_secret_is_refused_at_load() {
     let (_dir, path) = write_secret_assertion_config("file", "upstream.key");
+    let registry = FilterRegistry::with_builtins().with_validation_only(true);
+    let offline = registry
+        .build_policy(&policy_filter_config(&path))
+        .err()
+        .expect("validation must reject file providers");
     let err = PolicyFilter::new(filter_config(path), None)
         .err()
         .expect("a `file` provider must not load");
+    assert!(
+        offline.to_string().contains("not registered"),
+        "expected the 'not registered' diagnostic"
+    );
     let msg = err.to_string();
     assert!(
         msg.contains("`file`") && msg.contains("not registered"),
-        "the error must name the unregistered kind; got {msg}"
+        "the error must name the unregistered kind"
     );
 }
 
