@@ -593,3 +593,20 @@ Use this flowchart to choose a strategy:
 4. **Unsure?** Start with `round_robin` (the
    default) and switch if monitoring reveals uneven
    load.
+
+## Declaring accepted input modalities
+
+Set `clusters[].http.input_modalities` to declare the accepted input content
+for the routed HTTP cluster. Supported values are `text` and `image`.
+Omission and an empty list declare no modalities. TCP load balancers ignore
+this field.
+
+The metadata comes from the routed cluster even when an endpoint selector
+presets an address outside its endpoint list. Operators should ensure that
+every destination reachable through the route supports the declared inputs.
+An inline cluster that references a top-level cluster inherits its endpoints.
+Set input modalities on the inline cluster itself.
+
+For example, two Chat Completions clusters using vLLM can declare `[text]` and
+`[text, image]` respectively. A filter can query
+`HttpFilterContext::selected_input_modality_declared` after upstream selection.

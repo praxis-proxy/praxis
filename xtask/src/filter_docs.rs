@@ -1629,7 +1629,7 @@ fn render_type_path(tp: &syn::TypePath, enums: &BTreeMap<String, EnumInfo>) -> S
     let ident = last.ident.to_string();
 
     match ident.as_str() {
-        "Vec" => render_vec_type(last, enums),
+        "Vec" | "BTreeSet" => render_vec_type(last, enums),
         "Option" => render_inner_or(last, enums, "any"),
         "Arc" => render_arc_type(last, enums),
         "BTreeMap" | "HashMap" => render_map_type(last, enums),

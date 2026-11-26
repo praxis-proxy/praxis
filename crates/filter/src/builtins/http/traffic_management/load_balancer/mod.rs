@@ -311,7 +311,7 @@ impl LoadBalancerFilter {
         }
         // A preset upstream still serves the routed cluster, so
         // `selected_upstream` conditions must see its metadata.
-        ctx.publish_selected_application(entry.application_protocol.clone(), entry.application_provider.clone());
+        entry.publish_application(ctx);
         FilterAction::Continue
     }
 
@@ -482,10 +482,7 @@ impl HttpFilter for LoadBalancerFilter {
                 // are handled upstream by the session-affinity filter, which
                 // does not pin to a down endpoint.
                 ctx.upstream = Some(entry.build_upstream(pinned_addr, ctx));
-                ctx.publish_selected_application(
-                    entry.application_protocol.clone(),
-                    entry.application_provider.clone(),
-                );
+                entry.publish_application(ctx);
                 return Ok(FilterAction::Continue);
             }
             debug!(
@@ -550,7 +547,7 @@ impl HttpFilter for LoadBalancerFilter {
         );
         ctx.attempted_endpoints.push(Arc::clone(&addr));
         ctx.upstream = Some(entry.build_upstream(addr, ctx));
-        ctx.publish_selected_application(entry.application_protocol.clone(), entry.application_provider.clone());
+        entry.publish_application(ctx);
 
         Ok(FilterAction::Continue)
     }

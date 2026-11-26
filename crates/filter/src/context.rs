@@ -6,7 +6,7 @@
 use std::{
     any::Any,
     borrow::Cow,
-    collections::{HashMap, VecDeque},
+    collections::{BTreeSet, HashMap, VecDeque},
     net::IpAddr,
     sync::Arc,
     time::{Duration, Instant},
@@ -14,7 +14,8 @@ use std::{
 
 use http::{HeaderMap, Method, StatusCode, Uri, header::HeaderName};
 use praxis_core::{
-    connectivity::Upstream, health::HealthRegistry, id::IdGenerator, kv::KvStoreRegistry, time::TimeSource,
+    config::InputModality, connectivity::Upstream, health::HealthRegistry, id::IdGenerator, kv::KvStoreRegistry,
+    time::TimeSource,
 };
 use praxis_tls::TlsPeerIdentity;
 
@@ -745,6 +746,14 @@ impl HttpFilterContext<'_> {
             .and_then(SelectedClusterApplication::provider)
     }
 
+    /// Whether the upstream selected for this exchange explicitly declares this input modality.
+    /// Returns false before selection or when the modality is absent.
+    pub fn selected_input_modality_declared(&self, modality: InputModality) -> bool {
+        self.extensions
+            .get::<SelectedClusterApplication>()
+            .is_some_and(|application| application.declares(modality))
+    }
+
     /// Publish the selected cluster's opaque application metadata into the
     /// request-scoped extensions.
     ///
@@ -755,8 +764,13 @@ impl HttpFilterContext<'_> {
     /// steps; without the removal, a later step selecting an untagged cluster
     /// would leave the previous step's protocol/provider visible and a consuming
     /// filter could apply the wrong transformation.
-    pub(crate) fn publish_selected_application(&mut self, protocol: Option<Arc<str>>, provider: Option<Arc<str>>) {
-        match SelectedClusterApplication::new(protocol, provider) {
+    pub(crate) fn publish_selected_application(
+        &mut self,
+        protocol: Option<Arc<str>>,
+        provider: Option<Arc<str>>,
+        input_modalities: Option<Arc<BTreeSet<InputModality>>>,
+    ) {
+        match SelectedClusterApplication::new(protocol, provider, input_modalities) {
             Some(app) => self.extensions.insert(app),
             None => {
                 self.extensions.remove::<SelectedClusterApplication>();
@@ -3407,7 +3421,11 @@ content-length: 0
     fn publish_selected_application_exposes_both_fields() {
         let req = crate::test_utils::make_request(Method::GET, "/");
         let mut ctx = crate::test_utils::make_filter_context(&req);
-        ctx.publish_selected_application(Some(Arc::from("openai_chat_completions")), Some(Arc::from("vllm")));
+        ctx.publish_selected_application(
+            Some(Arc::from("openai_chat_completions")),
+            Some(Arc::from("vllm")),
+            None,
+        );
         assert_eq!(
             ctx.selected_application_protocol(),
             Some("openai_chat_completions"),
@@ -3424,7 +3442,7 @@ content-length: 0
     fn publish_selected_application_protocol_only() {
         let req = crate::test_utils::make_request(Method::GET, "/");
         let mut ctx = crate::test_utils::make_filter_context(&req);
-        ctx.publish_selected_application(Some(Arc::from("openai_responses")), None);
+        ctx.publish_selected_application(Some(Arc::from("openai_responses")), None, None);
         assert_eq!(
             ctx.selected_application_protocol(),
             Some("openai_responses"),
@@ -3440,7 +3458,7 @@ content-length: 0
     fn publish_selected_application_provider_only() {
         let req = crate::test_utils::make_request(Method::GET, "/");
         let mut ctx = crate::test_utils::make_filter_context(&req);
-        ctx.publish_selected_application(None, Some(Arc::from("openai")));
+        ctx.publish_selected_application(None, Some(Arc::from("openai")), None);
         assert!(
             ctx.selected_application_protocol().is_none(),
             "an unpublished protocol should stay absent"
@@ -3456,7 +3474,7 @@ content-length: 0
     fn publish_selected_application_is_noop_when_both_absent() {
         let req = crate::test_utils::make_request(Method::GET, "/");
         let mut ctx = crate::test_utils::make_filter_context(&req);
-        ctx.publish_selected_application(None, None);
+        ctx.publish_selected_application(None, None, None);
         assert!(
             ctx.selected_application_protocol().is_none(),
             "publishing nothing must leave the protocol absent"
@@ -3475,8 +3493,12 @@ content-length: 0
     fn publish_selected_application_untagged_clears_prior_selection() {
         let req = crate::test_utils::make_request(Method::GET, "/");
         let mut ctx = crate::test_utils::make_filter_context(&req);
-        ctx.publish_selected_application(Some(Arc::from("openai_chat_completions")), Some(Arc::from("vllm")));
-        ctx.publish_selected_application(None, None);
+        ctx.publish_selected_application(
+            Some(Arc::from("openai_chat_completions")),
+            Some(Arc::from("vllm")),
+            None,
+        );
+        ctx.publish_selected_application(None, None, None);
         assert!(
             ctx.selected_application_protocol().is_none(),
             "a later untagged selection must clear the prior protocol so a reused context cannot leak stale metadata"
@@ -3495,8 +3517,12 @@ content-length: 0
     fn publish_selected_application_replaces_prior_selection() {
         let req = crate::test_utils::make_request(Method::GET, "/");
         let mut ctx = crate::test_utils::make_filter_context(&req);
-        ctx.publish_selected_application(Some(Arc::from("openai_chat_completions")), Some(Arc::from("vllm")));
-        ctx.publish_selected_application(Some(Arc::from("anthropic_messages")), Some(Arc::from("bedrock")));
+        ctx.publish_selected_application(
+            Some(Arc::from("openai_chat_completions")),
+            Some(Arc::from("vllm")),
+            None,
+        );
+        ctx.publish_selected_application(Some(Arc::from("anthropic_messages")), Some(Arc::from("bedrock")), None);
         assert_eq!(
             ctx.selected_application_protocol(),
             Some("anthropic_messages"),

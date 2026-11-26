@@ -5,7 +5,6 @@
 
 use std::collections::HashMap;
 
-use praxis_core::config::{Cluster, Config};
 #[cfg(feature = "upstream-binding")]
 use praxis_test_utils::start_full_proxy;
 use praxis_test_utils::{
@@ -146,37 +145,96 @@ fn rate_limiting_example_returns_rate_limit_headers() {
     panic!("rate limiter should have returned 429 within 50 requests");
 }
 
+/// Report the selected cluster's image declaration to the echo backend.
+struct ReportImageModality;
+
+#[async_trait::async_trait]
+impl praxis_filter::HttpFilter for ReportImageModality {
+    fn name(&self) -> &'static str {
+        "report_image_modality"
+    }
+
+    async fn on_request(
+        &self,
+        _ctx: &mut praxis_filter::HttpFilterContext<'_>,
+    ) -> Result<praxis_filter::FilterAction, praxis_filter::FilterError> {
+        Ok(praxis_filter::FilterAction::Continue)
+    }
+
+    fn selected_upstream_request_body_access(&self) -> praxis_filter::BodyAccess {
+        praxis_filter::BodyAccess::ReadWrite(praxis_filter::BodyRequirement::Optional)
+    }
+
+    fn request_body_mode(&self) -> praxis_filter::BodyMode {
+        praxis_filter::BodyMode::StreamBuffer { max_bytes: Some(4096) }
+    }
+
+    async fn on_selected_upstream_request_body(
+        &self,
+        ctx: &mut praxis_filter::HttpFilterContext<'_>,
+        _body: &mut Option<bytes::Bytes>,
+    ) -> Result<praxis_filter::SelectedUpstreamBodyOutcome, praxis_filter::FilterError> {
+        use praxis_core::config::InputModality;
+
+        if ctx.selected_application_provider() != Some("vllm") {
+            return Err(format!("expected vLLM, selected {:?}", ctx.selected_application_provider()).into());
+        }
+        if ctx.selected_application_protocol() != Some("openai_chat_completions") {
+            return Err(format!(
+                "expected Chat Completions, selected {:?}",
+                ctx.selected_application_protocol()
+            )
+            .into());
+        }
+        if !ctx.selected_input_modality_declared(InputModality::Text) {
+            return Err("the selected cluster must declare text input".into());
+        }
+        let modality = if ctx.selected_input_modality_declared(InputModality::Image) {
+            "image"
+        } else {
+            "text"
+        };
+        ctx.extra_request_headers
+            .push(("x-test-input-modality".into(), modality.to_owned()));
+        Ok(praxis_filter::SelectedUpstreamBodyOutcome::Continue)
+    }
+}
+
 #[test]
-fn cluster_application_metadata_example_proxies_request() {
-    let backend_guard = start_backend_with_shutdown("llm");
-    let proxy_port = free_port();
-    let config = super::load_example_config(
+fn cluster_application_metadata_example_reports_selected_modalities() {
+    use praxis_test_utils::{http_post, registry_with, start_proxy_with_registry, start_tagged_header_echo_backend};
+
+    let text = start_tagged_header_echo_backend("text backend");
+    let vision = start_tagged_header_echo_backend("vision backend");
+    let mut config = super::load_example_config(
         "traffic-management/cluster-application-metadata.yaml",
-        proxy_port,
-        HashMap::from([("127.0.0.1:3001", backend_guard.port())]),
+        free_port(),
+        HashMap::from([("127.0.0.1:3001", text.port()), ("127.0.0.1:3002", vision.port())]),
     );
+    let chain = config
+        .filter_chains
+        .iter_mut()
+        .find(|chain| chain.name == "main")
+        .unwrap();
+    chain
+        .filters
+        .push(serde_yaml::from_str("filter: report_image_modality").unwrap());
+    let registry = registry_with("report_image_modality", || Box::new(ReportImageModality));
+    let proxy = start_proxy_with_registry(&config, &registry);
 
-    let clusters = inline_clusters(&config, "main", "load_balancer");
-    let cluster = clusters
-        .iter()
-        .find(|c| &*c.name == "llm_backend")
-        .expect("example should define the llm_backend cluster");
-    assert_eq!(
-        cluster.http.application_protocol.as_deref(),
-        Some("openai_chat_completions"),
-        "application_protocol should survive parsing on the declaring cluster"
-    );
-    assert_eq!(
-        cluster.http.application_provider.as_deref(),
-        Some("vllm"),
-        "application_provider should survive parsing on the declaring cluster"
-    );
-
-    let proxy = start_proxy(&config);
-
-    let (status, body) = http_get(proxy.addr(), "/v1/chat/completions", None);
-    assert_eq!(status, 200, "tagged cluster should still proxy traffic normally");
-    assert_eq!(body, "llm", "response body should come from the tagged backend");
+    for (path, backend, expected) in [
+        ("/v1/chat/completions", "text backend", "text"),
+        ("/vision", "vision backend", "image"),
+    ] {
+        let (status, body) = http_post(proxy.addr(), path, "same request");
+        assert_eq!(status, 200, "{path} returned {body}");
+        assert_eq!(body.lines().next(), Some(backend), "{path} reached the wrong backend");
+        let modality = format!("x-test-input-modality: {expected}");
+        assert!(
+            body.lines().any(|line| line.eq_ignore_ascii_case(&modality)),
+            "{path} returned {body}"
+        );
+    }
 }
 
 #[cfg(feature = "upstream-binding")]
@@ -223,34 +281,4 @@ fn bound_upstream_condition_example_gates_on_bound_cluster() {
         None,
         "the bound_upstream condition must not match the untagged cluster, so no provider header"
     );
-}
-
-// ---------------------------------------------------------------------------
-// Test Utilities
-// ---------------------------------------------------------------------------
-
-/// Read back the inline `clusters:` list of one filter entry.
-///
-/// Example clusters are declared inside the load balancer's opaque filter
-/// config rather than the top-level `clusters:` block, so recovering the
-/// typed [`Cluster`] means re-deserializing that YAML value — the same way
-/// `validate_inline_clusters` reaches them.
-fn inline_clusters(config: &Config, chain_name: &str, filter_type: &str) -> Vec<Cluster> {
-    let chain = config
-        .filter_chains
-        .iter()
-        .find(|c| c.name == chain_name)
-        .unwrap_or_else(|| panic!("chain '{chain_name}' not found"));
-    let entry = chain
-        .filters
-        .iter()
-        .find(|f| f.filter_type == filter_type)
-        .unwrap_or_else(|| panic!("filter '{filter_type}' not found in chain '{chain_name}'"));
-    let serde_yaml::Value::Mapping(mapping) = &entry.config else {
-        panic!("filter '{filter_type}' config should be a mapping");
-    };
-    let clusters = mapping
-        .get("clusters")
-        .unwrap_or_else(|| panic!("filter '{filter_type}' should declare inline clusters"));
-    serde_yaml::from_value(clusters.clone()).expect("inline clusters should deserialize")
 }

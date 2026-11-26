@@ -197,7 +197,7 @@ for full options.
 | [bound-upstream-dispatch.yaml](configs/traffic-management/bound-upstream-dispatch.yaml) | Selects an upstream endpoint straight from the logical binding, with no second router |
 | [canary-routing.yaml](configs/traffic-management/canary-routing.yaml) | Sends ~10% of traffic to a canary backend while the stable backend handles the remaining ~90% |
 | [circuit-breaker.yaml](configs/traffic-management/circuit-breaker.yaml) | Prevents cascading failures by tracking consecutive upstream errors per cluster |
-| [cluster-application-metadata.yaml](configs/traffic-management/cluster-application-metadata.yaml) | Tags an upstream cluster with opaque application metadata that consuming filters interpret |
+| [cluster-application-metadata.yaml](configs/traffic-management/cluster-application-metadata.yaml) | Declares application protocol, provider, and input modalities for routed upstream clusters |
 | [cluster-base-path.yaml](configs/traffic-management/cluster-base-path.yaml) | Prepends a path to the upstream request for the cluster the load balancer selected, so one gateway can front several upstreams that each serve the same API under their own prefix |
 | [cluster-max-connections.yaml](configs/traffic-management/cluster-max-connections.yaml) | Caps the concurrent in-flight requests the load balancer will send to one cluster, so a single slow upstream cannot consume all available capacity |
 | [cluster-references.yaml](configs/traffic-management/cluster-references.yaml) | An inline load-balancer cluster that shares its name with a top-level declaration may omit its endpoints: validation fills them in from the declaration, so the routed addresses and the health-checked addresses cannot drift apart |

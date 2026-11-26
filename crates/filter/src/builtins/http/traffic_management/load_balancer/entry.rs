@@ -71,6 +71,9 @@ pub(crate) struct ClusterEntry {
     /// Opaque application provider tagged on the cluster, if any.
     pub(super) application_provider: Option<Arc<str>>,
 
+    /// Shared declaration of supported request content.
+    input_modalities: Option<Arc<std::collections::BTreeSet<praxis_core::config::InputModality>>>,
+
     /// Normalized upstream base path tagged on the cluster, if any.
     pub(super) base_path: Option<Arc<str>>,
 
@@ -155,10 +158,13 @@ impl ClusterEntry {
         &self.retry_state
     }
 
-    /// The cluster's opaque application protocol and provider tags.
-    #[cfg(feature = "chain-binding")]
-    pub(crate) fn application(&self) -> (Option<Arc<str>>, Option<Arc<str>>) {
-        (self.application_protocol.clone(), self.application_provider.clone())
+    /// Publish this cluster's application metadata for the selected exchange.
+    pub(crate) fn publish_application(&self, ctx: &mut HttpFilterContext<'_>) {
+        ctx.publish_selected_application(
+            self.application_protocol.clone(),
+            self.application_provider.clone(),
+            self.input_modalities.clone(),
+        );
     }
 
     /// Pick an endpoint with this cluster's strategy, skipping
@@ -295,8 +301,6 @@ pub(crate) fn build_cluster_entry(cluster: &Cluster) -> Result<ClusterEntry, Fil
         "cluster registered"
     );
 
-    let tls = build_cached_tls(cluster)?;
-    let authority = AuthorityResolver::build(cluster)?;
     let strategy = Arc::new(build_strategy(&cluster.load_balancer_strategy, endpoints));
     let retry_policy = Arc::new(cluster.retry_policy.clone().unwrap_or_else(RetryPolicy::legacy_default));
     let retry_state = Arc::new(
@@ -304,12 +308,14 @@ pub(crate) fn build_cluster_entry(cluster: &Cluster) -> Result<ClusterEntry, Fil
     );
     Ok(ClusterEntry {
         name: Arc::clone(&cluster.name),
-        authority,
+        authority: AuthorityResolver::build(cluster)?,
         opts: Arc::new(ConnectionOptions::from(cluster)),
         strategy,
-        tls,
+        tls: build_cached_tls(cluster)?,
         application_protocol: cluster.http.application_protocol.clone(),
         application_provider: cluster.http.application_provider.clone(),
+        input_modalities: (!cluster.http.input_modalities.is_empty())
+            .then(|| Arc::new(cluster.http.input_modalities.clone())),
         base_path: cluster.http.normalized_base_path().map(Arc::from),
         retry_policy,
         retry_state,
