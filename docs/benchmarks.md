@@ -2,24 +2,20 @@
 
 Praxis has two benchmark systems:
 
-- **Microbenchmarks**: Criterion benches for individual
-  components (filter pipeline, config parsing, router
-  lookup, condition evaluation, load balancer, headers).
-- **Scenario benchmarks**: full proxy benchmarks driven
-  by external load generators (Vegeta, Fortio) with
-  optional side-by-side comparison against Envoy,
-  NGINX, and HAProxy.
+- **Microbenchmarks**: Criterion benches for individual components.
+- **Scenario benchmarks**: the full proxy under load from Vegeta or Fortio,
+  optionally side by side with Envoy, NGINX, and HAProxy.
 
 ## Prerequisites
 
-- [Fortio](https://fortio.org/) v1.75.1+ (HTTP echo
-  backend, TCP workloads, connection-count workloads)
-- [Vegeta](https://github.com/tsenart/vegeta) v12.13.0+
-  (HTTP load generator; open-loop mode)
-- [Docker](https://www.docker.com/) or Podman (required
-  for comparison mode; optional for Praxis-only runs)
-- `perf` and `inferno` (flamegraph profiling; Linux
-  only; `cargo install inferno`)
+- [Fortio](https://fortio.org/) v1.75.1+ (HTTP echo backend, TCP workloads,
+  connection-count workloads)
+- [Vegeta](https://github.com/tsenart/vegeta) v12.13.0+ (HTTP load
+  generator; open-loop mode)
+- [Docker](https://www.docker.com/) or Podman (required for comparison
+  mode; optional for Praxis-only runs)
+- `perf` and `inferno` (flamegraph profiling; Linux only;
+  `cargo install inferno`)
 
 ## Microbenchmarks
 
@@ -35,99 +31,75 @@ Location: `tests/benches/benches/`
 | `headers` | Request/response header injection (1/5/20 headers) |
 | `token_bucket` | Mutex, locked split-field, packed 128-bit CAS, and `governor` rate-limit state under sequential and concurrent load |
 
-Run all microbenchmarks:
+Run all of them, or one suite with `--bench`:
 
 ```console
 cargo bench -p praxis-tests-benches
-```
-
-Run the rate-limit state-management suite on its own:
-
-```console
 cargo bench -p praxis-tests-benches --bench token_bucket
-```
-
-The `token_bucket` suite compares four candidates against the mutex
-implementation from PR #1173: `split_atomics_locked`, a correctness-preserving
-split-field implementation guarded by an atomic spin lock; `packed_128_cas`, an
-exact compound-state CAS prototype; and the actual `governor 0.10.4` direct
-in-memory `RateLimiter::check()` path. The locked split variant measures
-serialization overhead, not a lock-free design. The packed candidate uses
-`portable-atomic` and must be identified as native or fallback on each host.
-Governor uses integer-cell virtual-time semantics and has no equivalent
-token-count introspection API, so it is a performance comparison rather than an
-API-equivalent replacement.
-
-The suite contains 55 benchmark IDs: 8 isolated operations, 4 rejection paths,
-3 introspection paths, and 40 contention cases. Introspection is intentionally
-limited to candidates that expose the production token-count operation.
-
-Historical split-atomic logs from the PR investigation are not committed to the
-repository. The unsafe implementation is not part of the runnable suite or the
-decision tables.
-
-Run a single suite:
-
-```console
 cargo bench -p praxis-tests-benches --bench router_lookup
 ```
 
-Results land in `target/criterion/` with Criterion HTML reports. CI uploads the
-generated directory as a workflow artifact; raw run logs and host-specific
-snapshots are not committed to the repository.
+Results land in `target/criterion/` as Criterion HTML reports. CI uploads
+that directory as a workflow artifact; raw run logs and host-specific
+snapshots are not committed.
+
+### `token_bucket`
+
+The suite measures candidates against the mutex implementation from
+PR #1173:
+
+- `split_atomics_locked`: a correctness-preserving split-field
+  implementation guarded by an atomic spin lock. It measures serialization
+  overhead; it is not a lock-free design.
+- `packed_128_cas`: an exact compound-state CAS prototype. It uses
+  `portable-atomic`, so each host must report whether it ran native or
+  fallback.
+- `governor 0.10.4`: the real direct in-memory `RateLimiter::check()` path.
+  Governor uses integer-cell virtual-time semantics and has no equivalent
+  token-count introspection API, so it is a performance comparison, not an
+  API-equivalent replacement.
+
+There are 55 benchmark IDs: 8 isolated operations, 4 rejection paths,
+3 introspection paths, and 40 contention cases. Introspection covers only
+candidates that expose the production token-count operation. The unsafe
+split-atomic implementation from the PR investigation is not in the
+runnable suite or the decision tables, and its logs are not committed.
 
 ## Scenario Benchmarks
 
-Scenario benchmarks run a full Praxis binary (or Docker
-container) with real traffic from external load
-generators. The xtask orchestrator handles: building the
-proxy, starting a Fortio echo backend, warming up,
-executing multiple measurement runs, and selecting the
-median result.
-
-The load-test harness itself is the published
+`cargo xtask benchmark` builds the proxy (or uses a Docker container),
+starts a Fortio echo backend, warms up, runs several measurement runs, and
+keeps the median. It wraps the published
 [`praxis-proxy-benchmarks`](https://crates.io/crates/praxis-proxy-benchmarks)
 crate (developed in the
-[benchmarks repository](https://github.com/praxis-proxy/benchmarks));
-`cargo xtask benchmark` wraps it for local runs against
-the in-tree comparison configs.
+[benchmarks repository](https://github.com/praxis-proxy/benchmarks)) for
+local runs against the in-tree comparison configs.
 
 ### Workloads
 
-Eight workload types cover different traffic patterns:
-
-| Workload name | Description | Load generator | Key parameters |
+| Workload name | What it measures | Load generator | Key parameters |
 | --- | --- | --- | --- |
-| `high-concurrency-small-requests` | Small GET requests at high concurrency | Vegeta | `--concurrency` (default 100) |
-| `large-payloads` | Large POST requests | Vegeta | `--body-size` (default 65536) |
-| `large-payloads-high-concurrency` | Large POST at high concurrency | Vegeta | `--concurrency`, `--body-size` |
-| `high-connection-count` | HTTP/1.1 connection stress test | Fortio | `--connections` (default 100) |
-| `sustained` | Sustained load for leak detection | Vegeta | `--sustained-duration` (default 60s) |
-| `ramp` | Ramp from low to high QPS | Vegeta | `--start-qps`, `--end-qps`, `--step` |
-| `tcp-throughput` | Raw TCP forwarding throughput | Fortio | (none) |
-| `tcp-connection-rate` | TCP connection setup rate (1 conn/req) | Fortio | (none) |
+| `high-concurrency-small-requests` | Small GET requests at high concurrency: baseline proxy overhead, dominated by scheduling and connection management | Vegeta | `--concurrency` (default 100) |
+| `large-payloads` | Large POST requests: data-plane throughput, body buffering, memory allocation, and copy paths | Vegeta | `--body-size` (default 65536) |
+| `large-payloads-high-concurrency` | Large POST at high concurrency: contention under memory pressure | Vegeta | `--concurrency`, `--body-size` |
+| `high-connection-count` | HTTP/1.1 connection stress: accept-loop throughput and connection pool behavior | Fortio | `--connections` (default 100) |
+| `sustained` | Continuous load: memory leaks, connection exhaustion, degradation over time | Vegeta | `--sustained-duration` (default 60s) |
+| `ramp` | Low to high QPS: the saturation point where latency inflects | Vegeta | `--start-qps`, `--end-qps`, `--step` |
+| `tcp-throughput` | Raw L4 forwarding with no HTTP parsing: the floor overhead of the proxy's I/O path | Fortio | (none) |
+| `tcp-connection-rate` | TCP connection setup rate (1 conn/req): accept/close churn cost | Fortio | (none) |
 
-### Running a Single Workload
+### Running workloads
+
+Pass `--workload` for one workload, or omit it to run all of them in
+sequence. Workload parameters override the defaults above:
 
 ```console
 cargo xtask benchmark \
     --workload high-concurrency-small-requests \
     --duration 30 --warmup 10 --runs 3
-```
 
-### Running All Workloads
-
-Omit `--workload` to run every workload in sequence:
-
-```console
 cargo xtask benchmark --runs 3 --warmup 10 --duration 30
-```
 
-### Tuning Workload Parameters
-
-Override defaults for specific workload types:
-
-```console
 cargo xtask benchmark \
     --workload large-payloads \
     --body-size 131072 \
@@ -154,19 +126,15 @@ cargo xtask benchmark \
 
 ## Comparison Benchmarks
 
-Compare Praxis against Envoy, NGINX, and/or HAProxy.
-Each proxy runs inside a Docker container with identical
-resource constraints (4 CPUs, 2GB RAM) against a shared
-Fortio echo backend. Configs are functionally equivalent
-minimal reverse proxies (one listener, one route, one
-upstream).
+`--proxy` adds Envoy, NGINX, or HAProxy; Praxis is always included. Each
+proxy runs in a Docker container with the same limits (4 CPUs, 2GB RAM)
+against a shared Fortio echo backend, one proxy at a time. The configs are
+equivalent minimal reverse proxies (one listener, one route, one upstream).
 
 ### Comprehensive Praxis vs Envoy
 
-This is the most common comparative benchmark. It
-runs every workload against both proxies with tuned
-parameters and enough runs for statistical
-confidence:
+The most common comparison runs every workload against both proxies, with
+tuned parameters and enough runs for statistical confidence:
 
 ```console
 cargo xtask benchmark \
@@ -189,40 +157,10 @@ cargo xtask benchmark \
     --output results/praxis-vs-envoy.yaml
 ```
 
-What each workload tests:
+This takes about 90 minutes (8 workloads x 2 proxies x 5 runs x 60s each,
+plus warmup). With `--runs 3` and `--duration 30` it takes about 30 minutes.
 
-- **high-concurrency-small-requests**: baseline
-  proxy overhead; 200 concurrent GET requests
-  through the proxy to the echo backend; dominated
-  by scheduling and connection management.
-- **large-payloads**: data-plane throughput; 128KB
-  POST bodies; stresses body buffering, memory
-  allocation, and copy paths.
-- **large-payloads-high-concurrency**: combines
-  large bodies with high concurrency; reveals
-  contention under memory pressure.
-- **high-connection-count**: connection management
-  at scale; 500 concurrent HTTP/1.1 connections;
-  tests accept-loop throughput and connection pool
-  behavior.
-- **sustained**: stability under continuous load for
-  120s; exposes memory leaks, connection exhaustion,
-  and degradation over time.
-- **ramp**: progressive load increase from 100 to
-  20,000 QPS in steps of 200; identifies the
-  saturation point where latency inflects.
-- **tcp-throughput**: raw L4 forwarding throughput
-  with no HTTP parsing; measures the floor overhead
-  of the proxy's I/O path.
-- **tcp-connection-rate**: new TCP connection per
-  request; measures accept/close churn cost.
-
-This takes about 90 minutes (8 workloads x 2 proxies
-x 5 runs x 60s each, plus warmup). For a faster
-iteration cycle, reduce `--runs` to 3 and
-`--duration` to 30 (about 30 minutes).
-
-After the run completes, visualize and compare:
+Then chart the results:
 
 ```console
 cargo xtask benchmark visualize \
@@ -232,7 +170,7 @@ cargo xtask benchmark visualize \
 
 ### Quick Praxis vs Envoy
 
-A faster run covering the most informative workloads:
+A faster run over the most informative workloads:
 
 ```console
 cargo xtask benchmark \
@@ -247,6 +185,8 @@ cargo xtask benchmark \
 
 ### Praxis vs All Proxies
 
+Without `--workload`, this runs all eight workloads:
+
 ```console
 cargo xtask benchmark \
     --proxy envoy --proxy nginx --proxy haproxy \
@@ -254,12 +194,7 @@ cargo xtask benchmark \
     --output results/all-proxies.yaml
 ```
 
-Praxis is always included automatically. Omitting
-`--workload` runs all eight workloads.
-
 ### Using Custom Docker Images
-
-Override any proxy image:
 
 ```console
 cargo xtask benchmark \
@@ -273,8 +208,6 @@ cargo xtask benchmark \
     --haproxy-image haproxy:3.1
 ```
 
-Default images:
-
 | Proxy | Default image |
 | --- | --- |
 | Praxis | Built from local `Containerfile` |
@@ -284,10 +217,8 @@ Default images:
 
 ### Comparison Configs
 
-All proxy configs live in
-`xtask/comparison/configs/` and implement the
-same topology: listen on a dedicated port, route
-`/` to the Fortio echo backend at `127.0.0.1:18080`.
+The configs in `xtask/comparison/configs/` all listen on their own port and
+route `/` to the Fortio echo backend at `127.0.0.1:18080`.
 
 | Proxy | Config | Port |
 | --- | --- | --- |
@@ -296,9 +227,7 @@ same topology: listen on a dedicated port, route
 | NGINX | `nginx.conf` | 18092 |
 | HAProxy | `haproxy.cfg` | 18093 |
 
-The Docker Compose file
-(`xtask/comparison/docker-compose.yml`) can also
-be used directly:
+You can also use the Docker Compose file directly:
 
 ```console
 docker compose -f xtask/comparison/docker-compose.yml \
@@ -309,31 +238,28 @@ docker compose -f xtask/comparison/docker-compose.yml \
 
 ## Output and Reports
 
-Reports are written in YAML (default) or JSON:
+Reports are YAML (default) or JSON:
 
 ```console
 cargo xtask benchmark --format json --output report.json
 cargo xtask benchmark --format yaml --output report.yaml
 ```
 
-Use `--include-raw-report` to embed the raw Vegeta or
-Fortio JSON output alongside the normalized metrics.
-
-Each report contains:
+`--include-raw-report` embeds the raw Vegeta or Fortio JSON next to the
+normalized metrics. Each report holds:
 
 - **Environment**: CPU model, OS, git commit SHA
 - **Settings**: all workload parameters used
 - **Per-scenario, per-proxy results**: latency
-  (min/max/mean/p50/p90/p95/p99/p99.9), throughput
-  (req/s, bytes/s), errors (non-2xx, timeouts,
-  connection failures)
-- **Median selection**: when multiple runs are
-  performed, the median by p99 latency is selected
+  (min/max/mean/p50/p90/p95/p99/p99.9), throughput (req/s, bytes/s), errors
+  (non-2xx, timeouts, connection failures)
+- **Median selection**: with multiple runs, the run with the median p99
+  latency is kept
 
 ## Visualization
 
-Generate SVG charts from a report. `--output` names a directory
-(default: `target/criterion`):
+Generate SVG charts from a report. `--output` names a directory (default:
+`target/criterion`):
 
 ```console
 cargo xtask benchmark visualize report.yaml
@@ -341,17 +267,16 @@ cargo xtask benchmark visualize report.yaml \
     --output results/charts
 ```
 
-The command writes eight separate files named
-`<report-stem>-<metric>.svg`, for p99, minimum, mean, and
-maximum latency; request and data throughput; average CPU;
-and peak memory. For `report.yaml`, one example is
-`results/charts/report-p99-latency.svg`. Proxy colors:
-Praxis=green, Envoy=blue, NGINX=red, HAProxy=purple.
+The command writes eight files named `<report-stem>-<metric>.svg`: p99,
+minimum, mean, and maximum latency; request and data throughput; average
+CPU; and peak memory. For `report.yaml`, one is
+`results/charts/report-p99-latency.svg`. Proxy colors: Praxis=green,
+Envoy=blue, NGINX=red, HAProxy=purple.
 
 ## Regression Detection
 
-Compare two reports and exit non-zero if a stable, matching
-Praxis scenario meets the regression rule:
+Compare two reports; the command exits non-zero if a stable, matching Praxis
+scenario regresses:
 
 ```console
 cargo xtask benchmark compare baseline.yaml current.yaml
@@ -359,19 +284,19 @@ cargo xtask benchmark compare baseline.yaml current.yaml \
     --threshold 0.10
 ```
 
-Default threshold: 5%. A scenario fails only when p99 latency
-increases **and** throughput decreases, each strictly beyond
-the threshold. Isolated movement is treated as noise: a 20%
-latency increase with unchanged throughput passes at a 5%
-threshold, while a 20% latency increase together with a 10%
-throughput decrease fails. Current-run results with coefficient
-of variation above 0.15 are skipped. The output shows each
-scenario's percentage changes and PASS, FAIL, or SKIP status.
+Default threshold: 5%. A scenario fails only when p99 latency increases
+**and** throughput decreases, each strictly beyond the threshold; movement
+in one alone is noise. At a 5% threshold, a 20% latency increase with
+unchanged throughput passes, while a 20% latency increase with a 10%
+throughput decrease fails. Current-run results with a coefficient of
+variation above 0.15 are skipped. The output shows each scenario's
+percentage changes and PASS, FAIL, or SKIP.
 
 ## Flamegraph Profiling
 
-Profile Praxis under load and generate a CPU
-flamegraph:
+Profile Praxis under load and write a CPU flamegraph to
+`target/criterion/flamegraph-{timestamp}.svg` (needs `perf` and `inferno`,
+see [Prerequisites](#prerequisites)):
 
 ```console
 cargo xtask benchmark flamegraph \
@@ -382,63 +307,38 @@ cargo xtask benchmark flamegraph \
     --workload large-payloads --duration 15
 ```
 
-Prerequisites: `perf` (Linux only), `inferno`
-(`cargo install inferno`).
-
-Output: `target/criterion/flamegraph-{timestamp}.svg`
-
 ## Tips for Reliable Results
 
-- **Isolate the machine**: close unnecessary
-  applications, disable frequency scaling
-  (`cpupower frequency-set -g performance`).
-- **Use multiple runs**: `--runs 5` with median
-  selection reduces noise.
-- **Warm up sufficiently**: `--warmup 15` or longer
-  lets connection pools and JIT-like effects settle.
-- **Consistent resource limits**: comparison mode
-  enforces 4 CPUs and 2GB RAM per proxy via Docker
-  resource constraints.
-- **Run proxies sequentially**: the orchestrator runs
-  one proxy at a time to avoid CPU contention.
-- **Check errors**: non-zero error counts invalidate
-  throughput/latency comparisons.
+- Isolate the machine: close other applications and disable frequency
+  scaling (`cpupower frequency-set -g performance`).
+- Use `--runs 5`; median selection reduces noise.
+- Warm up for `--warmup 15` or longer so connection pools and JIT-like
+  effects settle.
+- Check errors: non-zero error counts invalidate throughput and latency
+  comparisons.
 
 ## CI
 
-GitHub Actions workflows run on this repository.
-`conventions.yaml`, `coverage.yaml`, `msrv.yaml`,
-`supply-chain.yaml`, `pull-request-conventions.yaml`,
-and a few others are short callers of shared workflows
-in `praxis-proxy/conventions`:
+GitHub Actions workflows in this repository. `conventions.yaml`,
+`coverage.yaml`, `msrv.yaml`, `supply-chain.yaml`,
+`pull-request-conventions.yaml`, and a few others are short callers of
+shared workflows in `praxis-proxy/conventions`.
 
-- `tests.yaml`: unit lint and test on push/PR
-- `integration.yaml`: integration test suites on
-  push/PR
-- `conformance.yaml`: HTTP/2 conformance (h2spec, RFC
-  compliance) on push/PR
-- `conventions.yaml`: coding conventions enforcement
-  on PRs
-- `supply-chain.yaml`: supply chain safety checks
-  (`cargo audit`, `cargo deny`) on push/PR
-- `container.yaml`: build, run, and health-check the
-  container image on push/PR
-- `microbenchmarks.yaml`: Criterion microbenchmarks run
-  daily or by manual dispatch, with `target/criterion/`
-  uploaded as an artifact; the workflow does not configure
-  a push/PR baseline comparison
-- `benchmarks.yaml`: comparative benchmarks (Praxis
-  vs Envoy) on push to main
-- `coverage.yaml`: coverage workflow on push/PR;
-  the repository's `make coverage-check` floor is 97%
-- `codeql.yaml`: CodeQL security analysis on push/PR
-  and weekly schedule
-- `documentation.yaml`: rustdoc generation on push/PR
-- `msrv.yaml`: minimum supported Rust version check
-  on push/PR
-- `nightly.yaml`: comprehensive nightly test runs
-- `pull-request-conventions.yaml`: automated PR
-  lifecycle management (draft on failure, close stale)
-- `release.yaml`: tag-triggered release workflow
-- `publish.yaml`: manual container build and push to
-  GHCR
+| Workflow | Runs | Trigger |
+| --- | --- | --- |
+| `tests.yaml` | Unit lint and test | push/PR |
+| `integration.yaml` | Integration test suites | push/PR |
+| `conformance.yaml` | HTTP/2 conformance (h2spec, RFC compliance) | push/PR |
+| `conventions.yaml` | Coding conventions enforcement | PRs |
+| `supply-chain.yaml` | Supply chain checks (`cargo audit`, `cargo deny`) | push/PR |
+| `container.yaml` | Build, run, and health-check the container image | push/PR |
+| `microbenchmarks.yaml` | Criterion microbenchmarks, `target/criterion/` uploaded as an artifact; no push/PR baseline comparison | daily, manual dispatch |
+| `benchmarks.yaml` | Comparative benchmarks (Praxis vs Envoy) | push to main |
+| `coverage.yaml` | Coverage; the `make coverage-check` floor is 97% | push/PR |
+| `codeql.yaml` | CodeQL security analysis | push/PR, weekly |
+| `documentation.yaml` | Rustdoc generation | push/PR |
+| `msrv.yaml` | Minimum supported Rust version check | push/PR |
+| `nightly.yaml` | Comprehensive nightly test runs | nightly |
+| `pull-request-conventions.yaml` | PR lifecycle management (draft on failure, close stale) | PRs |
+| `release.yaml` | Release | tag |
+| `publish.yaml` | Container build and push to GHCR | manual |

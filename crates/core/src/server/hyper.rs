@@ -24,7 +24,10 @@ use tokio::{
 };
 use tracing::{error, info, warn};
 
-use super::{LifecycleHandle, RuntimeOptions, ServerRuntime, ShutdownFuture, resolve_thread_count};
+use super::{
+    LifecycleHandle, RuntimeOptions, RuntimeServiceRegistration, ServerRuntime, ShutdownFuture, resolve_thread_count,
+    service,
+};
 use crate::config::Config;
 
 // -----------------------------------------------------------------------------
@@ -124,6 +127,8 @@ pub struct HyperRuntime {
 
     /// Shared lifecycle state for management services and handlers.
     lifecycle: LifecycleHandle,
+    /// Embedding services installed once when the runtime starts.
+    embedding_services: Vec<RuntimeServiceRegistration>,
 }
 
 impl fmt::Debug for HyperRuntime {
@@ -169,6 +174,7 @@ impl HyperRuntime {
             threads,
             trust_anchors,
             lifecycle: LifecycleHandle::new(),
+            embedding_services: Vec::new(),
         }
     }
 
@@ -215,6 +221,36 @@ impl HyperRuntime {
         });
     }
 
+    /// Install embedding services on the serving backend.
+    pub fn add_runtime_services(&mut self, services: Vec<RuntimeServiceRegistration>) {
+        if !services.is_empty() {
+            service::prepare(&self.lifecycle);
+            self.embedding_services.extend(services);
+        }
+    }
+
+    /// Register a data-plane listener gated on required embedding services.
+    pub fn add_proxy_service<F, Fut>(&mut self, name: &str, service: F)
+    where
+        F: FnOnce(ShutdownWatch, Readiness) -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        let gate = self.lifecycle.runtime_services_gate().clone();
+        self.add_required_service(name, move |mut shutdown, ready| async move {
+            tokio::select! {
+                biased;
+                () = service::wait_for_backend_shutdown(&mut shutdown) => {},
+                initialized = gate.wait_for_initialization() => {
+                    if initialized {
+                        service(shutdown, ready).await;
+                    } else {
+                        service::wait_for_backend_shutdown(&mut shutdown).await;
+                    }
+                },
+            }
+        });
+    }
+
     /// Idle upstream connections the egress pool may keep
     /// (`runtime.upstream_keepalive_pool_size`, 128 like Pingora when `null`).
     ///
@@ -258,11 +294,16 @@ impl HyperRuntime {
         clippy::too_many_lines,
         reason = "startup supervision, serving, drain, and stop ordering stay together"
     )]
-    fn run<Stop, MakeStop>(self, make_stop: MakeStop)
+    fn run<Stop, MakeStop>(mut self, make_stop: MakeStop)
     where
         Stop: Future<Output = ShutdownMode> + Send,
         MakeStop: FnOnce() -> Stop + Send,
     {
+        if !self.embedding_services.is_empty() {
+            let services = std::mem::take(&mut self.embedding_services);
+            let lifecycle = self.lifecycle.clone();
+            self.add_service("embedding services", move |_| service::supervise(services, lifecycle));
+        }
         let runtime = self.runtime_or_panic();
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let graceful = self.shutdown_timeout.saturating_sub(self.shutdown_drain_delay);
@@ -288,6 +329,7 @@ impl HyperRuntime {
             let startup = tokio::select! {
                 ready = &mut readiness => Startup::Ready(ready),
                 requested = &mut stop => Startup::Stop(requested),
+                () = lifecycle.runtime_services_gate().startup_failed() => Startup::Stop(ShutdownMode::Graceful),
             };
             drop(readiness);
             let mode = match startup {

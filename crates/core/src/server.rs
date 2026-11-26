@@ -15,6 +15,8 @@ pub mod lifecycle;
 pub mod pingora;
 /// Runtime options and worker-thread sizing shared by every backend.
 mod runtime;
+/// Backend-neutral contracts for contributed runtime services.
+mod service;
 /// The stand-in runtime for a build with no backend.
 mod unavailable;
 
@@ -25,4 +27,8 @@ pub use lifecycle::{LifecycleError, LifecycleHandle, LifecyclePhase};
 #[cfg(feature = "pingora")]
 pub use pingora::{PingoraServerRuntime, build_http_server};
 pub use runtime::{RuntimeOptions, resolve_thread_count};
+pub use service::{
+    RuntimeReady, RuntimeService, RuntimeServiceContext, RuntimeServiceFuture, RuntimeServiceRegistration,
+    RuntimeServicesStatus, RuntimeShutdown,
+};
 pub use unavailable::UnavailableRuntime;

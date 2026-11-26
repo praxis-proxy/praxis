@@ -1,21 +1,17 @@
 # Adding a Network Backend
 
-## Overview
+A network backend owns sockets, TLS acceptors, HTTP framing, connection
+pooling and the async runtime. Each binary runs one backend, picked at build
+time by a Cargo feature. Pingora is the default. Hyper is the experimental
+second backend, and its modules (`crates/core/src/server/hyper.rs`,
+`crates/core/src/egress/hyper.rs`, `crates/protocol/src/http/hyper.rs`,
+`crates/protocol/src/tcp/hyper.rs`) are the worked example for this page.
 
-A network backend is the layer that owns sockets, TLS acceptors, HTTP
-framing, connection pooling and the async runtime. Praxis runs on one
-backend per binary, selected at build time with a Cargo feature. Pingora
-is the default backend; hyper is the experimental second one, and its
-modules (`crates/core/src/server/hyper.rs`, `crates/core/src/egress/hyper.rs`,
-`crates/protocol/src/http/hyper.rs`, `crates/protocol/src/tcp/hyper.rs`)
-are the worked example of everything below.
-
-Everything above the backend is backend-neutral and stays untouched when a
-backend is added: configuration, validation, the filter engine, routing,
-load balancing, health checking, retry policy, hop-by-hop handling, the
-admin and metrics handlers, and the sub-request client. A backend plugs
-into a small contract and drives the filter pipeline at the right points
-of a request's life.
+A new backend implements the contract below and drives the filter pipeline
+at fixed points in each request. Configuration, validation, the filter
+engine, routing, load balancing, health checking, retry policy, hop-by-hop
+handling, the admin and metrics handlers, and the sub-request client are
+backend-neutral and don't change.
 
 ## The contract
 
@@ -28,8 +24,7 @@ of a request's life.
 | Selection | `praxis_core::backend`, `praxis_protocol::backend` | The feature-gated arms that resolve `Runtime`, `Connector`, `Http`, `Tcp` and `admin::*` to the backend's types. |
 
 The server bootstrap (`crates/server/src/server.rs`) and the test harness
-(`tests/utils/src/proxy.rs`) use only these names, so neither changes when a
-backend is added.
+(`tests/utils/src/proxy.rs`) use only these names, so neither changes.
 
 [`PeerSpec`]: ../../crates/core/src/egress/peer.rs
 
@@ -37,8 +32,8 @@ backend is added.
 
 ### 1. Wire the feature
 
-Add a feature named after the backend in three manifests. Cargo's `dep:`
-syntax lets the feature share a dependency's name.
+Add a feature named after the backend to three manifests (`dep:` lets the
+feature share a dependency's name):
 
 ```toml
 # crates/core/Cargo.toml
@@ -59,18 +54,18 @@ hyper = ["praxis-core/hyper", "praxis-protocol/hyper", "experimental"]
 Keep the backend's dependencies `optional = true`. A backend that is not yet
 supported implies `experimental`, which turns on the startup warning.
 
-Then add the arms to the `backend` module at the end of
-`crates/core/src/lib.rs` and of `crates/protocol/src/lib.rs`, including
-`backend::NAME`, and keep the guard in `crates/server/src/lib.rs` naming
-the new feature: a build with no backend refuses to compile.
+Add the arms, including `backend::NAME`, to the `backend` module at the end
+of `crates/core/src/lib.rs` and of `crates/protocol/src/lib.rs`. Add the new
+feature to the guard in `crates/server/src/lib.rs`, which refuses to compile
+a build with no backend.
 
-Backends are mutually exclusive: the `backend` modules and the server
-crate carry a `compile_error!` for two backend features at once, so add
-the new feature to those guards. One consequence: nothing in the workspace
-may build with `--all-features`. The Makefile names every feature except
-the other backend through `cargo xtask features --except <name>`, which
-reads the manifests, so extend that `--except` list and give the backend
-its own `*-<name>` targets for its builds, lints and tests.
+Backends are mutually exclusive: the `backend` modules and the server crate
+raise `compile_error!` when two backend features are on, so add the new
+feature to those guards too. As a result nothing in the workspace may build
+with `--all-features`. The Makefile names every feature except the other
+backend through `cargo xtask features --except <name>`, which reads the
+manifests. Extend that `--except` list and give the backend its own
+`*-<name>` targets for its builds, lints and tests.
 
 ### 2. Implement `ServerRuntime`
 
@@ -104,8 +99,8 @@ interim `1xx` heads are skipped, while `101` is final. The borrow ends
 before the session moves into the response body handle.
 
 The sub-request client is generic over the connector and needs nothing
-else. Under a backend that also routes the proxy data path through its
-connector, pool, limits and metrics are one thing for both.
+else. If the backend also sends the proxy data path through its connector,
+both share one pool, one set of limits and one set of metrics.
 
 ### 4. Implement `Protocol` for HTTP and TCP
 
@@ -116,10 +111,9 @@ listener's pipeline from `ListenerPipelines`, binds the socket (through
 registers a service on the runtime. Return the cert-watcher shutdown
 senders as the trait documents.
 
-The HTTP adapter drives the pipeline at these points of a request's life.
-The Pingora handler under `crates/protocol/src/http/pingora/handler/` is
-the worked example, and `docs/architecture/pingora-handler-lifecycle.md`
-walks through it.
+The HTTP adapter calls the pipeline at these points. The Pingora handler
+under `crates/protocol/src/http/pingora/handler/` is the worked example, and
+`docs/architecture/pingora-handler-lifecycle.md` walks through it.
 
 | Point | Pipeline call | Notes |
 | ----- | ------------- | ----- |
@@ -136,7 +130,7 @@ one is `PingoraRequestCtx` in `crates/protocol/src/http/pingora/context.rs`
 and its `filter_context!` macro shows how a context becomes an
 `HttpFilterContext`.
 
-Two rules the backend must keep because the suites check them:
+The suites check two rules:
 
 - **Replay.** Retry a stale reused-connection failure only when
   `praxis_core::retry::reused_only_replay_safe` says so: the connection
@@ -151,8 +145,8 @@ Two rules the backend must keep because the suites check them:
 Implement `AdminRequest` for the backend's request type (method, target,
 headers, bounded body read), then serve `PingoraHealthService::respond` on
 the metrics listener and `PingoraAdminService::respond` on the admin
-listener. The handlers are backend-neutral despite their names; only the
-glue is yours. Provide `add_admin_api`, `add_health_endpoint`,
+listener. Despite their names the handlers are backend-neutral; you write
+only the glue. Provide `add_admin_api`, `add_health_endpoint`,
 `add_health_endpoint_with_pipelines` and `add_prometheus_upkeep` taking
 `&mut Runtime`, and re-export them from `praxis_protocol::backend::admin`.
 `run_prometheus_upkeep` is the upkeep loop; run it as a background task
@@ -196,11 +190,11 @@ The Pingora glue is `crates/protocol/src/http/pingora/health/pingora_glue.rs`.
 
 ## Building without a backend
 
-The library crates compile with no backend feature so lean builds can be
-checked: `praxis_core::backend::Connector` is then `egress::Unavailable`,
+The library crates compile with no backend feature, so lean builds can be
+checked. `praxis_core::backend::Connector` is then `egress::Unavailable`,
 which refuses every connection, and `Runtime` is
 `server::UnavailableRuntime`, which has nothing to serve. The `praxis-proxy`
-binary refuses to build in that state, so every `--no-default-features`
+binary refuses to build that way, so every `--no-default-features`
 invocation names a backend:
 
 ```console

@@ -1,13 +1,14 @@
 # Rehearse a configuration reload
 
-Praxis watches its config file and swaps in new filter pipelines when the file
-changes, without a restart. This walkthrough rehearses that change on one
-container: check a response, validate a candidate file, replace the watched
-file, confirm the reload in the log, and check the new response. Do the same
-steps before changing a production proxy.
+Praxis watches its config file and swaps in new filter pipelines when it
+changes, without a restart. This walkthrough rehearses that on one container:
+check a response, validate a candidate file, replace the watched file, confirm
+the reload in the log, and check the new response. Run through it before
+changing a production proxy.
 
 [Configuration](configuration.md#dynamic-configuration-reload) lists which
-settings reload, which need a restart, and which changes are rejected.
+settings reload, which need a restart, which changes are rejected, and which
+state survives.
 
 ## Before you start
 
@@ -61,15 +62,15 @@ before reload
 ## Validate a candidate
 
 Write the change to a separate file in the same directory. Praxis reloads
-when `config.yaml` or a document a configured filter reads changes; a new file
-such as the candidate does not trigger a reload. Keeping the candidate next to
-`config.yaml` lets the final rename stay within one directory.
+only when `config.yaml` or a document a configured filter reads changes, so
+the new candidate file triggers nothing, and keeping it next to `config.yaml`
+keeps the final rename within one directory.
 
-Copy the config with its permissions first, then write the change into the
-copy. Overwriting an existing file keeps its mode, so a config that holds
-credentials never becomes readable by other users. `chmod u+w` lets you write
-the copy even when `config.yaml` is read-only; it adds write access for you
-only. This change only edits the response body:
+Copy the config with its permissions first, then write into the copy.
+Overwriting an existing file keeps its mode, so a config holding credentials
+never becomes readable by other users. `chmod u+w` adds write access for you
+only, in case `config.yaml` is read-only. This change edits only the response
+body:
 
 ```console
 cp -p config/config.yaml config/candidate.yaml
@@ -85,8 +86,8 @@ docker run --rm -v "$PWD/config/candidate.yaml:/etc/praxis/config.yaml:ro" \
 ```
 
 Validation parses the file, builds the filter pipelines, and exits without
-binding any listener. It prints nothing and exits with status 0 when the file
-is valid; review any warnings it prints before you continue.
+binding a listener. A valid file prints nothing and exits 0; review any
+warnings before you continue.
 
 ## Apply the change
 
@@ -108,11 +109,15 @@ docker logs --since "$since" praxis 2>&1 |
 ```
 
 The watcher waits briefly for edits to settle, so repeat the command if it
-prints nothing at first. With Podman on macOS, file changes made on the host
-may not reach the Podman machine, and no reload happens; run the walkthrough
-inside `podman machine ssh` instead. A `config reload failed` or `failed to
-read config file` line means Praxis rejected the file and kept serving the
-previous config; read the error before you try again.
+prints nothing at first. With Podman on macOS, host file changes may not reach
+the Podman machine and no reload happens; run the walkthrough inside
+`podman machine ssh` instead.
+
+A `config reload failed` or `failed to read config file` line means Praxis
+rejected the file and kept serving the previous config; read the error before
+you try again. After a rejected reload, `praxis --dump` shows the file on
+disk, not what is running; `GET /api/pipelines` from
+[diagnostics](diagnostics.md) shows the live pipelines.
 
 Send a new request:
 
@@ -133,17 +138,3 @@ docker stop praxis
 ```
 
 Delete the working directory when you no longer need it.
-
-## What a reload can and cannot change
-
-| Change | Result |
-|-|-|
-| Filters, routes, endpoints and weights | Reloaded. Check the effect with a new request. |
-| Listener addresses, listener TLS settings, the `admin` section, and startup `runtime` settings | Applied only at restart. The reload completes and logs a warning naming the setting. |
-| HTTP to TCP, or TCP to HTTP, on a running listener | Rejected. The previous config keeps serving until you revert the change or restart. |
-| Invalid YAML or an invalid pipeline | Rejected with `config reload failed`; the previous config keeps serving. |
-
-Rate limiter and circuit breaker state starts fresh after a reload.
-`praxis --dump` reads the file on disk, so after a rejected reload it can
-differ from what is running; use `GET /api/pipelines` from
-[diagnostics](diagnostics.md) to see the live pipelines.

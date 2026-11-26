@@ -1,8 +1,7 @@
 # Maintainers
 
-This file lists the maintainers of the Praxis
-project. See [GOVERNANCE.md][gov] for role
-definitions and processes.
+Who holds each Praxis role. [GOVERNANCE.md][gov] defines the roles and how
+people join or leave them.
 
 [gov]: https://github.com/praxis-proxy/praxis/blob/main/GOVERNANCE.md
 
@@ -48,7 +47,7 @@ definitions and processes.
 ## Reviewers
 
 | Name                      | Repos            | GitHub            | Affiliation |
-| ------------------------- | --------------   | ----------------- | ----------- |
+| ------------------------- | ---------------- | ----------------- | ----------- |
 | Alexander Cristurean      | AI               | [@crstrn13]       | Red Hat     |
 | Asaad Balum               | AI               | [@asaadbalum]     | Red Hat     |
 | Brent Salisbury           | Core, AI, Grid   | [@nerdalert]      | Red Hat     |
@@ -74,7 +73,6 @@ definitions and processes.
 
 [@crstrn13]: https://github.com/crstrn13
 [@asaadbalum]: https://github.com/asaadbalum
-[@nerdalert]: https://github.com/nerdalert
 [@christinaexyou]: https://github.com/christinaexyou
 [@maleck13]: https://github.com/maleck13
 [@dgn]: https://github.com/dgn

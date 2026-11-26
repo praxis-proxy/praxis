@@ -1,28 +1,27 @@
 # Payload-size coverage ledger
 
 The [manifest](payload-coverage.json) maps the 102 families in the accepted
-payload-size test plan and four generated campaigns. Final reconciliation records
-394 passing case entries, nine proposed contract entries and one intentionally
-unmeasured process-wide instrumentation scope. Entries can reuse a test when its
-observations support several invariants; these are not 394 distinct tests.
+payload-size test plan and four generated campaigns. Final reconciliation
+records 394 passing case entries (not 394 distinct tests: one test can back
+several invariants), nine proposed contract entries, and one intentionally
+unmeasured process-wide instrumentation scope.
 
-Family disposition summarizes only its listed variants and observed builds:
-`verified` means those cases passed, `verified_with_proposals` retains explicit
-unadopted contracts, and `partial` identifies the remaining process-wide
-allocation/task measurement scope. Platform qualifications are separate.
-A unit test alone does not establish wire or process behavior.
+A family's disposition covers only its listed variants and observed builds:
+`verified` means those cases passed, `verified_with_proposals` keeps explicit
+unadopted contracts, and `partial` marks the remaining process-wide
+allocation/task measurement scope. Platform qualifications are separate. A
+unit test alone does not establish wire or process behavior.
 
-Verification completed serially through the repository gates, with 96.84% line
+Verification ran serially through the repository gates, at 96.84% line
 coverage against the 96% threshold. A Hyper policy-order fixture failure was
-corrected and its exact test passed on both adapters; earlier passing suites
-were retained. Original failed runs and source revisions remain in the evidence.
-All 17 scheduled selectors passed separately on Pingora and Hyper, and the heap
-campaign passed 48 profiles and 64 warmed callback samples. Narrowly reviewed
-source differences and unchanged benchmark dependencies justify retained evidence.
-
-An additional broad Hyper/CloudEvents Clippy probe failed on an unchanged
-`large_futures` expectation. The standard lint targets and the focused policy
-lint passed; the extra probe remains explicitly recorded as failed.
+fixed and its exact test passed on both adapters; earlier passing suites were
+kept, and the original failed runs and source revisions stay in the evidence.
+All 17 scheduled selectors passed separately on Pingora and Hyper, and the
+heap campaign passed 48 profiles and 64 warmed callback samples. Evidence was
+kept where source differences were narrowly reviewed and benchmark
+dependencies were unchanged. A broader Hyper/CloudEvents Clippy probe failed
+on an unchanged `large_futures` expectation and is recorded as failed; the
+standard lint targets and the focused policy lint passed.
 
 ## Case records
 
@@ -45,22 +44,27 @@ Each case is an object with these fields:
 | `evidence` | Command, revision, selection count and actual outcome. |
 | `result` | `passed`, `failed`, `not_run`, `unsupported`, or `proposed`. |
 
-Case `validation_runs` references resolve to the manifest's shared run records,
-which retain exact command, adapter, source revision, log, executable and source
-provenance. `selected_test` identifies the individually passing test within that
-run. The evidence archive retains full observations and earlier history under
-each stable `case_id`, without repeating the same run metadata in every case.
+A case's `validation_runs` references point to the manifest's shared run
+records, which hold the exact command, adapter, source revision, log,
+executable, and source provenance; `selected_test` names the individually
+passing test within that run. The evidence archive keeps full observations
+and earlier history under each stable `case_id`, so run metadata is not
+repeated in every case.
 
-Record an explicit reason and follow-up for `unsupported` or `proposed` cases.
-Never use a passing status for an unrun case. Each test can support several
-families only when its observations establish each invariant. Record each
-case's owner and evidence rather than counting a duplicate implementation.
-Where exact inputs have not been transcribed, `parameters` points to the named
-fixture rather than asserting coverage of the whole family. A null
-`test_location` with `not_run` may identify a missing fixture or an intentionally
-unmeasured scope; its evidence explains which. Neither implies an unsupported
-product feature. The same test can appear under different families as
-complementary evidence, with each family retaining its own gap.
+Rules for recording cases:
+
+- Give `unsupported` and `proposed` cases an explicit reason and follow-up.
+- Never give an unrun case a passing status.
+- A test may back several families only when its observations establish each
+  invariant. It can then appear under each family as complementary evidence,
+  and each family keeps its own gap.
+- Record each case's owner and evidence; don't count a duplicate
+  implementation.
+- Where exact inputs have not been transcribed, `parameters` points to the
+  named fixture instead of claiming coverage of the whole family.
+- A null `test_location` with `not_run` marks a missing fixture or an
+  intentionally unmeasured scope, and its evidence says which. Neither means
+  the product feature is unsupported.
 
 The `platform_matrix` records completed Hyper checks with the repository's
 existing parity exclusions, plus unrun aarch64, Miri/sanitizer and
@@ -71,12 +75,12 @@ is not a pass.
 
 ## Recent resource and lifecycle fixtures
 
-The following cases have verified source implementations. Their manifest records
-identify the exact selector, original source revision and observed outcome;
-earlier observations are retained separately as history.
-The [scheduled manifest](payload-scheduled.json) has 17 selectors, including
-the CloudEvents and 16/32-download cases below; both adapters require matching
-feature-built proxy binaries and separate results.
+These cases have verified source implementations. Their manifest records give
+the exact selector, original source revision, and observed outcome; earlier
+observations are kept separately as history. The
+[scheduled manifest](payload-scheduled.json) has 17 selectors, including the
+CloudEvents and 16/32-download cases below; each adapter needs its own
+feature-built proxy binary and separate results.
 
 | Families | Current selector or workload | Observation |
 | --- | --- | --- |
@@ -93,9 +97,9 @@ feature-built proxy binaries and separate results.
 | R08, R12 | `payload_lifecycle::repeated_failures_and_cancellation_leave_proxy_available` and `payload_lifecycle::repeated_slow_response_cancellations_leave_process_available` | Repeated process failure/cancellation cycles now include the active HTTP request gauge in addition to RSS and FD sampling. |
 | R09 | `payload_lifecycle::reload_drains_old_response_hook_and_body_owner` | Watched reload with old/new response hooks and tracked old filter and incoming-chunk owner drops after drain. |
 
-The G1 normal and pre-read models retain their separately documented passing
-protocol-unit evidence for specific input-owner release. They are not a count
-of all live allocations. Dhat tracks allocations made during its profile,
+The G1 normal and pre-read models keep their separately documented passing
+protocol-unit evidence for specific input-owner release; they do not count
+all live allocations. Dhat tracks allocations made during its profile,
 not fixture inputs allocated beforehand or the proxy's entire heap. The HTTP
 active-request gauge is neither a Tokio task count nor a TCP connection count;
 RSS and FD samples do not establish live-object counts. Runner memory and
@@ -178,5 +182,5 @@ assert_eq!(body, b"a\0b");
   SSE and owner-lifetime fixtures.
 - W0: `tests/utils/`, suite registrations, manifests, Makefile and CI wiring.
 
-The manifest records actual source locations or identifies missing fixtures;
-the ownership list describes the implementation work areas.
+The manifest records actual source locations or names missing fixtures; this
+list describes the implementation work areas.

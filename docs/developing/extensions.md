@@ -1,98 +1,33 @@
 # Extensions
 
-Praxis is designed to be extended. The core library provides
-the building blocks for building bespoke proxy servers.
-Multiple extension mechanisms are provided to support a
-variety of needs.
-
-If this is your first custom filter, start with the
-[HTTP Filter Tutorial](http-filter-tutorial.md). It walks
-through a complete filter crate before this guide's more
-advanced registration and implementation options.
+Custom filters plug into Praxis the same way built-ins do: same ordering,
+context access, and short-circuit behavior. For a first filter, follow the
+[HTTP Filter Tutorial](http-filter-tutorial.md), which builds a complete
+filter crate. The [filter system documentation](../filters/README.md) is the
+API reference.
 
 ## Auto-Discovery (Recommended)
 
-External filter crates can self-register into Praxis at
-build time. The operator adds a `Cargo.toml` dependency
-and writes YAML config with zero Rust code changes to Praxis.
+An external filter crate registers itself at build time. Praxis needs a
+`Cargo.toml` dependency and YAML config, with no Rust changes.
 
-### How It Works
-
-1. The external crate uses `export_filters!` to declare
-   its filters
-2. The crate's `Cargo.toml` carries a
-   `[package.metadata.praxis-filters]` marker
-3. The Praxis server's `build.rs` runs `cargo metadata`,
-   discovers marked crates, and generates registration code
-4. At startup, discovered filters are registered alongside
-   built-ins
-
-### External Crate Setup
-
-In the external crate's `Cargo.toml`:
-
-```toml
-[package]
-name = "my-auth-filters"
-version = "0.1.0"
-
-# Empty marker: tells the Praxis build script this crate exports filters.
-# The actual filter names and factories are declared in export_filters!.
-[package.metadata.praxis-filters]
-
-[dependencies]
-async-trait = "0.1"
-praxis-proxy-filter = "0.4"
-serde = { version = "1", features = ["derive"] }
-serde_yaml = "0.9.34"
-```
-
-In the external crate's `src/lib.rs`:
+1. The crate declares its filters with `export_filters!`.
+2. Its `Cargo.toml` carries an empty `[package.metadata.praxis-filters]`
+   marker.
+3. The server's `build.rs` runs `cargo metadata`, finds marked crates, and
+   generates registration code.
+4. At startup, discovered filters are registered alongside the built-ins.
 
 ```rust
-use async_trait::async_trait;
-use praxis_filter::{
-    FilterAction, FilterError, HttpFilter,
-    HttpFilterContext, export_filters,
-};
-
-pub struct MyAuthFilter { /* ... */ }
-
-#[async_trait]
-impl HttpFilter for MyAuthFilter {
-    fn name(&self) -> &'static str { "my_auth" }
-
-    async fn on_request(
-        &self, _ctx: &mut HttpFilterContext<'_>,
-    ) -> Result<FilterAction, FilterError> {
-        Ok(FilterAction::Continue)
-    }
-}
-
-impl MyAuthFilter {
-    pub fn from_config(
-        config: &serde_yaml::Value,
-    ) -> Result<Box<dyn HttpFilter>, FilterError> {
-        // Parse config and construct the filter
-        Ok(Box::new(Self { /* ... */ }))
-    }
-}
-
 export_filters! {
     http "my_auth" => MyAuthFilter::from_config,
 }
 ```
 
-### Operator Usage
-
-Add the crate to the Praxis server's `Cargo.toml`:
-
-```toml
-[dependencies]
-my-auth-filters = "0.1"
-```
-
-Then reference the filter by name in YAML:
+The tutorial shows the full
+[crate setup](http-filter-tutorial.md#1-create-the-filter-crate) and how to
+[add the crate to the server](http-filter-tutorial.md#4-add-the-filter-to-the-praxis-server).
+Once it is a dependency, reference the filter by name in YAML:
 
 ```yaml
 filter_chains:
@@ -102,28 +37,17 @@ filter_chains:
         some_option: "value"
 ```
 
-Rebuild and run; no other changes needed.
-
 ### Duplicate Detection
 
-If an external filter name collides with a built-in or
-another external filter, the server panics at startup
-with a clear error message. Filter names must be unique
-across all sources.
+Filter names must be unique across built-ins and all external crates. A
+collision panics at startup with the duplicate name.
 
 ## Rust Extensions (Manual Registration)
 
-Compile-time extensions with zero overhead. Implement
-`HttpFilter` or `TcpFilter` in your own crate, register it,
-and reference it in YAML config. Use this approach when
-building a custom Praxis binary with inline filters that
-don't need to be shared as a separate crate.
-
-1. Implement `HttpFilter` (`on_request`, `on_response`,
-   body hooks) or `TcpFilter` (`on_connect`,
-   `on_disconnect`)
-2. Register with `register_filters!`
-3. Reference by name in YAML filter chains
+To build a custom Praxis binary with inline filters that don't need to ship
+as a separate crate, implement `HttpFilter` (`on_request`, `on_response`,
+body hooks) or `TcpFilter` (`on_connect`, `on_disconnect`), register it with
+`register_filters!`, and reference it by name in YAML filter chains.
 
 ### HTTP Filter
 
@@ -191,10 +115,34 @@ register_filters! {
 }
 ```
 
+Every key next to `filter:` in a chain entry reaches `from_config` as a
+`serde_yaml::Value`, except the entry keys `branch_chains`, `conditions`,
+`failure_mode`, `name`, and `response_conditions`, which the pipeline
+consumes:
+
+```yaml
+filter_chains:
+  - name: security
+    filters:
+      - filter: max_body_guard
+        max_content_length: 1048576   # 1 MiB
+        reject_status: 413
+        conditions:
+          - when:
+              methods: ["POST", "PUT", "PATCH"]
+```
+
+`MaxBodyGuard` only checks the declared `Content-Length`, so chunked uploads
+and other requests without that header pass. For a cumulative request
+ceiling, set `body_limits.max_request_bytes`
+([payload size limits](../operating/configuration.md#payload-size-limits)).
+On a streaming request, a body-limit rejection can arrive after the headers
+or part of the body has already reached the upstream.
+
 ### TCP Filter
 
-TCP custom filters implement `TcpFilter` and register with
-the `tcp` keyword:
+TCP filters implement `TcpFilter` and register with the `tcp` keyword
+(`tcp "name" => factory`):
 
 ```rust
 use async_trait::async_trait;
@@ -219,13 +167,21 @@ impl TcpFilter for ConnectionCounter {
 }
 ```
 
+### Registration
+
+`register_filters!` generates a `custom_registry()` function that returns a
+`FilterRegistry` holding the built-ins plus your filters. Pass it to the test
+utilities (`start_proxy_with_registry`) or to your own server bootstrap built
+from the workspace crates (`praxis-core`, `praxis-filter`,
+`praxis-protocol`).
+
 ### Custom Load Balancer
 
-Load balancers are ordinary HTTP filters. The contract:
-read `ctx.cluster` (set by the router), select an
-endpoint, and set `ctx.upstream`. If your algorithm
-tracks in-flight requests, use `on_response` to release
-counters.
+A load balancer is an ordinary HTTP filter. It reads `ctx.cluster` (set by
+the router, which runs first), picks an endpoint, and sets `ctx.upstream`.
+The protocol layer connects to whatever `Upstream` you set (address, TLS,
+SNI, timeouts). An algorithm that tracks in-flight requests releases its
+counters in `on_response`.
 
 ```rust
 use std::{
@@ -330,8 +286,6 @@ register_filters! {
 }
 ```
 
-Then use it in config:
-
 ```yaml
 filter_chains:
   - name: main
@@ -349,103 +303,41 @@ filter_chains:
               - "127.0.0.1:3002"
 ```
 
-Key points:
-
-- The router runs first and sets `ctx.cluster`.
-- Your filter reads the cluster name, selects an endpoint,
-  and writes `ctx.upstream`.
-- The protocol layer connects to whatever `Upstream` you
-  set (address, TLS, SNI, timeouts).
-- For stateful algorithms, override `on_response` to
-  update counters when a request completes.
-
-### Registration
-
-The `register_filters!` macro uses protocol-prefixed
-syntax:
-
-```rust
-register_filters! {
-    http "max_body_guard" => MaxBodyGuard::from_config,
-}
-```
-
-TCP filters would use `tcp "name" => factory` syntax.
-
-The macro generates a `custom_registry()` function that
-returns a `FilterRegistry` with both built-in and custom
-filters. Use it with the test utilities
-(`start_proxy_with_registry`) or build your own server
-bootstrap from the workspace crates (`praxis-core`,
-`praxis-filter`, `praxis-protocol`).
-
-### YAML Config
-
-Any keys placed alongside `filter:` in the filter chain
-entry are passed to `from_config` as a `serde_yaml::Value`:
-
-```yaml
-filter_chains:
-  - name: security
-    filters:
-      - filter: max_body_guard
-        max_content_length: 1048576   # 1 MiB
-        reject_status: 413
-        conditions:
-          - when:
-              methods: ["POST", "PUT", "PATCH"]
-```
-
-`MaxBodyGuard` checks only the declared `Content-Length` when the
-request arrives. Chunked uploads and other requests without that
-header are not compared with its `max_content_length` value. For a
-cumulative request transfer ceiling, configure
-`body_limits.max_request_bytes` as described in the
-[payload size limits guide](../operating/configuration.md#payload-size-limits).
-With streaming requests, a body-limit rejection may occur after the
-headers or an earlier body prefix has reached the upstream.
-
-Custom filters participate identically to built-ins: same
-ordering, context access, and short-circuit capability.
-
-See the [filter system documentation](../filters/README.md) for the
-full API reference.
+If `ctx.cluster` is `None`, return an error as above
+(`.ok_or("my_filter: no cluster set")?`) rather than panicking.
 
 ## Best Practices
 
 ### Header trust boundaries
 
-Never blindly trust `X-Forwarded-For` or
-`X-Forwarded-Proto`. Attackers spoof these unless trusted
-upstream sources are explicitly defined.
+Don't trust `X-Forwarded-For` or `X-Forwarded-Proto` unless the trusted
+upstream sources are defined explicitly. Clients can spoof both.
 
 ### Keep filters stateless when possible
 
-Prefer reading all configuration at construction time
-(in `from_config`) and keeping the filter struct
-immutable. When shared mutable state is required (e.g.
-counters, connection tracking), use atomics or interior
-mutability with minimal lock scope. Filters are shared
-across requests and must be `Send + Sync`.
+Filters are shared across requests and must be `Send + Sync`. Read all
+configuration in `from_config` and keep the struct immutable. When you need
+shared mutable state (counters, connection tracking), use atomics or
+interior mutability with the smallest possible lock scope.
+
+### Validate in `from_config`
+
+Parse and type-check every field in `from_config` so bad config fails at
+startup with a descriptive error, not at request time. Use
+`#[serde(default)]` for optional fields.
 
 ### Return early with `Reject`, not panics
 
-Use `FilterAction::Reject(Rejection::status(code))` to
-abort request processing. Never panic inside a filter;
-a panic takes down the worker thread. Return
-`Err(...)` for unexpected failures and let the pipeline
-handle the 500 response.
+Stop a request with `FilterAction::Reject(Rejection::status(code))`. A panic
+takes down the worker thread. For unexpected failures, return `Err(...)` and
+the pipeline sends a 500 response.
 
 ### Declare body access accurately
 
-Only declare `request_body_access()` or
-`response_body_access()` if your filter actually
-inspects or modifies the body. Use `ReadOnly` if you
-inspect but do not modify, and `ReadWrite` only if you
-mutate chunks in place.
-
-Every body-access declaration also states whether the
-processing is optional or required:
+Declare `request_body_access()` or `response_body_access()` only if the
+filter reads or changes the body: `ReadOnly` to inspect, `ReadWrite` to
+mutate chunks in place. Each declaration also says whether body processing
+is optional or required:
 
 ```rust
 fn request_body_access(&self) -> BodyAccess {
@@ -453,48 +345,38 @@ fn request_body_access(&self) -> BodyAccess {
 }
 ```
 
-`Required` means an explicitly permitted opaque WebSocket
-upgrade must be refused when this selected filter would
-otherwise need HTTP body processing. Use `Optional` when
-missing body hooks for an opaque upgraded connection is
-acceptable, as for a best-effort observer. The default
-`BodyAccess::None` needs no requirement. This is a Rust API
-change: external filters that return `ReadOnly` or
-`ReadWrite` must now provide `BodyRequirement::Optional`
-or `BodyRequirement::Required`.
+With `Required`, an explicitly permitted opaque WebSocket upgrade is refused
+when this selected filter would otherwise need HTTP body processing. Use
+`Optional` when skipping body hooks on an opaque upgraded connection is
+acceptable, as for a best-effort observer. The default `BodyAccess::None`
+takes no requirement.
 
 ### Choose the right body mode
 
-- `Stream`: lowest latency; chunks flow through as they
-  arrive. Best for filters that inspect headers only or
-  process chunks independently.
-- `StreamBuffer`: chunks flow through filters
-  incrementally but forwarding to upstream is deferred
-  until `Release` or end-of-stream. Use when body
-  content influences routing, when you need the complete
-  body (e.g. signature verification), or when you need
-  to inspect the full body before upstream selection.
-  Set `max_bytes` to avoid unbounded memory growth.
+- `Stream`: lowest latency. Chunks flow through as they arrive. Use it for
+  header-only filters or ones that handle each chunk on its own.
+- `StreamBuffer`: filters still see chunks as they arrive, but forwarding to
+  the upstream waits for `Release` or end-of-stream. Use it when the body
+  decides routing, when you need the whole body (signature verification), or
+  when you must inspect it before upstream selection. Set `max_bytes` to
+  bound memory.
 
-During incremental request or response body handling, `Release` flushes the
-buffer and changes the context's runtime body mode to `Stream` for subsequent
-chunks. The global body size ceiling still applies. A static request pre-read
-keeps buffering until end-of-stream even after `Release`, so body writers
-receive the complete request before routing runs.
+During incremental body handling, `Release` flushes the buffer and switches
+the context's runtime body mode to `Stream` for later chunks. The global body
+size ceiling still applies. A static request pre-read keeps buffering until
+end-of-stream even after `Release`, so body writers see the complete request
+before routing runs.
 
-Two patterns for declaring `StreamBuffer`:
-
-**Static declaration** (filter always needs the body):
+Declare `StreamBuffer` statically when the filter always needs the body, or
+per request from `on_request`:
 
 ```rust
+// Static: the filter always needs the body.
 fn request_body_mode(&self) -> BodyMode {
     BodyMode::StreamBuffer { max_bytes: Some(1_048_576) }
 }
-```
 
-**Per-request upgrade** (conditional buffering):
-
-```rust
+// Per request: buffer only when needed.
 async fn on_request(
     &self, ctx: &mut HttpFilterContext<'_>,
 ) -> Result<FilterAction, FilterError> {
@@ -511,18 +393,16 @@ async fn on_request(
 
 ### `on_response_body` is synchronous
 
-Unlike `on_request_body`, the `HttpFilter` trait declares
-`on_response_body` as a plain `fn`, and it runs inline on
-the worker thread proxying the response. Do not block
-the thread with `block_on` or heavy computation. If you
-need async I/O during response payload processing, spawn
-a background task and communicate via a channel.
+`on_request_body` is async, but `on_response_body` is a plain `fn` that runs
+inline on the worker thread proxying the response. Don't block it with
+`block_on` or heavy computation. For async I/O during response processing,
+spawn a background task and talk to it over a channel.
 
 ### Use conditions instead of internal checks
 
-Rather than writing `if req.method != "POST" { return
-Continue }` inside your filter, declare conditions in
-YAML:
+Gate the filter with YAML conditions instead of checks like
+`if req.method != "POST" { return Continue }` in code. Operators can then
+change the gating without a rebuild:
 
 ```yaml
 - filter: my_filter
@@ -531,25 +411,19 @@ YAML:
         methods: ["POST", "PUT"]
 ```
 
-This keeps filter logic focused and lets operators
-adjust gating without code changes.
-
 ### Use `extra_request_headers` for metadata
 
-When your filter extracts values from the body or
-computes derived data, promote it to a request header
-via `ctx.extra_request_headers`. This makes the value
-visible to downstream filters (e.g. the router) without
-coupling filters to each other.
+Promote values extracted from the body, or derived data, to a request header
+through `ctx.extra_request_headers`. Later filters such as the router can
+then read it without depending on your filter.
 
 ### Access KV stores for runtime mappings
 
-Use `ctx.kv_stores` to access runtime-updatable key-value
-data without restarting the proxy. Read a store the
-embedder configured with `get`, which returns `None` for
-a missing name instead of silently creating one. Use
-`get_or_create_memory` only when the filter deliberately
-owns an in-memory store:
+`ctx.kv_stores` gives access to key-value data that changes at runtime
+without a restart. Read a store the embedder configured with `get`, which
+returns `None` for a missing name instead of creating one. Call
+`get_or_create_memory` only when the filter owns an in-memory store on
+purpose.
 
 ```rust
 async fn on_request(
@@ -566,105 +440,64 @@ async fn on_request(
 }
 ```
 
-Operators update stores at runtime via the admin API
-without config reloads:
+Operators update stores through the admin API, without a config reload:
 
 ```console
 curl -X PUT http://127.0.0.1:9901/api/kv/routing_overrides/preferred_cluster \
      -d 'us-east-cluster'
 ```
 
-### Handle missing `ctx.cluster` gracefully
-
-If your filter depends on a cluster being set (like a
-load balancer), return a clear error when
-`ctx.cluster` is `None` rather than panicking:
-
-```rust
-let cluster = ctx.cluster.as_deref()
-    .ok_or("my_filter: no cluster set")?;
-```
-
-### Provide `from_config` validation
-
-Validate all configuration values in `from_config`
-rather than deferring checks to request time. Fail fast
-at startup with a descriptive error. Parse and
-type-check every field; use `#[serde(default)]` for
-optional fields with sensible defaults.
-
 ### Test with the integration harness
 
-Use the integration test utilities (`free_port`,
-`start_backend`, `start_proxy_with_registry`) to write
-end-to-end tests for custom filters. Register your
-filter with `FilterFactory::Http(Arc::new(factory))`,
-build a minimal YAML config, and assert on status codes
-and response bodies. See `tests/integration/` for
+Write end-to-end tests with the harness utilities (`free_port`,
+`start_backend`, `start_proxy_with_registry`): register the filter with
+`FilterFactory::Http(Arc::new(factory))`, build a minimal YAML config, and
+assert on status codes and response bodies. `tests/integration/` has
 examples.
 
-Built-in filter reference pages are generated from source.
-After changing a filter config struct, run:
-
-```console
-cargo xtask generate-filter-docs
-```
-
-CI runs `cargo xtask lint-filter-docs` as part of `make lint`.
+Built-in filter reference pages are generated from source. After changing a
+filter config struct, run `cargo xtask generate-filter-docs`. `make lint`
+runs `cargo xtask lint-filter-docs` in CI.
 
 ## Advanced: Iterative Request Router
 
-The `iterative_request_router` filter composes other
-filters within named step chains. Each step is a
-pre-built `FilterPipeline` that runs independently,
-producing an upstream exchange via Pingora's native
-`Connector`. Transition rules on each step's response
-drive the iteration loop.
+The `iterative_request_router` filter runs named step chains. Each step is a
+pre-built `FilterPipeline` that runs independently and makes an upstream
+exchange through Pingora's native `Connector`. Transition rules on each
+step's response drive the loop.
 
-Step chain filters have access to `IterationState` via
-request extensions (`ctx.extensions.get::<IterationState>()`),
-which carries the original request, previous response,
-and a cross-step accumulator. Filters can provide a
-custom body for the next iteration by inserting
-`NextIterationBody` into extensions. Both types are
-exported from `praxis_filter` for use by external filter
-crates.
-
-Nesting an `iterative_request_router` inside another
-`iterative_request_router`'s step chain is not
-supported and will be rejected at config validation.
-Step pipelines execute the complete request-header,
-request-body, response-header, and response-body filter
-lifecycle around each sub-request. The caller's filter
-registry and request extensions are preserved so external
-filters and pipeline-scoped resources remain available.
+Each step pipeline runs the full request-header, request-body,
+response-header, and response-body lifecycle around its sub-request. The
+caller's filter registry and request extensions carry over, so external
+filters and pipeline-scoped resources stay available. Step chain filters
+read `IterationState` from request extensions
+(`ctx.extensions.get::<IterationState>()`): the original request, the
+previous response, and a cross-step accumulator. A filter sets the next
+iteration's body by inserting `NextIterationBody` into extensions. Config
+validation rejects an `iterative_request_router` nested inside another one's
+step chain.
 
 ### Streaming step responses
 
-By default a step buffers its complete sub-request response
-before transition rules run (`SubRequestResponseMode::Buffered`).
-A filter can instead opt a step into a pull-based streamed
-response by calling
-`ctx.set_subrequest_response_mode(SubRequestResponseMode::Streaming)`
-from `on_request`. Any filter that does so must also override
-`may_select_streaming_subrequest_response()` to return `true`:
-pipeline validation rejects a streaming step whose response
-pipeline requires `BodyMode::StreamBuffer`, and a runtime guard
-rejects an undeclared streaming action.
+By default a step buffers the whole sub-request response before transition
+rules run (`SubRequestResponseMode::Buffered`). A filter switches a step to a
+pull-based streamed response by calling
+`ctx.set_subrequest_response_mode(SubRequestResponseMode::Streaming)` from
+`on_request`. That filter must also override
+`may_select_streaming_subrequest_response()` to return `true`. Pipeline
+validation rejects a streaming step whose response pipeline requires
+`BodyMode::StreamBuffer`, and a runtime guard rejects an undeclared
+streaming action.
 
-Inside a step, a filter can inject additional bytes into the
-router-owned logical stream with `ctx.emit_stream_chunk(bytes)`.
-Emitted chunks are delivered in FIFO order ahead of the
-callback's own body output, and Praxis never inspects them.
-Emission is only valid inside an `iterative_request_router`
-step; the pending chunks are bounded together with the retained
-`IterationState`, so exceeding that limit returns an error and
-enqueues nothing.
+Inside a step, `ctx.emit_stream_chunk(bytes)` adds bytes to the
+router-owned logical stream. Emitted chunks go out in FIFO order ahead of the
+callback's own body output, and Praxis never inspects them. Emission only
+works inside an `iterative_request_router` step. Pending chunks count toward
+the same bound as the retained `IterationState`; going over it returns an
+error and enqueues nothing.
 
-`SubRequestResponseMode` and the streaming utilities are exported
-from `praxis_filter` for external filter crates.
-
-See the
+`IterationState`, `NextIterationBody`, `SubRequestResponseMode`, and the
+streaming utilities are exported from `praxis_filter`. See the
 [`iterative_request_router` reference](../filters/http/traffic_management/iterative_request_router.md)
 and [proposal 00786](https://github.com/praxis-proxy/enhancements/blob/main/proposals/00786_iterative-request-router.md)
 for the full design.
@@ -673,7 +506,7 @@ for the full design.
 
 With the `chain-binding` build feature, a chain-binding filter can send a
 `FilteredSubrequestExecutor` callout to a top-level cluster instead of a URL.
-One `clusters:` entry then supplies the callout's endpoints, load-balancing
+That `clusters:` entry supplies the callout's endpoints, load-balancing
 strategy, health, slow start, TLS (including client certificates), authority,
 base path, and connection options.
 
@@ -691,30 +524,30 @@ extensions.insert(StagedCluster::new(&cluster));
 let response = executor.run(&outbound, &request, extensions, deadline).await?;
 ```
 
-The owning filter must forward `visit_nested_pipelines` to its bound outbound
-pipeline (as any chain-binding filter must). The staged cluster's health is
-read from that pipeline's health registry, so a filter that does not forward
-it gets endpoint selection without health.
+Like any chain-binding filter, the owning filter must forward
+`visit_nested_pipelines` to its bound outbound pipeline. The staged cluster's
+health comes from that pipeline's health registry, so without forwarding,
+endpoint selection runs without health.
 
 What the executor does with a staged cluster:
 
 - **Selection.** Before the request phase it picks an endpoint with the
-  cluster's strategy, reading health from the pipeline's health registry
+  cluster's strategy, using health from the pipeline's health registry
   (panic mode and slow start apply as in `load_balancer`), and sets
   `ctx.cluster` and `ctx.upstream`. Outbound-chain filters that key on the
   cluster, such as `credential_injection`, work unchanged.
-- **Admission.** A callout claims one of the cluster's `max_connections` slots
-  when it is staged, and holds it until its response ends
-  (for a streaming callout, until the body finishes or is dropped). A callout
-  staged at a cluster that is at its ceiling fails without dialing.
+- **Admission.** Staging a callout claims one of the cluster's
+  `max_connections` slots until its response ends (for a streaming callout,
+  until the body finishes or is dropped). A callout staged at a cluster at
+  its ceiling fails without dialing.
 - **Pinning.** `ctx.upstream` is re-pinned after the request phase and after
   the selected-upstream body phase, so a chain filter cannot retarget the
-  callout. A chain filter that changes `ctx.cluster` (for example a `router`)
-  fails the callout before anything is sent: filters after it may already have
-  chosen headers, such as a `credential_injection` secret, for the other
-  cluster. Staging `StagedCluster` together with `StagedUpstream` fails the
+  callout. If a chain filter changes `ctx.cluster` (a `router`, say), the
+  callout fails before anything is sent, because later filters may already
+  have picked headers for the other cluster, such as a `credential_injection`
+  secret. Staging `StagedCluster` together with `StagedUpstream` fails the
   callout.
 
-Limitations: a callout makes one attempt; the cluster's `retry_policy` is not
-applied yet. A `ClusterRef` keeps its own balancer state, separate from any
-`load_balancer` filter that declares the same cluster.
+Limitations: a callout makes one attempt, and the cluster's `retry_policy`
+is not applied yet. A `ClusterRef` keeps its own balancer state, separate
+from any `load_balancer` filter that declares the same cluster.

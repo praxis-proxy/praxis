@@ -1,31 +1,32 @@
 # Observability Examples
 
-Observability filters provide logging, metrics, and tracing to monitor proxy behavior and diagnose issues.
+Observability filters and settings log, measure, and trace proxy traffic so
+you can monitor it and diagnose problems.
 
 ## When to Use
 
 - Track request throughput, latency, and error rates
 - Correlate requests across services with trace context
-- Export metrics to Prometheus for alerting and dashboards
-- Log structured events for audit trails and debugging
-- Monitor upstream health and connection states
+- Export Prometheus metrics for alerts and dashboards
+- Write structured logs for audit trails and debugging
+- Watch upstream health and connection state
 
 ## Key Filters
 
-**Access Log**: Emits structured logs (JSON, key-value) for HTTP and TCP events with configurable fields, sampling, and filtering.
+- [`access_log`](../../../docs/filters/http/observability/access_log.md) and
+  [`tcp_access_log`](../../../docs/filters/tcp/observability/tcp_access_log.md):
+  structured HTTP and TCP access logs, with configurable fields and sampling
+- [`trace_context`](../../../docs/filters/http/observability/trace_context.md):
+  propagates W3C Trace Context headers (`traceparent`, `tracestate`)
+- [`request_id`](../../../docs/filters/http/observability/request_id.md):
+  generates a correlation ID for each request
+- [`cloud_events`](../../../docs/filters/http/observability/cloud_events.md):
+  sends CloudEvents to an HTTP endpoint (experimental, `cloud-events-filter`
+  feature)
 
-**Trace Context**: Propagates W3C Trace Context headers (`traceparent`, `tracestate`) for distributed tracing.
-
-**Request ID**: Generates unique correlation IDs for each request.
-
-**Metrics**: Automatically emits Prometheus counters, gauges, and histograms for requests, errors, upstream calls, and connection states.
-
-## Best Practices
-
-- Use sampling to reduce log volume in high-traffic environments
-- Apply route templates to metrics to bound cardinality
-- Correlate logs and traces with request IDs
-- Monitor both proxy-side and upstream-side metrics for full visibility
+Prometheus counters, gauges, and histograms for requests, errors, upstream
+calls, and connections are emitted without a filter. Use sampling to cut log
+volume, and route templates to bound metric cardinality.
 
 ## Related Documentation
 

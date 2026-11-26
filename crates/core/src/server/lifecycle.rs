@@ -7,12 +7,14 @@ use std::sync::Arc;
 
 use tokio::sync::watch;
 
+use super::service::{RuntimeServicesGate, RuntimeServicesStatus};
+
 /// The externally visible phase of a Praxis server.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LifecyclePhase {
     /// Configuration and listener startup are still in progress.
     Initializing,
-    /// Required listeners and services are ready to accept work.
+    /// The network backend reached its serving phase.
     Serving,
     /// Shutdown has begun; no later transition may resume serving.
     Draining,
@@ -47,6 +49,8 @@ impl std::error::Error for LifecycleError {}
 pub struct LifecycleHandle {
     /// The current phase, shared with every clone and subscriber.
     state: Arc<watch::Sender<LifecyclePhase>>,
+    /// Readiness of required embedding services.
+    runtime_services: RuntimeServicesGate,
 }
 
 impl Default for LifecycleHandle {
@@ -63,6 +67,7 @@ impl LifecycleHandle {
         let (sender, _receiver) = watch::channel(LifecyclePhase::Initializing);
         Self {
             state: Arc::new(sender),
+            runtime_services: RuntimeServicesGate::default(),
         }
     }
 
@@ -76,6 +81,18 @@ impl LifecycleHandle {
     #[must_use]
     pub fn subscribe(&self) -> watch::Receiver<LifecyclePhase> {
         self.state.subscribe()
+    }
+
+    /// Current readiness of contributed embedding services.
+    #[must_use]
+    pub fn runtime_services_status(&self) -> RuntimeServicesStatus {
+        self.runtime_services.status()
+    }
+
+    /// Shared gate for backend listener supervision.
+    #[cfg(any(feature = "pingora", feature = "hyper"))]
+    pub(super) fn runtime_services_gate(&self) -> &RuntimeServicesGate {
+        &self.runtime_services
     }
 
     /// Publish serving after all required startup work has succeeded.

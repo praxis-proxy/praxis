@@ -1,7 +1,6 @@
 # Adopters
 
-Organizations using Praxis in production or
-evaluation. To add your organization, submit a
+Organizations using Praxis in production or evaluation. To add yours, open a
 pull request.
 
 | Organization  | Use Case                    |

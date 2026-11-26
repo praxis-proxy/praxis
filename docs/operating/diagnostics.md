@@ -1,12 +1,12 @@
 # Diagnostics
 
-Use the CLI, admin API, and process logs to inspect a
-running proxy or investigate a failed startup.
+How to inspect a running proxy or investigate a failed startup with the CLI,
+the admin API, and process logs.
 
 ## Version and Configuration
 
-Run these commands with the same binary, configuration,
-and environment as the affected instance:
+Run these with the same binary, configuration, and environment as the
+affected instance:
 
 ```console
 praxis --version
@@ -14,20 +14,12 @@ praxis --validate --config praxis.yaml
 praxis --dump --config praxis.yaml > effective-config.yaml
 ```
 
-`--validate` and `--dump` exit without binding listeners.
-Both return a non-zero exit status on failure and write
-warnings and errors to stderr. Listener startup can still
-fail if a port is unavailable or TLS files cannot be loaded.
-
-The dump includes configuration defaults and resolved
-top-level listener chains. It reads the file on disk;
-after a failed reload, the running proxy may still use
-an older config.
-Known secrets are redacted by name, but custom secret
-fields may remain. Review the output before sharing it.
-
-See [Validating Configuration] and
-[Dumping Effective Configuration] for details.
+Neither `--validate` nor `--dump` binds listeners, so startup can still fail
+on a busy port or an unloadable TLS file. The dump reads the file on disk:
+after a failed reload, the running proxy may still be on an older config.
+Known secrets are redacted by name, but custom secret fields may remain, so
+review the dump before sharing it. Exit codes and output are in
+[Validating Configuration] and [Dumping Effective Configuration].
 
 [Validating Configuration]: configuration.md#validating-configuration
 [Dumping Effective Configuration]:
@@ -35,8 +27,7 @@ configuration.md#dumping-effective-configuration
 
 ## Live State
 
-The examples below use separate admin and health/metrics
-listeners:
+These examples put the admin API on 9901 and health and metrics on 9902:
 
 ```yaml
 admin:
@@ -44,15 +35,10 @@ admin:
   metrics_address: "127.0.0.1:9902"
 ```
 
-Both require the `admin-api` build feature, enabled by
-default. Neither listener has authentication. Keep the
-admin interface on loopback or a trusted, access-controlled
-network, and restrict access to health and metrics too.
-See [Admin] for binding restrictions.
+Both need the `admin-api` build feature (on by default), and neither has
+authentication; see [Admin] for binding restrictions.
 
 [Admin]: configuration.md#admin
-
-Inspect the running proxy:
 
 ```console
 curl -fsS http://127.0.0.1:9901/api/stats
@@ -65,28 +51,25 @@ curl -fsS http://127.0.0.1:9902/metrics
 |-|-|
 | `GET /api/stats` | `version.display`, uptime, listener activity and upstream health. `version.git_sha` is present when available at build time. |
 | `GET /api/pipelines` | Resolved live pipelines, including branches. Use `?listener=NAME` to inspect one listener. |
-| `GET /healthy` | Liveness: `200` once the listener accepts requests. |
-| `GET /ready` | Readiness: `503` while the replica is initializing, draining or stopped. Once serving, the default `admin.readiness: serving` returns `200` even when a cluster has no healthy endpoints; `readiness: upstreams` returns `503` in that case. |
-| `GET /metrics` | Request, error, health and reload metrics. |
+| `GET /ready` | Why a replica is unready (see below). |
+| `GET /metrics` | Request, error, health and reload metrics; see [Observability]. |
 
-`/api/*` uses port 9901 in this example; health and metrics
-use 9902. The `/ready` body names the phase
-(`{"status":"draining"}` during shutdown) or, with active
-health checks, the cluster counts, so a `503` tells you
-whether the replica is shutting down or an upstream is
-down. Enable `admin.verbose` only when per-cluster
-readiness detail is needed; it exposes internal topology.
-
-See [Observability] for endpoint responses and metric
-definitions, and [Health Checking] for probe behaviour.
+`/ready` returns `503` while the replica is initializing, draining or
+stopped, and the body names the phase (`{"status":"draining"}` during
+shutdown). With active health checks it also carries cluster counts. Once
+serving, the default `admin.readiness: serving` stays `200` when a cluster
+has no healthy endpoints, and `readiness: upstreams` returns `503`, so the body tells you whether the replica is shutting down or an
+upstream is down. `admin.verbose` adds per-cluster detail but exposes
+internal topology; enable it only when needed. Probe behavior is in
+[Health Checking].
 
 [Observability]: observability.md
 [Health Checking]: health-checking.md
 
 ## Temporary Debug Logging
 
-Read the current log settings, then enable debug logging
-for the config watcher for five minutes:
+Read the current log settings, then turn on debug logging for the config
+watcher for five minutes:
 
 ```console
 curl -fsS http://127.0.0.1:9901/api/log-level
@@ -95,64 +78,51 @@ curl -fsS -X PUT http://127.0.0.1:9901/api/log-level \
   -d '{"module":"praxis::watcher","level":"debug","duration_secs":300}'
 ```
 
-The overlay expires automatically. Clear it early with:
+The overlay expires on its own. To clear it early:
 
 ```console
 curl -fsS -X DELETE 'http://127.0.0.1:9901/api/log-level?module=praxis::watcher'
 ```
 
-See [Runtime Log Levels] for global overlays and limits.
-For startup failures, use `RUST_LOG` and
-`PRAXIS_LOG_FORMAT=json` when starting the process; the
-admin API is only available after startup.
+[Runtime Log Levels] covers global overlays and limits. The admin API exists
+only after startup, so for startup failures set `RUST_LOG` and
+`PRAXIS_LOG_FORMAT=json` when starting the process.
 
 [Runtime Log Levels]: observability.md#runtime-log-levels-apilog-level
 
 ## Startup and Reload Failures
 
-Keep the startup or reload error and the preceding log
-messages. Warnings identify active `insecure_options`,
-experimental features and unsafe file permissions.
+Keep the startup or reload error and the log lines before it. Warnings name
+active `insecure_options`, experimental features and unsafe file permissions.
 
-With the default Pingora backend, an occupied listener
-address causes binding to retry before failing. The admin
-endpoints may still respond; test the affected listener too.
+With the default Pingora backend, an occupied listener address makes binding
+retry before it fails. The admin endpoints may still answer, so test the
+affected listener too.
 
-For reloads, look for `config reload complete` or
-`config reload failed` and the accompanying error.
-Rejected configurations leave the previous pipelines
-serving traffic. A `requires restart` warning means a
-startup-only setting has not taken effect.
+For reloads, look for `config reload complete` or `config reload failed` and
+its error. A rejected config leaves the previous pipelines serving. A
+`requires restart` warning means a startup-only setting has not taken effect.
 
-The metrics `praxis_config_reload_total{result="success"}`
-and `praxis_config_reload_total{result="failure"}` count
-reload outcomes. `praxis_config_reload_last_success_timestamp`
-records the last successful reload as Unix time in seconds.
-Compare these with `/api/pipelines` and the process logs
-when checking whether an edit took effect.
-
-See [Dynamic Configuration Reload] for settings that can
-reload and changes that require a restart or are rejected.
+`praxis_config_reload_total{result="success"}` and
+`praxis_config_reload_total{result="failure"}` count reload outcomes, and
+`praxis_config_reload_last_success_timestamp` holds the last successful
+reload as Unix time in seconds. Compare them with `/api/pipelines` and the
+logs to check whether an edit took effect. [Dynamic Configuration Reload]
+lists what reloads, what needs a restart, and what is rejected.
 
 [Dynamic Configuration Reload]: configuration.md#dynamic-configuration-reload
 
 ## Draining Before Shutdown
 
-Stop routing new traffic to the instance before sending
-SIGTERM. Wait for active work to finish, using
-`praxis_http_active_requests` for HTTP and
-`praxis_tcp_active_connections` for TCP, together with
-the access logs. Long-lived streams may need a separate
-drain window.
+Stop routing new traffic to the instance before sending SIGTERM, then wait
+for active work to finish: watch `praxis_http_active_requests` for HTTP,
+`praxis_tcp_active_connections` for TCP, and the access logs. Long-lived
+streams may need their own drain window.
 
-With the default Pingora backend, the request grace period
-after SIGTERM is at most five seconds. Increasing
-`shutdown_timeout_secs` does not extend that period.
-Long-lived and streaming responses can therefore be
-interrupted when the grace period expires; drain them before
-SIGTERM when they need more time.
-Allow time for shutdown and for logs and spans to flush
-before forcing the process to exit.
-See [Graceful Shutdown] for the timeout behaviour.
+With the default Pingora backend, requests get at most five seconds after
+SIGTERM, however high `shutdown_timeout_secs` is, so long-lived and streaming
+responses are cut when that expires. Drain them before SIGTERM if they need
+longer, and allow time for logs and spans to flush before forcing the
+process to exit. See [Graceful Shutdown] for the timing.
 
 [Graceful Shutdown]: configuration.md#graceful-shutdown

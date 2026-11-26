@@ -1226,7 +1226,7 @@ impl crate::HttpFilter for SelectedProviderRecorderFilter {
             tls: None,
         });
         if let Some(provider) = self.publish {
-            ctx.publish_selected_application(None, Some(std::sync::Arc::from(provider)));
+            ctx.publish_selected_application(None, Some(std::sync::Arc::from(provider)), None);
         }
         Ok(crate::FilterAction::Continue)
     }
@@ -1286,8 +1286,9 @@ async fn selected_upstream_phase_does_not_inherit_parent_provider() {
         crate::FilteredSubrequestExecutor::for_callout(client, downstream, 0, 1_048_576, Duration::from_secs(5));
 
     let mut extensions = crate::RequestExtensions::default();
-    extensions
-        .insert(crate::extensions::SelectedClusterApplication::new(None, Some(Arc::from("parent-provider"))).unwrap());
+    extensions.insert(
+        crate::extensions::SelectedClusterApplication::new(None, Some(Arc::from("parent-provider")), None).unwrap(),
+    );
 
     let request = crate::SubRequest {
         method: http::Method::POST,
@@ -1390,7 +1391,7 @@ fn nested_upstream_extensions() -> crate::RequestExtensions {
         Some(Arc::from("child_provider")),
     ));
     extensions.remove::<crate::extensions::BoundUpstreamFrozen>();
-    extensions.insert(crate::extensions::SelectedClusterApplication::new(None, Some(Arc::from("leak"))).unwrap());
+    extensions.insert(crate::extensions::SelectedClusterApplication::new(None, Some(Arc::from("leak")), None).unwrap());
 
     extensions
 }
@@ -1477,7 +1478,8 @@ fn nested_upstream_scope_restores_parent_binding_and_freeze() {
     super::enter_nested_upstream_scope(&mut extensions, true);
     extensions.insert(crate::extensions::BoundUpstream::new(Arc::from("child"), None, None));
     extensions.remove::<crate::extensions::BoundUpstreamFrozen>();
-    extensions.insert(crate::extensions::SelectedClusterApplication::new(None, Some(Arc::from("child"))).unwrap());
+    extensions
+        .insert(crate::extensions::SelectedClusterApplication::new(None, Some(Arc::from("child")), None).unwrap());
 
     super::restore_parent_upstream_scope(&mut extensions);
 

@@ -26,6 +26,7 @@ use std::{
 
 #[cfg(feature = "bound-upstream-request-body")]
 use bytes::Bytes;
+use praxis_core::config::InputModality;
 
 /// The client-facing headers of a streaming terminal response were written.
 ///
@@ -162,14 +163,14 @@ impl AuthenticatedIdentity {
 // SelectedClusterApplication
 // -----------------------------------------------------------------------------
 
-/// Opaque application metadata of the cluster the load balancer selected
+/// Application metadata of the cluster selected
 /// for this exchange.
 ///
 /// Published once by the trusted built-in load balancer after a successful
 /// upstream selection and read-only thereafter, so request, response,
 /// response-body, and logging filters all observe the same values for the
 /// life of the exchange. Absent when no cluster was selected or the
-/// selected cluster tagged neither field.
+/// selected cluster declares no application metadata.
 ///
 /// The identifiers are opaque to Praxis core: consuming filters interpret
 /// them; Praxis defines no enum of known protocols or providers. The type
@@ -177,9 +178,9 @@ impl AuthenticatedIdentity {
 /// balancer constructs it (via
 /// [`HttpFilterContext::publish_selected_application`]), and external
 /// filters read it through
-/// [`HttpFilterContext::selected_application_protocol`] and
-/// [`HttpFilterContext::selected_application_provider`] rather than naming
-/// the type. The identifiers come straight from the resolved cluster entry.
+/// [`HttpFilterContext::selected_application_protocol`],
+/// [`HttpFilterContext::selected_application_provider`], and
+/// [`crate::HttpFilterContext::selected_input_modality_declared`].
 ///
 /// [`HttpFilterContext::publish_selected_application`]: crate::HttpFilterContext::publish_selected_application
 /// [`HttpFilterContext::selected_application_protocol`]: crate::HttpFilterContext::selected_application_protocol
@@ -190,14 +191,29 @@ pub(crate) struct SelectedClusterApplication {
     protocol: Option<Arc<str>>,
     /// Opaque application provider of the selected cluster, if tagged.
     provider: Option<Arc<str>>,
+    /// Input modalities declared for the selected cluster.
+    input_modalities: Option<Arc<BTreeSet<InputModality>>>,
 }
 
 impl SelectedClusterApplication {
-    /// Build selected-application metadata from a resolved cluster's
-    /// identifiers, or `None` when the cluster tagged neither field, so the
-    /// extension is inserted only when there is something to read.
-    pub(crate) fn new(protocol: Option<Arc<str>>, provider: Option<Arc<str>>) -> Option<Self> {
-        (protocol.is_some() || provider.is_some()).then_some(Self { protocol, provider })
+    /// Build selected-application metadata, if the cluster declared any.
+    pub(crate) fn new(
+        protocol: Option<Arc<str>>,
+        provider: Option<Arc<str>>,
+        input_modalities: Option<Arc<BTreeSet<InputModality>>>,
+    ) -> Option<Self> {
+        (protocol.is_some() || provider.is_some() || input_modalities.is_some()).then_some(Self {
+            protocol,
+            provider,
+            input_modalities,
+        })
+    }
+
+    /// Whether the selected cluster explicitly declares this input modality.
+    pub(crate) fn declares(&self, modality: InputModality) -> bool {
+        self.input_modalities
+            .as_ref()
+            .is_some_and(|modalities| modalities.contains(&modality))
     }
 
     /// Opaque application protocol of the selected cluster, if tagged.
@@ -431,14 +447,14 @@ mod tests {
     #[test]
     fn selected_cluster_application_absent_when_both_fields_absent() {
         assert!(
-            SelectedClusterApplication::new(None, None).is_none(),
+            SelectedClusterApplication::new(None, None, None).is_none(),
             "an untagged cluster must not produce a metadata value"
         );
     }
 
     #[test]
     fn selected_cluster_application_present_with_protocol_only() {
-        let app = SelectedClusterApplication::new(Some(Arc::from("openai_chat_completions")), None)
+        let app = SelectedClusterApplication::new(Some(Arc::from("openai_chat_completions")), None, None)
             .expect("a protocol-only cluster should produce a value");
         assert_eq!(
             app.protocol(),
@@ -450,7 +466,7 @@ mod tests {
 
     #[test]
     fn selected_cluster_application_present_with_provider_only() {
-        let app = SelectedClusterApplication::new(None, Some(Arc::from("vllm")))
+        let app = SelectedClusterApplication::new(None, Some(Arc::from("vllm")), None)
             .expect("a provider-only cluster should produce a value");
         assert!(app.protocol().is_none(), "an absent protocol should read back as None");
         assert_eq!(app.provider(), Some("vllm"), "provider should read back");
@@ -458,7 +474,7 @@ mod tests {
 
     #[test]
     fn selected_cluster_application_exposes_both_fields() {
-        let app = SelectedClusterApplication::new(Some(Arc::from("openai_responses")), Some(Arc::from("openai")))
+        let app = SelectedClusterApplication::new(Some(Arc::from("openai_responses")), Some(Arc::from("openai")), None)
             .expect("a fully tagged cluster should produce a value");
         assert_eq!(app.protocol(), Some("openai_responses"), "protocol should read back");
         assert_eq!(app.provider(), Some("openai"), "provider should read back");

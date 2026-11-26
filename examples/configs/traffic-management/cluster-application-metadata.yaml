@@ -1,12 +1,12 @@
 # Cluster Application Metadata
 #
-# Tags an upstream cluster with opaque application metadata that
-# consuming filters interpret. The `application_protocol` field
+# Declares application protocol, provider, and input modalities for routed
+# upstream clusters. The `application_protocol` field
 # declares the wire format the upstream body speaks and
 # `application_provider` names the provider-specific flavor. Both stay
 # opaque to Praxis core and are validated only as bounded, canonical
-# identifiers. Traffic is proxied normally; the metadata simply travels
-# with the cluster definition.
+# identifiers. Declare accepted input modalities per deployment so
+# filters can distinguish clusters that use the same protocol and provider.
 #
 # Usage:
 #   cargo run -p praxis-proxy -- -c examples/configs/traffic-management/cluster-application-metadata.yaml
@@ -23,6 +23,8 @@ filter_chains:
     filters:
       - filter: router
         routes:
+          - path_prefix: "/vision"
+            cluster: vision_backend
           - path_prefix: "/"
             cluster: llm_backend
 
@@ -34,8 +36,16 @@ filter_chains:
               # filters, validated here only as canonical identifiers.
               application_protocol: openai_chat_completions
               application_provider: vllm
+              input_modalities: [text]
             endpoints:
               - "127.0.0.1:3001"
+          - name: vision_backend
+            http:
+              application_protocol: openai_chat_completions
+              application_provider: vllm
+              input_modalities: [text, image]
+            endpoints:
+              - "127.0.0.1:3002"
 
 insecure_options:
   allow_private_endpoints: true # example proxies to a local backend

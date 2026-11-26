@@ -359,6 +359,38 @@ async fn staged_cluster_repins_after_a_retargeting_filter() {
     );
 }
 
+/// Re-pinning restores the declaration after the executor clears selected metadata.
+#[test]
+fn staged_cluster_repin_restores_image_modality() {
+    use praxis_core::config::InputModality::Image;
+
+    let declared = cluster(
+        &["127.0.0.1:8080".parse().unwrap()],
+        "http:\n  input_modalities: [image]\n",
+    );
+    let target = ClusterRef::resolve(&declared).unwrap();
+    let request = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&request);
+    ctx.extensions = staged(&target);
+    let (upstream, pinned) = super::staged_cluster::stage_cluster(&mut ctx, false).unwrap().unwrap();
+    assert!(
+        ctx.selected_input_modality_declared(Image),
+        "staging publishes image support"
+    );
+
+    super::repin_staged_upstream(&mut ctx, Some(&upstream));
+    assert!(
+        !ctx.selected_input_modality_declared(Image),
+        "restoring the endpoint clears metadata"
+    );
+
+    super::staged_cluster::repin_cluster(&mut ctx, Some(&pinned));
+    assert!(
+        ctx.selected_input_modality_declared(Image),
+        "re-pinning restores image support"
+    );
+}
+
 #[tokio::test]
 #[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
 async fn staged_cluster_and_staged_upstream_conflict() {

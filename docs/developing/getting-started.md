@@ -1,8 +1,7 @@
 # Getting Started
 
-This guide is for repository contributors building and changing Praxis.
-To configure and run your first local proxy, use the
-[operator quickstart](../getting-started/quickstart.md).
+For contributors building and changing Praxis. To configure and run a local
+proxy, use the [operator quickstart](../getting-started/quickstart.md).
 
 ## Requirements
 
@@ -14,7 +13,7 @@ For a local build and targeted tests, install:
 - CMake 3.31+
 - System OpenSSL development libraries and `pkg-config`
 
-Clone the repository and work from its root:
+Clone the repository and build from its root:
 
 ```console
 git clone https://github.com/praxis-proxy/praxis.git
@@ -22,18 +21,15 @@ cd praxis
 cargo build -p praxis-proxy
 ```
 
-Run a focused test while making changes, for example the core unit tests:
+While making changes, run focused tests, for example the core unit tests:
 
 ```console
 cargo test -p praxis-proxy-core --lib
 ```
 
-See [conventions](conventions.md) for the checks required for your change.
-
 ## Tools for linting and specialist workflows
 
-Install the tools needed by the targets you plan to run. FIPS, container,
-and coverage workflows have additional requirements below.
+Install the tools for the targets you plan to run:
 
 - Rust nightly for `rustfmt`, at `NIGHTLY_VERSION` in the Makefile
 - Docker 29.3.0+ or Podman (for container builds; the FIPS image, its
@@ -49,39 +45,30 @@ and coverage workflows have additional requirements below.
 - `typos`, `taplo`, `shellcheck`, `actionlint`
   (non-Rust lint, `make lint-extra`)
 
-## Conventions
+## Conventions and Lint
 
-**All contributors must read and understand
-[conventions.md] before contributing.** The conventions
-cover code style, testing requirements, file
-organization, and security practices. Submissions
-that do not follow these conventions will be rejected.
-
-[conventions.md]:./conventions.md
-
-## Lint
+Read [conventions.md](conventions.md) before contributing. It covers code
+style, testing requirements, file organization, and security practices, and
+submissions that don't follow it are rejected.
 
 ```console
 make fmt
 make lint
 ```
 
-It is recommended you run `make setup-hooks` to set
-up pre-commit hooks that ensure linting is always
-done before committing code.
+`make setup-hooks` installs a pre-commit hook that runs the linters before
+every commit.
 
 ## Dev Utilities
 
-For rapid development and testing:
-
-**Echo server** (quick HTTP test backend):
+`cargo xtask echo` starts a quick HTTP test backend:
 
 ```console
 cargo xtask echo
 cargo xtask echo --status 201 --body '{"created": true}'
 ```
 
-**Debug server** (run with dev settings):
+`cargo xtask debug` runs the proxy with dev settings:
 
 ```console
 cargo xtask debug
@@ -107,48 +94,40 @@ make test-integration
 make test-rollout # temporarily disabled; prints SKIPPED
 ```
 
-KIND rollout acceptance is temporarily disabled in CI and through both
-`make test-rollout` and `cargo xtask rollout`. The four-node rootless
-cluster exhausts the host's shared inotify instance budget before Praxis
-starts. Move the suite to
+KIND rollout acceptance is disabled in CI and in both `make test-rollout`
+and `cargo xtask rollout`: the four-node rootless cluster exhausts the host's
+shared inotify instance budget before Praxis starts. Move the suite to
 [gateway-controller](https://github.com/praxis-proxy/gateway-controller)
-before re-enabling it. The harness and its assertions remain in
-`tests/rollout` for migration; a skipped invocation does not validate
-rollout behavior.
+before re-enabling it. The harness and its assertions stay in
+`tests/rollout` for the migration; a skipped run validates nothing.
 
-Integration tests wait for the proxy to start accepting connections
-before issuing requests. On slow or heavily loaded runners (notably
-under coverage instrumentation), the default readiness deadlines can
-expire before startup finishes, producing spurious failures. Set
-`PRAXIS_TEST_READY_TIMEOUT_MS` to a larger value (in milliseconds) to
-raise the deadline for every readiness utility; `make coverage` and
-`make coverage-check` already set it. When unset, the defaults apply
-(2s for TCP, 5s for HTTP, HTTP/2, and TLS).
+Integration tests wait for the proxy to accept connections before sending
+requests. The default readiness deadlines are 2s for TCP and 5s for HTTP,
+HTTP/2, and TLS. On slow runners, notably under coverage instrumentation,
+they can expire and cause spurious failures; set
+`PRAXIS_TEST_READY_TIMEOUT_MS` (milliseconds) to raise the deadline for
+every readiness utility. `make coverage` and `make coverage-check` already
+set it.
 
 ### Supply Chain Safety
 
-Security is enforced at every stage of development.
-`cargo audit` and `cargo deny check` are run as part of
-the `make audit` target. The `deny.toml` config bans
-wildcard version requirements, unknown registries, and
-unknown git sources. Multiple versions of the same crate
-produce a warning. All crates enforce
-`#![deny(unsafe_code)]` and Clippy runs with
-`-D warnings` (zero tolerance).
+`make audit` runs `cargo audit` and `cargo deny check`. `deny.toml` bans
+wildcard version requirements, unknown registries, and unknown git sources,
+and warns on multiple versions of one crate. All crates enforce
+`#![deny(unsafe_code)]`, and Clippy runs with `-D warnings`.
 
 See the [crate layout](../architecture/crate-layout.md) for workspace
-structure and crate dependencies.
-See [security-hardening.md](../operating/security-hardening.md) for
-deployment guidance.
+structure and [security-hardening.md](../operating/security-hardening.md)
+for deployment guidance.
 
 ### FIPS Build and Compliance Check
 
 The FIPS build does all cryptography in the system OpenSSL, which on a Red
 Hat Enterprise Linux host in FIPS mode is the validated FIPS provider. It
-leaves out the features that are not yet FIPS compliant, currently the policy
-engine. The feature set is defined once, as `FIPS_FEATURES` in the
-`Makefile`. The standard build (`make build`, `make release`,
-`make container`) uses the default features.
+leaves out features that are not FIPS compliant yet, currently the policy
+engine. Its feature set is `FIPS_FEATURES` in the `Makefile`; the standard
+build (`make build`, `make release`, `make container`) uses the default
+features.
 
 ```console
 make release-fips    # FIPS build, release profile, into target/fips
@@ -160,44 +139,20 @@ make test-integration-fips  # the integration suites against the FIPS feature se
 make test-fips-host  # the whole suite as the FIPS build, inside the UBI 9 toolchain image, on a FIPS host
 ```
 
-On a RHEL 9 host in FIPS mode, two more targets give the runtime proof the
-hosted checks cannot ([FIPS 140-3](../operating/fips.md#verifying-a-deployment)):
-
-```console
-make fips-host-check     # attest the host and the image's module build (target/fips/host-attestation.*)
-make fips-runtime-probe  # run the FIPS image under PRAXIS_REQUIRE_FIPS=1 and probe its listener
-```
-
-`fips-deps`, `fips-report` and `fips-check` check a build against the rules
-Red Hat's release scanner (`openshift/check-payload`) applies to Rust
-binaries, explain each finding, and exit non-zero while findings remain.
-`fips-scanner` and `fips-scan` build and run the scanner itself:
-
-```console
-make fips-deps     # dependency graph and source guards (seconds, no build)
-make fips-report   # full report against target/fips/release/praxis
-make fips-check    # build on UBI 9 with Red Hat's toolchain, then report
-make fips-scanner  # build Red Hat's scanner (check-payload) at its pinned revision
-make fips-scan     # run that scanner on the FIPS image, warnings fatal: the gate
-```
-
-`make container-fips`, `make fips-check`, `make fips-smoke` and
-`make fips-scan` need a Linux podman, rootless or root. The first two verify
-the Red Hat signatures of the digest-pinned UBI 9 base images before every
-build (`make fips-verify-image`). On Debian and Ubuntu, whose podman ships no
-`registries.d` entry for Red Hat's registry, run `make fips-signature-store`
-once first. The image is built with Red Hat's `rust-toolset`, and its runtime
-stage installs nothing on `ubi9/ubi-minimal` beyond the binary and its config.
-See [FIPS Tooling](fips.md) for what the report checks, the provenance of the
-pinned images and signing key, and why the build uses cargo's SBOM precursor.
+The compliance targets (`fips-deps`, `fips-report`, `fips-check`,
+`fips-scanner`, `fips-scan`), the FIPS-host targets (`fips-host-check`,
+`fips-runtime-probe`), and the base-image signature checks are in
+[FIPS Tooling](fips.md), with what the report checks and the provenance of
+the pinned images and signing key. `make container-fips`, `make fips-check`,
+`make fips-smoke` and `make fips-scan` need a Linux podman, rootless or root.
 
 ### Hyper Backend (experimental)
 
-The proxy can be built on the experimental hyper backend instead of Pingora.
-Its feature set is defined once, as `HYPER_FEATURES` in the `Makefile`, and
-its builds go to `target/hyper`. `BACKEND=hyper` routes the standard test
-targets to these, so `make test-integration BACKEND=hyper` runs the same
-suites on hyper. CI runs the lint and test targets below.
+The proxy can build on the experimental hyper backend instead of Pingora.
+Its feature set is `HYPER_FEATURES` in the `Makefile`, and its builds go to
+`target/hyper`. `BACKEND=hyper` points the standard test targets at it, so
+`make test-integration BACKEND=hyper` runs the same suites on hyper. CI runs
+the lint and test targets below.
 
 ```console
 make build-hyper              # hyper build, debug profile, into target/hyper
@@ -213,25 +168,20 @@ covers and what is not at parity with Pingora yet.
 
 ## Security: Binding Low Ports
 
-Praxis refuses to start when running as root (UID 0)
-on Unix systems. This check runs before any port
-binding or protocol registration. If you need to
-bind ports below 1024, prefer one of these approaches:
+On Unix, Praxis refuses to start as root (UID 0), checked before any port
+binding or protocol registration. To bind ports below 1024:
 
 - Grant `CAP_NET_BIND_SERVICE` to the binary:
   `sudo setcap cap_net_bind_service=+ep ./target/release/praxis`
-- Run behind a reverse proxy or load balancer that
-  handles port 80/443.
-- Use socket activation (systemd) to pass pre-bound
-  sockets.
+- Run behind a reverse proxy or load balancer that handles port 80/443.
 
 ## Insecure Options
 
-> **Warning.** These flags are intended for development and
-> testing only. Never enable them in production. Each flag demotes
-> a security check from an error to a warning.
+> **Warning.** For development and testing only; never enable these in
+> production. Each flag demotes a security check from an error to a warning.
 
-All flags live under `insecure_options` in the YAML config and default to `false`.
+All flags live under `insecure_options` in the YAML config and default to
+`false`.
 
 ```yaml
 insecure_options:
@@ -251,18 +201,18 @@ insecure_options:
 
 | Flag | Effect |
 | ------ | -------- |
-| `allow_open_security_filters` | Allow filters registered as `SecurityClass::Security` (built-in examples: `ip_acl`, `forwarded_headers`; also custom filters registered as Security) to use `failure_mode: open`. Without this flag, open security filters are rejected because a runtime error would bypass security enforcement. With this flag enabled, the error is demoted to a warning. |
+| `allow_open_security_filters` | Allow filters registered as `SecurityClass::Security` (built-ins such as `ip_acl` and `forwarded_headers`, and custom filters registered that way) to use `failure_mode: open`. Without it they are rejected, because a runtime error would bypass security enforcement. |
 | `allow_private_endpoints` | Allow cluster endpoints to resolve to loopback, link-local, or cloud metadata addresses. Blocked by default as SSRF protection for upstream targets. |
 | `allow_private_health_checks` | Allow health check endpoints that resolve to loopback (`127.0.0.0/8`), link-local (`169.254.0.0/16`), or cloud metadata addresses. Blocked by default as SSRF protection. The probed endpoints are also cluster endpoints, so they additionally need `allow_private_endpoints`. |
 | `allow_private_upstreams` | Allow upstream connections that resolve to private or reserved IP addresses at runtime. Without this flag, DNS-resolved upstream addresses in RFC 1918, loopback, link-local, CGNAT, and IPv6 unique-local ranges are rejected to prevent DNS rebinding and SSRF attacks, on both the TCP and HTTP data planes (including `iterative_request_router` sub-requests). Literal `host:port` upstreams are unaffected; those are gated at config time by `allow_private_endpoints`. |
 | `allow_public_admin` | Allow the admin API listener to bind to a non-loopback address (`0.0.0.0`, a LAN IP, etc.). The health/metrics listener is not restricted to loopback by this flag. |
 | `allow_root` | Allow starting as root (UID 0). Praxis refuses to run as root by default. |
-| `allow_tls_no_verify` | Allow disabling upstream TLS certificate verification (`tls.verify: false` on a cluster). Without this flag, `verify: false` is a hard validation error. |
+| `allow_tls_no_verify` | Allow disabling upstream TLS certificate verification (`tls.verify: false` on a cluster), otherwise a validation error. |
 | `allow_tls_without_sni` | Allow upstream TLS verification on a cluster with neither `tls.sni` nor `authority: { from: endpoint }`. The certificate is then verified against the cluster's fixed `authority` if set, else the client's `Host` header, which the client chooses. When that is not a hostname, the endpoint address is used instead. Without this flag, such a cluster is a validation error. IP endpoints don't need it: with `authority: { from: endpoint }` they are verified against the certificate's IP SAN. |
-| `allow_unbounded_body` | Allow unbounded body processing. This covers two checks: (1) `body_limits.max_request_bytes` or `max_response_bytes` set to `null`, and (2) `StreamBuffer` body mode without a `max_bytes` limit. Without this flag, both are rejected at startup. |
-| `csrf_log_only` | Run the CSRF filter in log-only mode: evaluate all rules but log violations as warnings instead of rejecting requests. Useful for initial rollout monitoring. |
+| `allow_unbounded_body` | Allow unbounded body processing: `body_limits.max_request_bytes` or `max_response_bytes` set to `null`, and `StreamBuffer` body mode without a `max_bytes` limit. Both are otherwise rejected at startup. |
+| `csrf_log_only` | Run the CSRF filter in log-only mode: evaluate all rules but log violations as warnings instead of rejecting, for example during an initial rollout. |
 | `skip_pipeline_checks` | Granular per-check pipeline validation bypass flags (`conditional_security`, `conflicting_cluster_selectors`, `duplicate_load_balancers`, `duplicate_rewrite_filters`, `duplicate_routers`, `lb_without_router`, `misaligned_clusters`, `unreachable_filters`). Prefer these over the blanket `skip_pipeline_validation` flag. |
-| `skip_pipeline_validation` | **Deprecated.** Demote ALL pipeline ordering errors (e.g. filter placement issues) to warnings instead of failing startup. Prefer the granular `skip_pipeline_checks` flags. |
+| `skip_pipeline_validation` | **Deprecated.** Demote all pipeline ordering errors (such as filter placement) to warnings instead of failing startup. Use `skip_pipeline_checks`. |
 
 Example overriding two flags for local development:
 
@@ -277,38 +227,24 @@ insecure_options:
 
 ## Shared Build Cache with sccache
 
-[sccache] caches compiled artifacts so that switching
-branches, cleaning `target/`, or working across
-multiple git worktrees does not require rebuilding
-every dependency from scratch.
-
-### Setup
-
-[Install sccache][sccache-install], then add the
-following to your shell profile (`~/.bashrc`,
-`~/.zshrc`, etc.):
+[sccache] caches compiled artifacts, so switching branches, cleaning
+`target/`, or working across git worktrees doesn't rebuild every dependency.
+[Install sccache][sccache-install] and add this to your shell profile
+(`~/.bashrc`, `~/.zshrc`):
 
 ```sh
 export RUSTC_WRAPPER=sccache
 ```
 
-### Warming the cache
-
-After setting up sccache, run a full clippy pass in any
-worktree to populate the cache:
+Warm the cache with one full clippy pass in any worktree:
 
 ```console
 cargo clippy --workspace --all-targets
 ```
 
-Subsequent builds reuse the cached artifacts
-automatically. Cargo still prints `Compiling` /
-`Checking` for every crate, but cache-hit compilations
-complete in milliseconds instead of seconds.
-
-Check hit rates with `sccache --show-stats`. See
-[sccache usage][sccache-usage] for more configuration
-options.
+Later builds reuse the cache. Cargo still prints `Compiling` / `Checking` for
+every crate, but cache hits finish in milliseconds. Check hit rates with
+`sccache --show-stats`; see [sccache usage][sccache-usage] for configuration.
 
 [sccache]: https://github.com/mozilla/sccache
 [sccache-install]: https://github.com/mozilla/sccache#installation
