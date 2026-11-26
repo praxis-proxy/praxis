@@ -528,7 +528,8 @@ mod tests {
             options.input_modalities,
             [InputModality::Text, InputModality::Image].into()
         );
-        assert!(serde_yaml::from_str::<ClusterHttpOptions>("input_modalities: [imgae]").is_err());
+        let error = serde_yaml::from_str::<ClusterHttpOptions>("input_modalities: [imgae]").unwrap_err();
+        assert!(error.to_string().contains("unknown variant `imgae`"));
     }
 
     #[test]

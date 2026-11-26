@@ -301,8 +301,6 @@ pub(crate) fn build_cluster_entry(cluster: &Cluster) -> Result<ClusterEntry, Fil
         "cluster registered"
     );
 
-    let tls = build_cached_tls(cluster)?;
-    let authority = AuthorityResolver::build(cluster)?;
     let strategy = Arc::new(build_strategy(&cluster.load_balancer_strategy, endpoints));
     let retry_policy = Arc::new(cluster.retry_policy.clone().unwrap_or_else(RetryPolicy::legacy_default));
     let retry_state = Arc::new(
@@ -310,10 +308,10 @@ pub(crate) fn build_cluster_entry(cluster: &Cluster) -> Result<ClusterEntry, Fil
     );
     Ok(ClusterEntry {
         name: Arc::clone(&cluster.name),
-        authority,
+        authority: AuthorityResolver::build(cluster)?,
         opts: Arc::new(ConnectionOptions::from(cluster)),
         strategy,
-        tls,
+        tls: build_cached_tls(cluster)?,
         application_protocol: cluster.http.application_protocol.clone(),
         application_provider: cluster.http.application_provider.clone(),
         input_modalities: (!cluster.http.input_modalities.is_empty())

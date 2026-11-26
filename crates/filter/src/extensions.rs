@@ -180,7 +180,7 @@ impl AuthenticatedIdentity {
 /// filters read it through
 /// [`HttpFilterContext::selected_application_protocol`],
 /// [`HttpFilterContext::selected_application_provider`], and
-/// [`HttpFilterContext::selected_input_modality_declared`].
+/// [`crate::HttpFilterContext::selected_input_modality_declared`].
 ///
 /// [`HttpFilterContext::publish_selected_application`]: crate::HttpFilterContext::publish_selected_application
 /// [`HttpFilterContext::selected_application_protocol`]: crate::HttpFilterContext::selected_application_protocol
