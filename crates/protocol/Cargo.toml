@@ -23,7 +23,7 @@ tls-health-check = ["pingora", "praxis-core/tls-health-check"]
 # docs/developing/adding-backends.md.
 default = ["pingora"]
 # Transport for locally admitted HTTP/1.1 upgrades.
-managed-websocket = ["pingora"]
+managed-websocket = ["pingora", "dep:tungstenite"]
 pingora = ["dep:openssl", "dep:pingora-core", "dep:pingora-http", "dep:pingora-proxy", "praxis-core/pingora"]
 # The hyper network backend: the HTTP and TCP adapters, the admin glue and
 # `backend::{Http, Tcp}` resolve to hyper. Off by default and experimental.
@@ -127,6 +127,8 @@ tokio-rustls = { workspace = true, optional = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 tracing-opentelemetry = { workspace = true, optional = true }
+
+tungstenite = { version = "0.30.0", default-features = false, optional = true }
 
 [dev-dependencies]
 praxis-core = { workspace = true, features = ["test-support"] }

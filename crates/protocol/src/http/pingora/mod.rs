@@ -394,3 +394,7 @@ mod tests {
         assert!(http_listeners.iter().all(|l| l.protocol == ProtocolKind::Http));
     }
 }
+
+/// Bounded WebSocket messages over the local upgrade transport.
+#[cfg(feature = "managed-websocket")]
+pub mod websocket_session;

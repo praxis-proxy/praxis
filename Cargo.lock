@@ -3495,6 +3495,7 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "tungstenite",
  "yaml_serde",
 ]
 
