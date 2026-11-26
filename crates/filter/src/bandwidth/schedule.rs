@@ -556,6 +556,22 @@ mod tests {
         assert_eq!(schedule.reserve_at(1000, 0).delay(), Duration::from_secs(1));
     }
 
+    /// A delayed partial write cannot refund into allowance already refilled elsewhere.
+    #[test]
+    fn late_partial_write_cannot_create_a_second_burst() {
+        let schedule = Schedule::new(16_384, 16_384);
+        let mut first = schedule.grant(16_384, 0, Some(0));
+        assert!(matches!(first.try_acquire(), Admission::Ready));
+        let mut second = schedule.grant(4_096, 1_000_000_000, Some(1_000_000_000));
+        assert!(matches!(second.try_acquire(), Admission::Busy(_)));
+        first.synthetic_now = Some(1_000_000_000);
+        first.commit_partial(4_096);
+        assert!(matches!(second.try_acquire(), Admission::Ready));
+        second.commit();
+        let mut extra = schedule.grant(16_384, 1_000_000_000, Some(1_000_000_000));
+        assert!(matches!(extra.try_acquire(), Admission::At(..)));
+    }
+
     #[test]
     fn cancelling_a_pre_refill_grant_does_not_create_a_second_burst() {
         let schedule = Schedule::new(100, 100);
