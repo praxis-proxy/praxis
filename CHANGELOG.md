@@ -89,6 +89,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   are rejected at startup. Unrepresentable clock values leave the timestamp unset.
 
 
+- Fuzz testing (`tests/fuzz`, `make fuzz`/`fuzz-build`): a differential
+  fuzz target checks the SIMD-accelerated JSON string-delimiter scanner
+  (`json_ops::simd_scan`, the workspace's only `unsafe` code) against its
+  scalar fallback on arbitrary input. Runs nightly on a bounded schedule
+  (`.github/workflows/fuzz.yaml`).
+
 ### Changed
 
 - Update the policy engine from PPE 0.6.0 to 0.7.0, including Limitador
