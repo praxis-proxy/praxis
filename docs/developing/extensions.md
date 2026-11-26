@@ -508,7 +508,7 @@ With the `chain-binding` build feature, a chain-binding filter can send a
 `FilteredSubrequestExecutor` callout to a top-level cluster instead of a URL.
 That `clusters:` entry supplies the callout's endpoints, load-balancing
 strategy, health, slow start, TLS (including client certificates), authority,
-base path, timeouts, and retry policy.
+base path, and timeouts.
 
 Resolve the cluster once, when the filter is built, and stage it on each
 callout:
@@ -549,7 +549,9 @@ What the executor does with a staged cluster:
   callout.
 - **Timeouts.** The policy's `per_try_timeout_ms` caps each attempt, from
   peer construction (including DNS resolution) to the response, inside the
-  step deadline. Its `request_timeout_ms` caps the whole callout.
+  step deadline. Its `request_timeout_ms` caps the whole callout. The executor
+  makes a single cluster endpoint attempt. It may try another address for that
+  endpoint after a connection failure, but cluster retry rules do not apply.
 - **Passive health.** Every attempt that reached an endpoint counts toward the cluster's
   `passive_unhealthy_threshold` and `passive_healthy_threshold`. Outcomes
   decided on the caller's side (a request that could not be built, the callout

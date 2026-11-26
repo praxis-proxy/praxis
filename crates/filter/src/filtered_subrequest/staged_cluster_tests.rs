@@ -666,8 +666,20 @@ async fn cluster_callout_oversized_response_does_not_eject_the_endpoint() {
     let downstream = SubrequestRuntime::new(None, false, None, Instant::now());
     let tight = FilteredSubrequestExecutor::for_callout(client, downstream, 0, 4, Duration::from_secs(5));
 
-    drop(run_buffered(&tight, &pipeline, &get(), staged(&target)).await);
+    let outcome = tight
+        .run_classified(
+            &pipeline,
+            &get(),
+            staged(&target),
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await;
     backend.abort();
+
+    assert!(matches!(
+        outcome.unwrap(),
+        crate::CalloutOutcome::ResponseTooLarge { limit: 4, .. }
+    ));
 
     let state = pipeline.health_registry().unwrap().get("weather-mcp").unwrap();
     assert!(
