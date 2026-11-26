@@ -100,6 +100,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- Document proposed application protocol identifiers for routed Embeddings,
+  Decisions, and System One APIs, using a shared vLLM upstream address.
+
 - Update the policy engine from PPE 0.6.0 to 0.7.0, including Limitador
   0.14.1. This removes `heapless` and its nine temporary RustSec advisory
   exceptions from the audit and deny configurations.
