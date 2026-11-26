@@ -1023,6 +1023,55 @@ mod tests {
         );
     }
 
+    /// A waiting sibling reuses only the unwritten tail after a transport reset.
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "follows two writers through admission, reset, refund and reuse"
+    )]
+    async fn partial_reset_wakes_a_sibling_and_preserves_the_shared_burst() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let pacer = TcpBandwidthPacer::new(Some(1), None, 16_384);
+        let mut first = pacer.reserve_upload(16_384);
+        let (bytes, permit) = first.acquire_prefix(16_384, None).await.unwrap();
+        assert_eq!(bytes, 16_384);
+        let mut second = pacer.reserve_upload(12_288);
+        let (sent, accepted) = {
+            let pending = second.acquire_prefix(12_288, None);
+            tokio::pin!(pending);
+            tokio::select! {
+                biased;
+                _result = &mut pending => panic!("the unsettled write holds the burst"),
+                () = tokio::task::yield_now() => {},
+            }
+            let (mut writer, peer) = tokio::io::duplex(4_096);
+            let accepted = writer.write(&vec![b'x'; bytes]).await.unwrap();
+            assert_eq!(accepted, 4_096);
+            drop(peer);
+            let error = writer.write(b"remaining").await.unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+            permit.commit_bytes(accepted);
+            let (sent, reclaimed) = tokio::time::timeout(Duration::from_secs(1), &mut pending)
+                .await
+                .expect("settlement must wake an already waiting sibling")
+                .unwrap();
+            reclaimed.commit_bytes(sent);
+            (sent, accepted)
+        };
+        let mut reused = sent;
+        while reused < 12_288 {
+            let (bytes, permit) = second.acquire_prefix(12_288 - reused, None).await.unwrap();
+            permit.commit_bytes(bytes);
+            reused += bytes;
+        }
+        assert_eq!(accepted + reused, 16_384);
+        assert!(
+            !pacer.reserve_upload(1).delay().is_zero(),
+            "accepted bytes remain charged"
+        );
+    }
+
     #[test]
     fn generated_body_is_not_reserved_twice() {
         let mut extensions = RequestExtensions::new();
