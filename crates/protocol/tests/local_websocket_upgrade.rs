@@ -65,6 +65,8 @@ mod tests {
         let transport = LocalWebSocket::commit(session, accept).await.unwrap();
         let mut messages = WebSocketSession::new(transport);
         assert_eq!(messages.receive().await.unwrap(), Some(Message::text("ab")));
+        let oversized = Message::Binary(Bytes::from(vec![0; 1_048_577]));
+        assert!(messages.send(oversized).await.is_err());
         messages.send(Message::text("x")).await.unwrap();
         assert_eq!(messages.receive().await.unwrap(), None);
     }
@@ -126,6 +128,27 @@ mod tests {
         let mut response = Vec::new();
         peer.read_to_end(&mut response).await.unwrap();
         assert!(response.is_empty());
+    }
+
+    #[tokio::test]
+    async fn oversized_inbound_frame_terminates_the_session() {
+        use praxis_protocol::http::pingora::websocket_session::WebSocketSession;
+        use tungstenite::{Error, Message};
+
+        let (mut peer, socket) = tokio::io::duplex(1024);
+        let head = OFFER.strip_suffix(b"\x81\x80abcd").unwrap();
+        peer.write_all(head).await.unwrap();
+        peer.write_all(b"\x82\xff\0\0\0\0\0\x10\0\x01\0\0\0\0").await.unwrap();
+        let mut session = Session::new_h1(Box::new(socket));
+        assert!(session.read_request().await.unwrap());
+        let accept = http::HeaderValue::from_static("s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+        let transport = LocalWebSocket::commit(&mut session, accept).await.unwrap();
+        let mut messages = WebSocketSession::new(transport);
+        assert!(matches!(messages.receive().await, Err(Error::Capacity(_))));
+        assert!(matches!(
+            messages.send(Message::text("x")).await,
+            Err(Error::AlreadyClosed)
+        ));
     }
 
     /// Verify the server control replies and the assembled message response.

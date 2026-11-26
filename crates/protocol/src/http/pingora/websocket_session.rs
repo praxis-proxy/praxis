@@ -18,6 +18,16 @@ const MESSAGE_LIMIT: usize = 1_048_576; // 1 MiB
 /// Maximum encoded write, including frame headers and a pending control reply.
 const WRITE_LIMIT: usize = 1_049_088;
 
+/// Buffer and size limits shared by the downstream codec.
+fn codec_config() -> WebSocketConfig {
+    WebSocketConfig::default()
+        .read_buffer_size(8192)
+        .write_buffer_size(0)
+        .max_write_buffer_size(WRITE_LIMIT)
+        .max_message_size(Some(MESSAGE_LIMIT))
+        .max_frame_size(Some(MESSAGE_LIMIT))
+}
+
 /// Nonblocking codec input and output. Only the driver touches the transport.
 #[derive(Default)]
 struct Wire {
@@ -65,20 +75,18 @@ pub struct WebSocketSession<'a> {
 impl<'a> WebSocketSession<'a> {
     /// Start message I/O after a successful local upgrade.
     pub fn new(transport: LocalWebSocket<'a>) -> Self {
-        let config = WebSocketConfig::default()
-            .read_buffer_size(8192)
-            .write_buffer_size(0)
-            .max_write_buffer_size(WRITE_LIMIT)
-            .max_message_size(Some(MESSAGE_LIMIT))
-            .max_frame_size(Some(MESSAGE_LIMIT));
         Self {
             transport,
-            codec: WebSocket::from_raw_socket(Wire::default(), Role::Server, Some(config)),
+            codec: WebSocket::from_raw_socket(Wire::default(), Role::Server, Some(codec_config())),
             terminal: false,
         }
     }
 
     /// Receive a complete data message, answering control frames internally.
+    ///
+    /// Cancelling while a control reply is being written makes the session
+    /// terminal. End the request if cancellation may have interrupted a write.
+    /// Subsequent reads return `None` and sends return `AlreadyClosed`.
     ///
     /// # Errors
     /// Returns a transport or protocol error. End the request on error.
@@ -108,6 +116,10 @@ impl<'a> WebSocketSession<'a> {
     }
 
     /// Send a complete text or binary message directly to the downstream.
+    ///
+    /// Cancelling a pending send makes the session terminal. End the request
+    /// after cancellation. Subsequent reads return `None` and sends return
+    /// `AlreadyClosed`.
     ///
     /// # Errors
     /// Returns an error for a closed session, unsupported message or failed write.
@@ -167,4 +179,40 @@ impl<'a> WebSocketSession<'a> {
 /// Convert Pingora's transport error into the codec's error type.
 fn transport_error(error: Box<pingora_core::Error>) -> Error {
     Error::Io(io::Error::other(error))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use super::*;
+
+    /// A large binary frame header with a mask of all zeroes.
+    fn binary_header(length: u64, opcode: u8) -> Vec<u8> {
+        let mut header = vec![opcode, 0xFF];
+        header.extend_from_slice(&length.to_be_bytes());
+        header.extend_from_slice(&[0; 4]);
+        header
+    }
+
+    #[test]
+    fn frame_limit_accepts_boundary_and_rejects_larger_header() {
+        let mut wire = binary_header(1_048_576, 0x82);
+        wire.extend(vec![7; MESSAGE_LIMIT]);
+        let mut codec = WebSocket::from_raw_socket(Cursor::new(wire), Role::Server, Some(codec_config()));
+        assert!(matches!(codec.read(), Ok(Message::Binary(payload)) if payload.len() == MESSAGE_LIMIT));
+
+        let wire = binary_header(1_048_577, 0x82);
+        let mut codec = WebSocket::from_raw_socket(Cursor::new(wire), Role::Server, Some(codec_config()));
+        assert!(matches!(codec.read(), Err(Error::Capacity(_))));
+    }
+
+    #[test]
+    fn message_limit_counts_bytes_across_fragments() {
+        let mut wire = binary_header(1_048_576, 0x02);
+        wire.extend(vec![7; MESSAGE_LIMIT]);
+        wire.extend_from_slice(b"\x80\x81\0\0\0\0x");
+        let mut codec = WebSocket::from_raw_socket(Cursor::new(wire), Role::Server, Some(codec_config()));
+        assert!(matches!(codec.read(), Err(Error::Capacity(_))));
+    }
 }

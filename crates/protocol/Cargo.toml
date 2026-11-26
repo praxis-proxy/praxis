@@ -128,7 +128,7 @@ tokio-util = { workspace = true }
 tracing = { workspace = true }
 tracing-opentelemetry = { workspace = true, optional = true }
 
-tungstenite = { version = "0.30.0", default-features = false, optional = true }
+tungstenite = { workspace = true, optional = true }
 
 [dev-dependencies]
 praxis-core = { workspace = true, features = ["test-support"] }

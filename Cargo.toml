@@ -147,6 +147,7 @@ tempfile = "3.27.0"
 # same way.
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["logging", "tls12"] }
 tokio-tungstenite = "0.30.0"
+tungstenite = { version = "0.30.0", default-features = false }
 thiserror = "2.0.21"
 tikv-jemallocator = "0.7.0"
 tonic = "0.14.9"
