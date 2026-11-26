@@ -17,7 +17,7 @@ use metrics::{counter, histogram};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::debug;
 
-use super::types::{SubRequestError, SubResponse};
+use super::types::{ExchangeFailure, RequestProgress, SubRequestError, SubResponse};
 use crate::{
     backend,
     circuit::{CircuitBreakerConfig, CircuitBreakerRegistry, CircuitToken, PeerKey},
@@ -453,12 +453,25 @@ pub(super) fn ensure_host_header(headers: &mut HeaderMap, address: SocketAddr) -
 /// Map a transport failure onto the sub-request error it means.
 ///
 /// Message text is carried through unchanged so callers keep seeing the
-/// transport's own diagnostics.
-pub(super) fn transport_error(err: EgressError) -> SubRequestError {
+/// transport's own diagnostics. An HTTP/2 refusal or abort is reported as
+/// [`SubRequestError::Io`] and its class recorded on `progress`.
+pub(super) fn transport_error(err: EgressError, progress: Option<&RequestProgress>) -> SubRequestError {
+    let failure = match &err {
+        EgressError::Refused(_) => Some(ExchangeFailure::Refused),
+        EgressError::Aborted(_) => Some(ExchangeFailure::Aborted),
+        EgressError::InvalidRequest(_) | EgressError::Connect(_) | EgressError::Io(_) | EgressError::Unavailable => {
+            None
+        },
+    };
+    if let Some((progress, failure)) = progress.zip(failure) {
+        progress.record_exchange_failure(failure);
+    }
     match err {
         EgressError::InvalidRequest(message) => SubRequestError::InvalidRequest(message),
         EgressError::Connect(message) => SubRequestError::Connect(message),
-        EgressError::Io(message) => SubRequestError::Io(message),
+        EgressError::Io(message) | EgressError::Refused(message) | EgressError::Aborted(message) => {
+            SubRequestError::Io(message)
+        },
         unavailable @ EgressError::Unavailable => SubRequestError::Connect(unavailable.to_string()),
     }
 }

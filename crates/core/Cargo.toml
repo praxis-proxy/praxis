@@ -25,7 +25,7 @@ tls-health-check = []
 # `praxis-proxy` binary refuses to build without one. See
 # docs/developing/adding-backends.md.
 default = ["pingora"]
-pingora = ["dep:pingora-core", "dep:pingora-http"]
+pingora = ["dep:h2", "dep:pingora-core", "dep:pingora-http"]
 # The hyper network backend: `backend::Runtime` and `backend::Connector`
 # resolve to the hyper implementations. Off by default and experimental; the
 # `praxis-proxy` binary's `hyper` feature turns it on together with
@@ -33,6 +33,7 @@ pingora = ["dep:pingora-core", "dep:pingora-http"]
 # build starts from `--no-default-features`. See
 # docs/developing/adding-backends.md.
 hyper = [
+    "dep:h2",
     "dep:http-body-util",
     "dep:hyper",
     "dep:hyper-util",
@@ -84,6 +85,8 @@ opentelemetry-otlp = { workspace = true, optional = true }
 percent-encoding = { workspace = true }
 pingora-core = { workspace = true, optional = true }
 pingora-http = { workspace = true, optional = true }
+# Reads the HTTP/2 reset reason that decides whether a failed exchange may be replayed.
+h2 = { workspace = true, optional = true }
 praxis-tls = { workspace = true }
 rand = { workspace = true }
 regex = { workspace = true }

@@ -288,11 +288,15 @@ impl HyperSession {
         Ok(())
     }
 
-    /// Record `err` as the end of the exchange and return it as an error.
+    /// Record `err` as the end of the exchange and return it as an error,
+    /// keeping the HTTP/2 reason of a stream or connection error.
     fn fail(&mut self, err: &hyper::Error) -> EgressError {
         let message = describe(err);
         self.inbound = Inbound::Failed(message.clone());
-        EgressError::Io(message)
+        let first: &(dyn std::error::Error + 'static) = err;
+        let h2_error = std::iter::successors(Some(first), |cause| cause.source())
+            .find_map(|cause| cause.downcast_ref::<h2::Error>());
+        crate::egress::exchange_error(h2_error, message)
     }
 
     /// Finish with the session and hand back its connection when it can
@@ -915,6 +919,23 @@ mod tests {
             204,
             "the final head follows the buffered interim heads"
         );
+    }
+
+    #[tokio::test]
+    async fn http2_resets_keep_their_retry_class() {
+        for (reason, refused) in [(h2::Reason::INTERNAL_ERROR, false), (h2::Reason::REFUSED_STREAM, true)] {
+            let peer = resetting_http2_upstream(reason).await;
+            let mut session = open(&peer).await;
+            send_get(&mut session).await;
+
+            let error = session.read_response_head().await.unwrap_err();
+
+            if refused {
+                assert!(matches!(error, EgressError::Refused(_)), "{reason:?}: {error}");
+            } else {
+                assert!(matches!(error, EgressError::Aborted(_)), "{reason:?}: {error}");
+            }
+        }
     }
 
     #[tokio::test]
@@ -1585,6 +1606,22 @@ mod tests {
             method: Method::GET,
             target: target.to_owned(),
         }
+    }
+
+    /// A prior-knowledge HTTP/2 upstream that resets every stream with
+    /// `reason` before answering it.
+    async fn resetting_http2_upstream(reason: h2::Reason) -> PeerSpec {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut peer = PeerSpec::new(listener.local_addr().unwrap(), false, "api.test");
+        Arc::make_mut(&mut peer.connection).http_version = UpstreamHttpVersion::H2;
+        tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut connection = h2::server::handshake(socket).await.unwrap();
+            while let Some(Ok((_request, mut respond))) = connection.accept().await {
+                respond.send_reset(reason);
+            }
+        });
+        peer
     }
 
     /// A prior-knowledge HTTP/2 upstream, presenting `sni` as its server

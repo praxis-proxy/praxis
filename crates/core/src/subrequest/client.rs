@@ -430,7 +430,7 @@ impl<C: Connector> SubRequestClient<C> {
         let mut session = tokio::time::timeout(connect_budget, Box::pin(self.connector.inner.connect(peer, timeout)))
             .await
             .map_err(|_elapsed| charge(&mut circuit_guard, connect_timeout_error(deadline)))?
-            .map_err(|err| charge(&mut circuit_guard, transport_error(err)))?;
+            .map_err(|err| charge(&mut circuit_guard, transport_error(err, progress)))?;
 
         debug!(
             peer = %peer.address,
@@ -457,7 +457,7 @@ impl<C: Connector> SubRequestClient<C> {
                     classify_timeout(header_budget, write_timeout, "write"),
                 )
             })?
-            .map_err(|err| charge(&mut circuit_guard, transport_error(err)))?;
+            .map_err(|err| charge(&mut circuit_guard, transport_error(err, progress)))?;
         if let Some(progress) = progress {
             progress.mark_forwarded();
         }
@@ -480,7 +480,7 @@ impl<C: Connector> SubRequestClient<C> {
                     classify_timeout(body_budget, write_timeout, "write"),
                 )
             })?
-            .map_err(|err| charge(&mut circuit_guard, transport_error(err)))?;
+            .map_err(|err| charge(&mut circuit_guard, transport_error(err, progress)))?;
         }
 
         let finish_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -497,7 +497,7 @@ impl<C: Connector> SubRequestClient<C> {
                     classify_timeout(finish_budget, write_timeout, "write"),
                 )
             })?
-            .map_err(|err| charge(&mut circuit_guard, transport_error(err)))?;
+            .map_err(|err| charge(&mut circuit_guard, transport_error(err, progress)))?;
 
         // ---------------------------------------------------------------------
         // 6. Read the response header, skipping 1xx interim responses
@@ -522,11 +522,11 @@ impl<C: Connector> SubRequestClient<C> {
             tokio::time::timeout(read_wait, session.read_response_head())
                 .await
                 .map_err(|_elapsed| charge(&mut circuit_guard, classify_timeout(read_budget, read_timeout, "read")))?
-                .map_err(|err| charge(&mut circuit_guard, transport_error(err)))?;
+                .map_err(|err| charge(&mut circuit_guard, transport_error(err, progress)))?;
 
             let candidate = session
                 .response_head()
-                .map_err(|err| charge(&mut circuit_guard, transport_error(err)))?;
+                .map_err(|err| charge(&mut circuit_guard, transport_error(err, progress)))?;
 
             if (100..=199).contains(&candidate.status) && candidate.status != 101 {
                 interim_count = interim_count.saturating_add(1);
@@ -665,7 +665,7 @@ impl<C: Connector> SubRequestClient<C> {
                         exchange,
                         circuit_guard,
                         "h2_error",
-                        transport_error(err),
+                        transport_error(err, progress),
                     ))
                     .await);
                 },
@@ -981,7 +981,7 @@ impl<C: Connector> SubRequestClient<C> {
                     Ok(Ok(None)) => break,
                     Ok(Err(err)) => {
                         session.shutdown().await;
-                        return Err(transport_error(err));
+                        return Err(transport_error(err, progress));
                     },
                     Err(_elapsed) => {
                         session.shutdown().await;
@@ -998,7 +998,7 @@ impl<C: Connector> SubRequestClient<C> {
                 },
                 Err(err) => {
                     session.shutdown().await;
-                    return Err(transport_error(err));
+                    return Err(transport_error(err, progress));
                 },
             }
 

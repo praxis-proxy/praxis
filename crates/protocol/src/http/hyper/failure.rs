@@ -61,7 +61,9 @@ impl Failure {
     pub(super) fn connect(err: &EgressError) -> Self {
         let kind = match err {
             EgressError::Connect(message) => connect_kind(message),
-            EgressError::Io(message) => exchange_kind(message),
+            EgressError::Io(message) | EgressError::Refused(message) | EgressError::Aborted(message) => {
+                exchange_kind(message)
+            },
             EgressError::InvalidRequest(_) | EgressError::Unavailable => FailureKind::Internal,
             _ => FailureKind::ConnectError,
         };
@@ -82,7 +84,9 @@ impl Failure {
     /// Classify a failure of an exchange on an open upstream connection.
     pub(super) fn exchange(err: &EgressError) -> Self {
         let kind = match err {
-            EgressError::Io(message) => exchange_kind(message),
+            EgressError::Io(message) | EgressError::Refused(message) | EgressError::Aborted(message) => {
+                exchange_kind(message)
+            },
             EgressError::Connect(message) => connect_kind(message),
             EgressError::InvalidRequest(_) | EgressError::Unavailable => FailureKind::Internal,
             _ => FailureKind::ReadError,

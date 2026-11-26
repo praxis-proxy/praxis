@@ -283,9 +283,13 @@ fn bounded(configured: Option<Duration>, timeout: Duration) -> Duration {
     configured.map_or(timeout, |configured| configured.min(timeout))
 }
 
-/// Map a Pingora transport error onto the exchange error.
+/// Map a Pingora transport error onto the exchange error, keeping the
+/// HTTP/2 reason of an `H2Error`.
 fn io_error(err: &pingora_core::Error) -> EgressError {
-    EgressError::Io(err.to_string())
+    let h2_error = (err.etype == pingora_core::ErrorType::H2Error)
+        .then(|| err.root_cause().downcast_ref::<h2::Error>())
+        .flatten();
+    super::exchange_error(h2_error, err.to_string())
 }
 
 // -----------------------------------------------------------------------------
@@ -300,6 +304,28 @@ mod tests {
 
     use super::*;
     use crate::connectivity::ConnectionOptions;
+
+    /// A Pingora `H2Error` caused by an HTTP/2 reset with `reason`.
+    fn h2_reset(reason: h2::Reason) -> pingora_core::BError {
+        pingora_core::Error::because(pingora_core::ErrorType::H2Error, "h2 stream", h2::Error::from(reason))
+    }
+
+    #[test]
+    fn http2_errors_keep_their_retry_class() {
+        assert!(
+            matches!(io_error(&h2_reset(h2::Reason::INTERNAL_ERROR)), EgressError::Aborted(_)),
+            "an INTERNAL_ERROR may follow a processed request"
+        );
+        assert!(
+            matches!(io_error(&h2_reset(h2::Reason::REFUSED_STREAM)), EgressError::Refused(_)),
+            "REFUSED_STREAM proves the request was not processed"
+        );
+        let closed = pingora_core::Error::new(pingora_core::ErrorType::ConnectionClosed);
+        assert!(
+            matches!(io_error(&closed), EgressError::Io(_)),
+            "other transport errors stay plain I/O failures"
+        );
+    }
 
     #[test]
     fn http_peer_carries_group_and_connection_options() {
