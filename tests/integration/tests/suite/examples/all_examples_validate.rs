@@ -57,6 +57,13 @@ fn every_example_resolves_its_pipelines() {
         if path.file_name().is_some_and(|name| name == "slow-start.yaml") {
             continue;
         }
+        #[cfg(not(feature = "candidate-constraints"))]
+        if path
+            .file_name()
+            .is_some_and(|name| name == "cluster-candidate-labels.yaml")
+        {
+            continue;
+        }
         #[cfg(not(feature = "forward-proxy"))]
         if path
             .file_name()
@@ -528,6 +535,8 @@ fn environmental<'a>(error: &str, permitted_files: &[ExternalFile<'a>], config: 
         .any(|(filter, enabled)| !enabled && error == format!("unknown filter type: '{filter}'"));
     let binding = !cfg!(feature = "upstream-binding")
         && error == "load_balancer: cluster_source 'bound_upstream' needs the upstream-binding build feature";
+    let candidate_constraints = !cfg!(feature = "candidate-constraints")
+        && (error.contains("unknown variant `policy_candidates`") || error.contains("unknown field `labels`"));
     let unset_credential =
         error.starts_with("credential_injection: environment variable '") && error.contains("' not set");
     if gated {
@@ -535,6 +544,9 @@ fn environmental<'a>(error: &str, permitted_files: &[ExternalFile<'a>], config: 
     }
     if binding {
         return Some("disabled upstream-binding feature");
+    }
+    if candidate_constraints {
+        return Some("disabled candidate-constraints feature");
     }
     if unset_credential {
         return Some("unset deployment credential");

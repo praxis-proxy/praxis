@@ -26,6 +26,8 @@ use std::{
 
 #[cfg(feature = "bound-upstream-request-body")]
 use bytes::Bytes;
+#[cfg(feature = "policy-engine")]
+use ppe::praxis_policy_core::extensions::CandidateConstraintExtension;
 
 /// The client-facing headers of a streaming terminal response were written.
 ///
@@ -155,6 +157,62 @@ impl AuthenticatedIdentity {
     /// serializing them outside Praxis.
     pub fn custom_claims(&self) -> &BTreeMap<String, String> {
         &self.custom_claims
+    }
+}
+
+// -----------------------------------------------------------------------------
+// PolicyCandidateConstraint
+// -----------------------------------------------------------------------------
+
+/// Non-empty candidate constraint emitted by the trusted policy filter.
+///
+/// The value is request-scoped and never originates from an HTTP header. It is
+/// stored privately so only the built-in policy filter can publish it; a later
+/// candidate publisher reads it through
+/// [`HttpFilterContext::policy_candidate_constraint`].
+///
+/// [`HttpFilterContext::policy_candidate_constraint`]: crate::HttpFilterContext::policy_candidate_constraint
+#[cfg(feature = "policy-engine")]
+#[derive(Clone, Debug)]
+pub(crate) struct PolicyCandidateConstraint(Arc<CandidateConstraintExtension>);
+
+#[cfg(feature = "policy-engine")]
+impl PolicyCandidateConstraint {
+    /// Wrap a non-empty policy output for request-scoped publication.
+    pub(crate) fn new(constraint: Arc<CandidateConstraintExtension>) -> Option<Self> {
+        (!constraint.is_empty()).then_some(Self(constraint))
+    }
+
+    /// Borrow the policy engine's typed constraint without copying it.
+    pub(crate) fn as_ref(&self) -> &CandidateConstraintExtension {
+        &self.0
+    }
+}
+
+// -----------------------------------------------------------------------------
+// PolicyEligibleCandidates
+// -----------------------------------------------------------------------------
+
+/// Logical clusters remaining after policy candidate filtering.
+///
+/// The trusted candidate publisher creates this request-scoped value after it
+/// evaluates every declared cluster with PPE's typed matcher. AI routing
+/// filters can inspect its names through the request context, but cannot
+/// replace the list.
+#[cfg(feature = "candidate-constraints")]
+#[derive(Clone, Debug)]
+pub(crate) struct PolicyEligibleCandidates(Arc<[Arc<str>]>);
+
+#[cfg(feature = "candidate-constraints")]
+impl PolicyEligibleCandidates {
+    /// Wrap the eligible logical cluster names for one request.
+    pub(crate) fn new(clusters: Vec<Arc<str>>) -> Self {
+        Self(clusters.into())
+    }
+
+    /// Borrow the names without allowing mutation of the published set.
+    pub(crate) fn clusters(&self) -> &[Arc<str>] {
+        &self.0
     }
 }
 

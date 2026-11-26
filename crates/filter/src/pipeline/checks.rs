@@ -153,6 +153,8 @@ pub(super) fn check_lb_without_cluster_selector(filters: &[PipelineFilter], erro
     for (i, filter) in filters.iter().enumerate() {
         if filter.filter.name() == "load_balancer"
             && !consumes_bound_upstream(filter)
+            && !filter.filter.publishes_policy_candidates()
+            && !filter.filter.selects_cluster()
             && !filters
                 .get(..i)
                 .unwrap_or_default()
@@ -168,6 +170,78 @@ pub(super) fn check_lb_without_cluster_selector(filters: &[PipelineFilter], erro
             return;
         }
     }
+}
+
+/// Require a policy-candidate publisher to run unconditionally before destination selection.
+///
+/// A request condition could skip the publisher after PPE has produced a
+/// restriction. A later AI routing filter would then have no eligible-list
+/// extension and could make a choice from unrestricted candidates instead.
+/// A publisher in a branch has the same problem: the branch may not run for
+/// every request. Reject both shapes because neither can prove that it has the
+/// same applicability as policy evaluation.
+///
+/// Publishing after a router or an endpoint-selecting load balancer would
+/// allow that earlier filter to make a decision from the unrestricted set.
+/// The runtime also fails closed, but rejecting this shape at startup gives
+/// the operator a configuration error before any request can reach it.
+pub(super) fn check_policy_candidate_publisher_order(filters: &[PipelineFilter], errors: &mut Vec<String>) {
+    for (index, filter) in filters.iter().enumerate() {
+        if filter.filter.publishes_policy_candidates()
+            && let Some(message) = policy_candidate_publisher_order_error(filters, index, filter)
+        {
+            errors.push(message.to_owned());
+            return;
+        }
+    }
+    if let Some(branch) = policy_candidate_publisher_branch(filters) {
+        errors.push(format!(
+            "load_balancer with cluster_source 'policy_candidates' must be a top-level unconditional filter; it cannot run in branch '{}'",
+            branch.name,
+        ));
+    }
+}
+
+/// Return the startup error for a publisher that is conditional or runs too late.
+fn policy_candidate_publisher_order_error(
+    filters: &[PipelineFilter],
+    index: usize,
+    filter: &PipelineFilter,
+) -> Option<&'static str> {
+    if !filter.conditions.is_empty() {
+        return Some(
+            "load_balancer with cluster_source 'policy_candidates' must not have request conditions; it must publish candidates for every request",
+        );
+    }
+    let has_prior_selection = filters
+        .get(..index)
+        .unwrap_or_default()
+        .iter()
+        .any(|prior| prior.filter.selects_cluster() || is_endpoint_load_balancer(prior));
+    has_prior_selection.then_some(
+        "load_balancer with cluster_source 'policy_candidates' must run before a cluster or endpoint is selected",
+    )
+}
+
+/// Find a branch that contains a policy-candidate publisher.
+fn policy_candidate_publisher_branch(filters: &[PipelineFilter]) -> Option<&ResolvedBranch> {
+    filters
+        .iter()
+        .flat_map(|filter| &filter.branches)
+        .find(|branch| branch_contains_policy_candidate_publisher(branch))
+}
+
+/// Whether a branch, at any nesting level, contains a policy-candidate publisher.
+///
+/// Even an unconditional nested branch belongs to a parent filter whose normal
+/// execution can be bypassed by future configuration. Keeping the publisher
+/// top-level makes its every-request guarantee explicit and independently
+/// verifiable.
+fn branch_contains_policy_candidate_publisher(branch: &ResolvedBranch) -> bool {
+    branch.filters.iter().any(|filter| {
+        filter.filter.publishes_policy_candidates()
+            || filter.branches.iter().any(branch_contains_policy_candidate_publisher)
+    })
 }
 
 /// Unconditional `static_response` blocking subsequent filters.
@@ -303,13 +377,31 @@ pub(super) fn check_duplicate_routers(names: &[&str], errors: &mut Vec<String>) 
     }
 }
 
-/// Duplicate `load_balancer` filters.
-pub(super) fn check_duplicate_load_balancers(names: &[&str], errors: &mut Vec<String>) {
-    let lb_count = names.iter().filter(|n| **n == "load_balancer").count();
-    if lb_count > 1 {
+/// Reject duplicate endpoint selectors or policy-candidate publishers.
+///
+/// A candidate publisher followed by one ordinary endpoint-selecting load
+/// balancer is intentional: an AI routing filter between them selects one
+/// published logical cluster. Two filters with the same role would overwrite
+/// request state or select two endpoints, so each remains invalid.
+pub(super) fn check_duplicate_load_balancers(filters: &[PipelineFilter], errors: &mut Vec<String>) {
+    let endpoint_selector_count = filters
+        .iter()
+        .filter(|filter| is_endpoint_load_balancer(filter))
+        .count();
+    if endpoint_selector_count > 1 {
         errors.push(format!(
-            "multiple load_balancer filters in chain ({lb_count}); \
+            "multiple load_balancer endpoint selectors in chain ({endpoint_selector_count}); \
              only the last one's upstream selection will take effect"
+        ));
+    }
+    let publisher_count = filters
+        .iter()
+        .filter(|filter| filter.filter.publishes_policy_candidates())
+        .count();
+    if publisher_count > 1 {
+        errors.push(format!(
+            "multiple policy-candidate load_balancer publishers in chain ({publisher_count}); \
+             only the last published candidate list would be visible"
         ));
     }
 }
@@ -785,7 +877,7 @@ fn top_level_filter_edges(
     }
     // On the path where it runs, an unconditional load balancer clears `no_lb`;
     // its branches then run after its `on_request`.
-    let entry = no_lb_in && !is_load_balancer(pf);
+    let entry = no_lb_in && !is_endpoint_load_balancer(pf);
     if let Some(carry) = top_level_branch_edges(&pf.branches, entry, edges, errors) {
         edges.push((next_index, carry));
     }
@@ -858,7 +950,7 @@ fn nested_filter_no_lb(pf: &PipelineFilter, no_lb_in: bool, mut errors: Option<&
     // A conditional filter may be skipped, carrying `no_lb` past it; an
     // unconditional load balancer clears it before its branches run.
     let skipped = no_lb_in && !pf.conditions.is_empty();
-    let entry = no_lb_in && !is_load_balancer(pf);
+    let entry = no_lb_in && !is_endpoint_load_balancer(pf);
     skipped || nested_branches_exit(&pf.branches, entry, errors)
 }
 
@@ -903,10 +995,10 @@ fn nested_branches_exit(branches: &[ResolvedBranch], entry: bool, mut errors: Op
     exit || (alive && carry)
 }
 
-/// Whether `pf` is a `load_balancer` — the filter that publishes
+/// Whether `pf` is a load balancer that selects an endpoint and publishes
 /// selected-upstream metadata.
-fn is_load_balancer(pf: &PipelineFilter) -> bool {
-    pf.filter.name() == "load_balancer"
+fn is_endpoint_load_balancer(pf: &PipelineFilter) -> bool {
+    pf.filter.name() == "load_balancer" && !pf.filter.publishes_policy_candidates()
 }
 
 /// Record the "no guaranteed load balancer" error for a gated filter reached
@@ -1011,7 +1103,7 @@ fn admits_at_request_head(pf: &PipelineFilter) -> bool {
 /// `load_balancer` is expected, not a 502 hazard.
 pub(super) fn check_router_without_lb(filters: &[PipelineFilter], names: &[&str], warnings: &mut Vec<String>) {
     let has_router = names.contains(&"router");
-    let has_lb = names.contains(&"load_balancer");
+    let has_lb = filters.iter().any(is_endpoint_load_balancer);
     if has_router && !has_lb && !any_consumes_bound_upstream(filters) {
         warnings.push(
             "router filter without a load_balancer; \
@@ -1137,6 +1229,8 @@ mod tests {
     use praxis_core::config::{ConditionMatch, SelectedUpstreamMatch};
 
     use super::*;
+    #[cfg(feature = "candidate-constraints")]
+    use crate::pipeline::test_filters::policy_candidate_publisher;
     use crate::pipeline::test_filters::{
         admitting_head_filter, head_filter, lb_filter, noop_filter_with_conditions, selector_filter,
     };
@@ -1375,6 +1469,57 @@ mod tests {
         let mut errors = Vec::new();
         check_lb_without_cluster_selector(&filters, &mut errors);
         assert!(errors.is_empty(), "router before LB should produce no errors");
+    }
+
+    #[cfg(feature = "candidate-constraints")]
+    #[test]
+    fn candidate_publisher_after_router_errors() {
+        let filters = vec![selector_filter("router", &["eu"]), policy_candidate_publisher(&["eu"])];
+        let mut errors = Vec::new();
+
+        check_policy_candidate_publisher_order(&filters, &mut errors);
+
+        assert_eq!(errors.len(), 1, "publisher must run before the router");
+        assert!(errors[0].contains("must run before a cluster or endpoint"));
+    }
+
+    #[cfg(feature = "candidate-constraints")]
+    #[test]
+    fn conditional_candidate_publisher_errors() {
+        let mut publisher = policy_candidate_publisher(&["eu"]);
+        publisher.conditions = vec![make_condition()];
+        let mut errors = Vec::new();
+
+        check_policy_candidate_publisher_order(&[publisher], &mut errors);
+
+        assert_eq!(errors.len(), 1, "a candidate publisher must be unconditional");
+        assert!(errors[0].contains("must not have request conditions"));
+    }
+
+    #[cfg(feature = "candidate-constraints")]
+    #[test]
+    fn candidate_publisher_in_branch_errors() {
+        let filters = vec![host_with_branch(vec![policy_candidate_publisher(&["eu"])])];
+        let mut errors = Vec::new();
+
+        check_policy_candidate_publisher_order(&filters, &mut errors);
+
+        assert_eq!(errors.len(), 1, "a candidate publisher must be top-level");
+        assert!(errors[0].contains("must be a top-level unconditional filter"));
+    }
+
+    #[cfg(feature = "candidate-constraints")]
+    #[test]
+    fn candidate_publisher_before_router_is_valid() {
+        let filters = vec![policy_candidate_publisher(&["eu"]), selector_filter("router", &["eu"])];
+        let mut errors = Vec::new();
+
+        check_policy_candidate_publisher_order(&filters, &mut errors);
+
+        assert!(
+            errors.is_empty(),
+            "publisher must be allowed before the AI router: {errors:?}"
+        );
     }
 
     #[cfg(feature = "upstream-binding")]
@@ -1989,15 +2134,41 @@ mod tests {
 
     #[test]
     fn duplicate_load_balancers_errors() {
-        let names = vec!["load_balancer", "load_balancer"];
+        let filters = vec![lb_filter(&[]), lb_filter(&[])];
         let mut errors = Vec::new();
-        check_duplicate_load_balancers(&names, &mut errors);
+        check_duplicate_load_balancers(&filters, &mut errors);
         assert_eq!(errors.len(), 1, "should produce exactly one error");
         assert!(
-            errors[0].contains("multiple load_balancer"),
+            errors[0].contains("multiple load_balancer endpoint selectors"),
             "error should mention multiple LBs: {}",
             errors[0]
         );
+    }
+
+    #[cfg(feature = "candidate-constraints")]
+    #[test]
+    fn candidate_publisher_and_endpoint_load_balancer_are_allowed() {
+        let filters = vec![policy_candidate_publisher(&["eu"]), lb_filter(&["eu"])];
+        let mut errors = Vec::new();
+
+        check_duplicate_load_balancers(&filters, &mut errors);
+
+        assert!(
+            errors.is_empty(),
+            "a candidate publisher and one endpoint selector have distinct roles: {errors:?}"
+        );
+    }
+
+    #[cfg(feature = "candidate-constraints")]
+    #[test]
+    fn duplicate_candidate_publishers_error() {
+        let filters = vec![policy_candidate_publisher(&["eu"]), policy_candidate_publisher(&["us"])];
+        let mut errors = Vec::new();
+
+        check_duplicate_load_balancers(&filters, &mut errors);
+
+        assert_eq!(errors.len(), 1, "two publishers would overwrite request state");
+        assert!(errors[0].contains("multiple policy-candidate"));
     }
 
     #[test]
@@ -2810,6 +2981,24 @@ mod tests {
         assert!(
             errors.is_empty(),
             "an unconditional load balancer before the filter satisfies the guarantee: {errors:?}"
+        );
+    }
+
+    #[cfg(feature = "candidate-constraints")]
+    #[test]
+    fn selected_upstream_after_candidate_publisher_errors() {
+        let filters = vec![
+            policy_candidate_publisher(&["eu"]),
+            gated_filter(Some("openai_chat_completions"), Some("vllm")),
+        ];
+        let mut errors = Vec::new();
+
+        check_selected_upstream_condition_ordering(&filters, &mut errors);
+
+        assert_eq!(
+            errors.len(),
+            1,
+            "publishing eligible names must not pretend an endpoint was selected"
         );
     }
 

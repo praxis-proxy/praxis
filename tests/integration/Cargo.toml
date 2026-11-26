@@ -47,6 +47,7 @@ policy-experimental-ratelimit = [
 basic-auth-filter = ["praxis-filter/basic-auth-filter"]
 cloud-events-filter = ["praxis/cloud-events-filter"]
 upstream-binding = ["praxis/upstream-binding"]
+candidate-constraints = ["praxis/candidate-constraints"]
 iterative-request-router = ["praxis/iterative-request-router"]
 # Off by default; runs the cluster-staged callout tests against a proxy built
 # with the chain-binding extension API.

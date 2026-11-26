@@ -45,7 +45,9 @@ pub(super) fn extract_selected_clusters(filters: &[PipelineFilter]) -> HashSet<S
 pub(super) fn extract_lb_clusters(filters: &[PipelineFilter]) -> HashSet<String> {
     let mut out = HashSet::new();
     for pf in filters {
-        out.extend(pf.filter.load_balancer_clusters());
+        if !pf.filter.publishes_policy_candidates() {
+            out.extend(pf.filter.load_balancer_clusters());
+        }
         for branch in &pf.branches {
             out.extend(extract_lb_clusters(&branch.filters));
         }
@@ -80,7 +82,9 @@ pub(super) fn level_selected_clusters(filters: &[PipelineFilter]) -> HashSet<Str
 pub(super) fn reachable_lb_clusters(filters: &[PipelineFilter]) -> HashSet<String> {
     let mut out = HashSet::new();
     for pf in filters {
-        out.extend(pf.filter.load_balancer_clusters());
+        if !pf.filter.publishes_policy_candidates() {
+            out.extend(pf.filter.load_balancer_clusters());
+        }
         if pf.conditions.is_empty() {
             for branch in &pf.branches {
                 if branch.condition.is_none() {
@@ -132,6 +136,8 @@ mod tests {
     use super::*;
     #[cfg(feature = "upstream-binding")]
     use crate::pipeline::test_filters::binding_router;
+    #[cfg(feature = "candidate-constraints")]
+    use crate::pipeline::test_filters::policy_candidate_publisher;
     use crate::pipeline::test_filters::{lb_filter, noop_filter, selector_filter};
 
     #[test]
@@ -182,6 +188,18 @@ mod tests {
         let filters = vec![selector_filter("router", &["web"])];
         let clusters = extract_lb_clusters(&filters);
         assert!(clusters.is_empty(), "non-LB entries should yield no clusters");
+    }
+
+    #[cfg(feature = "candidate-constraints")]
+    #[test]
+    fn skips_policy_candidate_publisher() {
+        let filters = vec![policy_candidate_publisher(&["eu"])];
+        let clusters = extract_lb_clusters(&filters);
+
+        assert!(
+            clusters.is_empty(),
+            "a candidate publisher cannot serve a router-selected cluster"
+        );
     }
 
     #[test]

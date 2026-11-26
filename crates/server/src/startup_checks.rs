@@ -410,6 +410,7 @@ const EXPERIMENTAL_FEATURES: &[(&str, bool)] = &[
         "bound-upstream-request-body",
         cfg!(feature = "bound-upstream-request-body"),
     ),
+    ("candidate-constraints", cfg!(feature = "candidate-constraints")),
     ("chain-binding", cfg!(feature = "chain-binding")),
     ("cloud-events-filter", cfg!(feature = "cloud-events-filter")),
     ("forward-proxy", cfg!(feature = "forward-proxy")),

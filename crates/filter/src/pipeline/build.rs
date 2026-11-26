@@ -313,6 +313,7 @@ impl FilterPipeline {
         if !skip.lb_without_router {
             super::checks::check_lb_without_cluster_selector(&self.filters, &mut errors);
         }
+        super::checks::check_policy_candidate_publisher_order(&self.filters, &mut errors);
         if !skip.unreachable_filters {
             super::checks::check_unconditional_static_response(&names, &self.filters, &mut errors);
         }
@@ -324,7 +325,7 @@ impl FilterPipeline {
             super::checks::check_duplicate_routers(&names, &mut errors);
         }
         if !skip.duplicate_load_balancers {
-            super::checks::check_duplicate_load_balancers(&names, &mut errors);
+            super::checks::check_duplicate_load_balancers(&self.filters, &mut errors);
         }
         if !skip.conflicting_cluster_selectors {
             super::checks::check_conflicting_cluster_selectors(&self.filters, &mut errors);

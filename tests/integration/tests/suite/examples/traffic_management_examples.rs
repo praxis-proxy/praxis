@@ -179,6 +179,51 @@ fn cluster_application_metadata_example_proxies_request() {
     assert_eq!(body, "llm", "response body should come from the tagged backend");
 }
 
+#[cfg(feature = "candidate-constraints")]
+#[test]
+fn cluster_candidate_labels_example_proxies_request() {
+    let backend_guard = start_backend_with_shutdown("eu-model");
+    let proxy_port = free_port();
+    let config = super::load_example_config(
+        "traffic-management/cluster-candidate-labels.yaml",
+        proxy_port,
+        HashMap::from([("127.0.0.1:3001", backend_guard.port())]),
+    );
+
+    let clusters = inline_clusters(&config, "main", "load_balancer");
+    let cluster = clusters
+        .iter()
+        .find(|cluster| &*cluster.name == "eu_model")
+        .expect("example should define the eu_model cluster");
+    assert_eq!(
+        cluster.http.labels.get("region").map(String::as_str),
+        Some("eu"),
+        "region label should survive parsing on the logical cluster"
+    );
+    assert_eq!(
+        cluster.http.labels.get("data_class").map(String::as_str),
+        Some("restricted"),
+        "custom labels should survive parsing on the logical cluster"
+    );
+
+    let proxy = start_proxy(&config);
+    let response = http_send(
+        proxy.addr(),
+        "GET /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+
+    assert_eq!(
+        parse_status(&response),
+        200,
+        "labelled-cluster example should proxy successfully"
+    );
+    assert_eq!(
+        praxis_test_utils::parse_body(&response),
+        "eu-model",
+        "the labelled logical cluster should reach its backend"
+    );
+}
+
 #[cfg(feature = "upstream-binding")]
 #[test]
 fn bound_upstream_condition_example_gates_on_bound_cluster() {

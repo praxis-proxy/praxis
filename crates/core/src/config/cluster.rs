@@ -10,6 +10,8 @@ mod retry_policy;
 mod slow_start;
 mod upstream_authority;
 
+#[cfg(feature = "candidate-constraints")]
+use std::collections::BTreeMap;
 use std::{fmt, sync::Arc};
 
 pub use endpoint::Endpoint;
@@ -150,6 +152,21 @@ pub struct ClusterHttpOptions {
     /// rationale — as `application_protocol`.
     #[serde(default)]
     pub application_provider: Option<Arc<str>>,
+
+    /// Operator-defined labels describing this logical HTTP cluster.
+    ///
+    /// Labels identify the whole cluster, rather than individual endpoints.
+    /// For example, a cluster can declare `model`, `region`, `site`, and
+    /// `cost_tier` for policy candidate filtering. Endpoints with different
+    /// values for one of those attributes belong in separate clusters.
+    ///
+    /// Praxis keeps the vocabulary open: policy constraints may use the
+    /// well-known keys or arbitrary custom keys. The map is ordered so its
+    /// serialized form is deterministic. Available with the experimental
+    /// `candidate-constraints` feature.
+    #[cfg(feature = "candidate-constraints")]
+    #[serde(default)]
+    pub labels: BTreeMap<String, String>,
 
     /// HTTP version used for upstream connections to this cluster.
     ///
@@ -521,6 +538,47 @@ endpoints: ["10.0.0.1:8080"]
         assert!(
             cluster.connection_timeout_ms.is_none(),
             "connection_timeout should default to None"
+        );
+    }
+
+    #[cfg(feature = "candidate-constraints")]
+    #[test]
+    fn parses_logical_cluster_labels_with_logical_metadata_feature() {
+        let cluster: Cluster = serde_yaml::from_str(
+            r#"
+name: "backend"
+endpoints: ["10.0.0.1:8080"]
+http:
+  labels:
+    region: eu
+"#,
+        )
+        .expect("labels should parse when a logical-cluster metadata feature is enabled");
+
+        assert_eq!(
+            cluster.http.labels.get("region").map(String::as_str),
+            Some("eu"),
+            "the logical cluster label should be retained in configuration"
+        );
+    }
+
+    #[cfg(not(feature = "candidate-constraints"))]
+    #[test]
+    fn rejects_logical_cluster_labels_without_logical_metadata_feature() {
+        let err = serde_yaml::from_str::<Cluster>(
+            r#"
+name: "backend"
+endpoints: ["10.0.0.1:8080"]
+http:
+  labels:
+    region: eu
+"#,
+        )
+        .expect_err("labels require a logical-cluster metadata feature");
+
+        assert!(
+            err.to_string().contains("labels"),
+            "the disabled feature should reject the unsupported labels key: {err}"
         );
     }
 

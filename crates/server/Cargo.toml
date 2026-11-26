@@ -82,6 +82,9 @@ cloud-events-filter = ["praxis-filter/cloud-events-filter", "experimental"]
 # Off by default; experimental. Implied by `iterative-request-router` and
 # `bound-upstream-request-body`.
 upstream-binding = ["praxis-filter/upstream-binding", "praxis-protocol/upstream-binding", "experimental"]
+# Policy-driven logical-candidate filtering. Off by default; it publishes
+# PPE-filtered names before an AI routing filter selects a logical cluster.
+candidate-constraints = ["policy-engine", "praxis-filter/candidate-constraints", "experimental"]
 # The `iterative_request_router` filter. Off by default; experimental.
 iterative-request-router = ["praxis-filter/iterative-request-router", "upstream-binding", "experimental"]
 # The `router` filter's JSON-alias body-routing groundwork. Off by default; experimental.

@@ -30,6 +30,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   This includes `basic_auth` and explicitly supplied
   `credential_injection.clusters[].strip_client_credential` settings. The scan
   warns if its work or warning limits prevent it from reporting every setting.
+- Experimental `candidate-constraints` lets the `policy` filter publish the
+  logical HTTP clusters whose `http.labels` satisfy PPE's candidate constraint
+  for a later AI routing filter. It returns 403 for `on_empty: deny` and
+  restores the original candidates for `on_empty: fallback`.
+  ([#1271](https://github.com/praxis-proxy/praxis/issues/1271))
 - Add the `jobs:` config section behind the off-by-default `jobs-config`
   feature: bounded queue capacity, worker count, per-job timeout, and a
   queued-payload byte ceiling for the coming background job runtime, each
