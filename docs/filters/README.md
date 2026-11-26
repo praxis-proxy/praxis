@@ -711,6 +711,82 @@ exists, so validation rejects a request-body filter that
 combines a `selected_upstream` condition with the
 `StreamBuffer` body mode.
 
+#### Routed Embeddings and Decisions APIs
+
+Set `http.application_protocol` on each logical cluster to the identifier
+expected by its consuming filters. The proposed identifiers are
+`openai_embeddings` for Embeddings and `openai_decisions` for Decisions.
+Praxis core carries these values as opaque strings. Downstream filters own
+their interpretation, API behavior, and protocol-specific tests.
+
+This filter chain assumes one upstream address serves both APIs. The router
+selects a cluster by path. Both clusters declare `vllm` as their provider,
+and each declares its own application protocol.
+
+```yaml
+filter_chains:
+  - name: routed_apis
+    filters:
+      - filter: router
+        routes:
+          - path: "/v1/embeddings"
+            cluster: embeddings
+          - path: "/v1/decisions"
+            cluster: decisions
+
+      - filter: load_balancer
+        clusters:
+          - name: embeddings
+            endpoints: ["api.example.com:443"]
+            tls: {}
+            http:
+              authority: { from: endpoint }
+              application_provider: vllm
+              application_protocol: openai_embeddings
+          - name: decisions
+            endpoints: ["api.example.com:443"]
+            tls: {}
+            http:
+              authority: { from: endpoint }
+              application_provider: vllm
+              application_protocol: openai_decisions
+```
+
+After the load balancer selects an endpoint, a later filter can match
+`selected_upstream.application_protocol` to distinguish the two APIs.
+It can also match `selected_upstream.application_provider` when its
+behavior depends on the provider.
+
+#### Routed vLLM System One API
+
+vLLM serves System One at `POST /v1/systemone` and OpenAI Decisions at
+`POST /v1/decisions`. Each endpoint has its own request format. For a
+filter that consumes the System One format, use `vllm_systemone` as a
+proposed protocol identifier and keep `vllm` as the provider. See the
+[vLLM Structured Decisions documentation][vllm-structured-decisions].
+
+To route System One to the same upstream address, add this entry to
+the router's `routes` list.
+
+```yaml
+- path: "/v1/systemone"
+  cluster: systemone
+```
+
+Add the corresponding entry to the load balancer's `clusters` list.
+
+```yaml
+- name: systemone
+  endpoints: ["api.example.com:443"]
+  tls: {}
+  http:
+    authority: { from: endpoint }
+    application_provider: vllm
+    application_protocol: vllm_systemone
+```
+
+[vllm-structured-decisions]: https://docs.vllm.ai/en/latest/models/structured_decisions_models/#typesafe-system-one-endpoint
+
 ### Response Conditions
 
 Use `response_conditions` to gate `on_response` execution.
