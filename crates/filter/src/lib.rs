@@ -63,6 +63,8 @@ mod grpc_response;
 pub mod json_ops;
 pub mod json_size;
 pub(crate) mod load_balancing;
+#[cfg(feature = "managed-websocket")]
+pub mod managed_websocket;
 mod metadata;
 mod metrics;
 pub(crate) mod path_match;

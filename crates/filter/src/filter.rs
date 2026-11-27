@@ -86,6 +86,22 @@ pub trait HttpFilter: Send + Sync {
     #[cfg(feature = "slow-start")]
     fn bind_slow_start(&self, _registry: &Arc<crate::SlowStartRegistry>) {}
 
+    /// Whether this filter participates in managed WebSocket admission.
+    #[cfg(feature = "managed-websocket")]
+    fn can_claim_managed_websocket(&self) -> bool {
+        false
+    }
+
+    /// Decide whether to claim a validated handshake after request authorization.
+    /// The protocol layer calls this hook only for filters declaring the capability.
+    #[cfg(feature = "managed-websocket")]
+    async fn on_managed_websocket(
+        &self,
+        _context: &crate::managed_websocket::ManagedWebSocketContext,
+    ) -> crate::managed_websocket::ManagedWebSocketDecision {
+        crate::managed_websocket::ManagedWebSocketDecision::Pass
+    }
+
     /// Called for each incoming request, in pipeline order.
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError>;
 
