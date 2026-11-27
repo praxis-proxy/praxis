@@ -103,7 +103,7 @@ impl From<TransportFailure> for config::TransportErrorKind {
             TransportFailure::AdmissionTimeout => config::TransportErrorKind::AdmissionTimeout,
             TransportFailure::CircuitOpen => config::TransportErrorKind::CircuitOpen,
             TransportFailure::Connect => config::TransportErrorKind::Connect,
-            TransportFailure::Io => config::TransportErrorKind::Io,
+            TransportFailure::Io | TransportFailure::InvalidRequest => config::TransportErrorKind::Io,
             TransportFailure::DeadlineExceeded => config::TransportErrorKind::DeadlineExceeded,
             TransportFailure::ResponseTooLarge { .. } => config::TransportErrorKind::ResponseTooLarge,
         }

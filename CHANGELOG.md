@@ -69,9 +69,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   (#1557). A chain-binding filter resolves a top-level cluster at config load
   with `ChainBindingContext::cluster` and stages it per call with
   `StagedCluster`; the executor picks the endpoint with the cluster's
-  strategy, health, and slow start, and pins `ctx.cluster` and
-  `ctx.upstream`. `credential_injection` now applies inside such callouts'
-  outbound chains.
+  strategy, health, and slow start, pins `ctx.cluster` and `ctx.upstream`,
+  honours the cluster's configured timeouts and reports each attempt to passive
+  health. `credential_injection` now applies inside such callouts' outbound
+  chains.
 
 - Policy request metadata now carries the exported root HTTP request span's
   trace ID when the `otel` feature is compiled in and an exporter is

@@ -89,6 +89,9 @@ pub(crate) struct FilteredSubrequestContinuation {
     pub(super) step_deadline: std::time::Instant,
     /// Verified downstream mTLS identity.
     pub(super) peer_identity: Option<Arc<praxis_tls::TlsPeerIdentity>>,
+    /// Passive observation pending upstream EOF or stream failure.
+    #[cfg(feature = "chain-binding")]
+    pub(super) stream_health: Option<super::attempt::PassiveObservation>,
     /// Endpoint held for a cluster-staged callout, released when the
     /// continuation (and so a streaming body) is finished or dropped.
     #[cfg(feature = "chain-binding")]
@@ -128,6 +131,8 @@ impl FilteredSubrequestContinuation {
             request_start: ctx.request_start,
             step_deadline,
             peer_identity: ctx.peer_identity.clone(),
+            #[cfg(feature = "chain-binding")]
+            stream_health: None,
             #[cfg(feature = "chain-binding")]
             lease: None,
         }

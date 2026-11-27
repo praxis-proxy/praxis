@@ -20,7 +20,7 @@
 //! which it drains to seed the sub-request's upstream before the request phase so
 //! a callout can dial a known destination without an upstream-selecting filter;
 //! and, with the `chain-binding` feature, `StagedCluster`, which names a
-//! top-level cluster whose endpoint the executor selects and pins.
+//! top-level cluster whose endpoint the executor selects, pins, and reports to passive health.
 //! It also scopes the parent's upstream state: on entry it clears the
 //! exchange-local upstream selection and, with the `upstream-binding` feature,
 //! sets the parent's logical binding aside (an IRR step keeps seeing it, a
@@ -37,6 +37,7 @@
 //! particular caller's state layout while still enforcing a ceiling at every
 //! phase boundary.
 
+mod attempt;
 mod context;
 mod continuation;
 mod sanitize;
@@ -89,13 +90,14 @@ use tracing::{Instrument as _, warn};
 #[cfg(feature = "chain-binding")]
 pub use self::types::StagedCluster;
 use self::{
+    attempt::AttemptResult,
     context::{SubrequestRuntimeResources, build_sub_filter_context},
     sanitize::{
         apply_request_header_mutations, body_exceeds_limit, ensure_destination_host, fold_pending_into,
         response_body_overflow_limit, sanitize_subrequest_headers, sanitize_subresponse_headers, set_authority_host,
         streaming_transport_limit, strip_reserved_headers, subrequest_uri, subresponse_from_rejection,
     },
-    transport::{build_peer, classify_transport_failure, stream_termination_cause},
+    transport::{build_peers, classify_transport_failure, stream_termination_cause},
 };
 pub(crate) use self::{
     continuation::FilteredSubrequestContinuation,
@@ -906,6 +908,13 @@ impl FilteredSubrequestExecutor {
             }
         };
 
+        // A staged cluster's `request_timeout_ms` bounds the whole callout,
+        // every attempt and backoff included.
+        #[cfg(feature = "chain-binding")]
+        let remaining = pinned_cluster
+            .as_ref()
+            .and_then(|pinned| pinned.cluster.entry().retry_policy().request_timeout_ms)
+            .map_or(remaining, |timeout_ms| remaining.min(Duration::from_millis(timeout_ms)));
         let step_budget = remaining.min(self.step_timeout);
         let step_started = Instant::now();
         let step_deadline = step_started.checked_add(step_budget).unwrap_or(deadline);
@@ -913,6 +922,13 @@ impl FilteredSubrequestExecutor {
         let in_transport_inner = Arc::clone(&in_transport);
         let transport_outcome_inner = transport_outcome.clone();
         let mut forwarding: Option<(Arc<str>, RequestProgress)> = None;
+        // Whether a dialed attempt has not been reported to passive health yet.
+        #[cfg(feature = "chain-binding")]
+        let mut outstanding = false;
+        // A successful streaming attempt's observation, settled when its body
+        // ends.
+        #[cfg(feature = "chain-binding")]
+        let mut stream_health = None;
 
         let step_span = tracing::info_span!("filtered_subrequest", step = label, iteration = iteration);
 
@@ -1045,27 +1061,38 @@ impl FilteredSubrequestExecutor {
                 staged_cluster::repin_cluster(&mut filter_ctx, pinned_cluster.as_ref());
             }
 
-            let upstream = filter_ctx.upstream.as_ref().ok_or_else(|| -> FilterError {
-                format!("filtered_subrequest: step '{label}' did not resolve an upstream").into()
-            })?;
-            let destination_authority = Arc::clone(&upstream.address);
-            // The credential-matching key and upstream Host are the *logical*
-            // authority the operator configured for this upstream (`authority`
-            // override), not the transport endpoint bytes travel to. Derived
-            // from trusted config, never the client-influenced Host header.
-            let authority_override: Option<Arc<str>> = upstream
-                .authority
-                .as_ref()
-                .and_then(|value| value.to_str().ok())
-                .map(Arc::from);
-            // Cloned out with the two above so the borrow of `filter_ctx` ends
-            // before the credential phase below needs it mutably.
-            let upstream_base_path: Option<Arc<str>> = upstream.base_path.clone();
-            // Fall back to the transport only when no override is set.
+            let request_body = request_body.unwrap_or_default();
+            let mut framework_headers = FrameworkHeaders::new();
+            framework_headers.set_depth(self.depth.saturating_add(1));
+            filter_ctx.apply_trace_propagation(&mut framework_headers);
+            let streaming = filter_ctx.subrequest_response_mode == SubRequestResponseMode::Streaming;
+            if streaming
+                && matches!(
+                    pipeline.body_capabilities().response_body_mode,
+                    crate::BodyMode::StreamBuffer { .. }
+                )
+            {
+                return Err(format!(
+                    "filtered_subrequest: step '{label}' selected streaming despite a StreamBuffer response mode"
+                )
+                .into());
+            }
+            let limits = StreamLimits {
+                idle_timeout: STREAMING_IDLE_TIMEOUT,
+                // FilteredStreamingBody enforces the original absolute step
+                // deadline so header time cannot be granted twice.
+                max_stream_duration: None,
+                max_total_bytes: streaming_transport_limit(pipeline.body_capabilities().response_body_mode),
+            };
+            // A staged cluster's `per_try_timeout_ms` caps each attempt within
+            // the step deadline; an expired attempt is not retried.
             #[cfg(feature = "chain-binding")]
-            let logical_authority: Arc<str> = authority_override
-                .clone()
-                .unwrap_or_else(|| Arc::clone(&destination_authority));
+            let per_try_cap = pinned_cluster
+                .as_ref()
+                .and_then(|pinned| pinned.cluster.entry().retry_policy().per_try_timeout_ms)
+                .map_or(Duration::MAX, Duration::from_millis);
+            #[cfg(not(feature = "chain-binding"))]
+            let per_try_cap = Duration::MAX;
             in_transport_inner.store(true, Ordering::Release);
             transport_outcome_inner.start();
             #[cfg(test)]
@@ -1073,119 +1100,114 @@ impl FilteredSubrequestExecutor {
                 gate.entered.notify_one();
                 gate.release.notified().await;
             }
-            // Build one transport peer per validated address so a connection
-            // refusal can fall back to the next. With no staged fallback set (or
-            // a single address) this is exactly the prior single-peer dial: the
-            // seeded upstream address — a pinned literal on the staged path, or a
-            // cluster-resolved hostname on the non-staged path — resolved once.
-            // Each fallback peer reuses the seeded upstream's authority, TLS, and
-            // connection options; only the transport socket address varies.
-            let peers = if fallback_addresses.len() > 1 {
-                let mut built = Vec::with_capacity(fallback_addresses.len());
-                for address in &fallback_addresses {
-                    let mut per_address = upstream.clone();
-                    per_address.address = Arc::from(address.to_string().as_str());
-                    let peer = build_peer(&per_address, pipeline.allow_private_upstreams()).await;
-                    built.push((Arc::clone(&per_address.address), peer));
+            let attempt_result = {
+                let upstream = filter_ctx.upstream.clone().ok_or_else(|| -> FilterError {
+                    format!("filtered_subrequest: step '{label}' did not resolve an upstream").into()
+                })?;
+                let destination_authority = Arc::clone(&upstream.address);
+                // The credential-matching key and upstream Host are the *logical*
+                // authority the operator configured for this upstream (`authority`
+                // override), not the transport endpoint bytes travel to. Derived
+                // from trusted config, never the client-influenced Host header.
+                let authority_override: Option<Arc<str>> = upstream
+                    .authority
+                    .as_ref()
+                    .and_then(|value| value.to_str().ok())
+                    .map(Arc::from);
+                // Fall back to the transport only when no override is set.
+                #[cfg(feature = "chain-binding")]
+                let logical_authority: Arc<str> = authority_override
+                    .clone()
+                    .unwrap_or_else(|| Arc::clone(&destination_authority));
+                // The attempt's clock starts before peer construction, which may
+                // resolve a hostname: `per_try_timeout_ms` bounds the whole
+                // attempt, within the step deadline.
+                let attempt_deadline = Instant::now()
+                    .checked_add(per_try_cap)
+                    .map_or(step_deadline, |cap| cap.min(step_deadline));
+                // Build one transport peer per validated address so a connection
+                // refusal can fall back to the next. With no staged fallback set (or
+                // a single address) this is exactly the prior single-peer dial: the
+                // seeded upstream address — a pinned literal on the staged path, or a
+                // cluster-resolved hostname on the non-staged path — resolved once.
+                // A construction still pending at the attempt deadline dials nothing
+                // and ends the attempt as a timeout.
+                let built = build_peers(&upstream, &fallback_addresses, pipeline.allow_private_upstreams(), attempt_deadline).await;
+                let peers_timed_out = built.is_none();
+                let peers = built.unwrap_or_default();
+                filter_ctx.upstream_reached = true;
+                apply_request_header_mutations(&mut sub_headers, &filter_ctx);
+                // Mirror the normal proxy path (`apply_authority_override`): a
+                // configured authority override becomes the upstream Host,
+                // replacing any prior step's or caller's Host. Without an override,
+                // default the Host to the transport endpoint only when absent.
+                match authority_override.as_deref() {
+                    Some(authority) => set_authority_host(&mut sub_headers, authority)?,
+                    None => ensure_destination_host(&mut sub_headers, &destination_authority)?,
                 }
-                built
-            } else {
-                vec![(Arc::clone(&upstream.address), build_peer(upstream, pipeline.allow_private_upstreams()).await)]
-            };
-            filter_ctx.upstream_reached = true;
-            apply_request_header_mutations(&mut sub_headers, &filter_ctx);
-            // Mirror the normal proxy path (`apply_authority_override`): a
-            // configured authority override becomes the upstream Host,
-            // replacing any prior step's or caller's Host. Without an override,
-            // default the Host to the transport endpoint only when absent.
-            match authority_override.as_deref() {
-                Some(authority) => set_authority_host(&mut sub_headers, authority)?,
-                None => ensure_destination_host(&mut sub_headers, &destination_authority)?,
-            }
-            sanitize_subrequest_headers(&mut sub_headers);
-            // Destination-bound credential injection: only now that the upstream
-            // authority is resolved do we materialize staged secrets, and only
-            // into a request bound for the authority each credential was issued
-            // for. Injecting after sanitization keeps the credential header from
-            // being stripped as hop-by-hop/framing.
-            #[cfg(feature = "chain-binding")]
-            if let Some(pending) = filter_ctx.extensions.remove::<PendingCredentials>() {
-                let destination = ResolvedDestination {
-                    authority: &logical_authority,
-                    transport: &destination_authority,
-                };
-                let injected = pending.inject_authorized(&destination, &mut sub_headers);
-                if injected > 0 {
-                    // A credential was authorized against `logical_authority`, so
-                    // the upstream must see exactly that authority as its Host. Pin
-                    // it here — replacing any step- or caller-set Host the
-                    // no-override path preserved — so a secret can never be
-                    // delivered under a divergent Host to a shared-vhost endpoint.
-                    // (With an override the Host already equals `logical_authority`;
-                    // this keeps that true.) A staged credential that matched
-                    // nothing injects no secret, so it must not retarget the Host —
-                    // doing so would silently change virtual-host routing.
-                    set_authority_host(&mut sub_headers, &logical_authority)?;
-                    tracing::debug!(
-                        authority = %logical_authority,
-                        transport = %destination_authority,
-                        injected,
-                        "materialized destination-bound credentials"
-                    );
-                }
-            }
-            let request = SubRequest {
-                method: current_request.method.clone(),
-                uri: subrequest_uri(
-                    filter_ctx.rewritten_path.as_ref(),
-                    &current_request.uri,
-                    upstream_base_path.as_deref(),
-                )?,
-                headers: sub_headers,
-                body: request_body.unwrap_or_default(),
-            };
-            let mut framework_headers = FrameworkHeaders::new();
-            framework_headers.set_depth(self.depth.saturating_add(1));
-            filter_ctx.apply_trace_propagation(&mut framework_headers);
-            let transport_budget = step_budget
-                .checked_sub(step_started.elapsed())
-                .unwrap_or(Duration::ZERO);
-            if transport_budget.is_zero() {
-                return Ok(RawResponse::Rejected(Rejection::status(504)));
-            }
-
-            match filter_ctx.subrequest_response_mode {
-                SubRequestResponseMode::Streaming => {
-                    if matches!(
-                        pipeline.body_capabilities().response_body_mode,
-                        crate::BodyMode::StreamBuffer { .. }
-                    ) {
-                        return Err(format!(
-                            "filtered_subrequest: step '{label}' selected streaming despite a StreamBuffer response mode"
-                        )
-                        .into());
-                    }
-                    let limits = StreamLimits {
-                        idle_timeout: STREAMING_IDLE_TIMEOUT,
-                        // FilteredStreamingBody enforces the original absolute step
-                        // deadline so header time cannot be granted twice.
-                        max_stream_duration: None,
-                        max_total_bytes: streaming_transport_limit(
-                            pipeline.body_capabilities().response_body_mode,
-                        ),
+                sanitize_subrequest_headers(&mut sub_headers);
+                // Destination-bound credential injection: only now that the upstream
+                // authority is resolved do we materialize staged secrets, and only
+                // into a request bound for the authority each credential was issued
+                // for. Injecting after sanitization keeps the credential header from
+                // being stripped as hop-by-hop/framing.
+                #[cfg(feature = "chain-binding")]
+                if let Some(pending) = filter_ctx.extensions.remove::<PendingCredentials>() {
+                    let destination = ResolvedDestination {
+                        authority: &logical_authority,
+                        transport: &destination_authority,
                     };
-                    let mut response =
-                        Err(SubRequestError::Connect("filtered_subrequest: no addresses to dial".to_owned()));
+                    let injected = pending.inject_authorized(&destination, &mut sub_headers);
+                    if injected > 0 {
+                        // A credential was authorized against `logical_authority`, so
+                        // the upstream must see exactly that authority as its Host. Pin
+                        // it here — replacing any step- or caller-set Host the
+                        // no-override path preserved — so a secret can never be
+                        // delivered under a divergent Host to a shared-vhost endpoint.
+                        // (With an override the Host already equals `logical_authority`;
+                        // this keeps that true.) A staged credential that matched
+                        // nothing injects no secret, so it must not retarget the Host —
+                        // doing so would silently change virtual-host routing.
+                        set_authority_host(&mut sub_headers, &logical_authority)?;
+                        tracing::debug!(
+                            authority = %logical_authority,
+                            transport = %destination_authority,
+                            injected = injected,
+                            "materialized destination-bound credentials"
+                        );
+                    }
+                }
+                let request = SubRequest {
+                    method: current_request.method.clone(),
+                    uri: subrequest_uri(
+                        filter_ctx.rewritten_path.as_ref(),
+                        &current_request.uri,
+                        upstream.base_path.as_deref(),
+                    )?,
+                    headers: sub_headers,
+                    body: request_body.clone(),
+                };
+                #[cfg(feature = "chain-binding")]
+                {
+                    outstanding = true;
+                }
+                let result = if streaming {
+                    let mut response = if peers_timed_out {
+                        Err(SubRequestError::DeadlineExceeded)
+                    } else {
+                        Err(SubRequestError::Connect("filtered_subrequest: no addresses to dial".to_owned()))
+                    };
                     for (address, peer) in &peers {
                         // Recompute the remaining budget before every fallback
                         // attempt so a slow-but-not-refused earlier address cannot
                         // hand each later attempt the full step budget again; the
                         // absolute step deadline bounds all attempts together (the
                         // outer `tokio::time::timeout` is the hard backstop).
-                        let attempt_budget = step_deadline
+                        let attempt_budget = attempt_deadline
                             .checked_duration_since(Instant::now())
                             .unwrap_or(Duration::ZERO);
                         if attempt_budget.is_zero() {
+                            response = Err(SubRequestError::DeadlineExceeded);
                             break;
                         }
                         let progress = RequestProgress::default();
@@ -1194,10 +1216,11 @@ impl FilteredSubrequestExecutor {
                             selected.address = Arc::clone(address);
                         }
                         response = match peer {
-                            Ok(peer) => self
-                                .client
-                                .send_streaming_with_progress(peer, &request, attempt_budget, limits.clone(), Some(&framework_headers), Some(&progress))
-                                .await,
+                            Ok(peer) => {
+                                self.client
+                                    .send_streaming_with_progress(peer, &request, attempt_budget, limits.clone(), Some(&framework_headers), Some(&progress))
+                                    .await
+                            },
                             Err(error) => Err(SubRequestError::Connect(error.to_string())),
                         };
                         // Advance to the next validated address only on a
@@ -1208,9 +1231,101 @@ impl FilteredSubrequestExecutor {
                         }
                         break;
                     }
-                    in_transport_inner.store(false, Ordering::Release);
-                    transport::publish_forwarding(&mut filter_ctx, forwarding.as_ref());
-                    match response {
+                    AttemptResult::Streaming(Box::new(response))
+                } else {
+                    let mut attempt = None;
+                    for (address, peer) in &peers {
+                        // Recompute the remaining budget before every fallback
+                        // attempt (see the streaming arm). If the step deadline is
+                        // already reached, stop dialing and fall through to the
+                        // `attempt.unwrap_or_else(...)` synthesized failure below.
+                        let attempt_budget = attempt_deadline
+                            .checked_duration_since(Instant::now())
+                            .unwrap_or(Duration::ZERO);
+                        if attempt_budget.is_zero() {
+                            attempt = None;
+                            break;
+                        }
+                        let progress = RequestProgress::default();
+                        forwarding = Some((Arc::clone(address), progress.clone()));
+                        if let Some(selected) = filter_ctx.upstream.as_mut() {
+                            selected.address = Arc::clone(address);
+                        }
+                        let outcome = match peer {
+                            Ok(peer) => {
+                                match self
+                                    .client
+                                    .execute_with_progress(peer, &request, self.max_response_bytes.min(pipeline.response_buffer_limit()), attempt_budget, Some(&framework_headers), &progress)
+                                    .await
+                                {
+                                    Ok(response) => (response, ResponseOrigin::Upstream, None),
+                                    Err(error) => {
+                                        let (status, kind) = classify_transport_failure(&error);
+                                        warn!(step = label, %error, status, "filtered sub-request buffered transport failure");
+                                        let response =
+                                            SubResponse { version: http::Version::HTTP_11, status, headers: HeaderMap::new(), body: Bytes::new() };
+                                        if matches!(error, SubRequestError::Connect(_)) {
+                                            // Connection refused/unreachable: remember
+                                            // it and try the next validated address.
+                                            attempt = Some((response, ResponseOrigin::Transport, Some(kind)));
+                                            continue;
+                                        }
+                                        (response, ResponseOrigin::Transport, Some(kind))
+                                    },
+                                }
+                            },
+                            Err(error) => {
+                                warn!(step = label, %error, status = 502_u16, "filtered sub-request buffered transport failure");
+                                // Peer construction failed (resolution, SSRF, or
+                                // no TLS name): remember it and try the next
+                                // validated address.
+                                attempt = Some((
+                                    SubResponse { version: http::Version::HTTP_11, status: 502, headers: HeaderMap::new(), body: Bytes::new() },
+                                    ResponseOrigin::Transport,
+                                    Some(TransportFailure::Connect),
+                                ));
+                                continue;
+                            },
+                        };
+                        attempt = Some(outcome);
+                        break;
+                    }
+                    AttemptResult::Buffered(Box::new(attempt.unwrap_or_else(|| {
+                        let (status, kind) = if peers_timed_out || Instant::now() >= attempt_deadline {
+                            (504, TransportFailure::DeadlineExceeded)
+                        } else {
+                            (502, TransportFailure::Connect)
+                        };
+                        (
+                            SubResponse { version: http::Version::HTTP_11, status, headers: HeaderMap::new(), body: Bytes::new() },
+                            ResponseOrigin::Transport,
+                            Some(kind),
+                        )
+                    })))
+                };
+                // A cluster-staged callout reports every attempt to passive
+                // health.
+                #[cfg(feature = "chain-binding")]
+                if let Some(pinned) = pinned_cluster.as_ref() {
+                    outstanding = false;
+                    let contacted = forwarding.as_ref().is_some_and(|(_, progress)| progress.dial_started());
+                    let facts = attempt::facts(&result, contacted);
+                    // A stream that opened is judged when its body ends: a
+                    // failure after the headers counts against the endpoint.
+                    if matches!(&result, AttemptResult::Streaming(_)) && facts.contacted && !facts.failure {
+                        stream_health = attempt::PassiveObservation::new(&filter_ctx, &pinned.cluster);
+                    } else {
+                        attempt::record_passive(&filter_ctx, &pinned.cluster, &facts);
+                    }
+                }
+                result
+            };
+            in_transport_inner.store(false, Ordering::Release);
+            transport::publish_forwarding(&mut filter_ctx, forwarding.as_ref());
+
+            match attempt_result {
+                AttemptResult::Streaming(response) => {
+                    match *response {
                         Ok(response) => {
                             let status = response.status;
                             transport_outcome_inner.response(status);
@@ -1281,70 +1396,8 @@ impl FilteredSubrequestExecutor {
                         },
                     }
                 },
-                SubRequestResponseMode::Buffered => {
-                    let mut attempt = None;
-                    for (address, peer) in &peers {
-                        // Recompute the remaining budget before every fallback
-                        // attempt (see the streaming arm). If the step deadline is
-                        // already reached, stop dialing and fall through to the
-                        // `attempt.unwrap_or_else(...)` synthesized failure below.
-                        let attempt_budget = step_deadline
-                            .checked_duration_since(Instant::now())
-                            .unwrap_or(Duration::ZERO);
-                        if attempt_budget.is_zero() {
-                            break;
-                        }
-                        let progress = RequestProgress::default();
-                        forwarding = Some((Arc::clone(address), progress.clone()));
-                        if let Some(selected) = filter_ctx.upstream.as_mut() {
-                            selected.address = Arc::clone(address);
-                        }
-                        let outcome = match peer {
-                            Ok(peer) => match self
-                                .client
-                                .execute_with_progress(peer, &request, self.max_response_bytes.min(pipeline.response_buffer_limit()), attempt_budget, Some(&framework_headers), &progress)
-                                .await
-                            {
-                                Ok(response) => (response, ResponseOrigin::Upstream, None),
-                                Err(error) => {
-                                    let (status, kind) = classify_transport_failure(&error);
-                                    warn!(step = label, %error, status, "filtered sub-request buffered transport failure");
-                                    let response =
-                                        SubResponse { version: http::Version::HTTP_11, status, headers: HeaderMap::new(), body: Bytes::new() };
-                                    if matches!(error, SubRequestError::Connect(_)) {
-                                        // Connection refused/unreachable: remember
-                                        // it and try the next validated address.
-                                        attempt = Some((response, ResponseOrigin::Transport, Some(kind)));
-                                        continue;
-                                    }
-                                    (response, ResponseOrigin::Transport, Some(kind))
-                                },
-                            },
-                            Err(error) => {
-                                warn!(step = label, %error, status = 502_u16, "filtered sub-request buffered transport failure");
-                                // Peer construction failed (resolution, SSRF, or
-                                // no TLS name): remember it and try the next
-                                // validated address.
-                                attempt = Some((
-                                    SubResponse { version: http::Version::HTTP_11, status: 502, headers: HeaderMap::new(), body: Bytes::new() },
-                                    ResponseOrigin::Transport,
-                                    Some(TransportFailure::Connect),
-                                ));
-                                continue;
-                            },
-                        };
-                        attempt = Some(outcome);
-                        break;
-                    }
-                    let (mut response, origin, transport_error) = attempt.unwrap_or_else(|| {
-                        (
-                            SubResponse { version: http::Version::HTTP_11, status: 502, headers: HeaderMap::new(), body: Bytes::new() },
-                            ResponseOrigin::Transport,
-                            Some(TransportFailure::Connect),
-                        )
-                    });
-                    in_transport_inner.store(false, Ordering::Release);
-                    transport::publish_forwarding(&mut filter_ctx, forwarding.as_ref());
+                AttemptResult::Buffered(attempt) => {
+                    let (mut response, origin, transport_error) = *attempt;
                     transport_outcome_inner.response(response.status);
                     sanitize_subresponse_headers(&mut response.headers);
                     response_header.status = http::StatusCode::from_u16(response.status)
@@ -1403,6 +1456,17 @@ impl FilteredSubrequestExecutor {
 
         transport::publish_forwarding(&mut filter_ctx, forwarding.as_ref());
         let outer_deadline = timed.is_err();
+        // The deadline cancelled an attempt before it was reported: count it
+        // against its endpoint, once. Cancellation during DNS, admission or a
+        // backoff leaves nothing outstanding.
+        #[cfg(feature = "chain-binding")]
+        if outer_deadline
+            && outstanding
+            && forwarding.as_ref().is_some_and(|(_, progress)| progress.dial_started())
+            && let Some(pinned) = pinned_cluster.as_ref()
+        {
+            attempt::record_passive(&filter_ctx, &pinned.cluster, &attempt::AttemptFacts::cancelled());
+        }
         let mut raw = match timed {
             Ok(Ok(raw)) => raw,
             Ok(Err(error)) => return Err(FilteredSubrequestError::capture(error, &mut filter_ctx)),
@@ -1572,6 +1636,7 @@ impl FilteredSubrequestExecutor {
         );
         #[cfg(feature = "chain-binding")]
         {
+            continuation.stream_health = stream_health;
             continuation.lease = pinned_cluster.map(|pinned| pinned.lease);
         }
         Ok(OpenedSubrequest { continuation, kind })

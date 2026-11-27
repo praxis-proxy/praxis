@@ -508,7 +508,7 @@ With the `chain-binding` build feature, a chain-binding filter can send a
 `FilteredSubrequestExecutor` callout to a top-level cluster instead of a URL.
 That `clusters:` entry supplies the callout's endpoints, load-balancing
 strategy, health, slow start, TLS (including client certificates), authority,
-base path, and connection options.
+base path, and timeouts.
 
 Resolve the cluster once, when the filter is built, and stage it on each
 callout:
@@ -527,7 +527,7 @@ let response = executor.run(&outbound, &request, extensions, deadline).await?;
 Like any chain-binding filter, the owning filter must forward
 `visit_nested_pipelines` to its bound outbound pipeline. The staged cluster's
 health comes from that pipeline's health registry, so without forwarding,
-endpoint selection runs without health.
+endpoint selection runs without health and nothing reports to passive health.
 
 What the executor does with a staged cluster:
 
@@ -547,7 +547,22 @@ What the executor does with a staged cluster:
   have picked headers for the other cluster, such as a `credential_injection`
   secret. Staging `StagedCluster` together with `StagedUpstream` fails the
   callout.
+- **Timeouts.** The policy's `per_try_timeout_ms` caps each attempt, from
+  peer construction (including DNS resolution) to the response, inside the
+  step deadline. Its `request_timeout_ms` caps the whole callout. The executor
+  makes a single cluster endpoint attempt. It may try another address for that
+  endpoint after a connection failure, but cluster retry rules do not apply.
+- **Passive health.** Every attempt that reached an endpoint counts toward the cluster's
+  `passive_unhealthy_threshold` and `passive_healthy_threshold`. Outcomes
+  decided on the caller's side (a request that could not be built, the callout
+  client's admission limit or circuit breaker, or a response over the caller's
+  size limit) are excluded. A streamed response counts when its body ends, so
+  a failure after the headers counts against the endpoint, including a stream
+  that sends nothing for the stream idle timeout. A stream that ends on the
+  caller's own step deadline is not counted.
 
-Limitations: a callout makes one attempt, and the cluster's `retry_policy`
-is not applied yet. A `ClusterRef` keeps its own balancer state, separate
-from any `load_balancer` filter that declares the same cluster.
+Limitations: callout passive-health transitions are logged but do
+not update the health-transition metrics,
+which the main proxy path records. A `ClusterRef` keeps its own balancer
+state, separate from any `load_balancer` filter that declares the same
+cluster.

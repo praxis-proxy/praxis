@@ -158,6 +158,12 @@ impl ClusterEntry {
         &self.retry_state
     }
 
+    /// The cluster's resolved retry policy (the legacy default when unset).
+    #[cfg(feature = "chain-binding")]
+    pub(crate) fn retry_policy(&self) -> &Arc<RetryPolicy> {
+        &self.retry_policy
+    }
+
     /// Publish this cluster's application metadata for the selected exchange.
     pub(crate) fn publish_application(&self, ctx: &mut HttpFilterContext<'_>) {
         ctx.publish_selected_application(

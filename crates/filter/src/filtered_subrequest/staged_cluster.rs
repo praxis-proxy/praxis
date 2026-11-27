@@ -95,6 +95,7 @@ pub(super) fn repin_cluster(ctx: &mut HttpFilterContext<'_>, pinned: Option<&Pin
     let Some(pinned) = pinned else {
         return;
     };
+    ctx.selected_endpoint_index = Some(pinned.lease.index);
     ctx.cluster = Some(std::sync::Arc::clone(pinned.cluster.name_arc()));
     pinned.cluster.entry().publish_application(ctx);
 }

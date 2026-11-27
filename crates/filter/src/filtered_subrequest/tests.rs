@@ -135,11 +135,34 @@ fn classify_io_returns_502() {
 }
 
 #[test]
-fn classify_invalid_request_falls_through_to_io() {
+fn classify_invalid_request_is_a_local_failure() {
     let error = praxis_core::subrequest::SubRequestError::InvalidRequest("bad uri".to_owned());
     let (status, kind) = super::transport::classify_transport_failure(&error);
-    assert_eq!(status, 502, "InvalidRequest wildcard should return 502");
-    assert_eq!(kind, super::TransportFailure::Io);
+    assert_eq!(status, 502, "InvalidRequest should return 502");
+    assert_eq!(kind, super::TransportFailure::InvalidRequest);
+}
+
+#[tokio::test]
+async fn peer_construction_is_bounded_by_the_attempt_deadline() {
+    let upstream = praxis_core::connectivity::Upstream {
+        address: std::sync::Arc::from("slow-dns.example:80"),
+        authority: None,
+        base_path: None,
+        connection: std::sync::Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
+        tls: None,
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(50);
+
+    let peers = super::transport::build_peers_with(&upstream, &[], deadline, |_| std::future::pending()).await;
+
+    assert!(
+        peers.is_none(),
+        "a peer still being built at the attempt deadline is cut off"
+    );
+    assert!(
+        std::time::Instant::now() < deadline + std::time::Duration::from_secs(1),
+        "the cut-off comes at the deadline, not after the construction"
+    );
 }
 
 #[test]
@@ -1553,6 +1576,8 @@ fn into_parent_extensions_restores_parent_upstream_scope() {
         step_deadline: std::time::Instant::now(),
         peer_identity: None,
         #[cfg(feature = "chain-binding")]
+        stream_health: None,
+        #[cfg(feature = "chain-binding")]
         lease: None,
     };
 
@@ -1609,6 +1634,8 @@ fn into_completion_restores_parent_upstream_scope() {
         request_start: std::time::Instant::now(),
         step_deadline: std::time::Instant::now(),
         peer_identity: None,
+        #[cfg(feature = "chain-binding")]
+        stream_health: None,
         #[cfg(feature = "chain-binding")]
         lease: None,
     };
@@ -3587,6 +3614,7 @@ async fn outer_deadline_settles_nested_circuit() {
     };
     let first_pipeline = Arc::clone(&pipeline);
     let first_gate = gate.clone();
+    let executor = buffered_executor(1_048_576);
     let worker = tokio::spawn(async move {
         let request = crate::SubRequest {
             method: http::Method::GET,
@@ -3602,7 +3630,7 @@ async fn outer_deadline_settles_nested_circuit() {
             Instant::now() + Duration::from_millis(150),
             extensions,
         );
-        let super::OpenedSubrequest { continuation, kind } = match buffered_executor(1_048_576).execute(input).await {
+        let super::OpenedSubrequest { continuation, kind } = match executor.execute(input).await {
             Ok(opened) => opened,
             Err(error) => panic!("nested circuit timeout failed: {}", error.into_parts().0),
         };

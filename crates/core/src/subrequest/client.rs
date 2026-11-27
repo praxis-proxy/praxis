@@ -427,6 +427,9 @@ impl<C: Connector> SubRequestClient<C> {
         // this outer timer is what reports a cap that ran out.
         let connect_budget = connect_attempt_cap.map_or(overall_connect_budget, |cap| cap.min(overall_connect_budget));
 
+        if let Some(progress) = progress {
+            progress.mark_dial_started();
+        }
         let mut session = tokio::time::timeout(connect_budget, Box::pin(self.connector.inner.connect(peer, timeout)))
             .await
             .map_err(|_elapsed| charge(&mut circuit_guard, connect_timeout_error(deadline)))?
