@@ -398,6 +398,10 @@ impl CachedClusterTls {
     pub fn try_from_config(tls: &crate::ClusterTls) -> Result<Self, TlsError> {
         #[cfg(feature = "config-reload")]
         if tls.hot_reload {
+            // Configs parsed from YAML already validated at deserialization;
+            // programmatically constructed ones did not. The registry is
+            // process-global, so an unvalidated struct must not reach it.
+            tls.validate()?;
             let material = crate::upstream_reload::acquire(tls)?;
             return Ok(Self {
                 ca: material.ca.map(Material::Reloadable),
@@ -835,6 +839,31 @@ mod tests {
         verifier
             .verify_client_cert(&chain[0], &chain[1..], rustls::pki_types::UnixTime::now())
             .expect("the unchanged client chain must authenticate against its v1 trust anchor");
+    }
+
+    #[test]
+    #[cfg(feature = "config-reload")]
+    fn hot_reload_branch_rejects_an_unvalidated_config_before_the_registry() {
+        let pair = gen_test_certs();
+        let tls = crate::ClusterTls {
+            client_cert: Some(crate::CertKeyPair {
+                cert_path: pair.cert_path.to_str().unwrap().to_owned(),
+                default: false,
+                key_path: pair.key_path.to_str().unwrap().to_owned(),
+                // `server_names` is a listener-only selector; a cluster
+                // client cert carrying it never passes validation.
+                server_names: vec!["api.example.com".to_owned()],
+            }),
+            hot_reload: true,
+            ..crate::ClusterTls::default()
+        };
+        assert!(
+            matches!(
+                CachedClusterTls::try_from_config(&tls),
+                Err(TlsError::ClusterClientCertSelectors)
+            ),
+            "a programmatically built hot-reload config must fail closed before acquire"
+        );
     }
 
     #[test]

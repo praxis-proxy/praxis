@@ -207,7 +207,10 @@ fn a_partially_broken_rotation_publishes_neither_material() {
 
     std::thread::sleep(Duration::from_millis(1500));
     assert!(
-        Arc::ptr_eq(&before_cert, &cached.client_cert().expect("identity after broken rotation")),
+        Arc::ptr_eq(
+            &before_cert,
+            &cached.client_cert().expect("identity after broken rotation")
+        ),
         "the identity must not publish while the CA file is unreadable"
     );
     assert!(
