@@ -61,6 +61,10 @@ pub struct ClusterTls {
 
     /// Verify upstream certificate. Default: `true`.
     pub verify: bool,
+
+    /// Reload `client_cert` and `ca` files when they change on disk.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hot_reload: Option<bool>,
 }
 
 /// Raw deserialization utility for [`ClusterTls`].
@@ -82,6 +86,10 @@ struct ClusterTlsRaw {
     /// Verify upstream certificate.
     #[serde(default = "default_true")]
     verify: bool,
+
+    /// Reload certificate files on change.
+    #[serde(default)]
+    hot_reload: Option<bool>,
 }
 
 impl<'de> Deserialize<'de> for ClusterTls {
@@ -93,6 +101,7 @@ impl<'de> Deserialize<'de> for ClusterTls {
             client_cert: raw.client_cert,
             sni: raw.sni,
             verify: raw.verify,
+            hot_reload: raw.hot_reload,
         };
         config.validate().map_err(de::Error::custom)?;
         Ok(config)
@@ -125,7 +134,22 @@ impl ClusterTls {
                 return Err(TlsError::ClusterClientCertSelectors);
             }
         }
+        if self.is_hot_reload() {
+            #[cfg(not(feature = "config-reload"))]
+            tracing::warn!(
+                "cluster tls requests hot_reload but this build lacks the `config-reload` feature; \
+                 serving static upstream TLS material"
+            );
+            if self.ca.is_none() && self.client_cert.is_none() {
+                return Err(TlsError::UpstreamHotReloadWithoutMaterial);
+            }
+        }
         Ok(())
+    }
+
+    /// Whether this cluster's TLS material hot-reloads on file change.
+    pub fn is_hot_reload(&self) -> bool {
+        self.hot_reload.unwrap_or(false)
     }
 }
 
@@ -137,6 +161,7 @@ impl Default for ClusterTls {
             client_cert: None,
             sni: None,
             verify: true,
+            hot_reload: None,
         }
     }
 }

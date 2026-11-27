@@ -129,6 +129,11 @@ pub enum TlsError {
         mode: ClientCertMode,
     },
 
+    /// Cluster `tls.hot_reload` is set but no `client_cert` or `ca` is
+    /// configured, so there would be nothing to reload.
+    #[error("tls.hot_reload requires tls.client_cert or tls.ca; there is no upstream TLS material to reload")]
+    UpstreamHotReloadWithoutMaterial,
+
     /// More than one certificate has `default: true`.
     #[error("multiple certificates are marked default: true; only one default certificate is allowed")]
     MultipleDefaults,

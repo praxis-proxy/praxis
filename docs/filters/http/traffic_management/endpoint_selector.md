@@ -39,6 +39,7 @@ When an endpoint is preset, the load balancer publishes the routed cluster's app
 | `tls.client_cert.server_names` | string[] | no | SNI hostnames this certificate serves (listener only). |
 | `tls.sni` | string | no | SNI hostname. |
 | `tls.verify` | bool | no | Verify upstream certificate. |
+| `tls.hot_reload` | bool | no | Reload certificate files on change. |
 
 ## Example
 

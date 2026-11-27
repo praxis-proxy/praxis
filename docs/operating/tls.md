@@ -30,6 +30,7 @@ Working example configs for every TLS scenario live in
 [tls-mtls-both]: ../../examples/configs/protocols/tls-mtls-both.yaml
 [tls-verify-disabled]: ../../examples/configs/protocols/tls-verify-disabled.yaml
 [upstream-tls]: ../../examples/configs/protocols/upstream-tls.yaml
+[upstream-tls-hot-reload]: ../../examples/configs/protocols/upstream-tls-hot-reload.yaml
 [upstream-ca-file]: ../../examples/configs/protocols/upstream-ca-file.yaml
 [tcp-tls-termination]: ../../examples/configs/protocols/tcp-tls-termination.yaml
 [tcp-tls-mtls]: ../../examples/configs/protocols/tcp-tls-mtls.yaml
@@ -218,6 +219,34 @@ client's `Host` header instead; see
 
 Present a client certificate to upstream servers.
 See [tls-mtls-upstream] and [tls-mtls-both].
+
+### Upstream Certificate Hot-Reload
+
+Set `hot_reload: true` on the cluster's `tls` block to re-read
+the `client_cert` and `ca` files when they change on disk:
+
+```yaml
+tls:
+  hot_reload: true
+  client_cert:
+    cert_path: /etc/ssl/certs/proxy-client.pem
+    key_path: /etc/ssl/private/proxy-client-key.pem
+```
+
+Rotated material is served to new connections without a restart
+or a config reload; existing connections keep the TLS they
+negotiated, matching [listener reload semantics](#certificate-hot-reload).
+A rotation that fails to parse keeps the previous material and
+retries with backoff. TLS and HTTPS health probes rebuild their
+connector on rotation, so probes never keep presenting an expired
+identity after the data path has rotated.
+
+The setting needs the `config-reload` build feature (the default
+server build has it), requires at least one of `client_cert` or
+`ca`, and works with deployments that swap certificate files
+atomically, such as Kubernetes Secret volumes. One watcher runs
+per unique set of file paths and is shared across config reloads.
+See [upstream-tls-hot-reload].
 
 ## CA Trust
 

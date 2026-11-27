@@ -3,14 +3,18 @@
 
 //! Pingora transport for TLS and HTTPS health probes.
 
-use std::{net::Ipv6Addr, sync::Arc, time::Duration};
+use std::{
+    net::Ipv6Addr,
+    sync::{Arc, Mutex, PoisonError},
+    time::Duration,
+};
 
 use pingora_core::tls::TlsConnector;
 use praxis_core::{
     config::{Cluster, HealthCheckType, UpstreamAuthority, UpstreamHttpVersion},
     connectivity::peer::tls_server_name,
 };
-use praxis_tls::{CachedCaCerts, CachedClusterTls};
+use praxis_tls::{CachedCaCerts, CachedClientCert, CachedClusterTls};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 // -----------------------------------------------------------------------------
@@ -27,12 +31,36 @@ mod verify;
 pub(super) struct TlsProbe {
     /// HTTP authority policy, independent of certificate verification names.
     authority: Option<UpstreamAuthority>,
-    /// Cached TLS configuration with session resumption disabled.
-    connector: TlsConnector,
+
     /// Optional HTTPS path and expected status; absent for handshake probes.
     http: Option<(String, u16)>,
+
     /// Validated cluster certificate material.
     tls: CachedClusterTls,
+
+    /// Runtime trust anchors used when the cluster names no CA of its own.
+    runtime_ca: Option<Arc<CachedCaCerts>>,
+
+    /// HTTP version the connector negotiates ALPN for.
+    version: UpstreamHttpVersion,
+
+    /// The built connector and the material snapshot it was built from.
+    state: Mutex<ProbeTlsState>,
+}
+
+/// A built probe connector plus the material it was built from.
+///
+/// When hot-reloaded material rotates, the live values differ from these
+/// snapshots and the connector is rebuilt before the next probe.
+struct ProbeTlsState {
+    /// The connector the current probes dial with.
+    connector: Arc<TlsConnector>,
+
+    /// The client identity the connector was built from.
+    built_from_cert: Option<Arc<CachedClientCert>>,
+
+    /// The CA bundle the connector was built from.
+    built_from_ca: Option<Arc<CachedCaCerts>>,
 }
 
 impl TlsProbe {
@@ -44,20 +72,69 @@ impl TlsProbe {
             .as_ref()
             .filter(|hc| hc.check_type == HealthCheckType::Http)
             .map(|hc| (hc.path.clone(), hc.expected_status));
+        let version = if http.is_some() {
+            UpstreamHttpVersion::H1
+        } else {
+            cluster.http.version
+        };
+        let runtime_ca = upstream_ca.map(|ca| Arc::new(ca.clone()));
+        let state = Self::build_state(&tls, runtime_ca.as_deref(), version)?;
         Ok(Self {
             authority: cluster.http.authority.clone(),
-            connector: build_connector(
-                &tls,
-                upstream_ca,
-                if http.is_some() {
-                    UpstreamHttpVersion::H1
-                } else {
-                    cluster.http.version
-                },
-            )?,
             http,
             tls,
+            runtime_ca,
+            version,
+            state: Mutex::new(state),
         })
+    }
+
+    /// Build a connector state from the material current at this moment.
+    fn build_state(
+        tls: &CachedClusterTls,
+        runtime_ca: Option<&CachedCaCerts>,
+        version: UpstreamHttpVersion,
+    ) -> Result<ProbeTlsState, String> {
+        let built_from_cert = tls.client_cert();
+        let built_from_ca = tls.ca();
+        let connector = Arc::new(build_connector(tls, runtime_ca, version)?);
+        Ok(ProbeTlsState {
+            connector,
+            built_from_cert,
+            built_from_ca,
+        })
+    }
+
+    /// The connector for the material current right now.
+    ///
+    /// With static material this always returns the connector built at
+    /// construction. With hot-reloaded material it rebuilds once per
+    /// rotation, so probes never keep presenting an expired identity after
+    /// the data path has rotated. A failed rebuild keeps the previous
+    /// connector and retries on the next probe.
+    fn current_connector(&self) -> Arc<TlsConnector> {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if self.material_unchanged(&state) {
+            return Arc::clone(&state.connector);
+        }
+        match Self::build_state(&self.tls, self.runtime_ca.as_deref(), self.version) {
+            Ok(new_state) => {
+                tracing::info!("TLS health probe connector rebuilt after upstream material rotation");
+                *state = new_state;
+            },
+            Err(error) => {
+                tracing::warn!(%error, "TLS health probe rebuild failed; keeping the previous connector");
+            },
+        }
+        Arc::clone(&state.connector)
+    }
+
+    /// Whether the state was built from the material that is current now.
+    fn material_unchanged(&self, state: &ProbeTlsState) -> bool {
+        let current_cert = self.tls.client_cert();
+        let current_ca = self.tls.ca();
+        same_material(current_cert.as_ref(), state.built_from_cert.as_ref())
+            && same_material(current_ca.as_ref(), state.built_from_ca.as_ref())
     }
 
     /// Probe under one deadline for DNS, connection, handshake, HTTP and close.
@@ -76,9 +153,10 @@ impl TlsProbe {
 
     /// Exchange over a new connection with session resumption disabled.
     async fn exchange(&self, address: &str, deadline: tokio::time::Instant) -> Result<bool, String> {
+        let connector = self.current_connector();
         let name = tls_server_name(&self.tls, address).map_err(|error| error.to_string())?;
         let started = tokio::time::Instant::now();
-        let mut stream = tokio::time::timeout_at(deadline, self.connect(address, name.clone()))
+        let mut stream = tokio::time::timeout_at(deadline, self.connect(&connector, address, name.clone()))
             .await
             .map_err(|error| format!("TLS health probe handshake timed out: {error}"))??;
         let grace = MIN_HANDSHAKE_ALERT_GRACE.max(started.elapsed());
@@ -98,6 +176,7 @@ impl TlsProbe {
     /// Connect with the upstream resolver and a full, non-resumed handshake.
     async fn connect(
         &self,
+        connector: &TlsConnector,
         address: &str,
         name: String,
     ) -> Result<Box<pingora_core::tls::ClientTlsStream<tokio::net::TcpStream>>, String> {
@@ -108,7 +187,7 @@ impl TlsProbe {
             .await
             .map_err(|error| error.to_string())?;
         let name = rustls::pki_types::ServerName::try_from(name).map_err(|error| error.to_string())?;
-        self.connector
+        connector
             .connect(name, stream)
             .await
             .map(Box::new)
@@ -173,6 +252,15 @@ async fn finish_probe<Stream: tokio::io::AsyncWrite + Unpin>(
     healthy
 }
 
+/// Whether two optional material snapshots name the same instance.
+fn same_material<T>(current: Option<&Arc<T>>, built_from: Option<&Arc<T>>) -> bool {
+    match (current, built_from) {
+        (Some(current), Some(built_from)) => Arc::ptr_eq(current, built_from),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
 /// Resolve a fixed DNS authority without overriding explicit SNI.
 fn cached_tls(cluster: &Cluster) -> Result<CachedClusterTls, String> {
     let config = cluster.tls.as_ref().ok_or("TLS probe requires cluster.tls")?;
@@ -200,7 +288,7 @@ fn build_connector(
     runtime_ca: Option<&CachedCaCerts>,
     version: UpstreamHttpVersion,
 ) -> Result<TlsConnector, String> {
-    let roots = Arc::new(trust_store(tls.ca().map(AsRef::as_ref).or(runtime_ca))?);
+    let roots = Arc::new(trust_store(tls.ca().as_deref().or(runtime_ca))?);
     let provider = rustls::crypto::CryptoProvider::get_default()
         .cloned()
         .ok_or("TLS crypto provider is not installed")?;

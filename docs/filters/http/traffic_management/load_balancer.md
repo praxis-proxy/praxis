@@ -55,6 +55,7 @@ Supported strategies: - `round_robin` (default): cycles through endpoints in ord
 | `clusters[].tls.client_cert.server_names` | string[] | no | SNI hostnames this certificate serves (listener only). |
 | `clusters[].tls.sni` | string | no | SNI hostname. |
 | `clusters[].tls.verify` | bool | no | Verify upstream certificate. |
+| `clusters[].tls.hot_reload` | bool | no | Reload certificate files on change. |
 | `clusters[].total_connection_timeout_ms` | integer | no | Total connection timeout in milliseconds (TCP + TLS). Bounds the combined TCP handshake and TLS negotiation. When exceeded, the connection attempt fails; for HTTP, the client gets a 504 once any retries are used up. Prefer this over [`connection_timeout_ms`] for TLS-enabled clusters where the handshake dominates latency. |
 | `clusters[].trusted_private_endpoints` | string[] | no | Endpoint hostnames allowed to resolve to RFC 1918 or IPv6 unique-local addresses. Loopback, link-local, and cloud metadata stay refused. Hostnames only, HTTP clusters only. |
 | `clusters[].write_timeout_ms` | integer | no | Per-write timeout in milliseconds. Applies to each individual write operation on an established upstream connection. For HTTP, a timed-out request body write stops the upload; the proxy then waits for whatever response the upstream sends and answers 504 if none arrives. Pair it with [`read_timeout_ms`] so that wait is bounded. |

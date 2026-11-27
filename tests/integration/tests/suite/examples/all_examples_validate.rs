@@ -646,7 +646,9 @@ fn cluster_files(cluster: &serde_yaml::Value) -> Vec<ExternalFile<'_>> {
 /// Deployment-owned files that a specific example may omit locally.
 fn external_files(example: &std::path::Path) -> &'static [ExternalFile<'static>] {
     match example.to_str().unwrap_or_default() {
-        "protocols/tls-mtls-upstream.yaml" | "protocols/tls-mtls-both.yaml" => &[
+        "protocols/tls-mtls-upstream.yaml"
+        | "protocols/tls-mtls-both.yaml"
+        | "protocols/upstream-tls-hot-reload.yaml" => &[
             ExternalFile {
                 path: "/etc/ssl/certs/proxy-client.pem",
                 loader: FileLoader::ClientCert("backend"),

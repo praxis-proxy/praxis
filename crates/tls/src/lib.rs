@@ -51,6 +51,8 @@ pub(crate) mod spiffe;
 )]
 pub mod test_utils;
 #[cfg(feature = "config-reload")]
+pub(crate) mod upstream_reload;
+#[cfg(feature = "config-reload")]
 pub mod watcher;
 
 pub use cached::{CachedCaCerts, CachedClientCert, CachedClusterTls};

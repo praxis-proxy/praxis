@@ -66,6 +66,55 @@ impl fmt::Debug for ConvertedSlot {
 }
 
 // -----------------------------------------------------------------------------
+// Material
+// -----------------------------------------------------------------------------
+
+/// Upstream TLS material storage: a fixed snapshot or a live slot.
+///
+/// Static: material loaded once at pipeline build.
+/// Reloadable reads always return what is current; the watcher swaps new
+/// material in when the files change.
+enum Material<T> {
+    /// Material loaded once at config time.
+    Static(Arc<T>),
+
+    /// A watcher-refreshed slot.
+    #[cfg(feature = "config-reload")]
+    Reloadable(crate::upstream_reload::Reloadable<T>),
+}
+
+impl<T> Material<T> {
+    /// Return the material that is current right now.
+    fn load(&self) -> Arc<T> {
+        match self {
+            Self::Static(material) => Arc::clone(material),
+            #[cfg(feature = "config-reload")]
+            Self::Reloadable(live) => live.load(),
+        }
+    }
+}
+
+impl<T> Clone for Material<T> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Static(material) => Self::Static(Arc::clone(material)),
+            #[cfg(feature = "config-reload")]
+            Self::Reloadable(live) => Self::Reloadable(live.clone()),
+        }
+    }
+}
+
+impl<T: fmt::Debug> fmt::Debug for Material<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Static(material) => fmt::Debug::fmt(material, f),
+            #[cfg(feature = "config-reload")]
+            Self::Reloadable(_) => f.write_str("Reloadable"),
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
 // CachedCaCerts
 // -----------------------------------------------------------------------------
 
@@ -319,10 +368,10 @@ impl CachedClientCert {
 #[derive(Clone, Debug)]
 pub struct CachedClusterTls {
     /// Cached CA certificates.
-    ca: Option<Arc<CachedCaCerts>>,
+    ca: Option<Material<CachedCaCerts>>,
 
     /// Cached client certificate and key.
-    client_cert: Option<Arc<CachedClientCert>>,
+    client_cert: Option<Material<CachedClientCert>>,
 
     /// SNI hostname for outbound connections.
     sni: Option<Arc<str>>,
@@ -334,7 +383,10 @@ pub struct CachedClusterTls {
 impl CachedClusterTls {
     /// Build cached TLS material from a [`ClusterTls`] config.
     ///
-    /// Reads and parses any referenced cert/key/CA files eagerly.
+    /// Reads and parses any referenced cert/key/CA files eagerly. With
+    /// `hot_reload: true` (and the `config-reload` feature) the material is
+    /// instead served from a live slot that a watcher refreshes on file
+    /// change.
     ///
     /// # Errors
     ///
@@ -344,6 +396,17 @@ impl CachedClusterTls {
     /// [`ClusterTls`]: crate::ClusterTls
     /// [`TlsError`]: crate::TlsError
     pub fn try_from_config(tls: &crate::ClusterTls) -> Result<Self, TlsError> {
+        #[cfg(feature = "config-reload")]
+        if tls.is_hot_reload() {
+            let material = crate::upstream_reload::acquire(tls)?;
+            return Ok(Self {
+                ca: material.ca.map(Material::Reloadable),
+                client_cert: material.client_cert.map(Material::Reloadable),
+                sni: tls.sni.as_deref().map(Arc::from),
+                verify: tls.verify,
+            });
+        }
+
         let ca = tls
             .ca
             .as_ref()
@@ -357,21 +420,27 @@ impl CachedClusterTls {
             .transpose()?;
 
         Ok(Self {
-            ca,
-            client_cert,
+            ca: ca.map(Material::Static),
+            client_cert: client_cert.map(Material::Static),
             sni: tls.sni.as_deref().map(Arc::from),
             verify: tls.verify,
         })
     }
 
     /// Cached CA certificates, if configured.
-    pub fn ca(&self) -> Option<&Arc<CachedCaCerts>> {
-        self.ca.as_ref()
+    ///
+    /// With hot-reload enabled this is the bundle that is current at the
+    /// call, not the one loaded at startup.
+    pub fn ca(&self) -> Option<Arc<CachedCaCerts>> {
+        self.ca.as_ref().map(Material::load)
     }
 
     /// Cached client certificate and key, if configured.
-    pub fn client_cert(&self) -> Option<&Arc<CachedClientCert>> {
-        self.client_cert.as_ref()
+    ///
+    /// With hot-reload enabled this is the identity that is current at the
+    /// call, not the one loaded at startup.
+    pub fn client_cert(&self) -> Option<Arc<CachedClientCert>> {
+        self.client_cert.as_ref().map(Material::load)
     }
 
     /// SNI hostname for outbound connections.
@@ -939,7 +1008,7 @@ mod tests {
         let client_cert = CachedClientCert::new(vec![vec![10]], Zeroizing::new(key_der.to_vec()));
         let cached = CachedClusterTls {
             ca: None,
-            client_cert: Some(Arc::new(client_cert)),
+            client_cert: Some(Material::Static(Arc::new(client_cert))),
             sni: Some(Arc::from("api.example.com")),
             verify: true,
         };
@@ -972,7 +1041,7 @@ mod tests {
         let cached = CachedClusterTls::try_from_config(&tls).unwrap();
         let cloned = cached.clone();
         assert!(
-            Arc::ptr_eq(cached.ca().unwrap(), cloned.ca().unwrap()),
+            Arc::ptr_eq(cached.ca().as_ref().unwrap(), cloned.ca().as_ref().unwrap()),
             "cloned CachedClusterTls should share CA Arc"
         );
     }

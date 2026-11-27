@@ -3,7 +3,11 @@
 
 //! Functional handshakes and requests using the shipped TLS example YAML.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 use praxis_core::config::Config;
 use praxis_test_utils::{
@@ -366,9 +370,195 @@ fn sni_routing_example_selects_exact_wildcard_and_default_backends() {
     }
 }
 
+#[test]
+fn upstream_hot_reload_example_presents_rotated_identity() {
+    let certs = TestCertificates::generate();
+    let first_identity = certs.generate_client_cert();
+    let second_identity = certs.generate_client_cert();
+    let backend = RecordingMtlsBackend::new(&certs);
+    let port = free_port();
+    let config = load_tls_example(
+        "upstream-tls-hot-reload.yaml",
+        port,
+        &HashMap::from([("127.0.0.1:9443", backend.port)]),
+        None,
+        Some(&first_identity),
+        &[],
+    );
+    let _proxy = start_full_proxy(&config);
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_tcp(&addr);
+
+    assert_eq!(
+        http_get(&addr, "/", None).0,
+        200,
+        "the upstream must accept the proxy's initial client certificate"
+    );
+    let first_leaf = read_pem_cert(&first_identity.cert_path);
+    assert!(
+        backend.presented_leaves().iter().any(|leaf| leaf == &first_leaf),
+        "the initial handshake must present the first identity"
+    );
+
+    // Rotate the files the proxy's hot-reload watcher monitors.
+    std::fs::copy(&second_identity.cert_path, &first_identity.cert_path).expect("rotate cert file");
+    std::fs::copy(&second_identity.key_path, &first_identity.key_path).expect("rotate key file");
+
+    let second_leaf = read_pem_cert(&second_identity.cert_path);
+    let deadline = Instant::now() + Duration::from_secs(12);
+    let mut rotated = false;
+    while Instant::now() < deadline {
+        assert_eq!(
+            http_get(&addr, "/", None).0,
+            200,
+            "requests must keep succeeding across the rotation"
+        );
+        if backend.presented_leaves().iter().any(|leaf| leaf == &second_leaf) {
+            rotated = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert!(
+        rotated,
+        "a new upstream connection must present the rotated identity without a restart"
+    );
+}
+
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
+
+/// DER-decode the first certificate in a PEM file.
+fn read_pem_cert(path: &std::path::Path) -> Vec<u8> {
+    use rustls::pki_types::pem::PemObject as _;
+    let pem = std::fs::read_to_string(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+    rustls::pki_types::CertificateDer::pem_slice_iter(pem.as_bytes())
+        .next()
+        .expect("one PEM certificate")
+        .expect("parse PEM certificate")
+        .to_vec()
+}
+
+/// A local mTLS backend that records the client leaf every connection
+/// presents, answering each request over its own connection.
+struct RecordingMtlsBackend {
+    /// The port the backend listens on.
+    port: u16,
+
+    /// The DER leaf of every client certificate presented so far.
+    presented: Arc<Mutex<Vec<Vec<u8>>>>,
+}
+
+impl RecordingMtlsBackend {
+    /// Start a backend that requires client certificates signed by `certs`.
+    fn new(certs: &TestCertificates) -> Self {
+        let acceptor = build_recording_acceptor(certs);
+        let presented = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&presented);
+        let (listener, port) = praxis_test_utils::bind_unique_port();
+
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime for the recording backend");
+            runtime.block_on(async move {
+                listener.set_nonblocking(true).expect("nonblocking recording listener");
+                let listener = tokio::net::TcpListener::from_std(listener).expect("tokio recording listener");
+                loop {
+                    let (stream, _) = match listener.accept().await {
+                        Ok(accepted) => accepted,
+                        Err(_) => return,
+                    };
+                    let acceptor = acceptor.clone();
+                    let recorded = Arc::clone(&recorded);
+                    tokio::spawn(async move {
+                        serve_recording_connection(stream, acceptor, recorded).await;
+                    });
+                }
+            });
+        });
+        Self { port, presented }
+    }
+
+    /// The client leaves presented so far, in connection order.
+    fn presented_leaves(&self) -> Vec<Vec<u8>> {
+        self.presented.lock().expect("presented leaves").clone()
+    }
+}
+
+/// Build the backend's mTLS acceptor from the test CA.
+fn build_recording_acceptor(certs: &TestCertificates) -> tokio_rustls::TlsAcceptor {
+    use rustls::pki_types::pem::PemObject as _;
+    let server_pem = std::fs::read_to_string(&certs.cert_path).expect("server PEM");
+    let key_pem = std::fs::read_to_string(&certs.key_path).expect("key PEM");
+    let chain = rustls::pki_types::CertificateDer::pem_slice_iter(server_pem.as_bytes())
+        .collect::<Result<Vec<_>, _>>()
+        .expect("server chain");
+    let key = rustls::pki_types::PrivateKeyDer::from_pem_slice(key_pem.as_bytes()).expect("server key");
+
+    let mut roots = rustls::RootCertStore::empty();
+    roots
+        .add(rustls::pki_types::CertificateDer::from(certs.ca_cert_der.clone()))
+        .expect("recording backend root");
+    let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(roots))
+        .build()
+        .expect("recording backend verifier");
+
+    let config = rustls::ServerConfig::builder()
+        .with_client_cert_verifier(verifier)
+        .with_single_cert(chain, key)
+        .expect("recording backend cert");
+    tokio_rustls::TlsAcceptor::from(Arc::new(config))
+}
+
+/// Handshake, record the presented leaf, and answer one request per connection.
+async fn serve_recording_connection(
+    stream: tokio::net::TcpStream,
+    acceptor: tokio_rustls::TlsAcceptor,
+    recorded: Arc<Mutex<Vec<Vec<u8>>>>,
+) {
+    let mut tls = match acceptor.accept(stream).await {
+        Ok(stream) => stream,
+        Err(_) => return,
+    };
+    if let Some(certificates) = tls.get_ref().1.peer_certificates()
+        && let Some(leaf) = certificates.first()
+    {
+        recorded.lock().expect("presented leaves").push(leaf.to_vec());
+    }
+    let request = read_http_request(&mut tls).await;
+    if request.is_none() {
+        return;
+    }
+    let response = "HTTP/1.1 200 OK\r\nContent-Length: 25\r\nConnection: close\r\n\r\nupstream-hot-reload-example";
+    if tokio::io::AsyncWriteExt::write_all(&mut tls, response.as_bytes())
+        .await
+        .is_err()
+    {
+        return;
+    }
+    let _shutdown_result = tokio::io::AsyncWriteExt::shutdown(&mut tls).await;
+}
+
+/// Read one HTTP/1.1 request head, returning it when complete.
+async fn read_http_request(stream: &mut tokio_rustls::server::TlsStream<tokio::net::TcpStream>) -> Option<String> {
+    let mut buffer = Vec::new();
+    let mut chunk = [0_u8; 512];
+    loop {
+        let read = tokio::io::AsyncReadExt::read(stream, &mut chunk).await.ok()?;
+        if read == 0 {
+            return None;
+        }
+        buffer.extend_from_slice(chunk.get(..read)?);
+        if let Ok(text) = std::str::from_utf8(&buffer)
+            && text.contains("\r\n\r\n")
+        {
+            return Some(text.to_owned());
+        }
+    }
+}
 
 /// Load an actual shipped example with only local fixture substitutions.
 #[expect(

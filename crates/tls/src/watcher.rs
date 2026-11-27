@@ -24,7 +24,7 @@ use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher as _};
 use rustls::sign::CertifiedKey;
 use tokio::sync::mpsc;
 
-use crate::{CertKeyPair, ClientCertMode, setup::loader};
+use crate::{CachedCaCerts, CachedClientCert, CertKeyPair, ClientCertMode, setup::loader};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -70,6 +70,7 @@ thread_local! {
 /// is atomically rebuilt from the current files on disk.
 ///
 /// [`CertWatcher::spawn`]: CertWatcher::spawn
+#[derive(Clone)]
 pub struct ClientVerifierReload {
     /// Path to the CA certificate PEM file.
     pub ca_path: String,
@@ -86,6 +87,102 @@ pub struct ClientVerifierReload {
 
     /// Handle to atomically swap the inner verifier state.
     pub swap_handle: Arc<ArcSwap<crate::reload::VerifierState>>,
+}
+
+// -----------------------------------------------------------------------------
+// ReloadSet
+// -----------------------------------------------------------------------------
+
+/// The material one watch loop keeps current.
+enum ReloadSet {
+    /// A listener's server certificate and optional client verifier.
+    Server(ServerReload),
+
+    /// An upstream cluster's client identity and CA bundle.
+    Upstream(UpstreamReload),
+}
+
+/// Listener-side reload inputs: the serving certificate and, for mTLS
+/// listeners, the client verifier.
+struct ServerReload {
+    /// The serving certificate slot.
+    current: Arc<ArcSwap<CertifiedKey>>,
+
+    /// The certificate and key files the slot reloads from.
+    pair: CertKeyPair,
+
+    /// The client verifier to rebuild alongside the certificate.
+    verifier: Option<ClientVerifierReload>,
+}
+
+/// Upstream-side reload inputs: a cluster's live material slots and the
+/// configured paths they reload from.
+pub(crate) struct UpstreamReload {
+    /// Live client identity slot, when the cluster has one.
+    pub(crate) client_cert: Option<Arc<ArcSwap<CachedClientCert>>>,
+
+    /// Live CA bundle slot, when the cluster has one.
+    pub(crate) ca: Option<Arc<ArcSwap<CachedCaCerts>>>,
+
+    /// The configured paths the slots reload from.
+    pub(crate) paths: crate::upstream_reload::UpstreamPaths,
+}
+
+impl ReloadSet {
+    /// The watched files in digest-baseline order.
+    fn watched_paths(&self) -> Vec<String> {
+        match self {
+            Self::Server(server) => {
+                let (ca_path, crl_paths) = verifier_paths(server.verifier.as_ref());
+                watched_paths(&server.pair, ca_path, crl_paths)
+            },
+            Self::Upstream(upstream) => upstream.paths.watched(),
+        }
+    }
+
+    /// The directories to register with the filesystem watcher.
+    fn watch_dirs(&self) -> Vec<PathBuf> {
+        match self {
+            Self::Server(server) => {
+                let mut dirs = vec![parent_dir(&server.pair.cert_path), parent_dir(&server.pair.key_path)];
+                dirs.extend(verifier_extra_dirs(server.verifier.as_ref()));
+                dirs
+            },
+            Self::Upstream(upstream) => upstream.paths.watched().iter().map(|path| parent_dir(path)).collect(),
+        }
+    }
+
+    /// Reload the material, returning whether all of it loaded.
+    fn reload(&self) -> bool {
+        match self {
+            Self::Server(server) => {
+                let cert_ok = reload_cert(&server.current, &server.pair);
+                let verifier_ok = reload_client_verifier(server.verifier.as_ref());
+                cert_ok && verifier_ok
+            },
+            Self::Upstream(upstream) => reload_upstream(upstream),
+        }
+    }
+
+    /// Log which material this watcher keeps current.
+    fn log_started(&self) {
+        match self {
+            Self::Server(server) if server.verifier.is_some() => tracing::info!(
+                cert_path = %server.pair.cert_path,
+                key_path = %server.pair.key_path,
+                "certificate and client verifier file watcher started"
+            ),
+            Self::Server(server) => tracing::info!(
+                cert_path = %server.pair.cert_path,
+                key_path = %server.pair.key_path,
+                "certificate file watcher started"
+            ),
+            Self::Upstream(upstream) => tracing::info!(
+                paths = ?upstream.paths,
+                "upstream TLS material file watcher started"
+            ),
+        }
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -141,7 +238,12 @@ impl CertWatcher {
         shutdown: tokio::sync::watch::Receiver<bool>,
         file_hashes: Vec<Option<[u8; 32]>>,
     ) -> std::thread::JoinHandle<()> {
-        spawn_watcher(move || watch_loop(current, pair, verifier_reload, file_hashes, shutdown))
+        let set = ReloadSet::Server(ServerReload {
+            current,
+            pair,
+            verifier: verifier_reload,
+        });
+        spawn_watcher(move || watch_loop(set, file_hashes, shutdown))
     }
 
     /// Spawn the watcher in polling-only mode.
@@ -160,11 +262,30 @@ impl CertWatcher {
         shutdown: tokio::sync::watch::Receiver<bool>,
         file_hashes: Vec<Option<[u8; 32]>>,
     ) -> std::thread::JoinHandle<()> {
+        let set = ReloadSet::Server(ServerReload {
+            current,
+            pair,
+            verifier: verifier_reload,
+        });
         spawn_watcher(move || {
             let (_notifications, events) = mpsc::channel(1);
-            watch_events(current, pair, verifier_reload, file_hashes, shutdown, events)
+            watch_events(set, file_hashes, shutdown, events)
         })
     }
+}
+
+/// Spawn a watcher for upstream cluster material.
+///
+/// The watcher refreshes the cluster's client identity and CA slots when
+/// their files change, and runs until the shutdown channel fires or its
+/// registry entry is torn down.
+pub(crate) fn spawn_upstream(
+    reload: UpstreamReload,
+    shutdown: tokio::sync::watch::Receiver<bool>,
+    file_hashes: Vec<Option<[u8; 32]>>,
+) -> std::thread::JoinHandle<()> {
+    let set = ReloadSet::Upstream(reload);
+    spawn_watcher(move || watch_loop(set, file_hashes, shutdown))
 }
 
 /// Run a watcher future on a dedicated current-thread runtime.
@@ -212,21 +333,12 @@ fn on_shutdown_change(changed_ok: bool, requested: bool) -> ShutdownAction {
 }
 
 /// Core watch loop: sets up the notify watcher, debounces events,
-/// and reloads certificates (and optionally the client verifier).
-async fn watch_loop(
-    current: Arc<ArcSwap<CertifiedKey>>,
-    pair: CertKeyPair,
-    verifier_reload: Option<ClientVerifierReload>,
-    file_hashes: Vec<Option<[u8; 32]>>,
-    shutdown: tokio::sync::watch::Receiver<bool>,
-) {
+/// and reloads the watched material.
+async fn watch_loop(set: ReloadSet, file_hashes: Vec<Option<[u8; 32]>>, shutdown: tokio::sync::watch::Receiver<bool>) {
     let (tx, rx) = mpsc::channel::<()>(16);
 
-    let cert_dir = parent_dir(&pair.cert_path);
-    let key_dir = parent_dir(&pair.key_path);
-
-    let extra_dirs = verifier_extra_dirs(verifier_reload.as_ref());
-    let _watcher = match setup_watcher(tx, &cert_dir, &key_dir, &extra_dirs) {
+    let dirs = set.watch_dirs();
+    let _watcher = match setup_watcher(tx, &dirs) {
         Ok(watcher) => Some(watcher),
         Err(err) => {
             tracing::warn!(error = %err, "failed to start certificate file watcher; using polling");
@@ -234,36 +346,18 @@ async fn watch_loop(
         },
     };
 
-    watch_events(current, pair, verifier_reload, file_hashes, shutdown, rx).await;
+    watch_events(set, file_hashes, shutdown, rx).await;
 }
 
 /// Watches a notification stream and polls watched files for missed changes.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the event loop borrows every watcher input for the process lifetime"
-)]
 #[expect(clippy::too_many_lines, reason = "event loop with tokio::select")]
 async fn watch_events(
-    current: Arc<ArcSwap<CertifiedKey>>,
-    pair: CertKeyPair,
-    verifier_reload: Option<ClientVerifierReload>,
+    set: ReloadSet,
     mut file_hashes: Vec<Option<[u8; 32]>>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
     mut rx: mpsc::Receiver<()>,
 ) {
-    if verifier_reload.is_some() {
-        tracing::info!(
-            cert_path = %pair.cert_path,
-            key_path = %pair.key_path,
-            "certificate and client verifier file watcher started"
-        );
-    } else {
-        tracing::info!(
-            cert_path = %pair.cert_path,
-            key_path = %pair.key_path,
-            "certificate file watcher started"
-        );
-    }
+    set.log_started();
 
     let mut backoff_ms = DEBOUNCE_MS;
     let mut watch_shutdown = true;
@@ -281,20 +375,20 @@ async fn watch_events(
                 }
 
                 backoff_ms = DEBOUNCE_MS;
-                retry_pending = !reload_tracked(&current, &pair, verifier_reload.as_ref(), &mut backoff_ms, &mut file_hashes).await;
+                retry_pending = !reload_tracked(&set, &mut backoff_ms, &mut file_hashes).await;
             }
             _ = certificate_poll.tick(), if !retry_pending => {
-                let observed = watched_file_hashes(&pair, verifier_reload.as_ref()).await;
+                let observed = watched_file_hashes(&set).await;
                 if observed != file_hashes || observed.iter().any(Option::is_none) {
                     backoff_ms = DEBOUNCE_MS;
-                    retry_pending = !reload_tracked(&current, &pair, verifier_reload.as_ref(), &mut backoff_ms, &mut file_hashes).await;
+                    retry_pending = !reload_tracked(&set, &mut backoff_ms, &mut file_hashes).await;
                 }
                 #[cfg(test)]
                 POLLS_COMPLETED.with(|completed| completed.set(completed.get().saturating_add(1)));
             }
             () = tokio::time::sleep(Duration::from_millis(backoff_ms)), if retry_pending => {
                 tracing::info!("retrying the failed certificate reload");
-                retry_pending = !reload_tracked(&current, &pair, verifier_reload.as_ref(), &mut backoff_ms, &mut file_hashes).await;
+                retry_pending = !reload_tracked(&set, &mut backoff_ms, &mut file_hashes).await;
             }
             result = shutdown.changed(), if watch_shutdown => {
                 // Copy the flag out of the borrow guard before the match so the
@@ -323,24 +417,17 @@ async fn watch_events(
 /// Set up a [`RecommendedWatcher`] that sends to the given channel
 /// on relevant filesystem events.
 ///
-/// Watches `cert_dir` and `key_dir` (plus any `extra_dirs` for
-/// CRL/CA files), deduplicating directories that overlap.
+/// Watches every directory in `dirs`, deduplicating overlaps.
 ///
 /// [`RecommendedWatcher`]: notify::RecommendedWatcher
-fn setup_watcher(
-    tx: mpsc::Sender<()>,
-    cert_dir: &Path,
-    key_dir: &Path,
-    extra_dirs: &[PathBuf],
-) -> Result<RecommendedWatcher, notify::Error> {
+fn setup_watcher(tx: mpsc::Sender<()>, dirs: &[PathBuf]) -> Result<RecommendedWatcher, notify::Error> {
     let mut watcher = notify::recommended_watcher(move |res| handle_watch_event(res, &tx))?;
 
-    let mut dirs = vec![cert_dir.to_path_buf(), key_dir.to_path_buf()];
-    dirs.extend_from_slice(extra_dirs);
-    dirs.sort();
-    dirs.dedup();
+    let mut unique = dirs.to_vec();
+    unique.sort();
+    unique.dedup();
 
-    for dir in &dirs {
+    for dir in &unique {
         watcher.watch(dir, RecursiveMode::NonRecursive)?;
     }
 
@@ -395,38 +482,26 @@ async fn drain_and_debounce(
 /// schedules another reload. Recording the pre-load digests would leave a
 /// baseline for bytes that were never installed, and the next poll would skip
 /// the change.
-async fn reload_tracked(
-    current: &Arc<ArcSwap<CertifiedKey>>,
-    pair: &CertKeyPair,
-    verifier: Option<&ClientVerifierReload>,
-    backoff_ms: &mut u64,
-    file_hashes: &mut Vec<Option<[u8; 32]>>,
-) -> bool {
-    reload_tracked_with(current, pair, verifier, backoff_ms, file_hashes, || {}).await
+async fn reload_tracked(set: &ReloadSet, backoff_ms: &mut u64, file_hashes: &mut Vec<Option<[u8; 32]>>) -> bool {
+    reload_tracked_with(set, backoff_ms, file_hashes, || {}).await
 }
 
 /// [`reload_tracked`] with a hook between the load and the post-load digest.
 ///
 /// The hook lets a test change a watched file in that window, proving a
 /// digest taken after the load cannot record bytes the load never installed.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "forwards the tracked reload inputs plus the test-only hook"
-)]
 async fn reload_tracked_with<AfterLoad: FnOnce()>(
-    current: &Arc<ArcSwap<CertifiedKey>>,
-    pair: &CertKeyPair,
-    verifier: Option<&ClientVerifierReload>,
+    set: &ReloadSet,
     backoff_ms: &mut u64,
     file_hashes: &mut Vec<Option<[u8; 32]>>,
     after_load: AfterLoad,
 ) -> bool {
-    let before = watched_file_hashes(pair, verifier).await;
-    if !reload_with_backoff(current, pair, verifier, backoff_ms) {
+    let before = watched_file_hashes(set).await;
+    if !reload_with_backoff(set, backoff_ms) {
         return false;
     }
     after_load();
-    let after = watched_file_hashes(pair, verifier).await;
+    let after = watched_file_hashes(set).await;
     if before == after {
         *file_hashes = after;
         true
@@ -436,25 +511,16 @@ async fn reload_tracked_with<AfterLoad: FnOnce()>(
     }
 }
 
-/// Reload the certificate and client verifier and update `backoff_ms`,
-/// returning whether both loaded. A failure is retried on the backoff timer,
-/// so a file caught mid-write heals without waiting for the next change.
-fn reload_with_backoff(
-    current: &Arc<ArcSwap<CertifiedKey>>,
-    pair: &CertKeyPair,
-    verifier_reload: Option<&ClientVerifierReload>,
-    backoff_ms: &mut u64,
-) -> bool {
-    let cert_ok = reload_cert(current, pair);
-    let verifier_ok = reload_client_verifier(verifier_reload);
-    let reloaded = cert_ok && verifier_ok;
+/// Reload the watched material and update `backoff_ms`, returning whether it
+/// loaded. A failure is retried on the backoff timer, so a file caught
+/// mid-write heals without waiting for the next change.
+fn reload_with_backoff(set: &ReloadSet, backoff_ms: &mut u64) -> bool {
+    let reloaded = set.reload();
     *backoff_ms = next_backoff(reloaded, *backoff_ms);
     if !reloaded {
         tracing::warn!(
-            cert_ok,
-            verifier_ok,
             retry_in_ms = *backoff_ms,
-            "certificate or client verifier reload failed; retrying after backoff"
+            "TLS material reload failed; retrying after backoff"
         );
     }
     reloaded
@@ -470,13 +536,12 @@ fn next_backoff(reloaded: bool, backoff_ms: u64) -> u64 {
     }
 }
 
-/// Fingerprints every certificate, key, CA and CRL monitored by the watcher.
+/// Fingerprints every file the watcher monitors for `set`.
 ///
 /// The reads and hashing run on the blocking pool so a slow filesystem or a
 /// large CRL cannot stall the watcher's runtime while a poll is in flight.
-async fn watched_file_hashes(pair: &CertKeyPair, verifier: Option<&ClientVerifierReload>) -> Vec<Option<[u8; 32]>> {
-    let (ca_path, crl_paths) = verifier_paths(verifier);
-    let paths = watched_paths(pair, ca_path, crl_paths);
+async fn watched_file_hashes(set: &ReloadSet) -> Vec<Option<[u8; 32]>> {
+    let paths = set.watched_paths();
     let count = paths.len();
     tokio::task::spawn_blocking(move || paths.iter().map(|path| file_digest(path)).collect())
         .await
@@ -609,6 +674,57 @@ fn verifier_extra_dirs(reload: Option<&ClientVerifierReload>) -> Vec<PathBuf> {
 }
 
 // -----------------------------------------------------------------------------
+// Upstream Reload
+// -----------------------------------------------------------------------------
+
+/// Reload an upstream cluster's material into its live slots.
+fn reload_upstream(upstream: &UpstreamReload) -> bool {
+    let identity_ok = reload_identity_slot(upstream);
+    let ca_ok = reload_ca_slot(upstream);
+    identity_ok && ca_ok
+}
+
+/// Reload the client identity into its slot when one is watched.
+fn reload_identity_slot(upstream: &UpstreamReload) -> bool {
+    let (Some(slot), Some((cert_path, key_path))) = (&upstream.client_cert, upstream.paths.client_identity()) else {
+        return true;
+    };
+    match CachedClientCert::from_pem_files(cert_path, key_path) {
+        Ok(material) => {
+            slot.store(Arc::new(material));
+            tracing::info!(cert_path, "upstream client certificate hot-reloaded successfully");
+            true
+        },
+        Err(err) => {
+            tracing::warn!(
+                cert_path,
+                error = %err,
+                "upstream client certificate reload failed, keeping previous material"
+            );
+            false
+        },
+    }
+}
+
+/// Reload the CA bundle into its slot when one is watched.
+fn reload_ca_slot(upstream: &UpstreamReload) -> bool {
+    let (Some(slot), Some(ca_path)) = (&upstream.ca, upstream.paths.ca_path()) else {
+        return true;
+    };
+    match CachedCaCerts::from_pem_file(ca_path) {
+        Ok(material) => {
+            slot.store(Arc::new(material));
+            tracing::info!(ca_path, "upstream CA bundle hot-reloaded successfully");
+            true
+        },
+        Err(err) => {
+            tracing::warn!(ca_path, error = %err, "upstream CA bundle reload failed, keeping previous material");
+            false
+        },
+    }
+}
+
+// -----------------------------------------------------------------------------
 // Utility Functions
 // -----------------------------------------------------------------------------
 
@@ -644,6 +760,20 @@ fn parent_dir(path: &str) -> PathBuf {
 mod tests {
     use super::*;
     use crate::test_utils::{gen_test_certs, gen_test_certs_in};
+
+    /// Wrap listener reload inputs the way `CertWatcher::spawn` does, for
+    /// tests that drive the loop functions directly.
+    fn server_set(
+        current: &Arc<ArcSwap<CertifiedKey>>,
+        pair: &CertKeyPair,
+        verifier: Option<&ClientVerifierReload>,
+    ) -> ReloadSet {
+        ReloadSet::Server(ServerReload {
+            current: Arc::clone(current),
+            pair: pair.clone(),
+            verifier: verifier.cloned(),
+        })
+    }
 
     #[test]
     fn shutdown_change_decisions() {
@@ -904,9 +1034,7 @@ mod tests {
         let changed_path = crl_path.clone();
 
         let changed = reload_tracked_with(
-            &current,
-            &pair,
-            Some(&reload),
+            &server_set(&current, &pair, Some(&reload)),
             &mut backoff_ms,
             &mut file_hashes,
             || {
@@ -919,8 +1047,13 @@ mod tests {
             "a change between the load and the post-load digest must schedule a retry"
         );
 
-        let retried =
-            reload_tracked_with(&current, &pair, Some(&reload), &mut backoff_ms, &mut file_hashes, || {}).await;
+        let retried = reload_tracked_with(
+            &server_set(&current, &pair, Some(&reload)),
+            &mut backoff_ms,
+            &mut file_hashes,
+            || {},
+        )
+        .await;
         assert!(retried, "the retry must install the changed CRL");
         let now = rustls::pki_types::UnixTime::now();
         assert!(
@@ -980,9 +1113,7 @@ mod tests {
         let before = swap.load_full();
 
         let polled = reload_tracked(
-            &server.cert_handle,
-            &pair,
-            Some(&reload),
+            &server_set(&server.cert_handle, &pair, Some(&reload)),
             &mut backoff_ms,
             &mut file_hashes,
         )
@@ -1001,9 +1132,7 @@ mod tests {
         std::fs::write(&crl_path, &trust.revoked_crl).expect("repair the CRL");
 
         let retried = reload_tracked(
-            &server.cert_handle,
-            &pair,
-            Some(&reload),
+            &server_set(&server.cert_handle, &pair, Some(&reload)),
             &mut backoff_ms,
             &mut file_hashes,
         )
@@ -1078,9 +1207,7 @@ mod tests {
         };
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         let task = tokio::spawn(watch_loop(
-            Arc::clone(&current),
-            missing_pair.clone(),
-            None,
+            server_set(&current, &missing_pair, None),
             vec![None, None],
             shutdown_rx,
         ));
@@ -1148,9 +1275,7 @@ mod tests {
         let (stop, shutdown) = tokio::sync::watch::channel(false);
         let baseline = file_hashes_now(&pair, None);
         let task = tokio::spawn(watch_events(
-            Arc::clone(&current),
-            pair,
-            None,
+            server_set(&current, &pair, None),
             baseline,
             shutdown,
             events,
@@ -1202,9 +1327,7 @@ mod tests {
         let (_notifications, events) = mpsc::channel(1);
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         let task = tokio::spawn(watch_events(
-            Arc::clone(&current),
-            pair,
-            None,
+            server_set(&current, &pair, None),
             startup_baseline,
             shutdown_rx,
             events,
@@ -1266,9 +1389,7 @@ mod tests {
         let (stop, shutdown) = tokio::sync::watch::channel(false);
         let baseline = file_hashes_now(&pair, Some(&reload));
         let task = tokio::spawn(watch_events(
-            Arc::clone(&current),
-            pair,
-            Some(reload),
+            server_set(&current, &pair, Some(&reload)),
             baseline,
             shutdown,
             events,

@@ -1996,11 +1996,11 @@ insecure_options:
         );
         assert_eq!(stores.len(), 2, "publication owns both configured listeners");
         assert!(
-            exercise_sticky_binding(&initial, true).await.is_none(),
+            Box::pin(exercise_sticky_binding(&initial, true)).await.is_none(),
             "first request is unbound"
         );
         assert_eq!(
-            exercise_sticky_binding(&initial, false).await.as_deref(),
+            Box::pin(exercise_sticky_binding(&initial, false)).await.as_deref(),
             Some("127.0.0.1:9"),
             "the initial response must establish a binding before reload"
         );
@@ -2042,7 +2042,7 @@ insecure_options:
             let retained = live.get("retained").unwrap().load_full();
             assert!(Arc::ptr_eq(retained.session_stores().unwrap(), &retained_registry));
             assert_eq!(
-                exercise_sticky_binding(&retained, false).await.as_deref(),
+                Box::pin(exercise_sticky_binding(&retained, false)).await.as_deref(),
                 Some("127.0.0.1:9"),
                 "removed listener must keep its original session binding while it serves"
             );
@@ -2072,7 +2072,7 @@ insecure_options:
             "reintroduction must construct a new listener pipeline registry"
         );
         assert_eq!(
-            exercise_sticky_binding(&current, false).await.as_deref(),
+            Box::pin(exercise_sticky_binding(&current, false)).await.as_deref(),
             Some("127.0.0.1:9"),
             "reintroduced listener must reuse the actual old store binding"
         );

@@ -153,6 +153,7 @@ for full options.
 | [tls-verify-disabled.yaml](configs/protocols/tls-verify-disabled.yaml) | Plain HTTP listener; TLS to the upstream with certificate verification disabled |
 | [tls-version-constraint.yaml](configs/protocols/tls-version-constraint.yaml) | Restrict accepted TLS versions via `min_version` |
 | [upstream-ca-file.yaml](configs/protocols/upstream-ca-file.yaml) | Sets a trusted CA bundle for all upstream TLS connections via `runtime.upstream_ca_file` |
+| [upstream-tls-hot-reload.yaml](configs/protocols/upstream-tls-hot-reload.yaml) | Plain HTTP from clients; the proxy presents a client certificate to the upstream backend over mTLS |
 | [upstream-tls.yaml](configs/protocols/upstream-tls.yaml) | Plain HTTP on the listener; TLS to the upstream |
 | [websocket.yaml](configs/protocols/websocket.yaml) | HTTP listener that explicitly permits opaque WebSocket passthrough |
 

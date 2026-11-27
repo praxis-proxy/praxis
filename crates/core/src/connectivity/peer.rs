@@ -1036,7 +1036,7 @@ pub fn apply_cached_tls(peer: &mut HttpPeer, tls: &praxis_tls::CachedClusterTls,
     if let Some(ca) = tls.ca() {
         let converted = ca
             .converted_or_init(|| -> Result<Arc<[pingora_core::utils::tls::WrappedX509]>, String> {
-                ca_from_cached(ca).map(Arc::from)
+                ca_from_cached(ca.as_ref()).map(Arc::from)
             })
             .ok_or("cached CA conversion has an incompatible type")?
             .as_ref()
@@ -1046,7 +1046,7 @@ pub fn apply_cached_tls(peer: &mut HttpPeer, tls: &praxis_tls::CachedClusterTls,
 
     if let Some(client) = tls.client_cert() {
         let converted = client
-            .converted_or_init(|| client_cert_from_cached(client).map(Arc::new))
+            .converted_or_init(|| client_cert_from_cached(client.as_ref()).map(Arc::new))
             .ok_or("cached client certificate conversion has an incompatible type")?
             .as_ref()
             .map_err(Clone::clone)?;

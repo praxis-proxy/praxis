@@ -19,6 +19,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Cluster TLS material can hot-reload: `tls.hot_reload: true` on a
+  `load_balancer` cluster re-reads its `client_cert` and `ca` files when they
+  change on disk and atomically swaps them in, so new upstream connections
+  present and verify with the rotated material without a restart or a
+  pipeline rebuild. The knob is opt-in, requires the `config-reload` build
+  feature and at least one of `tls.client_cert` or `tls.ca`, and reuses a
+  refcounted per-path-set watcher across config reloads. TLS and HTTPS health
+  probes rebuild their connector when the material rotates, so probes never
+  keep presenting an expired identity after the data path has rotated.
+  Existing connections keep their negotiated TLS, matching listener reload
+  semantics. See `docs/operating/tls.md`.
+
 - Embedders can validate configuration with their own `ServerComposition`
   using `validate_config_with_composition`. Startup, reload, validation, and
   configuration dump share the same pipeline candidate builder. Validation and

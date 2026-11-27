@@ -1,0 +1,43 @@
+# Upstream mTLS With Hot-Reloaded Client Certificate
+#
+# Plain HTTP from clients; the proxy presents a client certificate
+# to the upstream backend over mTLS. The certificate is re-read from
+# disk whenever the file changes, so a rotated identity is presented
+# on new connections without a restart. Clusters with short-lived
+# identities, such as SPIFFE X.509 SVIDs, rotate this way.
+#
+#   Client -> HTTP -> Praxis :8080 -> mTLS -> Backend :9443
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/protocols/upstream-tls-hot-reload.yaml
+#   curl http://localhost:8080/
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends
+  allow_tls_no_verify: true
+
+listeners:
+  - name: plain
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            tls:
+              verify: false # dev only
+              hot_reload: true # re-read the client certificate when its files change
+              client_cert:
+                cert_path: /etc/ssl/certs/proxy-client.pem
+                key_path: /etc/ssl/private/proxy-client-key.pem
+            endpoints:
+              - "127.0.0.1:9443"

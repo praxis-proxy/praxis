@@ -72,8 +72,11 @@ impl TlsIdentity {
         let cluster = peer.tls_config.as_ref();
         let ca = cluster.and_then(CachedClusterTls::ca);
         Self {
-            ca: ca.map(Arc::downgrade),
-            client_cert: cluster.and_then(CachedClusterTls::client_cert).map(Arc::downgrade),
+            ca: ca.as_ref().map(Arc::downgrade),
+            client_cert: cluster
+                .and_then(CachedClusterTls::client_cert)
+                .as_ref()
+                .map(Arc::downgrade),
             trust_anchors: peer.trust_anchors.as_ref().filter(|_| ca.is_none()).map(Arc::downgrade),
             verify: cluster.is_none_or(CachedClusterTls::verify),
         }
@@ -129,7 +132,7 @@ impl TlsConfigs {
 
         let mut config = match peer.tls_config.as_ref().and_then(CachedClusterTls::client_cert) {
             Some(cert) => {
-                let (chain, key) = client_identity(cert)?;
+                let (chain, key) = client_identity(cert.as_ref())?;
                 builder
                     .with_client_auth_cert(chain, key)
                     .map_err(|err| config_error("client certificate", &err))?
@@ -209,8 +212,9 @@ impl TlsConfigs {
             .map_err(|err| config_error("protocol versions", &err))?;
 
         if cluster.is_none_or(CachedClusterTls::verify) {
-            let ca = cluster.and_then(CachedClusterTls::ca).or(peer.trust_anchors.as_ref());
-            return Ok(builder.with_root_certificates(self.roots(ca.map(Arc::as_ref))?));
+            let cluster_ca = cluster.and_then(CachedClusterTls::ca);
+            let ca = cluster_ca.as_deref().or(peer.trust_anchors.as_deref());
+            return Ok(builder.with_root_certificates(self.roots(ca)?));
         }
         Ok(builder
             .dangerous()
