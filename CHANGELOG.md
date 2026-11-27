@@ -19,6 +19,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- An opt-in `status_code` label on `praxis_http_requests_total`, enabled
+  with `metrics.labels.status_code: true`. It separates an auth
+  rejection from a rate limit, which `status_class` reports as one `4xx`
+  series. Codes outside the allowlist the proxy's own filters return
+  collapse to their class, so the dimension stays at about seventeen
+  values, and `status_class` is unchanged. Off by default, so no existing
+  series move.
+
 - HTTP clusters can declare `input_modalities` for the selected-upstream filters
   that need to check whether a deployment accepts text or images.
 
@@ -96,6 +104,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 
 ### Changed
+
+- **Breaking:** `metrics.labels` takes one `true`/`false` setting per
+  dimension instead of the `disabled` list. The list could only remove a
+  dimension, so the new off-by-default `status_code` would have needed a
+  second, opposite list; one setting per dimension adds it without adding
+  a config surface. Omitted dimensions keep their defaults. A config using
+  `disabled` is rejected at startup with a message naming its replacement;
+  configs that never set `metrics.labels` are unaffected. Migrate
+  `disabled: [route, endpoint]` to `route: false` and `endpoint: false`.
+  A dimension set more than once is rejected rather than resolved to the
+  last value, matching how every other config struct treats a repeated
+  field.
 
 - Document proposed application protocol identifiers for routed Embeddings,
   Decisions, and System One APIs, using a shared vLLM upstream address.
@@ -474,13 +494,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   can appear in access logs outside Policy; prefer a header where the client
   can send one.
 
-- An opt-in `status_code` label on `praxis_http_requests_total`, enabled
-  with `metrics.labels.status_code: true`. It separates an auth
-  rejection from a rate limit, which `status_class` reports as one `4xx`
-  series. Codes outside the allowlist the proxy's own filters return
-  collapse to their class, so the dimension stays at about seventeen
-  values, and `status_class` is unchanged. Off by default, so no existing
-  series move.
 - Implicit cluster references: an inline load-balancer cluster that shares
   its name with a top-level cluster may omit its endpoints, which are
   filled in from the declaration at validation time, keeping the routed
@@ -573,17 +586,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
-- **Breaking:** `metrics.labels` takes one `true`/`false` setting per
-  dimension instead of the `disabled` list. The list could only remove a
-  dimension, so the new off-by-default `status_code` would have needed a
-  second, opposite list; one setting per dimension adds it without adding
-  a config surface. Omitted dimensions keep their defaults. A config using
-  `disabled` is rejected at startup with a message naming its replacement;
-  configs that never set `metrics.labels` are unaffected. Migrate
-  `disabled: [route, endpoint]` to `route: false` and `endpoint: false`.
-  A dimension set more than once is rejected rather than resolved to the
-  last value, matching how every other config struct treats a repeated
-  field.
 - Clarify that the default Pingora shutdown grace period is capped at five
   seconds, including for streaming responses, regardless of a larger
   `shutdown_timeout_secs` value.
