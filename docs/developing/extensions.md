@@ -557,8 +557,9 @@ What the executor does with a staged cluster:
   decided on the caller's side (a request that could not be built, the callout
   client's admission limit or circuit breaker, or a response over the caller's
   size limit) are excluded. A streamed response counts when its body ends, so
-  a failure after the headers counts against the endpoint; a stream that ends
-  on the caller's own step deadline or stream idle timeout is not counted.
+  a failure after the headers counts against the endpoint, including a stream
+  that sends nothing for the stream idle timeout. A stream that ends on the
+  caller's own step deadline is not counted.
 
 Limitations: callout passive-health transitions are logged but do
 not update the health-transition metrics,

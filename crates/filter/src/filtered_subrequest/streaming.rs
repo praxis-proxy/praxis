@@ -245,16 +245,9 @@ impl FilteredStreamingBody {
         &mut self,
         e: praxis_core::subrequest::SubRequestError,
     ) -> Result<Option<Bytes>, FilterError> {
-        // The caller's own limits (the response ceiling, the step deadline,
-        // the stream idle timeout) are not the endpoint's failures.
         #[cfg(feature = "chain-binding")]
         if let Some(observation) = self.continuation.stream_health.take()
-            && !matches!(
-                &e,
-                praxis_core::subrequest::SubRequestError::ResponseTooLarge { .. }
-                    | praxis_core::subrequest::SubRequestError::DeadlineExceeded
-                    | praxis_core::subrequest::SubRequestError::StreamIdleTimeout { .. }
-            )
+            && endpoint_fault(&e)
         {
             observation.finish(true);
         }
@@ -575,6 +568,20 @@ impl StreamingResponseBody for CalloutStreamingBody {
     }
 }
 
+/// Whether a stream error says something about the endpoint.
+///
+/// The caller's own limits, the response ceiling and the step deadline, are
+/// not the endpoint's failures. A stream idle timeout is: the endpoint sent
+/// its headers and then nothing for the whole idle window.
+#[cfg(feature = "chain-binding")]
+fn endpoint_fault(error: &praxis_core::subrequest::SubRequestError) -> bool {
+    !matches!(
+        error,
+        praxis_core::subrequest::SubRequestError::ResponseTooLarge { .. }
+            | praxis_core::subrequest::SubRequestError::DeadlineExceeded
+    )
+}
+
 #[cfg(test)]
 #[expect(
     clippy::expect_used,
@@ -595,6 +602,29 @@ mod tests {
     use praxis_core::subrequest::{StreamLimits, SubRequest, SubRequestClient, SubRequestError};
 
     use super::{CalloutResponseTooLarge, CalloutStreamingBody, FilteredStreamingBody, std_instant_to_tokio};
+
+    #[cfg(feature = "chain-binding")]
+    #[test]
+    fn a_stream_gone_silent_counts_against_its_endpoint() {
+        assert!(
+            super::endpoint_fault(&SubRequestError::StreamIdleTimeout {
+                idle_timeout: Duration::from_secs(30),
+            }),
+            "an endpoint that stops sending after its headers has failed"
+        );
+        assert!(
+            super::endpoint_fault(&SubRequestError::Io("reset".to_owned())),
+            "a transport failure mid-body counts"
+        );
+        assert!(
+            !super::endpoint_fault(&SubRequestError::DeadlineExceeded),
+            "the caller's step deadline is not the endpoint's failure"
+        );
+        assert!(
+            !super::endpoint_fault(&SubRequestError::ResponseTooLarge { actual: 2, limit: 1 }),
+            "the caller's response ceiling is not the endpoint's failure"
+        );
+    }
 
     #[test]
     fn streaming_callout_limit_error_is_typed_and_terminal() {
