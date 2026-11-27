@@ -17,11 +17,16 @@ pub struct PreparedLocalWebSocket {
     offer: WebSocketOffer,
     /// Request target used when selecting the managed route.
     target: http::Uri,
+    /// Original wire target when Pingora stores it separately from the URI path.
+    raw_target: Option<Bytes>,
+    /// Virtual host used for routing origin-form requests.
+    host: http::HeaderValue,
 }
 
 impl PreparedLocalWebSocket {
     /// Capture the offer before filters run. The caller selects and authorizes
-    /// the managed route before committing the captured offer.
+    /// the managed route before committing the captured offer. Only the URI, wire target,
+    /// Host and WebSocket offer are pinned. The caller owns any other route predicates.
     ///
     /// # Errors
     /// Returns an error if the session or WebSocket offer is invalid.
@@ -34,6 +39,14 @@ impl PreparedLocalWebSocket {
         Ok(Self {
             offer,
             target: request.uri.clone(),
+            raw_target: (Some(request.raw_path()) != request.uri.path_and_query().map(|path| path.as_str().as_bytes()))
+                .then(|| Bytes::copy_from_slice(request.raw_path())),
+            host: single_host(&request.headers).cloned().ok_or_else(|| {
+                Error::explain(
+                    ErrorType::InvalidHTTPHeader,
+                    "expected one nonempty Host for a managed WebSocket",
+                )
+            })?,
         })
     }
 
@@ -45,13 +58,26 @@ impl PreparedLocalWebSocket {
     pub async fn commit(self, session: &mut Session) -> Result<LocalWebSocket<'_>> {
         check_upgrade_state(session)?;
         let request = session.req_header();
-        if request.uri != self.target {
-            return Error::e_explain(ErrorType::InvalidHTTPHeader, "managed WebSocket request target changed");
+        let raw_target = self
+            .raw_target
+            .as_deref()
+            .or_else(|| self.target.path_and_query().map(|path| path.as_str().as_bytes()));
+        if request.uri != self.target
+            || Some(request.raw_path()) != raw_target
+            || single_host(&request.headers) != Some(&self.host)
+        {
+            return Error::e_explain(ErrorType::InternalError, "managed WebSocket request target changed");
         }
         upgrade::validate_forwarded_request(&self.offer, &request.method, &request.headers, request.version)
-            .map_err(|reason| Error::explain(ErrorType::InvalidHTTPHeader, reason))?;
+            .map_err(|reason| Error::explain(ErrorType::InternalError, reason))?;
         LocalWebSocket::write_switch(session, self.offer.into_accept()).await
     }
+}
+
+/// Require an unambiguous HTTP/1.1 Host for the prepared route.
+fn single_host(headers: &http::HeaderMap) -> Option<&http::HeaderValue> {
+    let mut hosts = headers.get_all(header::HOST).iter();
+    hosts.next().filter(|host| !host.is_empty() && hosts.next().is_none())
 }
 
 /// Check connection state and reject body framing before an upgrade.

@@ -125,7 +125,10 @@ mod tests {
             .req_header_mut()
             .insert_header("sec-websocket-protocol", "new-protocol")
             .unwrap();
-        assert!(offer.commit(&mut session).await.is_err());
+        assert_eq!(
+            offer.commit(&mut session).await.err().unwrap().etype,
+            pingora_core::ErrorType::InternalError
+        );
         assert!(session.response_written().is_none());
     }
 
@@ -137,7 +140,43 @@ mod tests {
         assert!(session.read_request().await.unwrap());
         let offer = PreparedLocalWebSocket::prepare(&session).unwrap();
         session.req_header_mut().set_uri(http::Uri::from_static("/other"));
-        assert!(offer.commit(&mut session).await.is_err());
+        assert_eq!(
+            offer.commit(&mut session).await.err().unwrap().etype,
+            pingora_core::ErrorType::InternalError
+        );
+        assert!(session.response_written().is_none());
+    }
+
+    #[tokio::test]
+    async fn prepared_offer_refuses_changed_virtual_host() {
+        let (mut peer, socket) = tokio::io::duplex(1024);
+        peer.write_all(OFFER).await.unwrap();
+        let mut session = Session::new_h1(Box::new(socket));
+        assert!(session.read_request().await.unwrap());
+        let offer = PreparedLocalWebSocket::prepare(&session).unwrap();
+        session.req_header_mut().insert_header("host", "other.example").unwrap();
+        assert_eq!(
+            offer.commit(&mut session).await.err().unwrap().etype,
+            pingora_core::ErrorType::InternalError
+        );
+        assert!(session.response_written().is_none());
+    }
+
+    #[tokio::test]
+    async fn prepared_offer_compares_wire_target_even_when_parsed_uris_match() {
+        let (mut peer, socket) = tokio::io::duplex(1024);
+        peer.write_all(OFFER).await.unwrap();
+        let mut session = Session::new_h1(Box::new(socket));
+        assert!(session.read_request().await.unwrap());
+        session.req_header_mut().set_raw_path(b"/\xff").unwrap();
+        let original = session.req_header().uri.clone();
+        let offer = PreparedLocalWebSocket::prepare(&session).unwrap();
+        session.req_header_mut().set_raw_path(b"/\xfe").unwrap();
+        assert_eq!(session.req_header().uri, original);
+        assert_eq!(
+            offer.commit(&mut session).await.err().unwrap().etype,
+            pingora_core::ErrorType::InternalError
+        );
         assert!(session.response_written().is_none());
     }
 
