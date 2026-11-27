@@ -10,8 +10,8 @@ before they reach upstream services.
 - Validate request structure and reject malformed payloads
 - Authenticate and authorize requests
 - Apply per-model guardrails to AI inference endpoints
-- Restrict which destinations `HTTPS_PROXY` clients can tunnel to through a
-  forward proxy (requires the `forward-proxy` build feature)
+- Restrict which destinations `HTTP_PROXY` and `HTTPS_PROXY` clients can reach
+  through a forward proxy (requires the `forward-proxy` build feature)
 
 ## Key Filters
 
@@ -25,8 +25,8 @@ headers, and credentials.
 **Policy**: authorization through the Praxis Policy Engine (PPE), based on
 identity, resource attributes, and environment.
 
-**Forward proxy**: a listener's `forward_proxy` block accepts CONNECT tunnels,
-gated by a destination allowlist, by `ip_acl`/`policy` filters on the client,
+**Forward proxy**: a listener's `forward_proxy` block accepts CONNECT tunnels
+and absolute-form requests, gated by a destination allowlist, by `ip_acl`/`policy` filters on the client,
 or both. An enabled block with neither is rejected at load. That check is for
 the presence of a control, not its strictness: an `ip_acl` with no entries
 admits every client, so keep its `allow` list narrow.
