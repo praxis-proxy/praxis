@@ -295,6 +295,10 @@ fn worth_another_address(error: &SubRequestError) -> bool {
 #[async_trait]
 impl HttpTransport for PolicyHttpTransport {
     #[expect(
+        clippy::allow_attributes,
+        reason = "the future's size depends on the network backend compiled in"
+    )]
+    #[allow(
         clippy::large_stack_frames,
         clippy::large_futures,
         reason = "Pingora session types are large"

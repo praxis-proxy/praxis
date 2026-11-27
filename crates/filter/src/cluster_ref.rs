@@ -140,7 +140,7 @@ impl ClusterRef {
             cluster: self.clone(),
             address,
             index,
-            _admission: Arc::clone(admission),
+            admission: Arc::clone(admission),
         };
         Ok((upstream, lease))
     }
@@ -220,7 +220,14 @@ pub(crate) struct ClusterLease {
     pub(crate) index: usize,
 
     /// The callout's `max_connections` slot.
-    _admission: Arc<AdmissionLease>,
+    admission: Arc<AdmissionLease>,
+}
+
+impl ClusterLease {
+    /// The callout's admission slot, for selecting a retry endpoint under it.
+    pub(crate) fn admission(&self) -> &Arc<AdmissionLease> {
+        &self.admission
+    }
 }
 
 impl Drop for ClusterLease {

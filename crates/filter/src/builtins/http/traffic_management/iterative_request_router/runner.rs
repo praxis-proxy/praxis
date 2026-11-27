@@ -179,8 +179,12 @@ impl IrrStepRunner {
         reason = "adapter keeps the router's step-open error precedence in one place"
     )]
     #[expect(
+        clippy::allow_attributes,
+        reason = "the executor future size depends on the transport backend"
+    )]
+    #[allow(
         clippy::large_stack_frames,
-        reason = "constructs the executor's full step future before boxing it"
+        reason = "Pingora transport futures exceed the stack lint threshold"
     )]
     pub(super) async fn open_step(
         &self,

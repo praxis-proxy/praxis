@@ -342,19 +342,43 @@ impl PendingCredentials {
     }
 
     /// Inject every credential authorized for `destination` into `headers`,
-    /// returning the number injected.
+    /// keeping the set for another attempt, and report which ones matched.
     ///
-    /// Consumes the set; credentials whose scope does not match the resolved
-    /// logical authority are dropped and their secrets zeroized without ever
-    /// being written. The destination is canonicalized once for the whole set.
-    pub(crate) fn inject_authorized(self, destination: &ResolvedDestination<'_>, headers: &mut HeaderMap) -> usize {
+    /// Credentials whose scope does not match the resolved logical authority
+    /// are never written; every secret is zeroized when the set is dropped.
+    /// The destination is canonicalized once for the whole set.
+    ///
+    /// A retry to a different endpoint calls this again with that endpoint's
+    /// destination and compares the result with the first attempt's, so a
+    /// credential is never sent to an authority it was not issued for and a
+    /// retry never goes out with a different set of credentials.
+    pub(crate) fn inject_matching(
+        &self,
+        destination: &ResolvedDestination<'_>,
+        headers: &mut HeaderMap,
+    ) -> InjectedSet {
         let Some(resolved) = destination.canonicalize() else {
-            return 0;
+            return InjectedSet(Vec::new());
         };
-        self.credentials
-            .iter()
-            .filter(|credential| credential.inject_canonical(&resolved, headers))
-            .count()
+        InjectedSet(
+            self.credentials
+                .iter()
+                .enumerate()
+                .filter(|(_, credential)| credential.inject_canonical(&resolved, headers))
+                .map(|(index, _)| index)
+                .collect(),
+        )
+    }
+}
+
+/// Which staged credentials one attempt injected, by position in the set.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct InjectedSet(Vec<usize>);
+
+impl InjectedSet {
+    /// Number of credentials injected.
+    pub(crate) fn len(&self) -> usize {
+        self.0.len()
     }
 }
 
@@ -412,7 +436,7 @@ mod tests {
 
     // Inject a single credential against a fully-qualified destination string,
     // exercising the same canonicalize + scope-match path the executor drives
-    // through `PendingCredentials::inject_authorized`.
+    // through `PendingCredentials::inject_matching`.
     fn inject_if_authorized(cred: &DeferredCredential, authority: &str, headers: &mut HeaderMap) -> bool {
         resolved(authority)
             .canonicalize()
@@ -448,6 +472,34 @@ mod tests {
         let out = tracing::subscriber::with_default(subscriber, f);
         let bytes = buffer.0.lock().expect("buffer lock").clone();
         (out, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    #[test]
+    fn inject_matching_is_repeatable() {
+        let mut pending = PendingCredentials::new();
+        pending.push(credential("a.example:443", "Bearer a"));
+        let mut first = HeaderMap::new();
+        let mut second = HeaderMap::new();
+        let first_set = pending.inject_matching(&resolved("a.example:443"), &mut first);
+        let second_set = pending.inject_matching(&resolved("a.example:443"), &mut second);
+        assert_eq!(
+            first_set, second_set,
+            "the same destination matches the same credentials"
+        );
+        assert_eq!(first_set.len(), 1, "one credential matched");
+        assert!(first.contains_key("authorization"), "first attempt carries the header");
+        assert!(second.contains_key("authorization"), "a retry carries it again");
+    }
+
+    #[test]
+    fn inject_matching_differs_across_authorities() {
+        let mut pending = PendingCredentials::new();
+        pending.push(credential("a.example:443", "Bearer a"));
+        pending.push(credential("b.example:443", "Bearer b"));
+        let for_a = pending.inject_matching(&resolved("a.example:443"), &mut HeaderMap::new());
+        let for_b = pending.inject_matching(&resolved("b.example:443"), &mut HeaderMap::new());
+        assert_ne!(for_a, for_b, "each authority matches its own credential");
+        assert_eq!((for_a.len(), for_b.len()), (1, 1), "exactly one each");
     }
 
     #[test]
@@ -525,10 +577,11 @@ mod tests {
         assert!(!pending.is_empty());
 
         let mut headers = HeaderMap::new();
-        let injected = pending.inject_authorized(&resolved("api.example.com:443"), &mut headers);
+        let injected = pending.inject_matching(&resolved("api.example.com:443"), &mut headers);
 
         assert_eq!(
-            injected, 1,
+            injected.len(),
+            1,
             "only the credential bound to the resolved authority injects"
         );
         assert_eq!(
@@ -613,7 +666,7 @@ mod tests {
         let mut pending = PendingCredentials::new();
         pending.push(credential("api.example.com:443", "Bearer sk-secret"));
         let mut headers = HeaderMap::new();
-        let injected = pending.inject_authorized(
+        let injected = pending.inject_matching(
             &ResolvedDestination {
                 authority: "api.example.com",
                 transport: "10.0.0.5:443",
@@ -621,14 +674,15 @@ mod tests {
             &mut headers,
         );
         assert_eq!(
-            injected, 1,
+            injected.len(),
+            1,
             "a bare logical authority must inherit the transport port to match a :443 credential"
         );
 
         let mut pending = PendingCredentials::new();
         pending.push(credential("api.example.com:443", "Bearer sk-secret"));
         let mut headers = HeaderMap::new();
-        let injected = pending.inject_authorized(
+        let injected = pending.inject_matching(
             &ResolvedDestination {
                 authority: "api.example.com",
                 transport: "10.0.0.5:8443",
@@ -636,7 +690,8 @@ mod tests {
             &mut headers,
         );
         assert_eq!(
-            injected, 0,
+            injected.len(),
+            0,
             "the transport port (8443) must not match a credential bound to :443"
         );
     }
