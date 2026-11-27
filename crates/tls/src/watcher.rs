@@ -24,7 +24,7 @@ use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher as _};
 use rustls::sign::CertifiedKey;
 use tokio::sync::mpsc;
 
-use crate::{CachedCaCerts, CachedClientCert, CertKeyPair, ClientCertMode, setup::loader};
+use crate::{CachedCaCerts, CachedClientCert, CertKeyPair, ClientCertMode, TlsError, setup::loader};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -678,50 +678,65 @@ fn verifier_extra_dirs(reload: Option<&ClientVerifierReload>) -> Vec<PathBuf> {
 // -----------------------------------------------------------------------------
 
 /// Reload an upstream cluster's material into its live slots.
+///
+/// Both configured materials are loaded and validated before either is
+/// published: a rotation whose identity parses but whose CA bundle does not
+/// leaves both slots on their previous values, so the proxy never serves a
+/// half-applied rotation while the retry backoff waits for the files to
+/// heal.
 fn reload_upstream(upstream: &UpstreamReload) -> bool {
-    let identity_ok = reload_identity_slot(upstream);
-    let ca_ok = reload_ca_slot(upstream);
-    identity_ok && ca_ok
+    let identity = match load_identity(upstream) {
+        Ok(identity) => identity,
+        Err(error) => {
+            tracing::warn!(error = %error, "upstream client certificate reload failed, keeping previous material");
+            return false;
+        },
+    };
+    let ca = match load_ca(upstream) {
+        Ok(ca) => ca,
+        Err(error) => {
+            tracing::warn!(error = %error, "upstream CA bundle reload failed, keeping previous material");
+            return false;
+        },
+    };
+    if let (Some(slot), Some(material)) = (&upstream.client_cert, identity) {
+        slot.store(material);
+        tracing::info!("upstream client certificate hot-reloaded successfully");
+    }
+    if let (Some(slot), Some(material)) = (&upstream.ca, ca) {
+        slot.store(material);
+        tracing::info!("upstream CA bundle hot-reloaded successfully");
+    }
+    true
 }
 
-/// Reload the client identity into its slot when one is watched.
-fn reload_identity_slot(upstream: &UpstreamReload) -> bool {
-    let (Some(slot), Some((cert_path, key_path))) = (&upstream.client_cert, upstream.paths.client_identity()) else {
-        return true;
+/// Load the rotated client identity; `Ok(None)` when none is watched.
+///
+/// # Errors
+///
+/// Returns [`TlsError`] when the certificate or key files cannot be read
+/// or parsed.
+///
+/// [`TlsError`]: crate::TlsError
+fn load_identity(upstream: &UpstreamReload) -> Result<Option<Arc<CachedClientCert>>, TlsError> {
+    let Some((cert_path, key_path)) = upstream.paths.client_identity() else {
+        return Ok(None);
     };
-    match CachedClientCert::from_pem_files(cert_path, key_path) {
-        Ok(material) => {
-            slot.store(Arc::new(material));
-            tracing::info!(cert_path, "upstream client certificate hot-reloaded successfully");
-            true
-        },
-        Err(err) => {
-            tracing::warn!(
-                cert_path,
-                error = %err,
-                "upstream client certificate reload failed, keeping previous material"
-            );
-            false
-        },
-    }
+    CachedClientCert::from_pem_files(cert_path, key_path).map(|material| Some(Arc::new(material)))
 }
 
-/// Reload the CA bundle into its slot when one is watched.
-fn reload_ca_slot(upstream: &UpstreamReload) -> bool {
-    let (Some(slot), Some(ca_path)) = (&upstream.ca, upstream.paths.ca_path()) else {
-        return true;
+/// Load the rotated CA bundle; `Ok(None)` when none is watched.
+///
+/// # Errors
+///
+/// Returns [`TlsError`] when the CA file cannot be read or parsed.
+///
+/// [`TlsError`]: crate::TlsError
+fn load_ca(upstream: &UpstreamReload) -> Result<Option<Arc<CachedCaCerts>>, TlsError> {
+    let Some(ca_path) = upstream.paths.ca_path() else {
+        return Ok(None);
     };
-    match CachedCaCerts::from_pem_file(ca_path) {
-        Ok(material) => {
-            slot.store(Arc::new(material));
-            tracing::info!(ca_path, "upstream CA bundle hot-reloaded successfully");
-            true
-        },
-        Err(err) => {
-            tracing::warn!(ca_path, error = %err, "upstream CA bundle reload failed, keeping previous material");
-            false
-        },
-    }
+    CachedCaCerts::from_pem_file(ca_path).map(|material| Some(Arc::new(material)))
 }
 
 // -----------------------------------------------------------------------------
@@ -862,6 +877,80 @@ mod tests {
 
         let result = handle.join();
         assert!(result.is_ok(), "watcher thread should shut down cleanly");
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one fixture drives the partial failure and the repair through both slots"
+    )]
+    fn reload_upstream_publishes_neither_material_on_a_partial_failure() {
+        crate::test_utils::ensure_crypto_provider();
+        let certs = gen_test_certs();
+        let ca = crate::test_utils::gen_ca_file();
+        let cert_path = certs.cert_path.to_str().expect("cert path").to_owned();
+        let key_path = certs.key_path.to_str().expect("key path").to_owned();
+        let ca_path = ca.ca_path.to_str().expect("CA path").to_owned();
+        let paths = crate::upstream_reload::UpstreamPaths::from_config(&crate::ClusterTls {
+            ca: Some(crate::CaConfig {
+                ca_path: ca_path.clone(),
+                crl_paths: Vec::new(),
+            }),
+            client_cert: Some(CertKeyPair {
+                cert_path: cert_path.clone(),
+                default: false,
+                key_path: key_path.clone(),
+                server_names: Vec::new(),
+            }),
+            sni: None,
+            verify: true,
+            hot_reload: true,
+        });
+        let identity_slot = Arc::new(ArcSwap::from_pointee(
+            CachedClientCert::from_pem_files(&cert_path, &key_path).expect("initial identity"),
+        ));
+        let ca_slot = Arc::new(ArcSwap::from_pointee(
+            CachedCaCerts::from_pem_file(&ca_path).expect("initial CA"),
+        ));
+        let upstream = UpstreamReload {
+            client_cert: Some(Arc::clone(&identity_slot)),
+            ca: Some(Arc::clone(&ca_slot)),
+            paths,
+        };
+        let before_identity = identity_slot.load_full();
+        let before_ca = ca_slot.load_full();
+
+        // A rotation whose identity files are valid but whose CA file is
+        // broken must publish nothing at all.
+        let rotated = gen_test_certs();
+        std::fs::copy(&rotated.cert_path, &cert_path).expect("rotate the certificate");
+        std::fs::copy(&rotated.key_path, &key_path).expect("rotate the key");
+        std::fs::write(&ca_path, "not a CA").expect("break the CA");
+        assert!(
+            !reload_upstream(&upstream),
+            "a half-readable rotation must fail the reload"
+        );
+        assert!(
+            Arc::ptr_eq(&before_identity, &identity_slot.load_full()),
+            "the identity must not publish while the CA file is unreadable"
+        );
+        assert!(
+            Arc::ptr_eq(&before_ca, &ca_slot.load_full()),
+            "the CA must keep the previous bundle while its file is unreadable"
+        );
+
+        // Repairing the CA publishes both materials together.
+        let replacement = crate::test_utils::gen_ca_file();
+        std::fs::copy(&replacement.ca_path, &ca_path).expect("repair the CA");
+        assert!(reload_upstream(&upstream), "a fully readable rotation must succeed");
+        assert!(
+            !Arc::ptr_eq(&before_identity, &identity_slot.load_full()),
+            "the repaired rotation must publish the identity"
+        );
+        assert!(
+            !Arc::ptr_eq(&before_ca, &ca_slot.load_full()),
+            "the repaired rotation must publish the CA"
+        );
     }
 
     #[test]

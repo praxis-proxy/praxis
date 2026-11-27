@@ -59,7 +59,7 @@ pub(crate) struct UpstreamPaths {
 
 impl UpstreamPaths {
     /// Extract the watched paths from a cluster TLS config.
-    fn from_config(tls: &ClusterTls) -> Self {
+    pub(crate) fn from_config(tls: &ClusterTls) -> Self {
         let (cert, key) = tls.client_cert.as_ref().map_or((None, None), |pair| {
             (Some(pair.cert_path.clone()), Some(pair.key_path.clone()))
         });

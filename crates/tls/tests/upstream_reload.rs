@@ -192,6 +192,42 @@ fn serves_identity(cached: &CachedClusterTls, expected: Option<&[u8]>) -> bool {
 }
 
 #[test]
+fn a_partially_broken_rotation_publishes_neither_material() {
+    let fixture = Fixture::new();
+    let cached = CachedClusterTls::try_from_config(&fixture.tls).expect("hot-reload material");
+    let before_cert = cached.client_cert().expect("initial identity");
+    let before_ca = cached.ca().expect("initial CA bundle");
+
+    // Rotate the identity to valid material while breaking the CA file: a
+    // half-readable rotation must publish nothing at all.
+    let ca_path = fixture.dir.path().join("ca.pem");
+    let valid_ca = std::fs::read(&ca_path).expect("read valid CA");
+    fixture.rotate();
+    std::fs::write(&ca_path, "not a CA").expect("write broken CA");
+
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(
+        Arc::ptr_eq(&before_cert, &cached.client_cert().expect("identity after broken rotation")),
+        "the identity must not publish while the CA file is unreadable"
+    );
+    assert!(
+        Arc::ptr_eq(&before_ca, &cached.ca().expect("CA after broken rotation")),
+        "the CA must keep the previous bundle while its file is unreadable"
+    );
+
+    // Repairing the CA publishes both materials together.
+    std::fs::write(&ca_path, valid_ca).expect("repair the CA");
+    let recovered = wait_for(Duration::from_secs(12), || {
+        let cert_rotated = cached
+            .client_cert()
+            .is_some_and(|cert| !Arc::ptr_eq(&cert, &before_cert));
+        let ca_rotated = cached.ca().is_some_and(|ca| !Arc::ptr_eq(&ca, &before_ca));
+        cert_rotated && ca_rotated
+    });
+    assert!(recovered, "a repaired rotation must publish both materials");
+}
+
+#[test]
 fn a_broken_rotation_keeps_the_previous_material() {
     let fixture = Fixture::new();
     let cached = CachedClusterTls::try_from_config(&fixture.tls).expect("hot-reload material");
