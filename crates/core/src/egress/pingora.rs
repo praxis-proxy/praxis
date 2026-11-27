@@ -284,11 +284,10 @@ fn bounded(configured: Option<Duration>, timeout: Duration) -> Duration {
 }
 
 /// Map a Pingora transport error onto the exchange error, keeping the
-/// HTTP/2 reason of an `H2Error`.
+/// HTTP/2 reason of any error caused by one: Pingora reports header reads
+/// as `H2Error` but body and trailer reads as `ReadError`.
 fn io_error(err: &pingora_core::Error) -> EgressError {
-    let h2_error = (err.etype == pingora_core::ErrorType::H2Error)
-        .then(|| err.root_cause().downcast_ref::<h2::Error>())
-        .flatten();
+    let h2_error = err.root_cause().downcast_ref::<h2::Error>();
     super::exchange_error(h2_error, err.to_string())
 }
 
@@ -308,6 +307,21 @@ mod tests {
     /// A Pingora `H2Error` caused by an HTTP/2 reset with `reason`.
     fn h2_reset(reason: h2::Reason) -> pingora_core::BError {
         pingora_core::Error::because(pingora_core::ErrorType::H2Error, "h2 stream", h2::Error::from(reason))
+    }
+
+    #[test]
+    fn http2_reset_while_reading_the_body_keeps_its_retry_class() {
+        // Pingora reports body-read failures as `ReadError`, with the
+        // `h2::Error` as the cause.
+        let reset = pingora_core::Error::because(
+            pingora_core::ErrorType::ReadError,
+            "while read h2 response body",
+            h2::Error::from(h2::Reason::INTERNAL_ERROR),
+        );
+        assert!(
+            matches!(io_error(&reset), EgressError::Aborted(_)),
+            "a reset after the body started may follow a processed request"
+        );
     }
 
     #[test]

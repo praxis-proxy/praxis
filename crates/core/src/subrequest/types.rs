@@ -34,7 +34,9 @@ use crate::{backend, egress::Connector};
 /// response read fails. Admission, validation and failed dials leave it false.
 ///
 /// It also keeps how an HTTP/2 exchange failed ([`ExchangeFailure`]), which
-/// [`SubRequestError::Io`] does not carry.
+/// [`SubRequestError::Io`] does not carry: for a buffered exchange, through
+/// the whole response; for a streaming one, up to its response head. Errors
+/// from a streaming body after that are not recorded.
 #[derive(Clone, Debug, Default)]
 pub struct RequestProgress(Arc<Witness>);
 
