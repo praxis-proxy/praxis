@@ -40,8 +40,11 @@ Precedence is `StreamBuffer` > `SizeLimit` > `Stream`: one filter requesting
 default) cap transfers, and buffered bodies also obey
 `body_limits.max_buffer_bytes` (64 MiB by default) and the filters' merged
 `max_bytes`, which is the largest value any filter declares. An oversized
-request returns 413; an oversized response is aborted if headers were already
-sent. Removing the transfer limit requires
+request returns 413. A validated, unambiguous upstream response length above
+the cumulative limit returns 502 before final headers are committed; an
+unknown-length overflow can still abort after commit. See
+[Payload Size Limits](../operating/configuration.md#payload-size-limits).
+Removing the transfer limit requires
 `insecure_options.allow_unbounded_body`, and buffering stays clamped to the
 cap. When no filter requests body access, the pipeline counts bytes in
 `SizeLimit` mode; an explicitly declared `Stream` mode stays streaming.

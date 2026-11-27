@@ -83,17 +83,15 @@ fn response_release_prefix_and_tail_progress_before_ceiling_aborts() {
     let (backend_port, backend_thread) = spawn_raw_http_backend(move |mut stream| {
         read_http_request(&mut stream);
         stream
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 49152\r\nConnection: close\r\n\r\n")
+            .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n")
             .unwrap();
-        stream.write_all(&vec![b'a'; CHUNK]).unwrap();
-        stream.flush().unwrap();
+        write_chunk(&mut stream, &vec![b'a'; CHUNK]);
         wait_for_prefix(&backend_observations);
         continue_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        stream.write_all(&vec![b'b'; CHUNK]).unwrap();
-        stream.flush().unwrap();
+        write_chunk(&mut stream, &vec![b'b'; CHUNK]);
         continue_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         // The crossing chunk must be withheld after Release.
-        let _result = stream.write_all(&vec![b'c'; CHUNK]);
+        let _result = write_chunk_result(&mut stream, &vec![b'c'; CHUNK]);
     });
     let config = release_config(backend_port, 32_768);
     let registry = release_registry(Direction::Response, &observations);
@@ -138,6 +136,58 @@ fn response_release_prefix_and_tail_progress_before_ceiling_aborts() {
         result.abort.is_some(),
         "the truncated response must be observable: {result:?}"
     );
+}
+
+#[test]
+fn released_response_may_exceed_its_transient_buffer_within_the_global_limit() {
+    const CHUNK: usize = 16_384; // 16 KiB, the runtime StreamBuffer threshold
+    let observations = Arc::new(Mutex::new(Vec::new()));
+    let backend_observations = Arc::clone(&observations);
+    let (continue_tx, continue_rx) = mpsc::channel();
+    let (backend_port, backend_thread) = spawn_raw_http_backend(move |mut stream| {
+        read_http_request(&mut stream);
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 49152\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        stream.write_all(&vec![b'a'; CHUNK]).unwrap();
+        stream.flush().unwrap();
+        wait_for_prefix(&backend_observations);
+        continue_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        stream.write_all(&vec![b'b'; CHUNK]).unwrap();
+        stream.write_all(&vec![b'c'; CHUNK]).unwrap();
+    });
+    let yaml = custom_filter_yaml(free_port(), backend_port, "release_probe");
+    let config = Config::from_yaml(&format!(
+        "{yaml}\nbody_limits:\n  max_request_bytes: 16\n  max_response_bytes: 49152\n"
+    ))
+    .unwrap();
+    let registry = release_registry(Direction::Response, &observations);
+    let proxy = start_full_proxy_with_registry(&config, &registry);
+    wait_for_tcp(proxy.addr());
+    let mut stream = TcpStream::connect(proxy.addr()).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    stream
+        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    let mut body = Vec::new();
+    let mut resumed = false;
+    let result = read_h1_response(&mut BufReader::new(stream), false, 49_152, |part| {
+        body.extend_from_slice(part);
+        if body.len() >= CHUNK && !resumed {
+            continue_tx.send(()).unwrap();
+            resumed = true;
+        }
+        Ok(())
+    });
+    backend_thread.join().unwrap();
+
+    assert_eq!(result.status, Some(200), "{result:?}");
+    assert_eq!(
+        result.completion,
+        Some(praxis_test_utils::H1Completion::ContentLength),
+        "{result:?}"
+    );
+    assert_eq!(body.len(), 49_152, "early Release turns buffering into streaming");
 }
 
 #[test]
@@ -390,6 +440,18 @@ fn wait_for_prefix(observations: &Arc<Mutex<Vec<Observation>>>) {
         );
         std::thread::sleep(Duration::from_millis(5));
     }
+}
+
+/// Send one HTTP/1 chunk and its framing terminator.
+fn write_chunk(stream: &mut TcpStream, body: &[u8]) {
+    write_chunk_result(stream, body).unwrap();
+}
+
+/// Send one HTTP/1 chunk, returning any socket error to the caller.
+fn write_chunk_result(stream: &mut TcpStream, body: &[u8]) -> std::io::Result<()> {
+    write!(stream, "{:x}\r\n", body.len())?;
+    stream.write_all(body)?;
+    stream.write_all(b"\r\n")
 }
 
 /// Check the transition without assuming TCP preserves chunk boundaries.

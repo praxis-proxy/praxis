@@ -1,9 +1,53 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-//! Shared request-body limit diagnostics and declared-length admission.
+//! Shared HTTP body limit diagnostics and declared-length admission.
 
 use praxis_filter::{BodyMode, FilterPipeline, Rejection};
+
+/// Return one validated, unambiguous response length when no transfer
+/// encoding makes it unsuitable for early size admission.
+pub(in crate::http) fn trustworthy_content_length(headers: &http::HeaderMap) -> Option<u64> {
+    if headers.contains_key(http::header::TRANSFER_ENCODING) {
+        return None;
+    }
+
+    let mut length = None;
+    for value in &headers.get_all(http::header::CONTENT_LENGTH) {
+        for item in value.to_str().ok()?.split(',') {
+            let item = item.trim();
+            if item.is_empty() || !item.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            let parsed = item.parse::<u64>().ok()?;
+            if length.is_some_and(|previous| previous != parsed) {
+                return None;
+            }
+            length = Some(parsed);
+        }
+    }
+    length
+}
+
+/// Return the enforced cumulative response limit when `length` exceeds it.
+///
+/// `StreamBuffer`'s threshold only bounds accumulation before `Release`; the
+/// global ceiling remains the cumulative limit after a runtime release.
+pub(in crate::http) fn response_body_limit_exceeded(
+    length: u64,
+    pipeline: &FilterPipeline,
+    mode: BodyMode,
+) -> Option<usize> {
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "non-SizeLimit modes use the global cumulative response ceiling"
+    )]
+    let limit = match mode {
+        BodyMode::SizeLimit { max_bytes } => Some(max_bytes),
+        _ => pipeline.response_body_ceiling(),
+    }?;
+    (length > u64::try_from(limit).unwrap_or(u64::MAX)).then_some(limit)
+}
 
 /// The stage that refused a request body.
 #[derive(Clone, Copy, Debug)]
@@ -150,6 +194,101 @@ mod tests {
             http::HeaderValue::from_static("chunked"),
         );
         assert!(declared_body_rejection(&headers, &pipeline(Some(10))?).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn response_content_length_accepts_identical_decimal_values() -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+    {
+        let mut headers = http::HeaderMap::new();
+        assert_eq!(
+            trustworthy_content_length(&headers),
+            None,
+            "an absent length is unknown"
+        );
+
+        for value in ["5", " 5\t", "5, 5"] {
+            headers.insert(http::header::CONTENT_LENGTH, value.parse()?);
+            assert_eq!(
+                trustworthy_content_length(&headers),
+                Some(5),
+                "a single decimal value or identical list is unambiguous: {value:?}"
+            );
+        }
+
+        headers.clear();
+        headers.append(http::header::CONTENT_LENGTH, http::HeaderValue::from_static("5"));
+        headers.append(http::header::CONTENT_LENGTH, http::HeaderValue::from_static("5"));
+        assert_eq!(
+            trustworthy_content_length(&headers),
+            Some(5),
+            "identical repeated lengths have one representation size"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn response_content_length_rejects_invalid_conflicting_or_transfer_encoded_values()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut headers = http::HeaderMap::new();
+        for value in ["5, 6", "5, invalid", "", "18446744073709551616"] {
+            headers.clear();
+            headers.insert(http::header::CONTENT_LENGTH, value.parse()?);
+            assert_eq!(
+                trustworthy_content_length(&headers),
+                None,
+                "invalid or conflicting values cannot drive early rejection: {value:?}"
+            );
+        }
+
+        headers.clear();
+        headers.insert(http::header::CONTENT_LENGTH, http::HeaderValue::from_static("5"));
+        headers.insert(
+            http::header::TRANSFER_ENCODING,
+            http::HeaderValue::from_static("chunked"),
+        );
+        assert_eq!(
+            trustworthy_content_length(&headers),
+            None,
+            "transfer-encoded framing never drives early rejection"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn response_limit_uses_the_cumulative_mode_limit_not_buffer_threshold()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut bounded = pipeline(None)?;
+        bounded.apply_body_limits(None, Some(4), false)?;
+        let size_limit = BodyMode::SizeLimit { max_bytes: 3 };
+        let stream_buffer = BodyMode::StreamBuffer { max_bytes: Some(2) };
+
+        for length in [2_u64, 3, 4] {
+            assert_eq!(
+                response_body_limit_exceeded(length, &bounded, size_limit),
+                (length > 3).then_some(3),
+                "SizeLimit enforces its own cumulative ceiling at {length} bytes"
+            );
+        }
+        assert_eq!(
+            response_body_limit_exceeded(5, &bounded, stream_buffer),
+            Some(4),
+            "StreamBuffer uses the global cumulative ceiling, not its threshold"
+        );
+        for length in [3_u64, 4, 5] {
+            assert_eq!(
+                response_body_limit_exceeded(length, &bounded, BodyMode::Stream),
+                (length > 4).then_some(4),
+                "Stream uses the global cumulative ceiling at {length} bytes"
+            );
+        }
+
+        let unbounded = pipeline(None)?;
+        assert_eq!(
+            response_body_limit_exceeded(5, &unbounded, stream_buffer),
+            None,
+            "an unbounded stream may release its transient buffer and continue"
+        );
         Ok(())
     }
 

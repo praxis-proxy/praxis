@@ -80,6 +80,9 @@ including its synthetic hop ID and `x-request-id` correlation.
 - Each proxied HTTP attempt and framework sub-request emits a `CLIENT` span.
   The `upstream_exchange` span stays an `INTERNAL` child carrying connection
   and response details.
+- A declared response-size rejection emits a bounded `response_size_limit`
+  event on `upstream_exchange`; the `CLIENT` span keeps the upstream status,
+  while the `SERVER` span records the local 502.
 - Filter execution emits bounded `filter` spans when debug-level tracing is
   on (see [Log Level Overrides](observability.md#log-level-overrides)).
 - The `iterative-request-router` build feature emits `filtered_subrequest`

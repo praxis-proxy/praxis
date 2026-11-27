@@ -107,12 +107,21 @@ fn encoded_response_ceiling_counts_gzip_bytes_not_decompressed_bytes() {
         } else {
             assert_eq!(
                 response.status,
-                Some(500),
-                "the upstream body failed before committing headers"
+                Some(502),
+                "the validated oversized Content-Length is rejected before committing headers"
             );
             assert_eq!(response.completion, Some(H1Completion::ContentLength));
+            assert_eq!(response.abort, None, "the local error body must complete: {response:?}");
             assert!(response.headers.iter().all(|(name, _)| name != "content-encoding"));
-            assert!(!received.starts_with(&GZIP_1MB_ZEROS[..2]));
+            assert!(
+                String::from_utf8_lossy(&received).contains("Upstream response body exceeds the configured size limit"),
+                "the local response should identify the size policy: {}",
+                String::from_utf8_lossy(&received)
+            );
+            assert!(
+                !received.windows(2).any(|window| window == &GZIP_1MB_ZEROS[..2]),
+                "the encoded upstream representation must not leak into the local response"
+            );
             assert!(received.len() <= limit);
         }
         let probe = http_send(

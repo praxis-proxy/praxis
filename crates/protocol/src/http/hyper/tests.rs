@@ -1106,6 +1106,37 @@ async fn late_first_chunk_streams_behind_an_early_head() {
 }
 
 #[tokio::test]
+async fn declared_oversize_response_is_complete_502_and_does_not_retry() {
+    let backend = Backend::start(Reply::Late("secret")).await;
+    let settings = "
+            retry_policy:
+              max_retries: 1
+              retriable_status_codes: [502]
+";
+    let yaml = with_cluster(&routed_yaml(backend.addr, ""), settings);
+    let yaml = format!("{yaml}\nbody_limits:\n  max_response_bytes: 4\n");
+    let proxy = Proxy::start(&yaml).await;
+    let started = Instant::now();
+
+    let response = proxy.send("GET / HTTP/1.1\r\nHost: a\r\n\r\n").await;
+
+    assert_eq!(response.status, 502, "the uncommitted upstream head becomes a 502");
+    assert!(
+        response
+            .body
+            .contains("Upstream response body exceeds the configured size limit"),
+        "the stable response-size cause reaches the client: {}",
+        response.body
+    );
+    assert!(!response.body.contains("secret"), "the body must not be exposed");
+    assert!(
+        started.elapsed() < LATE_BODY_DELAY,
+        "the 502 must complete while the upstream still withholds its body"
+    );
+    assert_eq!(backend.requests().len(), 1, "the local limit must not trigger a retry");
+}
+
+#[tokio::test]
 async fn body_filter_failing_after_the_commit_cuts_the_response() {
     let backend = Backend::start(Reply::Late("late body")).await;
     let yaml = routed_yaml(backend.addr, &format!("\n      - filter: {FAILING_BODY_FILTER}\n"));

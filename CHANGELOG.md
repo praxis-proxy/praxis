@@ -217,6 +217,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Return a complete 502 before committing a final response whose validated,
+  unambiguous upstream `Content-Length` exceeds the cumulative response limit.
+  Formatters receive `response_body_too_large`; bodyless metadata and unknown
+  or ambiguous framing keep their existing handling.
 - Deprecation warnings describe settings in the candidate configuration without
   implying that the configuration is already active.
 - Validate the final WebSocket handshake after response filters and reject

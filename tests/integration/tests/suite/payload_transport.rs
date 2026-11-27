@@ -572,11 +572,11 @@ fn generated_response_spec(
 }
 
 #[test]
-fn fixed_and_chunked_responses_stream_and_enforce_the_ceiling() {
+fn fixed_response_lengths_preflight_and_chunked_responses_enforce_the_ceiling() {
     for framing in [PayloadResponseFraming::Fixed, PayloadResponseFraming::Chunked] {
         generated_response(65_536, Some(65_536), "65536", framing, true);
-        generated_response(131_072, Some(65_536), "null", framing, false);
     }
+    generated_response(131_072, Some(65_536), "null", PayloadResponseFraming::Chunked, false);
 }
 
 #[test]
@@ -1271,14 +1271,15 @@ fn sse_events(unbounded: bool) {
         praxis_test_utils::read_http_request(&mut stream);
         write!(
             stream,
-            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            backend_events.iter().map(String::len).sum::<usize>()
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
         )
         .unwrap();
         for (index, event) in backend_events.iter().enumerate() {
+            write!(stream, "{:x}\r\n", event.len()).unwrap();
             if stream.write_all(event.as_bytes()).is_err() {
                 break;
             }
+            stream.write_all(b"\r\n").unwrap();
             stream.flush().unwrap();
             if index < accepted_events {
                 wait.recv_timeout(Duration::from_secs(5))
@@ -1287,6 +1288,9 @@ fn sse_events(unbounded: bool) {
             } else {
                 break;
             }
+        }
+        if unbounded {
+            stream.write_all(b"0\r\n\r\n").unwrap();
         }
     });
     let other = start_counting_backend(PayloadSpec::binary(0, SEED), "other", 0);
@@ -1327,10 +1331,7 @@ fn sse_events(unbounded: bool) {
     );
     if unbounded {
         assert_eq!(bytes, expected, "unbounded SSE stream must deliver every event");
-        #[cfg(feature = "pingora")]
         let expected_completion = H1Completion::Chunked;
-        #[cfg(feature = "hyper")]
-        let expected_completion = H1Completion::ContentLength;
         assert_eq!(
             result.completion,
             Some(expected_completion),
@@ -2061,7 +2062,7 @@ insecure_options:
 #[test]
 fn h2_response_overflow_resets_only_affected_stream_after_prefix() {
     let spec = PayloadSpec::binary(131_072, SEED);
-    let mut source = start_payload_response_backend(spec.clone(), PayloadResponseFraming::Fixed, Some(4096));
+    let mut source = start_payload_response_backend(spec.clone(), PayloadResponseFraming::Chunked, Some(4096));
     let other = start_counting_backend(PayloadSpec::binary(0, SEED), "other", 0);
     let health = start_backend_with_shutdown("probe");
     let config = transport_config(

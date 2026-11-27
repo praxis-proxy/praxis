@@ -3,6 +3,8 @@
 
 //! Tests for structured error responses on upstream failures.
 
+use std::io::Write as _;
+
 use http::HeaderValue;
 use praxis_core::config::Config;
 use praxis_filter::{
@@ -10,8 +12,9 @@ use praxis_filter::{
     FormattedErrorResponse, HttpFilter, HttpFilterContext,
 };
 use praxis_test_utils::{
-    custom_filter_yaml, free_port, http_get, http_send, parse_body, parse_header, parse_status, registry_with,
-    simple_proxy_yaml, start_proxy, start_proxy_with_registry,
+    custom_filter_yaml, free_port, http_get, http_send, parse_body, parse_header, parse_status, read_http_request,
+    registry_with, simple_proxy_yaml, spawn_raw_http_backend, start_full_proxy_with_registry, start_proxy,
+    start_proxy_with_registry, wait_for_tcp,
 };
 
 // -----------------------------------------------------------------------------
@@ -168,6 +171,44 @@ fn external_filter_controls_error_response_envelope() {
     assert_eq!(
         parse_body(&raw),
         r#"{"error":{"code":"upstream_connect_refused","status":502}}"#
+    );
+}
+
+#[test]
+fn oversized_upstream_response_uses_the_formatter_size_cause_without_body_content() {
+    let (backend_port, backend) = spawn_raw_http_backend(|mut stream| {
+        read_http_request(&mut stream);
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nsecret")
+            .unwrap();
+    });
+    let yaml = format!(
+        "{}\nbody_limits:\n  max_response_bytes: 4\n",
+        custom_filter_yaml(free_port(), backend_port, "test_error_formatter")
+    );
+    let config = Config::from_yaml(&yaml).unwrap();
+    let registry = registry_with("test_error_formatter", || Box::new(InstallErrorFormatterFilter));
+    let proxy = start_full_proxy_with_registry(&config, &registry);
+    wait_for_tcp(proxy.addr());
+
+    let raw = http_send(
+        proxy.addr(),
+        "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    backend.join().unwrap();
+
+    assert_eq!(parse_status(&raw), 502, "the local response size policy is a 502");
+    assert_eq!(
+        parse_header(&raw, "content-type").as_deref(),
+        Some("application/vnd.praxis.test+json")
+    );
+    assert_eq!(
+        parse_body(&raw),
+        r#"{"error":{"code":"response_body_too_large","status":502}}"#
+    );
+    assert!(
+        !parse_body(&raw).contains("secret"),
+        "upstream body must not be exposed"
     );
 }
 

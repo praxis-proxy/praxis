@@ -205,7 +205,10 @@ Pingora request_body_filter(chunk, eos)
 
 The response flow has the same structure, run synchronously. A response
 `StreamBuffer` overflow aborts the connection instead of sending 413, because
-the response headers are already sent.
+the response headers are already sent. Before that commit, a validated,
+unambiguous upstream `Content-Length` above the cumulative response ceiling
+returns a complete 502. Unknown or ambiguous framing remains incrementally
+enforced, and a `StreamBuffer` threshold is not cumulative after `Release`.
 
 ### Pre-Read Body
 

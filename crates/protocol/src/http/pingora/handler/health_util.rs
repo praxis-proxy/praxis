@@ -79,6 +79,9 @@ pub(in crate::http) fn record_passive_health_outcome(
         return;
     }
     let upstream_failed = ctx.upstream_response_status.is_some_and(|status| status >= 500);
+    if ctx.response_size_limit_exceeded && !upstream_failed {
+        return;
+    }
     if ctx.upgrade_failure == Some(crate::http::pingora::context::UpgradeFailure::Local) && !upstream_failed {
         return;
     }
@@ -193,9 +196,14 @@ fn emit_passive_health_transition(
 #[cfg(test)]
 #[cfg(feature = "pingora")]
 mod tests {
-    use pingora_core::{Error, ErrorType};
+    use std::{collections::HashMap, sync::Arc};
 
-    use super::ended_by_client;
+    use pingora_core::{Error, ErrorType};
+    use praxis_core::health::{ClusterHealthEntry, EndpointHealth, HealthRegistry};
+    use praxis_filter::{FilterPipeline, FilterRegistry};
+
+    use super::{ErrorOrigin, ended_by_client, record_passive_health_outcome};
+    use crate::http::pingora::context::PingoraRequestCtx;
 
     #[test]
     fn a_client_abort_before_any_upstream_response_ended_by_client() {
@@ -219,5 +227,99 @@ mod tests {
             "once the upstream answered, its status is the signal"
         );
         assert!(!ended_by_client(None, None), "no error is not a client ending");
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one sequence verifies that local policy preserves a health streak"
+    )]
+    fn local_response_size_rejection_neither_fails_nor_recovers_endpoint_health()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let pipeline = health_pipeline(2)?;
+        let mut ctx = contacted_context(200);
+        ctx.response_size_limit_exceeded = true;
+        record_passive_health_outcome(&pipeline, Some(ErrorOrigin::Other), &ctx);
+        assert_eq!(
+            endpoint_healthy(&pipeline),
+            Some(true),
+            "local policy is not an upstream failure"
+        );
+
+        ctx.response_size_limit_exceeded = false;
+        record_passive_health_outcome(&pipeline, Some(ErrorOrigin::Other), &ctx);
+        assert_eq!(
+            endpoint_healthy(&pipeline),
+            Some(true),
+            "one real failure is below threshold"
+        );
+
+        ctx.response_size_limit_exceeded = true;
+        record_passive_health_outcome(&pipeline, Some(ErrorOrigin::Other), &ctx);
+        assert!(
+            endpoint_healthy(&pipeline) == Some(true),
+            "local policy must not clear or advance the failure streak"
+        );
+
+        ctx.response_size_limit_exceeded = false;
+        record_passive_health_outcome(&pipeline, Some(ErrorOrigin::Other), &ctx);
+        assert_eq!(
+            endpoint_healthy(&pipeline),
+            Some(false),
+            "the prior failure streak remains intact"
+        );
+        drop(ctx);
+        Ok(())
+    }
+
+    #[test]
+    fn response_size_rejection_keeps_an_upstream_5xx_health_signal()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let pipeline = health_pipeline(1)?;
+        let mut ctx = contacted_context(503);
+        ctx.response_size_limit_exceeded = true;
+
+        record_passive_health_outcome(&pipeline, Some(ErrorOrigin::Other), &ctx);
+
+        assert!(
+            endpoint_healthy(&pipeline) == Some(false),
+            "an upstream 5xx still counts as a failure"
+        );
+        drop(ctx);
+        Ok(())
+    }
+
+    /// Build a one-endpoint pipeline with passive health checking enabled.
+    fn health_pipeline(threshold: u32) -> Result<FilterPipeline, Box<dyn std::error::Error + Send + Sync>> {
+        let mut pipeline = FilterPipeline::build(&mut [], &FilterRegistry::with_builtins())?;
+        let entry = ClusterHealthEntry::new(
+            vec![EndpointHealth::new()],
+            vec![Arc::from("127.0.0.1:8080")],
+            Some(threshold),
+            Some(1),
+        );
+        let registry: HealthRegistry = Arc::new(HashMap::from([(Arc::from("backend"), Arc::new(entry))]));
+        pipeline.set_health_registry(registry);
+        Ok(pipeline)
+    }
+
+    /// A request that reached the tracked endpoint and got `status`.
+    fn contacted_context(status: u16) -> PingoraRequestCtx {
+        PingoraRequestCtx {
+            cluster: Some(Arc::from("backend")),
+            selected_endpoint_index: Some(0),
+            upstream_contacted: true,
+            upstream_response_status: Some(status),
+            ..PingoraRequestCtx::default()
+        }
+    }
+
+    /// Whether the pipeline's sole endpoint remains healthy.
+    fn endpoint_healthy(pipeline: &FilterPipeline) -> Option<bool> {
+        pipeline
+            .health_registry()
+            .and_then(|registry| registry.get("backend"))
+            .and_then(|health| health.endpoints().first())
+            .map(EndpointHealth::is_healthy)
     }
 }

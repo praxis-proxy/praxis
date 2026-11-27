@@ -103,6 +103,7 @@ mod rate_limit;
 #[cfg(feature = "pingora")]
 mod rejection_lifecycle;
 mod response_framing;
+mod response_size_limit;
 mod retry;
 mod route_templates;
 mod routing;
