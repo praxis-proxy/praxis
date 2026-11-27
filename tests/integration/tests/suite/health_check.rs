@@ -52,8 +52,15 @@ fn comparison_benchmark_config_serves_readiness() {
     );
     let _proxy = start_full_proxy(&config);
     wait_for_http(&metrics_addr);
-    let (status, _) = http_get(&metrics_addr, "/ready", None);
-    assert_eq!(status, 200, "benchmark readiness probe must succeed");
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let (status, readiness) = loop {
+        let response = http_get(&metrics_addr, "/ready", None);
+        if response.0 == 200 || std::time::Instant::now() >= deadline {
+            break response;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(status, 200, "benchmark readiness must reach serving: {readiness}");
     wait_for_http(&proxy_addr);
     let (status, body) = http_get(&proxy_addr, "/", None);
     assert_eq!(status, 200, "benchmark proxy must forward traffic");

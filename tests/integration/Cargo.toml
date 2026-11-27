@@ -52,6 +52,7 @@ iterative-request-router = ["praxis/iterative-request-router"]
 # with the chain-binding extension API.
 chain-binding = ["praxis/chain-binding", "praxis-filter/chain-binding"]
 slow-start = ["praxis/slow-start"]
+overload-actions = ["praxis/overload-actions", "praxis-test-utils/overload-actions"]
 bound-upstream-request-body = ["praxis/bound-upstream-request-body"]
 # Off by default; runs the SPIFFE mTLS e2e tests against a proxy built with it.
 spiffe = ["praxis/spiffe"]

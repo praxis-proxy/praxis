@@ -56,8 +56,9 @@ pub fn load_example_config(filename: &str, listener_port: u16, port_map: HashMap
 /// assert!(yaml.contains("allow_private_endpoints: true"));
 /// ```
 pub fn allow_loopback_endpoints(yaml: &str) -> String {
+    let yaml = yaml.replace("\r\n", "\n");
     if yaml.contains("allow_private_endpoints") {
-        return yaml.to_owned();
+        return yaml;
     }
     if yaml.contains("\ninsecure_options:") || yaml.starts_with("insecure_options:") {
         return yaml.replacen(
@@ -150,6 +151,20 @@ fn substitute(yaml: &str, rules: &[(&str, String)]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn loopback_override_is_added_to_crlf_insecure_options() {
+        let yaml = allow_loopback_endpoints("insecure_options:\r\n  allow_private_upstreams: true\r\n");
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml).expect("patched YAML");
+        assert_eq!(
+            parsed
+                .get("insecure_options")
+                .and_then(|options| options.get("allow_private_endpoints"))
+                .and_then(serde_yaml::Value::as_bool),
+            Some(true),
+            "Windows line endings must not drop the loopback override"
+        );
+    }
 
     #[test]
     fn patch_yaml_replaces_listener_0000() {

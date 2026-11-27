@@ -115,6 +115,23 @@ impl Drop for CountingBackend {
 ///
 /// Panics if the listener cannot be bound or configured.
 pub fn start_counting_backend(spec: PayloadSpec, backend_id: &str, max_body: u64) -> CountingBackend {
+    start_counting_backend_with_read_timeout(spec, backend_id, max_body, Duration::from_secs(15))
+}
+
+/// Like [`start_counting_backend`], with a read-inactivity budget for the fixture.
+///
+/// A buffering proxy can hold the upstream idle throughout the client upload;
+/// use the test's transfer budget when that may exceed the default 15 seconds.
+///
+/// # Panics
+///
+/// Panics if the listener cannot be configured or the read timeout is invalid.
+pub fn start_counting_backend_with_read_timeout(
+    spec: PayloadSpec,
+    backend_id: &str,
+    max_body: u64,
+    read_timeout: Duration,
+) -> CountingBackend {
     let (listener, port) = bind_unique_port();
     listener.set_nonblocking(true).expect("set listener nonblocking");
     let (accepted_tx, accepted) = mpsc::channel();
@@ -129,6 +146,9 @@ pub fn start_counting_backend(spec: PayloadSpec, backend_id: &str, max_body: u64
         let Some(stream) = accept_counting_socket(&listener, &worker_stop, &worker_active, &accepted_tx) else {
             return;
         };
+        stream
+            .set_read_timeout(Some(read_timeout))
+            .expect("set backend read timeout");
         let observation = observe_request(stream, &spec, backend_id, max_body, &first_tx);
         drop(worker_active.lock().expect("active counting socket lock").take());
         let _sent = receipt_tx.send(observation);
@@ -185,9 +205,6 @@ fn observe_request(
     stream
         .set_nonblocking(false)
         .expect("set accepted backend socket blocking");
-    stream
-        .set_read_timeout(Some(Duration::from_secs(15)))
-        .expect("set backend read timeout");
     stream
         .set_write_timeout(Some(Duration::from_secs(15)))
         .expect("set backend write timeout");
@@ -272,7 +289,7 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use super::start_counting_backend;
+    use super::{start_counting_backend, start_counting_backend_with_read_timeout};
     use crate::{
         net::http1::{H1Completion, read_h1_response},
         payload::PayloadSpec,
@@ -289,6 +306,26 @@ mod tests {
         backend.join();
         assert!(started.elapsed() < Duration::from_secs(2));
         assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+    }
+
+    #[test]
+    fn configured_read_timeout_bounds_a_stalled_body() {
+        let backend = start_counting_backend_with_read_timeout(
+            PayloadSpec::binary(1, 7),
+            "timeout",
+            1,
+            Duration::from_millis(50),
+        );
+        let mut stream = TcpStream::connect(("127.0.0.1", backend.port)).unwrap();
+        stream
+            .write_all(b"POST / HTTP/1.1\r\nContent-Length: 1\r\n\r\n")
+            .unwrap();
+        let receipt = backend.receipt.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(receipt.bytes, 0);
+        assert_eq!(receipt.completion, None);
+        assert!(receipt.abort.is_some(), "an idle body must hit its configured deadline");
+        drop(stream);
+        backend.join();
     }
 
     #[test]

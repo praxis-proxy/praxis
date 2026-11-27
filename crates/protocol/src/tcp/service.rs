@@ -80,5 +80,6 @@ fn build_tcp_service(
         app,
     );
     service.endpoints().set_pre_tls_callback(callback);
+    service.set_connection_filter(Arc::new(crate::overload::AdmissionFilter(pipelines.overload())));
     service
 }

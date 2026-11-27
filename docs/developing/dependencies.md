@@ -85,6 +85,24 @@ release was 2024-10-09, which is low risk for a small, feature-complete
 primitive. If it goes dormant, vendor its narrow surface: it is a thin wrapper
 over `zeroize`, already a direct dependency.
 
+`tikv-jemalloc-sys` is included transitively in Unix default builds through
+the non-optional `tikv-jemallocator`. The optional `overload-actions` feature
+enables a direct dependency and uses it to purge unused pages from the binary's
+jemalloc arenas. Only that direct dependency and explicit purge callback are
+feature-gated; the allocator's transitive FFI dependency is already present.
+It adds no cryptography.
+
+`tikv-jemalloc-ctl` is the matching TiKV typed control API, enabled only by
+`overload-actions`. Safe epoch and allocation-stat readers avoid raw FFI for
+the allocator wiring check. Purging still needs a narrow raw command because
+the crate has no typed arena-purge API. Both crates use the same jemalloc-sys
+version and introduce no cryptography.
+
+Every allocator upgrade requires manually re-auditing the version-specific
+initialization and locking assumptions in `crates/server/src/allocator.rs`.
+Run its `purge_contract_matches_locked_allocator` test with `overload-actions`;
+update the version tripwire only after reviewing the new vendored source.
+
 **`syslog`** backs the `access_log` filter's RFC 3164 sink. It is optional,
 pulled in only by the off-by-default experimental `access-log-syslog` feature.
 It is the de-facto Rust syslog client, maintained by Geoffroy Couprie (author
