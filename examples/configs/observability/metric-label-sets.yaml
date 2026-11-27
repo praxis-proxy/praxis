@@ -1,9 +1,10 @@
 # Metric Label Sets
 #
 # Selectively disables individual label dimensions on Prometheus metrics to
-# bound total time-series cardinality. Every dimension is on by default;
-# turning one off drops it from every metric that carries it while leaving
-# the metric itself available on the metrics listener.
+# bound total time-series cardinality. Each dimension takes its own
+# true/false setting; turning one off drops it from every metric that
+# carries it while leaving the metric itself available on the metrics
+# listener. Dimensions left out keep their defaults.
 #
 # Usage:
 #   cargo run -p praxis-proxy -- -c examples/configs/observability/metric-label-sets.yaml
@@ -19,9 +20,8 @@ metrics:
   labels:
     # The two dimensions that grow with traffic shape rather than with
     # config size, and so dominate cardinality in large deployments.
-    disabled:
-      - route
-      - endpoint
+    route: false
+    endpoint: false
 
 insecure_options:
   allow_private_endpoints: true

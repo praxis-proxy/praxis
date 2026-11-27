@@ -158,10 +158,10 @@ pub(crate) const RELOAD_RESULT_FAILURE: &str = "failure";
 
 /// Histogram bucket upper bounds for HTTP body sizes in bytes.
 ///
-/// `PrometheusBuilder`'s default buckets target request durations in seconds
-/// (`0.005` to `10`), so without an override almost every body would fall into
-/// the `+Inf` bucket. These byte-scaled bounds keep the body-size histograms
-/// meaningful.
+/// `PrometheusBuilder` has no default buckets: a metric with no bucket
+/// override renders as a summary of quantiles rather than a bucketed
+/// histogram. Setting these byte-scaled bounds is what makes the body-size
+/// metrics true histograms.
 const BODY_SIZE_BUCKETS_BYTES: &[f64] = &[
     64.0,
     256.0,
@@ -184,8 +184,9 @@ static PROMETHEUS_HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
 /// Label dimensions to emit, installed once at startup.
 static LABEL_CONFIG: OnceLock<MetricLabelsConfig> = OnceLock::new();
 
-/// Every dimension enabled: the default, and the fallback before install.
-static ALL_LABELS: OnceLock<MetricLabelsConfig> = OnceLock::new();
+/// The default label set: every dimension at `MetricLabel::default_on`, used
+/// as the fallback before install.
+static DEFAULT_LABELS: OnceLock<MetricLabelsConfig> = OnceLock::new();
 
 /// Install the label dimensions to emit.
 ///
@@ -196,17 +197,17 @@ pub fn install_metric_labels(labels: MetricLabelsConfig) {
     let _existing = LABEL_CONFIG.set(labels);
 }
 
-/// The installed label dimensions, defaulting to all enabled.
+/// The installed label dimensions, falling back to the default set.
 pub(crate) fn metric_labels() -> &'static MetricLabelsConfig {
     LABEL_CONFIG
         .get()
-        .unwrap_or_else(|| ALL_LABELS.get_or_init(MetricLabelsConfig::default))
+        .unwrap_or_else(|| DEFAULT_LABELS.get_or_init(MetricLabelsConfig::default))
 }
 
-/// Build a label set, dropping the dimensions that are disabled.
+/// Build a label set, dropping the dimensions that are turned off.
 ///
-/// Only reached when at least one dimension is off; the all-enabled path
-/// uses the static-label macro form.
+/// Only reached when the configured dimensions differ from the default set;
+/// the default path uses the static-label macro form.
 fn selected_labels(pairs: &[(&'static str, Option<SharedString>)]) -> Vec<Label> {
     pairs
         .iter()
@@ -479,6 +480,35 @@ pub fn status_class(code: u16) -> &'static str {
     }
 }
 
+/// Map an HTTP status code to its bounded `status_code` label value.
+///
+/// The codes Praxis returns from its own filters each keep their own value;
+/// anything else collapses to the class [`status_class`] would give it.
+///
+/// ```
+/// use praxis_protocol::http::pingora::metrics::status_code_label;
+///
+/// assert_eq!(status_code_label(429), "429");
+/// assert_eq!(status_code_label(418), "4xx");
+/// assert_eq!(status_code_label(200), "2xx");
+/// ```
+pub fn status_code_label(code: u16) -> &'static str {
+    match code {
+        400 => "400",
+        401 => "401",
+        403 => "403",
+        404 => "404",
+        405 => "405",
+        413 => "413",
+        429 => "429",
+        500 => "500",
+        502 => "502",
+        503 => "503",
+        504 => "504",
+        other => status_class(other),
+    }
+}
+
 /// Map an HTTP method to a bounded label value.
 ///
 /// Returns the method string for the nine standard methods
@@ -526,12 +556,19 @@ pub(crate) struct RequestMetricLabels {
     pub route: SharedString,
     /// Status class (e.g. `"2xx"`).
     pub status_class: &'static str,
+    /// Bounded status code (e.g. `"429"`), emitted only when opted in.
+    pub status_code: &'static str,
 }
 
 /// Build the enabled subset of the request-metric labels.
-fn selected_request_labels(labels: RequestMetricLabels) -> Vec<Label> {
-    let selected = metric_labels();
-    let pairs = [
+///
+/// Returns the counter's labels first, then the duration metric's. They differ
+/// only by `status_code`, which the duration metric never carries.
+///
+/// Takes the selection as an argument rather than reading the installed one,
+/// so the label choice can be unit-tested without installing a recorder.
+fn selected_request_labels(selected: &MetricLabelsConfig, labels: RequestMetricLabels) -> (Vec<Label>, Vec<Label>) {
+    let shared = [
         (
             "method",
             label_if(
@@ -552,7 +589,12 @@ fn selected_request_labels(labels: RequestMetricLabels) -> Vec<Label> {
             label_if(selected.is_enabled(MetricLabel::Cluster), labels.cluster),
         ),
     ];
-    selected_labels(&pairs)
+    let duration = selected_labels(&shared);
+    let mut request = duration.clone();
+    if selected.is_enabled(MetricLabel::StatusCode) {
+        request.push(Label::new("status_code", SharedString::const_str(labels.status_code)));
+    }
+    (request, duration)
 }
 
 /// Record HTTP request metrics for a completed request.
@@ -560,10 +602,11 @@ pub(crate) fn record_request_metrics(labels: RequestMetricLabels, duration_secs:
     if !is_recorder_installed() {
         return;
     }
-    if !metric_labels().all_enabled() {
-        let emitted = selected_request_labels(labels);
-        counter!(HTTP_REQUESTS_TOTAL, emitted.clone()).increment(1);
-        histogram!(HTTP_REQUEST_DURATION_SECONDS, emitted).record(duration_secs);
+    let selected = metric_labels();
+    if !selected.default_set() {
+        let (request, duration) = selected_request_labels(selected, labels);
+        counter!(HTTP_REQUESTS_TOTAL, request).increment(1);
+        histogram!(HTTP_REQUEST_DURATION_SECONDS, duration).record(duration_secs);
         return;
     }
     record_request_metrics_all_labels(labels, duration_secs);
@@ -599,8 +642,15 @@ fn record_request_metrics_all_labels(labels: RequestMetricLabels, duration_secs:
 // -----------------------------------------------------------------------------
 
 /// Build the enabled subset of the body-size histogram labels.
-fn selected_body_labels(method: &'static str, status_class: &'static str, cluster: SharedString) -> Vec<Label> {
-    let selected = metric_labels();
+///
+/// Takes the selection as an argument rather than reading the installed one,
+/// so the label choice can be unit-tested without installing a recorder.
+fn selected_body_labels(
+    selected: &MetricLabelsConfig,
+    method: &'static str,
+    status_class: &'static str,
+    cluster: SharedString,
+) -> Vec<Label> {
     let pairs = [
         (
             "method",
@@ -662,8 +712,9 @@ pub(crate) fn record_body_size_metrics(
     )]
     let (request_bytes, response_bytes) = (request_body_bytes as f64, response_body_bytes as f64);
 
-    if !metric_labels().all_enabled() {
-        let emitted = selected_body_labels(method, status_class, cluster);
+    let selected = metric_labels();
+    if !selected.default_set() {
+        let emitted = selected_body_labels(selected, method, status_class, cluster);
         histogram!(HTTP_REQUEST_BODY_BYTES, emitted.clone()).record(request_bytes);
         histogram!(HTTP_RESPONSE_BODY_BYTES, emitted).record(response_bytes);
         return;
@@ -831,6 +882,33 @@ pub(crate) fn record_upstream_connect_duration(cluster: SharedString, duration_s
     }
 }
 
+/// Build the enabled subset of the upstream-request counter labels.
+///
+/// Takes the selection as an argument rather than reading the installed one,
+/// so the label choice can be unit-tested without installing a recorder.
+fn selected_upstream_labels(
+    selected: &MetricLabelsConfig,
+    cluster: SharedString,
+    endpoint: SharedString,
+    status_class: &'static str,
+) -> Vec<Label> {
+    let pairs = [
+        ("cluster", label_if(selected.is_enabled(MetricLabel::Cluster), cluster)),
+        (
+            "endpoint",
+            label_if(selected.is_enabled(MetricLabel::Endpoint), endpoint),
+        ),
+        (
+            "status_class",
+            label_if(
+                selected.is_enabled(MetricLabel::StatusClass),
+                SharedString::const_str(status_class),
+            ),
+        ),
+    ];
+    selected_labels(&pairs)
+}
+
 /// Record a request that reached an upstream endpoint.
 ///
 /// Counted once per request, from the logging hook, so a request retried
@@ -842,22 +920,9 @@ pub(crate) fn record_upstream_request(cluster: SharedString, endpoint: SharedStr
         return;
     }
     let selected = metric_labels();
-    if !selected.all_enabled() {
-        let pairs = [
-            ("cluster", label_if(selected.is_enabled(MetricLabel::Cluster), cluster)),
-            (
-                "endpoint",
-                label_if(selected.is_enabled(MetricLabel::Endpoint), endpoint),
-            ),
-            (
-                "status_class",
-                label_if(
-                    selected.is_enabled(MetricLabel::StatusClass),
-                    SharedString::const_str(status_class),
-                ),
-            ),
-        ];
-        counter!(UPSTREAM_REQUESTS_TOTAL, selected_labels(&pairs)).increment(1);
+    if !selected.default_set() {
+        let emitted = selected_upstream_labels(selected, cluster, endpoint, status_class);
+        counter!(UPSTREAM_REQUESTS_TOTAL, emitted).increment(1);
         return;
     }
     counter!(
@@ -1070,6 +1135,186 @@ mod tests {
     }
 
     #[test]
+    fn status_code_label_keeps_allowlisted_codes() {
+        for code in [400_u16, 401, 403, 404, 405, 413, 429, 500, 502, 503, 504] {
+            assert_eq!(
+                status_code_label(code),
+                code.to_string(),
+                "{code} is returned by a filter and must keep its own series"
+            );
+        }
+    }
+
+    #[test]
+    fn status_code_label_collapses_everything_else() {
+        assert_eq!(status_code_label(200), "2xx", "a success needs no per-code series");
+        assert_eq!(status_code_label(301), "3xx", "a redirect needs no per-code series");
+        assert_eq!(status_code_label(418), "4xx", "an unlisted 4xx collapses to its class");
+        assert_eq!(status_code_label(599), "5xx", "an unlisted 5xx collapses to its class");
+    }
+
+    #[test]
+    fn status_code_label_stays_bounded() {
+        let distinct: std::collections::BTreeSet<&str> = (0_u16..=1000).map(status_code_label).collect();
+        assert!(
+            distinct.len() <= 17,
+            "the dimension must stay bounded, saw {} values: {distinct:?}",
+            distinct.len()
+        );
+    }
+
+    #[test]
+    fn status_code_label_agrees_with_status_class() {
+        for code in 0_u16..=1000 {
+            let label = status_code_label(code);
+            let class = status_class(code);
+            let consistent = label == class || label.parse::<u16>().map(status_class) == Ok(class);
+            assert!(
+                consistent,
+                "{code} labelled {label} must stay inside class {class}, so the two \
+                 dimensions never contradict each other"
+            );
+        }
+    }
+
+    /// Parse a `metrics.labels` block from the YAML an operator would write.
+    fn label_settings(yaml: &str) -> MetricLabelsConfig {
+        serde_yaml::from_str(yaml).expect("label settings should parse")
+    }
+
+    /// A representative set of request labels for the selection tests.
+    fn sample_request_labels() -> RequestMetricLabels {
+        RequestMetricLabels {
+            cluster: SharedString::const_str("backend"),
+            method: "GET",
+            route: SharedString::const_str("/api*"),
+            status_class: "4xx",
+            status_code: "429",
+        }
+    }
+
+    /// The label names in `labels`, in order.
+    fn names(labels: &[Label]) -> Vec<&str> {
+        labels.iter().map(Label::key).collect()
+    }
+
+    #[test]
+    fn request_labels_carry_status_code_only_when_turned_on() {
+        let (request, duration) =
+            selected_request_labels(&label_settings("status_code: true"), sample_request_labels());
+        assert_eq!(
+            names(&request),
+            vec!["method", "status_class", "route", "cluster", "status_code"],
+            "the counter should gain the status_code dimension"
+        );
+        assert_eq!(
+            names(&duration),
+            vec!["method", "status_class", "route", "cluster"],
+            "the duration metric must never carry status_code: it renders as a \
+             summary, whose quantiles cannot be aggregated back across a label"
+        );
+    }
+
+    #[test]
+    fn request_labels_omit_status_code_by_default() {
+        let (request, duration) = selected_request_labels(&MetricLabelsConfig::default(), sample_request_labels());
+        assert_eq!(
+            names(&request),
+            vec!["method", "status_class", "route", "cluster"],
+            "status_code must stay off until it is asked for"
+        );
+        assert_eq!(names(&duration), names(&request), "both metrics share the default set");
+    }
+
+    #[test]
+    fn request_labels_drop_the_dimensions_turned_off() {
+        let (request, _duration) = selected_request_labels(
+            &label_settings("route: false\ncluster: false\nstatus_code: true"),
+            sample_request_labels(),
+        );
+        assert_eq!(
+            names(&request),
+            vec!["method", "status_class", "status_code"],
+            "turning two dimensions off must drop exactly those two"
+        );
+    }
+
+    #[test]
+    fn request_label_values_follow_the_request() {
+        let (request, _duration) =
+            selected_request_labels(&label_settings("status_code: true"), sample_request_labels());
+        let pairs: Vec<(&str, &str)> = request.iter().map(|l| (l.key(), l.value())).collect();
+        assert!(
+            pairs.contains(&("status_code", "429")),
+            "the status_code value should come from the request, got: {pairs:?}"
+        );
+        assert!(
+            pairs.contains(&("status_class", "4xx")),
+            "the aggregated class stays alongside it, got: {pairs:?}"
+        );
+    }
+
+    #[test]
+    fn body_labels_ignore_status_code() {
+        let emitted = selected_body_labels(
+            &label_settings("status_code: true"),
+            "GET",
+            "4xx",
+            SharedString::const_str("backend"),
+        );
+        assert_eq!(
+            names(&emitted),
+            vec!["method", "status_class", "cluster"],
+            "the body-size histograms do not carry status_code, on or off"
+        );
+    }
+
+    #[test]
+    fn upstream_labels_drop_the_dimensions_turned_off() {
+        let emitted = selected_upstream_labels(
+            &label_settings("endpoint: false"),
+            SharedString::const_str("backend"),
+            SharedString::const_str("127.0.0.1:3000"),
+            "2xx",
+        );
+        assert_eq!(
+            names(&emitted),
+            vec!["cluster", "status_class"],
+            "turning endpoint off must drop it from the upstream counter"
+        );
+    }
+
+    #[test]
+    fn upstream_labels_ignore_status_code() {
+        let emitted = selected_upstream_labels(
+            &label_settings("status_code: true"),
+            SharedString::const_str("backend"),
+            SharedString::const_str("127.0.0.1:3000"),
+            "2xx",
+        );
+        assert_eq!(
+            names(&emitted),
+            vec!["cluster", "endpoint", "status_class"],
+            "the upstream counter does not carry status_code, on or off"
+        );
+    }
+
+    #[test]
+    fn body_labels_drop_the_dimensions_turned_off() {
+        let emitted = selected_body_labels(
+            &label_settings("cluster: false"),
+            "GET",
+            "4xx",
+            SharedString::const_str("backend"),
+        );
+        assert_eq!(
+            names(&emitted),
+            vec!["method", "status_class"],
+            "turning cluster off must drop it from the body-size histograms"
+        );
+    }
+
+    #[test]
     fn method_label_standard_methods() {
         for m in [
             "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "TRACE", "CONNECT",
@@ -1241,11 +1486,11 @@ mod tests {
     }
 
     #[test]
-    fn metric_labels_default_to_all_enabled() {
+    fn metric_labels_default_to_the_default_set() {
         assert!(
-            metric_labels().all_enabled(),
-            "without an explicit install every dimension must stay on, so the \
-             recorders keep their allocation-free fast path"
+            metric_labels().default_set(),
+            "without an explicit install the label set must stay the default one, so \
+             the recorders keep their allocation-free fast path"
         );
     }
 

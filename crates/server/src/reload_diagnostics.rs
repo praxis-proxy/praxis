@@ -344,17 +344,13 @@ fn detect_logging_change(old: &Config, new: &Config) {
     }
 }
 
-/// Detect `metrics.labels` changes that require a restart.
+/// Warn when `metrics.labels` changed. It needs a restart.
 ///
-/// The selected label set installs once per process: a gauge guard acquired
-/// before a change and released after it would increment one series and
-/// decrement another, so a reload that alters `metrics.labels` is ignored
-/// until restart. Compared as a set, so merely reordering `disabled` does
-/// not warn.
+/// The label set is chosen once, when the proxy starts. A gauge opened
+/// before a change and closed after it would count on two different
+/// series, so a reload must not change it.
 fn detect_metrics_labels_change(old: &Config, new: &Config) {
-    let old_disabled: std::collections::HashSet<_> = old.metrics.labels.disabled.iter().copied().collect();
-    let new_disabled: std::collections::HashSet<_> = new.metrics.labels.disabled.iter().copied().collect();
-    if old_disabled != new_disabled {
+    if old.metrics.labels != new.metrics.labels {
         warn!("metrics.labels changed; requires restart (label selection installs once per process)");
     }
 }
@@ -552,9 +548,15 @@ pub(crate) fn diff_named_items<T: serde::Serialize>(
 mod tests {
     use std::sync::{Arc, Mutex};
 
+    use praxis_core::config::MetricLabelsConfig;
     use tracing_subscriber::layer::SubscriberExt as _;
 
     use super::*;
+
+    /// Parse a `metrics.labels` block from the YAML an operator would write.
+    fn label_settings(yaml: &str) -> MetricLabelsConfig {
+        serde_yaml::from_str(yaml).expect("label settings should parse")
+    }
 
     #[test]
     fn config_value_changed_treats_serialization_failure_as_changed() {
@@ -837,7 +839,7 @@ mod tests {
     fn metrics_labels_change_warns() {
         let old = config_with_circuit_breaker(None);
         let mut new = old.clone();
-        new.metrics.labels.disabled = vec![praxis_core::config::MetricLabel::Cluster];
+        new.metrics.labels = label_settings("cluster: false");
         let warnings = capture_warnings(|| detect_metrics_labels_change(&old, &new));
         assert_eq!(warnings.len(), 1, "a metrics.labels change should warn once");
         assert!(
@@ -848,16 +850,63 @@ mod tests {
 
     #[test]
     fn metrics_labels_reorder_does_not_warn() {
-        use praxis_core::config::MetricLabel::{Endpoint, Route};
         let mut old = config_with_circuit_breaker(None);
-        old.metrics.labels.disabled = vec![Route, Endpoint];
+        old.metrics.labels = label_settings("route: false\nendpoint: false");
         let mut new = old.clone();
-        new.metrics.labels.disabled = vec![Endpoint, Route];
+        new.metrics.labels = label_settings("endpoint: false\nroute: false");
         let warnings = capture_warnings(|| detect_metrics_labels_change(&old, &new));
         assert!(
             warnings.is_empty(),
-            "a mere reorder of disabled dimensions must not warn"
+            "writing the same dimensions in another order must not warn"
         );
+    }
+
+    #[test]
+    fn metrics_labels_redundant_setting_does_not_warn() {
+        let old = config_with_circuit_breaker(None);
+        let mut new = old.clone();
+        new.metrics.labels = label_settings("route: true\nstatus_code: false");
+        let warnings = capture_warnings(|| detect_metrics_labels_change(&old, &new));
+        assert!(
+            warnings.is_empty(),
+            "spelling out the defaults emits the same labels, so it must not warn"
+        );
+    }
+
+    #[test]
+    fn metrics_labels_opt_in_change_warns() {
+        let old = config_with_circuit_breaker(None);
+        let mut new = old.clone();
+        new.metrics.labels = label_settings("status_code: true");
+        let warnings = capture_warnings(|| detect_metrics_labels_change(&old, &new));
+        assert_eq!(
+            warnings.len(),
+            1,
+            "turning on an off-by-default dimension changes the series key, so it must warn"
+        );
+        assert!(
+            warnings[0].contains("metrics.labels"),
+            "warning should mention metrics.labels"
+        );
+    }
+
+    #[test]
+    fn metrics_labels_opt_in_removal_warns() {
+        let mut old = config_with_circuit_breaker(None);
+        old.metrics.labels = label_settings("status_code: true");
+        let mut new = old.clone();
+        new.metrics.labels = label_settings("{}");
+        let warnings = capture_warnings(|| detect_metrics_labels_change(&old, &new));
+        assert_eq!(warnings.len(), 1, "dropping an opt-in dimension must warn too");
+    }
+
+    #[test]
+    fn metrics_labels_unchanged_does_not_warn() {
+        let mut old = config_with_circuit_breaker(None);
+        old.metrics.labels = label_settings("route: false\nstatus_code: true");
+        let new = old.clone();
+        let warnings = capture_warnings(|| detect_metrics_labels_change(&old, &new));
+        assert!(warnings.is_empty(), "an identical label selection must stay quiet");
     }
 
     // -------------------------------------------------------------------------
