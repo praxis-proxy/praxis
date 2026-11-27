@@ -30,6 +30,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   configuration dump share the same pipeline candidate builder. Validation and
   dump compile built-in policy configuration without initializing plugins and
   check access-log configuration without opening sinks.
+- Embedders can register required process-lifetime services with
+  `ServerComposition::add_runtime_service` behind the experimental
+  `runtime-services` Cargo feature. HTTP and TCP listeners wait for these services
+  on Pingora and Hyper. The metrics listener reports initialization and returns
+  `503` if a required service later exits.
 
 - Config loading warns when a deprecated filter or field is configured, naming
   its location, affected listener, and replacement when one is available.

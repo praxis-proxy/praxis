@@ -53,7 +53,7 @@ impl Protocol for PingoraTcp {
                 group_key.0.as_deref(),
                 cert_watcher_shutdowns.senders_mut(),
             )?;
-            server.server_mut().add_service(service);
+            server.add_proxy_service(service);
         }
 
         Ok(cert_watcher_shutdowns.finish())

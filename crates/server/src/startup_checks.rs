@@ -422,6 +422,7 @@ const EXPERIMENTAL_FEATURES: &[(&str, bool)] = &[
         cfg!(feature = "policy-experimental-ratelimit"),
     ),
     ("router-json-aliases", cfg!(feature = "router-json-aliases")),
+    ("runtime-services", cfg!(feature = "runtime-services")),
     ("slow-start", cfg!(feature = "slow-start")),
     ("spiffe", cfg!(feature = "spiffe")),
     ("tls-health-check", cfg!(feature = "tls-health-check")),

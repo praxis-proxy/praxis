@@ -206,7 +206,7 @@ pub(super) fn register(
         shared: Arc::new(shared),
     };
     let name = format!("http-proxy:{name}", name = listener.name);
-    runtime.add_required_service(&name, move |shutdown, ready| accept.run(socket, shutdown, ready));
+    runtime.add_proxy_service(&name, move |shutdown, ready| accept.run(socket, shutdown, ready));
     Ok(())
 }
 

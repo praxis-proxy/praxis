@@ -61,6 +61,8 @@ access-log-syslog = ["praxis/access-log-syslog"]
 hedged-requests = ["praxis/hedged-requests"]
 # Off by default; drives the forward-proxy example configs end to end.
 forward-proxy = ["praxis/forward-proxy"]
+# Functional coverage for the embedded runtime-services example.
+runtime-services = ["praxis/runtime-services"]
 no-mac-cert-rotation-tests = []
 otel = ["praxis/otel"]
 

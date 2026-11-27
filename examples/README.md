@@ -89,6 +89,7 @@ Options are in
 | [max-connections.yaml](configs/operations/max-connections.yaml) | HTTP listeners return 503 with Retry-After: 1. TCP listeners close the socket immediately |
 | [multi-listener.yaml](configs/operations/multi-listener.yaml) | Demonstrates multiple HTTP listeners, each with its own filter pipeline |
 | [production-gateway.yaml](configs/operations/production-gateway.yaml) | Combines TLS, logging, timeouts, security headers, path routing, and load balancing |
+| [runtime-services.yaml](configs/operations/runtime-services.yaml) | Demonstrates a proxy listener that waits for an embedding service to initialize |
 
 ### Payload Processing
 

@@ -25,7 +25,6 @@ use praxis_core::{
     ProxyError,
     backend::Runtime,
     config::{Config, ProtocolKind},
-    server::ServerRuntime as _,
 };
 
 #[cfg(feature = "pingora")]
@@ -68,7 +67,7 @@ mod rejection_cleanup;
 ///
 /// Registers HTTP listeners from the configuration, binding them to Pingora
 /// HTTP proxy services with filter pipelines. Delegates to
-/// [`handler::load_http_handler_with_options`] for each listener. Implements
+/// the runtime-gated handler registration for each listener. Implements
 /// [`Protocol`].
 ///
 /// [`Protocol`]: crate::Protocol
@@ -96,18 +95,16 @@ impl Protocol for PingoraHttp {
         let options = handler::HttpHandlerOptions::default()
             .with_allow_private_upstreams(config.insecure_options.allow_private_upstreams);
         let mut cert_watcher_shutdowns = crate::cert_watcher_shutdowns::RegistrationWatchers::default();
-        let lifecycle = server.lifecycle();
         for listener in &http_listeners {
             let pipeline = pipelines.get(&listener.name).map(Arc::clone).ok_or_else(|| {
                 ProxyError::Config(format!("no pipeline for listener '{name}'", name = listener.name))
             })?;
 
-            handler::load_http_handler_with_options(
-                server.server_mut(),
+            handler::register_http_handler(
+                server,
                 listener,
                 pipeline,
                 cert_watcher_shutdowns.senders_mut(),
-                lifecycle.clone(),
                 &options,
             )?;
         }

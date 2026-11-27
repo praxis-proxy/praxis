@@ -55,6 +55,10 @@ mod version;
 pub(crate) mod watcher;
 pub use composition::{CompositionError, ExtensionContext, RegistryContext, ServerComposition, ValidatorContext};
 pub use pipelines::{build_full_registry, build_subrequest_client, resolve_pipelines};
+#[cfg(feature = "runtime-services")]
+pub use praxis_core::server::{
+    RuntimeReady, RuntimeService, RuntimeServiceContext, RuntimeServiceFuture, RuntimeShutdown,
+};
 pub use praxis_core::{
     config::load_config,
     logging::{TracingGuard, init_tracing, with_bootstrap_logging},

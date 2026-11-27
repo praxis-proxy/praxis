@@ -136,6 +136,8 @@ mod round_robin;
 mod route_on_promoted_header;
 mod route_templates;
 mod routing_health;
+#[cfg(all(feature = "runtime-services", unix))]
+mod runtime_services;
 mod security_examples;
 mod selected_upstream_conditions;
 mod session_affinity;
