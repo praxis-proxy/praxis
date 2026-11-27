@@ -18,6 +18,7 @@ harness = false
 
 [features]
 default = ["policy-builtins"]
+managed-websocket = []
 # The `policy` filter and the Policy engine, with no builtin plugin and no
 # crypto backend. Every build that names it must also select exactly one
 # backend (`policy-crypto-default` or `policy-crypto-fips`); PPE refuses to
