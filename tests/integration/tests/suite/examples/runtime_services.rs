@@ -176,10 +176,7 @@ impl RuntimeService for ValidationWorker {
 /// Validation resolves the example composition without starting its service.
 #[test]
 fn validation_does_not_start_embedding_services() {
-    let mut config = Config::from_yaml(include_str!(
-        "../../../../../examples/configs/operations/runtime-services.yaml"
-    ))
-    .expect("example configuration");
+    let mut config = super::load_example_config("operations/runtime-services.yaml", 8080, Default::default());
     let started = Arc::new(AtomicBool::new(false));
     let worker = ValidationWorker(Arc::clone(&started));
     let composition = ServerComposition::standard().add_runtime_service("validation-worker", worker);
@@ -422,23 +419,29 @@ fn spawn_child(config: &str, gate: &std::path::Path, scenario: Scenario) -> Chil
 /// Build a config containing one real HTTP listener, one real TCP listener,
 /// and the independent metrics listener that serves `/ready`.
 fn test_config(http_port: u16, tcp_port: u16, metrics_port: u16) -> String {
-    let tcp = format!(
-        r#"  - name: tcp
-    address: "127.0.0.1:{tcp_port}"
-    protocol: tcp
-    upstream: "127.0.0.1:1"
-filter_chains:"#
+    let mut config = super::load_example_config("operations/runtime-services.yaml", http_port, Default::default());
+    config.admin.metrics_address = Some(format!("127.0.0.1:{metrics_port}"));
+    config.listeners.push(
+        serde_yaml::from_str(&format!(
+            "name: tcp\naddress: '127.0.0.1:{tcp_port}'\nprotocol: tcp\nupstream: '127.0.0.1:1'"
+        ))
+        .expect("test TCP listener"),
     );
-    let mut config = include_str!("../../../../../examples/configs/operations/runtime-services.yaml")
-        .replace("127.0.0.1:8080", &format!("127.0.0.1:{http_port}"))
-        .replace("127.0.0.1:9902", &format!("127.0.0.1:{metrics_port}"))
-        .replace("\nfilter_chains:", &format!("\n{tcp}"))
-        .replace(
-            "      - filter: static_response",
-            "      - filter: require_listener_resource\n      - filter: static_response",
-        );
-    config.push_str("\ninsecure_options:\n  allow_private_upstreams: true\n  allow_root: true\n");
-    config
+    let chain = config
+        .filter_chains
+        .iter_mut()
+        .find(|chain| chain.name == "main")
+        .expect("example main chain");
+    let index = chain
+        .filters
+        .iter()
+        .position(|filter| filter.filter_type == "static_response")
+        .expect("example static response");
+    let consumer = serde_yaml::from_str("filter: require_listener_resource").expect("resource consumer");
+    chain.filters.insert(index, consumer);
+    config.insecure_options.allow_private_upstreams = true;
+    config.insecure_options.allow_root = true;
+    serde_yaml::to_string(&config).expect("serialize test config")
 }
 
 /// Obtain a currently unused loopback TCP port.
