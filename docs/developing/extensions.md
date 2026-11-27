@@ -549,7 +549,10 @@ What the executor does with a staged cluster:
   callout.
 - **Retries.** The cluster's `retry_policy` applies, with the same decision the
   main proxy path makes. A connect error counts as `connect_failure` and an
-  I/O error as `reset`. Other transport errors (circuit open, admission
+  I/O error as `reset`. HTTP/2 errors are classified as on the main path:
+  `REFUSED_STREAM` is `refused_stream`, a GOAWAY is `reset`, and any other
+  HTTP/2 stream or connection error is never retried, since the endpoint may
+  have acted on the request. Other transport errors (circuit open, admission
   timeout, deadline or idle timeout, oversized response, an expired
   `per_try_timeout_ms`) are never retried, and neither is an attempt that
   never reached its endpoint (a refused private address, a failed lookup, a
@@ -584,8 +587,6 @@ What the executor does with a staged cluster:
 
 Limitations: callout retries and passive-health transitions are logged but do
 not update `praxis_upstream_retries_total` or the health-transition metrics,
-which the main proxy path records. An HTTP/2 stream error on a callout counts
-as `reset`, including one the main path treats as unsafe to replay (an
-`INTERNAL_ERROR`), and nothing maps to `refused_stream`. A `ClusterRef` keeps its own balancer
+which the main proxy path records. A `ClusterRef` keeps its own balancer
 state, separate from any `load_balancer` filter that declares the same
 cluster.

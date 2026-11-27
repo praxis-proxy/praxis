@@ -16,6 +16,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(feature = "chain-binding")]
+use praxis_core::subrequest::ExchangeFailure;
 use praxis_core::subrequest::{StreamingSubResponse, SubRequestError};
 #[cfg(feature = "chain-binding")]
 use praxis_core::{
@@ -75,18 +77,26 @@ pub(super) struct AttemptFacts {
 /// Classify an attempt. A connect error is a connect failure, an I/O error a
 /// reset, and every other transport error is never retried.
 #[cfg(feature = "chain-binding")]
-pub(super) fn facts(result: &AttemptResult, contacted: bool) -> AttemptFacts {
+pub(super) fn facts(result: &AttemptResult, contacted: bool, exchange: Option<ExchangeFailure>) -> AttemptFacts {
+    // An I/O failure keeps the HTTP/2 class the transport recorded: only a
+    // refused stream is known to be unprocessed, and an aborted exchange may
+    // have been acted on, as the main proxy path classifies them.
+    let io = match exchange {
+        None => RetryOutcome::Reset,
+        Some(ExchangeFailure::Refused) => RetryOutcome::RefusedStream,
+        Some(ExchangeFailure::Aborted) => RetryOutcome::Other,
+    };
     let outcome = match result {
         AttemptResult::Streaming(response) => match response.as_ref() {
             Ok(response) => RetryOutcome::StatusCode(response.status),
             Err(SubRequestError::Connect(_)) => RetryOutcome::ConnectFailure,
-            Err(SubRequestError::Io(_)) => RetryOutcome::Reset,
+            Err(SubRequestError::Io(_)) => io,
             Err(_) => RetryOutcome::Other,
         },
         AttemptResult::Buffered(attempt) => match (&attempt.1, &attempt.2) {
             (ResponseOrigin::Upstream, _) => RetryOutcome::StatusCode(attempt.0.status),
             (_, Some(TransportFailure::Connect)) => RetryOutcome::ConnectFailure,
-            (_, Some(TransportFailure::Io)) => RetryOutcome::Reset,
+            (_, Some(TransportFailure::Io)) => io,
             (ResponseOrigin::Local | ResponseOrigin::Transport, _) => RetryOutcome::Other,
         },
     };

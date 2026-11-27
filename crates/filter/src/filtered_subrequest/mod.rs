@@ -1340,8 +1340,10 @@ impl FilteredSubrequestExecutor {
                 #[cfg(feature = "chain-binding")]
                 if let Some(pinned) = pinned_cluster.as_mut() {
                     outstanding = false;
-                    let contacted = forwarding.as_ref().is_some_and(|(_, progress)| progress.dial_started());
-                    let facts = attempt::facts(&result, contacted);
+                    let progress = forwarding.as_ref().map(|(_, progress)| progress);
+                    let contacted = progress.is_some_and(RequestProgress::dial_started);
+                    let exchange = progress.and_then(RequestProgress::exchange_failure);
+                    let facts = attempt::facts(&result, contacted, exchange);
                     if matches!(&result, AttemptResult::Streaming(_)) && facts.contacted && !facts.failure {
                         stream_health = attempt::PassiveObservation::new(&filter_ctx, &pinned.cluster);
                     } else {

@@ -1009,7 +1009,7 @@ fn caller_side_outcomes_are_not_endpoint_observations() {
         TransportFailure::ResponseTooLarge { actual: 10, limit: 4 },
     ] {
         assert!(
-            !facts(&synthesized(failure), true).contacted,
+            !facts(&synthesized(failure), true, None).contacted,
             "{failure:?} is decided on the caller side and must not reach passive health"
         );
     }
@@ -1018,7 +1018,7 @@ fn caller_side_outcomes_are_not_endpoint_observations() {
         TransportFailure::Io,
         TransportFailure::DeadlineExceeded,
     ] {
-        let observed = facts(&synthesized(failure), true);
+        let observed = facts(&synthesized(failure), true, None);
         assert!(
             observed.contacted && observed.failure,
             "{failure:?} counts against the endpoint"
@@ -1121,7 +1121,7 @@ fn local_request_errors_are_not_endpoint_observations() {
     let (_, kind) = classify_transport_failure(&error);
     assert_eq!(kind, TransportFailure::InvalidRequest, "a local error keeps its class");
 
-    let streaming = facts(&AttemptResult::Streaming(Box::new(Err(error))), true);
+    let streaming = facts(&AttemptResult::Streaming(Box::new(Err(error))), true, None);
     let buffered = facts(
         &AttemptResult::Buffered(Box::new((
             crate::SubResponse {
@@ -1134,6 +1134,7 @@ fn local_request_errors_are_not_endpoint_observations() {
             Some(kind),
         ))),
         true,
+        None,
     );
     for (mode, observed) in [("streaming", streaming), ("buffered", buffered)] {
         assert!(
@@ -1488,4 +1489,44 @@ async fn single_endpoint_cluster_retries_the_same_endpoint() {
         3,
         "the only endpoint got the first attempt and both retries"
     );
+}
+
+#[test]
+fn http2_failures_keep_their_retry_class() {
+    use praxis_core::{
+        retry::RetryOutcome,
+        subrequest::{ExchangeFailure, SubRequestError},
+    };
+
+    use super::{
+        attempt::{AttemptResult, facts},
+        types::{ResponseOrigin, TransportFailure},
+    };
+
+    let streaming: fn() -> AttemptResult =
+        || AttemptResult::Streaming(Box::new(Err(SubRequestError::Io("h2 reset".to_owned()))));
+    let buffered: fn() -> AttemptResult = || {
+        AttemptResult::Buffered(Box::new((
+            crate::SubResponse {
+                version: http::Version::HTTP_2,
+                status: 502,
+                headers: HeaderMap::new(),
+                body: bytes::Bytes::new(),
+            },
+            ResponseOrigin::Transport,
+            Some(TransportFailure::Io),
+        )))
+    };
+    for (mode, result) in [("streaming", streaming), ("buffered", buffered)] {
+        let cases = [
+            (None, RetryOutcome::Reset),
+            (Some(ExchangeFailure::Refused), RetryOutcome::RefusedStream),
+            (Some(ExchangeFailure::Aborted), RetryOutcome::Other),
+        ];
+        for (exchange, expected) in cases {
+            let observed = facts(&result(), true, exchange);
+            assert_eq!(observed.outcome, expected, "{mode}: {exchange:?}");
+            assert!(observed.failure, "{mode}: {exchange:?} is an endpoint failure");
+        }
+    }
 }
