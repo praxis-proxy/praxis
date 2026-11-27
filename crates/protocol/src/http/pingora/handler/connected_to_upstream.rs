@@ -66,6 +66,21 @@ pub(super) fn record_connected(reused: bool, digest: Option<&Digest>, ctx: &Ping
     }
 }
 
+/// Record a local response-body policy event without marking the valid
+/// upstream HTTP response as failed.
+pub(in crate::http) fn record_response_size_limit(ctx: &PingoraRequestCtx) {
+    if ctx.upstream_exchange_span.is_disabled() {
+        return;
+    }
+
+    tracing::event!(
+        name: "response_size_limit",
+        parent: &ctx.upstream_exchange_span,
+        tracing::Level::INFO,
+        "error.type" = crate::http::pingora::metrics::ERROR_TYPE_RESPONSE_SIZE_LIMIT
+    );
+}
+
 /// Record a bounded upstream error and close the failed attempt spans.
 #[cfg(feature = "pingora")]
 pub(super) fn record_attempt_failure(error: &pingora_core::Error, ctx: &mut PingoraRequestCtx) {

@@ -23,6 +23,8 @@ use super::{
     hop_by_hop::{self, RemoveHeader as _},
     retry_util::maybe_retry_response,
 };
+#[cfg(feature = "pingora")]
+use crate::http::body_limit::{response_body_limit_exceeded, trustworthy_content_length};
 
 // -----------------------------------------------------------------------------
 // Response Filters
@@ -46,6 +48,7 @@ pub(super) async fn execute(
 ) -> pingora_core::Result<()> {
     ctx.connection_upgraded = false;
     let is_final = super::fail_to_proxy::is_final_response(upstream_response);
+    let source_content_length = source_response_content_length(upstream_response, ctx, is_final);
     if is_final {
         ctx.upstream_response_status = Some(upstream_response.status.as_u16());
         praxis_core::subrequest::record_http_client_status(
@@ -191,6 +194,12 @@ pub(super) async fn execute(
         .request_snapshot
         .as_ref()
         .is_some_and(|request| successful_connect_tunnel(&request.method, resp.status));
+    preflight_response_size_limit(
+        pipeline,
+        ctx,
+        source_content_length,
+        !rewritten_is_bodyless && !is_connect_tunnel && !is_upgrade_response,
+    )?;
     let reframed_event_stream = matches!(
         &result,
         Ok(FilterAction::Continue | FilterAction::Release | FilterAction::BodyDone)
@@ -231,6 +240,58 @@ pub(super) async fn execute(
         });
     }
     handle_response_result(result, upstream_response, resp, headers_modified, is_bodyless, ctx)
+}
+
+/// Preserve a validated source length only when the upstream response has a
+/// body whose framing can be admitted before response filters rewrite it.
+#[cfg(feature = "pingora")]
+fn source_response_content_length(
+    response: &pingora_http::ResponseHeader,
+    ctx: &PingoraRequestCtx,
+    is_final: bool,
+) -> Option<u64> {
+    let status = response.status;
+    let bodyless = status.is_informational()
+        || matches!(status, http::StatusCode::NO_CONTENT | http::StatusCode::NOT_MODIFIED)
+        || ctx.request_snapshot.as_ref().is_some_and(|request| {
+            praxis_filter::bodyless_response(status, &request.method)
+                || successful_connect_tunnel(&request.method, status)
+        });
+    (is_final && !bodyless)
+        .then(|| trustworthy_content_length(&response.headers))
+        .flatten()
+}
+
+/// Reject an over-limit source body before its response head is committed.
+#[cfg(feature = "pingora")]
+fn preflight_response_size_limit(
+    pipeline: &FilterPipeline,
+    ctx: &mut PingoraRequestCtx,
+    source_content_length: Option<u64>,
+    has_final_body: bool,
+) -> pingora_core::Result<()> {
+    let Some(length) = source_content_length.filter(|_length| has_final_body) else {
+        return Ok(());
+    };
+    let Some(limit) = response_body_limit_exceeded(length, pipeline, ctx.response_body_mode) else {
+        return Ok(());
+    };
+
+    ctx.response_size_limit_exceeded = true;
+    ctx.stamp_error_type(crate::http::pingora::metrics::ERROR_TYPE_RESPONSE_SIZE_LIMIT);
+    super::connected_to_upstream::record_response_size_limit(ctx);
+    warn!(
+        status = 502,
+        content_length = length,
+        limit,
+        "upstream response exceeds configured body limit"
+    );
+    let mut error = pingora_core::Error::explain(
+        pingora_core::ErrorType::HTTPStatus(502),
+        "upstream response body exceeds the configured size limit",
+    );
+    error.set_retry(false);
+    Err(error)
 }
 
 /// A successful CONNECT switches to tunnel bytes instead of a response body.
@@ -560,7 +621,10 @@ fn invalid_upgrade_response(
     reason = "tests"
 )]
 mod tests {
-    use praxis_filter::{FilterRegistry, Request};
+    use std::sync::Arc;
+
+    use praxis_core::config::{HttpStatusCode, RetryPolicy};
+    use praxis_filter::{FilterEntry, FilterFactory, FilterRegistry, HttpFilter, HttpFilterContext, Request};
 
     use super::*;
 
@@ -741,6 +805,102 @@ mod tests {
         let result = execute(&pipeline, &mut upstream_response, &mut ctx).await;
 
         assert!(result.is_ok(), "empty pipeline should pass through without error");
+    }
+
+    #[tokio::test]
+    async fn declared_response_over_limit_returns_a_local_502_classification() {
+        let pipeline = limited_pipeline(4);
+        let mut ctx = make_ctx();
+        ctx.response_body_mode = pipeline.body_capabilities().response_body_mode;
+        let mut response = pingora_http::ResponseHeader::build(200, Some(6)).unwrap();
+        response.insert_header(http::header::CONTENT_LENGTH, "6").unwrap();
+
+        let error = execute(&pipeline, &mut response, &mut ctx).await.unwrap_err();
+
+        assert_eq!(error.etype(), &pingora_core::ErrorType::HTTPStatus(502));
+        assert!(!error.retry(), "a locally enforced response limit is not retried");
+        assert!(ctx.response_size_limit_exceeded);
+        assert_eq!(
+            ctx.error_type,
+            Some(crate::http::pingora::metrics::ERROR_TYPE_RESPONSE_SIZE_LIMIT)
+        );
+    }
+
+    #[tokio::test]
+    async fn retriable_upstream_status_precedes_declared_response_size_rejection() {
+        let pipeline = limited_pipeline(4);
+        let mut ctx = make_ctx();
+        ctx.response_body_mode = pipeline.body_capabilities().response_body_mode;
+        ctx.request_is_idempotent = true;
+        ctx.retry_policy = Some(Arc::new(RetryPolicy {
+            retriable_status_codes: vec![HttpStatusCode::try_from(503).unwrap()],
+            ..RetryPolicy::legacy_default()
+        }));
+        let mut response = pingora_http::ResponseHeader::build(503, Some(6)).unwrap();
+        response.insert_header(http::header::CONTENT_LENGTH, "6").unwrap();
+
+        let error = execute(&pipeline, &mut response, &mut ctx).await.unwrap_err();
+
+        assert_eq!(error.etype(), &pingora_core::ErrorType::HTTPStatus(503));
+        assert_eq!(ctx.retries, 1, "the upstream status retry happens first");
+        assert!(
+            !ctx.response_size_limit_exceeded,
+            "retry precedence prevents local rejection"
+        );
+    }
+
+    #[tokio::test]
+    async fn source_bodyless_lengths_are_metadata_not_response_bodies() {
+        let pipeline = limited_pipeline(4);
+        for (method, status) in [
+            (http::Method::HEAD, http::StatusCode::OK),
+            (http::Method::GET, http::StatusCode::NO_CONTENT),
+            (http::Method::GET, http::StatusCode::NOT_MODIFIED),
+            (http::Method::GET, http::StatusCode::EARLY_HINTS),
+            (http::Method::CONNECT, http::StatusCode::OK),
+        ] {
+            let mut ctx = make_ctx();
+            ctx.request_snapshot.as_mut().unwrap().method = method.clone();
+            ctx.response_body_mode = pipeline.body_capabilities().response_body_mode;
+            let mut response = pingora_http::ResponseHeader::build(status.as_u16(), Some(6)).unwrap();
+            response.insert_header(http::header::CONTENT_LENGTH, "6").unwrap();
+
+            let result = execute(&pipeline, &mut response, &mut ctx).await;
+
+            assert!(result.is_ok(), "{method} {status}: {result:?}");
+            assert!(!ctx.response_size_limit_exceeded, "{method} {status}");
+        }
+
+        let mut response = pingora_http::ResponseHeader::build(101, Some(6)).unwrap();
+        response.insert_header(http::header::CONTENT_LENGTH, "6").unwrap();
+        drop(response.insert_header("upgrade", "websocket"));
+        drop(response.insert_header("connection", "Upgrade"));
+        drop(response.insert_header("sec-websocket-accept", "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="));
+        let mut ctx = make_upgrade_ctx();
+        ctx.response_body_mode = pipeline.body_capabilities().response_body_mode;
+
+        let result = execute(&pipeline, &mut response, &mut ctx).await;
+
+        assert!(result.is_ok(), "101 length is upgrade metadata: {result:?}");
+        assert!(ctx.connection_upgraded);
+        assert!(!ctx.response_size_limit_exceeded);
+    }
+
+    #[tokio::test]
+    async fn filtered_bodyless_status_skips_the_source_length_limit() {
+        for status in [http::StatusCode::NO_CONTENT, http::StatusCode::NOT_MODIFIED] {
+            let pipeline = status_rewriting_pipeline(status);
+            let mut ctx = make_ctx();
+            ctx.response_body_mode = pipeline.body_capabilities().response_body_mode;
+            let mut response = pingora_http::ResponseHeader::build(200, Some(6)).unwrap();
+            response.insert_header(http::header::CONTENT_LENGTH, "6").unwrap();
+
+            let result = execute(&pipeline, &mut response, &mut ctx).await;
+
+            assert!(result.is_ok(), "rewritten status {status}: {result:?}");
+            assert_eq!(response.status, status.as_u16());
+            assert!(!ctx.response_size_limit_exceeded);
+        }
     }
 
     #[tokio::test]
@@ -1043,6 +1203,49 @@ mod tests {
     fn make_pipeline() -> FilterPipeline {
         let registry = FilterRegistry::with_builtins();
         FilterPipeline::build(&mut [], &registry).unwrap()
+    }
+
+    /// Build an empty pipeline with a cumulative response ceiling.
+    fn limited_pipeline(limit: usize) -> FilterPipeline {
+        let mut pipeline = make_pipeline();
+        pipeline.apply_body_limits(None, Some(limit), false).unwrap();
+        pipeline
+    }
+
+    /// Build a pipeline whose response filter rewrites its status.
+    fn status_rewriting_pipeline(status: http::StatusCode) -> FilterPipeline {
+        let mut registry = FilterRegistry::with_builtins();
+        registry
+            .register(
+                "response_status_rewrite_test",
+                FilterFactory::Http(Arc::new(move |_| Ok(Box::new(RewriteResponseStatus(status))))),
+            )
+            .unwrap();
+        let mut entries: Vec<FilterEntry> = serde_yaml::from_str("- filter: response_status_rewrite_test").unwrap();
+        let mut pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
+        pipeline.apply_body_limits(None, Some(4), false).unwrap();
+        pipeline
+    }
+
+    /// Rewrite only the response status.
+    struct RewriteResponseStatus(http::StatusCode);
+
+    #[async_trait::async_trait]
+    impl HttpFilter for RewriteResponseStatus {
+        fn name(&self) -> &'static str {
+            "response_status_rewrite_test"
+        }
+
+        async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+            Ok(FilterAction::Continue)
+        }
+
+        async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+            if let Some(response) = ctx.response_header.as_deref_mut() {
+                response.status = self.0;
+            }
+            Ok(FilterAction::Continue)
+        }
     }
 
     /// Create a request context with a GET snapshot for tests.

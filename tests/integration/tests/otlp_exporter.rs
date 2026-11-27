@@ -55,6 +55,7 @@
 
 use std::{
     fs,
+    io::Write as _,
     net::SocketAddr,
     path::Path,
     process::{Command, Output},
@@ -77,7 +78,7 @@ use praxis_core::config::Config;
 use praxis_test_utils::{
     example_config_path, free_port, http_get, http_send,
     net::tls::{TestCertificates, ensure_crypto_provider},
-    parse_status, patch_yaml, start_proxy, wait_for_tcp,
+    parse_status, patch_yaml, read_http_request, spawn_raw_http_backend, start_proxy, wait_for_tcp,
 };
 use tonic::transport::{Identity, ServerTlsConfig};
 
@@ -85,6 +86,8 @@ const CHILD_MODE_ENV: &str = "PRAXIS_OTLP_EXPORTER_TEST_CHILD";
 const CHILD_ENDPOINT_ENV: &str = "PRAXIS_OTLP_EXPORTER_TEST_ENDPOINT";
 const CHILD_TLS_ERROR_ENV: &str = "PRAXIS_OTLP_EXPORTER_TEST_TLS_ERROR";
 const TEST_AUTHORIZATION: &str = "Bearer otlp-test-credential-do-not-log";
+const RESPONSE_SIZE_LIMIT_TRACE_ID: &str = "0123456789abcdef0123456789abcdef";
+const RESPONSE_SIZE_LIMIT_PARENT_ID: &str = "0123456789abcdef";
 
 enum TrustSource<'a> {
     None,
@@ -296,6 +299,7 @@ fn otlp_exporter_tls_and_plaintext_contract() {
     let (untrusted_port, untrusted_state) = start_collector(&runtime, Some(&unrelated_certificates));
     let (wrong_name_port, wrong_name_state) = start_collector(&runtime, Some(&wrong_name_certificates));
     let (http_port, http_state) = start_collector(&runtime, None);
+    let (response_size_port, response_size_state) = start_collector(&runtime, None);
 
     let trusted_output = run_child(&ChildScenario {
         mode: "trusted-file",
@@ -376,6 +380,19 @@ fn otlp_exporter_tls_and_plaintext_contract() {
     );
     assert!(!http_output.contains(TEST_AUTHORIZATION));
 
+    let response_size_endpoint = format!("http://127.0.0.1:{response_size_port}");
+    let response_size_output = run_child(&ChildScenario {
+        mode: "response-size-limit",
+        endpoint: Some(&response_size_endpoint),
+        trust_source: TrustSource::None,
+        generic_insecure: Some("true"),
+        traces_insecure: Some("true"),
+        expected_tls_error: None,
+    });
+    assert!(!response_size_output.contains(TEST_AUTHORIZATION));
+    let response_size_spans = response_size_state.spans.lock().expect("response-size collector spans");
+    assert_response_size_limit_trace(&response_size_spans);
+
     let spans_before_schemeless = http_state.span_count.load(Ordering::Relaxed);
     let schemeless_http = run_child(&ChildScenario {
         mode: "schemeless-insecure",
@@ -413,6 +430,11 @@ fn run_exporter_child(mode: &str) {
     ensure_crypto_provider();
     let endpoint = std::env::var(CHILD_ENDPOINT_ENV).ok();
     let expected_tls_error = std::env::var(CHILD_TLS_ERROR_ENV).ok();
+
+    if mode == "response-size-limit" {
+        run_response_size_limit_child(endpoint.as_deref().expect("response-size collector endpoint"));
+        return;
+    }
 
     if let (Some(endpoint), Some(expected)) = (endpoint.as_deref(), expected_tls_error.as_deref()) {
         let detail = probe_tls_rejection(endpoint);
@@ -457,6 +479,170 @@ fn run_exporter_child(mode: &str) {
 
     drop(proxy);
     drop(tracing_guard);
+}
+
+fn run_response_size_limit_child(endpoint: &str) {
+    let (backend_port, backend) = spawn_raw_http_backend(|mut stream| {
+        read_http_request(&mut stream);
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\n")
+            .expect("write oversized upstream head");
+    });
+    let proxy_port = free_port();
+    let yaml = format!(
+        r#"
+listeners:
+  - name: response-size-limit
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        conditions:
+          - when:
+              path: /
+        status: 200
+        body: ready
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints: ["127.0.0.1:{backend_port}"]
+body_limits:
+  max_response_bytes: 4
+insecure_options:
+  allow_private_endpoints: true
+telemetry:
+  otlp_endpoint: "{endpoint}"
+  sampling_rate: 1.0
+  batch_size: 512
+  batch_interval_secs: 300
+"#
+    );
+    let config = Config::from_yaml(&yaml).expect("parse response-size trace config");
+    let tracing_guard = praxis_core::logging::init_tracing(&config).expect("initialize response-size tracing");
+    let proxy = start_proxy(&config);
+    let request = format!(
+        "GET /oversized HTTP/1.1\r\n\
+         Host: localhost\r\n\
+         traceparent: 00-{RESPONSE_SIZE_LIMIT_TRACE_ID}-{RESPONSE_SIZE_LIMIT_PARENT_ID}-01\r\n\
+         Connection: close\r\n\r\n"
+    );
+    let raw = http_send(proxy.addr(), &request);
+
+    assert_eq!(
+        parse_status(&raw),
+        502,
+        "the local response-size policy fails the request"
+    );
+    assert!(
+        raw.contains("Upstream response body exceeds the configured size limit"),
+        "the client receives the local policy response"
+    );
+
+    backend.join().expect("oversized upstream exits");
+    drop(proxy);
+    drop(tracing_guard);
+}
+
+fn assert_response_size_limit_trace(spans: &[Span]) {
+    let matching: Vec<_> = spans
+        .iter()
+        .filter(|span| hex(&span.trace_id) == RESPONSE_SIZE_LIMIT_TRACE_ID)
+        .collect();
+    let server = matching
+        .iter()
+        .copied()
+        .find(|span| span.kind == SpanKind::Server as i32)
+        .expect("response-size SERVER span");
+    let client = matching
+        .iter()
+        .copied()
+        .find(|span| span.kind == SpanKind::Client as i32)
+        .expect("response-size upstream CLIENT span");
+    let exchange = matching
+        .iter()
+        .copied()
+        .find(|span| span.name == "upstream_exchange")
+        .expect("response-size upstream exchange span");
+
+    assert_eq!(
+        matching.len(),
+        3,
+        "one server, client and exchange span expected: {matching:?}"
+    );
+    assert_eq!(
+        hex(&server.parent_span_id),
+        RESPONSE_SIZE_LIMIT_PARENT_ID,
+        "the SERVER span preserves the supplied remote parent"
+    );
+    assert_eq!(
+        client.parent_span_id, server.span_id,
+        "the upstream call belongs to the request"
+    );
+    assert_eq!(
+        exchange.parent_span_id, client.span_id,
+        "the exchange belongs to the HTTP client call"
+    );
+    assert_eq!(
+        int_attribute(server, "http.response.status_code"),
+        Some(502),
+        "the SERVER span records the local client-facing response"
+    );
+    assert_eq!(
+        server.status.as_ref().map(|status| status.code),
+        Some(2),
+        "the client-facing 502 is an error"
+    );
+    assert_eq!(
+        int_attribute(client, "http.response.status_code"),
+        Some(200),
+        "the CLIENT span retains the upstream's actual status"
+    );
+    assert_eq!(
+        int_attribute(exchange, "http.response.status_code"),
+        Some(200),
+        "the exchange span retains the upstream's actual status"
+    );
+    assert_eq!(
+        client.status.as_ref().map_or(0, |status| status.code),
+        0,
+        "the successful upstream response is not marked as a failed CLIENT span"
+    );
+    assert_eq!(
+        exchange.status.as_ref().map_or(0, |status| status.code),
+        0,
+        "the local policy is an exchange event, not a rewritten upstream status"
+    );
+    assert!(
+        string_attribute(client, "error.type").is_none(),
+        "the valid upstream 200 must not be mislabeled as a failed HTTP request"
+    );
+
+    let policy_events: Vec<_> = exchange
+        .events
+        .iter()
+        .filter(|event| event.name == "response_size_limit")
+        .collect();
+    assert_eq!(policy_events.len(), 1, "the exchange records one local policy event");
+    let event = policy_events.first().expect("one policy event");
+    assert_eq!(
+        event_string_attribute(event, "error.type"),
+        Some("response_size_limit"),
+        "the event carries only the bounded local policy cause"
+    );
+    assert!(
+        event
+            .attributes
+            .iter()
+            .all(|attribute| !attribute.key.contains("body") && !attribute.key.contains("length")),
+        "the event must not expose body or length metadata: {:?}",
+        event.attributes
+    );
 }
 
 fn probe_tls_rejection(endpoint: &str) -> String {
@@ -604,6 +790,22 @@ fn int_attribute(span: &Span, key: &str) -> Option<i64> {
         .and_then(|value| match value {
             Value::IntValue(value) => Some(*value),
             Value::StringValue(value) => value.parse().ok(),
+            _ => None,
+        })
+}
+
+fn event_string_attribute<'event>(
+    event: &'event opentelemetry_proto::tonic::trace::v1::span::Event,
+    key: &str,
+) -> Option<&'event str> {
+    event
+        .attributes
+        .iter()
+        .find(|attribute| attribute.key == key)
+        .and_then(|attribute| attribute.value.as_ref())
+        .and_then(|value| value.value.as_ref())
+        .and_then(|value| match value {
+            Value::StringValue(value) => Some(value.as_str()),
             _ => None,
         })
 }

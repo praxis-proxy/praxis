@@ -18,7 +18,7 @@ use praxis_core::{
     egress::{Session as _, hyper::HyperSession},
     server::LifecyclePhase,
 };
-use praxis_filter::{FilterAction, FilterError};
+use praxis_filter::{FilterAction, FilterError, FilterPipeline};
 use tracing::{Instrument as _, error, warn};
 
 use super::{
@@ -31,18 +31,21 @@ use super::{
     upload::Upload,
     upstream::{Outcome, after_failure, record_attempt_failure, release},
 };
-use crate::http::pingora::{
-    context::{PingoraRequestCtx, UpgradeFailure},
-    handler::{
-        health_util::ErrorOrigin,
-        hop_by_hop::{RESPONSE_HOP_BY_HOP, strip_hop_by_hop_header_map, strip_reserved_internal_header_map},
-        response_body_filter::run_response_body,
-        response_filter::{restore_http11_framing, run_response_filters, successful_connect_tunnel},
-        response_trailers,
-        retry_util::response_status_retry,
-        via::append_map_via,
+use crate::http::{
+    body_limit::{response_body_limit_exceeded, trustworthy_content_length},
+    pingora::{
+        context::{PingoraRequestCtx, UpgradeFailure},
+        handler::{
+            health_util::ErrorOrigin,
+            hop_by_hop::{RESPONSE_HOP_BY_HOP, strip_hop_by_hop_header_map, strip_reserved_internal_header_map},
+            response_body_filter::run_response_body,
+            response_filter::{restore_http11_framing, run_response_filters, successful_connect_tunnel},
+            response_trailers,
+            retry_util::response_status_retry,
+            via::append_map_via,
+        },
+        metrics,
     },
-    metrics,
 };
 
 // -----------------------------------------------------------------------------
@@ -103,7 +106,7 @@ pub(super) async fn head(
     }
     strip_hop_by_hop_header_map(&mut head.response.headers, RESPONSE_HOP_BY_HOP);
     strip_reserved_internal_header_map(&mut head.response.headers);
-    head.source_bodyless = record_upstream_head(&mut flight.ctx, &head.response);
+    record_source_bodylessness(&mut flight.ctx, &mut head);
     if response_status_retry(&mut flight.ctx, head.response.status.as_u16()) {
         release(&listener.connector, session, false);
         return status_retry(flight, upload, head.response.status);
@@ -168,6 +171,9 @@ struct Head {
     /// Whether the upstream supplied no body, before response filters ran.
     source_bodyless: bool,
 
+    /// The upstream's validated content length, before response filters ran.
+    source_content_length: Option<u64>,
+
     /// The HTTP version the upstream answered with.
     version: Version,
 }
@@ -185,6 +191,7 @@ fn copy_head(session: &HyperSession, read_timeout: Option<Duration>) -> Result<H
             status,
         },
         source_bodyless: false,
+        source_content_length: trustworthy_content_length(head.headers),
         version: head.version,
     })
 }
@@ -199,6 +206,19 @@ fn record_upstream_head(ctx: &mut PingoraRequestCtx, response: &praxis_filter::R
     praxis_core::subrequest::record_http_client_status(&ctx.upstream_client_span, status);
     response_trailers::capture(&response.headers, ctx);
     is_bodyless(ctx, response.status)
+}
+
+/// Record the source head and discard its length when it does not carry an HTTP body.
+fn record_source_bodylessness(ctx: &mut PingoraRequestCtx, head: &mut Head) {
+    head.source_bodyless = record_upstream_head(ctx, &head.response);
+    if head.source_bodyless
+        || ctx
+            .request_snapshot
+            .as_ref()
+            .is_some_and(|request| successful_connect_tunnel(&request.method, head.response.status))
+    {
+        head.source_content_length = None;
+    }
 }
 
 /// Retry after a retriable status, unless the replay copy is truncated:
@@ -270,7 +290,7 @@ fn settle(
             | FilterAction::BodyDone
             | FilterAction::TerminalResponse(_)
             | FilterAction::StreamingTerminalResponse(_),
-        ) => finish_response(listener, flight, session, head),
+        ) => settle_success(listener, flight, session, head),
         Ok(FilterAction::Reject(refusal)) => {
             warn!(status = refusal.status, "filter rejected response");
             release(&listener.connector, session, false);
@@ -283,6 +303,16 @@ fn settle(
             release(&listener.connector, session, false);
             Outcome::Failed(Failure::internal(format!("response filter error: {err}")))
         },
+    }
+}
+
+/// Deliver an accepted head, or stop its exchange with a pre-commit 502.
+fn settle_success(listener: &ListenerShared, flight: &mut Flight, session: HyperSession, head: Head) -> Outcome {
+    if let Some(reply) = declared_response_limit_reply(flight, &head) {
+        release(&listener.connector, session, false);
+        Outcome::Reply(reply)
+    } else {
+        finish_response(listener, flight, session, head)
     }
 }
 
@@ -329,6 +359,46 @@ fn reframe(flight: &mut Flight, head: &mut Head, result: &Result<FilterAction, F
             status: head.response.status,
         });
     }
+}
+
+/// Whether the original upstream body exceeds the cumulative response limit.
+fn declared_response_over_limit(
+    ctx: &PingoraRequestCtx,
+    pipeline: &FilterPipeline,
+    head: &Head,
+) -> Option<(u64, usize)> {
+    if head.source_bodyless
+        || head.bodyless
+        || head.response.status.is_informational()
+        || is_bodyless(ctx, head.response.status)
+    {
+        return None;
+    }
+    let method = &ctx.request_snapshot.as_ref()?.method;
+    if successful_connect_tunnel(method, head.response.status) {
+        return None;
+    }
+
+    let length = head.source_content_length?;
+    let limit = response_body_limit_exceeded(length, pipeline, ctx.response_body_mode)?;
+    Some((length, limit))
+}
+
+/// Construct a local error reply when the source representation exceeds its limit.
+fn declared_response_limit_reply(flight: &mut Flight, head: &Head) -> Option<reply::LocalReply> {
+    let (length, limit) = declared_response_over_limit(&flight.ctx, &flight.pipeline, head)?;
+    flight.ctx.response_size_limit_exceeded = true;
+    flight.ctx.stamp_error_type(metrics::ERROR_TYPE_RESPONSE_SIZE_LIMIT);
+    crate::http::pingora::handler::connected_to_upstream::record_response_size_limit(&flight.ctx);
+    flight.error = Some(ErrorOrigin::Other);
+    warn!(
+        status = 502,
+        content_length = length,
+        limit,
+        "upstream response exceeds configured body limit"
+    );
+    let error = crate::http::pingora::handler::fail_to_proxy::response_size_limit_error();
+    Some(reply::classified_error(&error, &flight.ctx, flight.version))
 }
 
 /// A bodyless upstream's unchanged length describes a representation, not
@@ -517,7 +587,7 @@ mod tests {
         egress::{Connector as _, PeerSpec, RequestHead, Session as _, hyper::HyperConnector},
     };
     use praxis_filter::{
-        BodyAccess, BodyMode, BodyRequirement, FilterEntry, FilterFactory, FilterPipeline, FilterRegistry, HttpFilter,
+        BodyAccess, BodyMode, BodyRequirement, FilterEntry, FilterFactory, FilterRegistry, HttpFilter,
         HttpFilterContext, Rejection,
     };
     use tokio::{
@@ -561,6 +631,34 @@ mod tests {
             !is_bodyless(&PingoraRequestCtx::default(), StatusCode::NO_CONTENT),
             "with no request recorded nothing is assumed about the body"
         );
+    }
+
+    #[test]
+    fn declared_size_limit_skips_source_and_final_bodyless_cases() {
+        let pipeline = limited_pipeline(4);
+        for (method, status, source_bodyless, final_bodyless) in [
+            (Method::HEAD, StatusCode::OK, false, false),
+            (Method::GET, StatusCode::OK, true, false),
+            (Method::GET, StatusCode::NO_CONTENT, true, false),
+            (Method::GET, StatusCode::NOT_MODIFIED, true, false),
+            (Method::GET, StatusCode::EARLY_HINTS, false, false),
+            (Method::GET, StatusCode::SWITCHING_PROTOCOLS, false, false),
+            (Method::CONNECT, StatusCode::OK, false, false),
+            (Method::GET, StatusCode::OK, false, true),
+        ] {
+            let mut ctx = ctx_for(method.clone());
+            ctx.response_body_mode = pipeline.body_capabilities().response_body_mode;
+            let mut head = unframed_head(status);
+            head.source_bodyless = source_bodyless;
+            head.source_content_length = Some(6);
+            head.bodyless = final_bodyless;
+
+            assert_eq!(
+                declared_response_over_limit(&ctx, &pipeline, &head),
+                None,
+                "{method} {status}: representation metadata is not a body"
+            );
+        }
     }
 
     #[test]
@@ -800,11 +898,11 @@ mod tests {
 
     #[tokio::test]
     async fn switching_protocols_is_refused_as_a_bad_gateway() {
-        let mut flight = get_flight(empty_pipeline());
+        let mut flight = get_flight(limited_pipeline(4));
 
         let (outcome, _client) = head_outcome(
             &mut flight,
-            b"HTTP/1.1 101 Switching Protocols\r\nconnection: upgrade\r\nupgrade: x\r\n\r\n",
+            b"HTTP/1.1 101 Switching Protocols\r\nconnection: upgrade\r\nupgrade: x\r\ncontent-length: 6\r\n\r\n",
         )
         .await;
 
@@ -812,16 +910,20 @@ mod tests {
             matches!(&outcome, Outcome::Failed(failure) if failure.kind == FailureKind::Status(502)),
             "an upgrade this backend cannot tunnel is a 502"
         );
+        assert!(
+            !flight.ctx.response_size_limit_exceeded,
+            "the adapter's upgrade refusal precedes size admission"
+        );
     }
 
     #[tokio::test]
     async fn retriable_status_under_a_policy_is_retried() {
-        let mut flight = get_flight(empty_pipeline());
+        let mut flight = get_flight(limited_pipeline(4));
         flight.ctx.retry_policy = Some(retrying_503());
 
         let (outcome, _client) = head_outcome(
             &mut flight,
-            b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n",
+            b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 6\r\n\r\n",
         )
         .await;
 
@@ -830,6 +932,10 @@ mod tests {
             "a status the policy retries is retried before anything reaches the client"
         );
         assert_eq!(flight.ctx.retries, 1, "the retry is counted");
+        assert!(
+            !flight.ctx.response_size_limit_exceeded,
+            "the retryable upstream status wins before local size admission"
+        );
     }
 
     #[tokio::test]
@@ -866,10 +972,12 @@ mod tests {
 
     #[tokio::test]
     async fn response_filter_rejection_is_answered_locally() {
-        let mut flight = get_flight(scripted_pipeline(Script {
+        let mut pipeline = scripted_pipeline(Script {
             response: Some(Arc::new(|| Ok(FilterAction::Reject(Rejection::status(403))))),
             ..Script::default()
-        }));
+        });
+        pipeline.apply_body_limits(None, Some(1), false).unwrap();
+        let mut flight = get_flight(pipeline);
 
         let (outcome, _client) = head_outcome(&mut flight, b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok").await;
 
@@ -883,6 +991,36 @@ mod tests {
             "it is counted as a filter rejection"
         );
         assert_eq!(flight.error, Some(ErrorOrigin::Other), "the proxy ended the request");
+        assert!(
+            !flight.ctx.response_size_limit_exceeded,
+            "response-filter rejection wins before size admission"
+        );
+    }
+
+    #[tokio::test]
+    async fn declared_oversize_response_returns_a_local_502_without_retry() {
+        let mut flight = get_flight(limited_pipeline(4));
+        flight.ctx.request_is_idempotent = true;
+        flight.ctx.retry_policy = Some(retrying_502());
+
+        let (outcome, _client) = head_outcome(&mut flight, b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\n").await;
+
+        assert!(
+            matches!(&outcome, Outcome::Reply(_)),
+            "a local response-size policy must not retry or commit the upstream response"
+        );
+        let Outcome::Reply(reply) = outcome else {
+            return;
+        };
+        assert_eq!(reply.status, StatusCode::BAD_GATEWAY);
+        assert!(reply.body.as_deref().is_some_and(|body| {
+            let cause = b"configured size limit";
+            body.windows(cause.len()).any(|window| window == cause)
+        }));
+        assert!(flight.ctx.response_size_limit_exceeded);
+        assert_eq!(flight.ctx.error_type, Some(metrics::ERROR_TYPE_RESPONSE_SIZE_LIMIT));
+        assert_eq!(flight.ctx.retries, 0, "the local policy does not consume a retry");
+        assert_eq!(flight.error, Some(ErrorOrigin::Other));
     }
 
     #[tokio::test]
@@ -1369,8 +1507,16 @@ mod tests {
     fn get_flight(pipeline: FilterPipeline) -> Flight {
         let mut flight = Flight::for_tests(pipeline);
         *flight.ctx = http11_ctx(Method::GET);
+        flight.ctx.response_body_mode = flight.pipeline.body_capabilities().response_body_mode;
         flight.ctx.request_is_idempotent = true;
         flight
+    }
+
+    /// An empty pipeline with a cumulative response limit.
+    fn limited_pipeline(limit: usize) -> FilterPipeline {
+        let mut pipeline = empty_pipeline();
+        pipeline.apply_body_limits(None, Some(limit), false).unwrap();
+        pipeline
     }
 
     /// Take the head an upstream answering `reply` sends a `GET` through the
@@ -1404,6 +1550,14 @@ mod tests {
         })
     }
 
+    /// A policy that retries a `502` on idempotent requests.
+    fn retrying_502() -> Arc<RetryPolicy> {
+        Arc::new(RetryPolicy {
+            retriable_status_codes: vec![HttpStatusCode::try_from(502).unwrap()],
+            ..RetryPolicy::legacy_default()
+        })
+    }
+
     /// A head with `status` and no framing headers left.
     fn unframed_head(status: StatusCode) -> Head {
         Head {
@@ -1414,6 +1568,7 @@ mod tests {
                 status,
             },
             source_bodyless: false,
+            source_content_length: None,
             version: Version::HTTP_11,
         }
     }

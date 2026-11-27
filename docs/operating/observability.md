@@ -140,17 +140,21 @@ Proxy errors, by cause in the `type` label.
 | `type` | Meaning |
 | ---------------------- | ---------------------------------------- |
 | `filter_reject` | A filter or a request-body limit rejected the request |
+| `response_size_limit` | A final body-bearing response declares an unambiguous upstream `Content-Length` above its effective response size limit |
 | `timeout` | An upstream connect, read or write timed out |
 | `upstream_unavailable` | The upstream could not be reached |
 | `upstream_protocol` | The upstream was reached but the exchange failed |
 | `downstream` | The client connection failed |
 | `internal` | An internal proxy fault |
 
+`response_size_limit` is declared-length preflight admission only. Unknown or
+under-reported bodies keep incremental enforcement after the response starts.
+
 The type is set first-write-wins on the request context at the sites that end
-a request (the terminal failure hook and the request- and body-filter
-rejection paths). The counter is incremented once per request, from the hook
-that records `praxis_http_requests_total`, so a request that fails and retries
-counts once.
+a request (the terminal failure hook, response preflight, and request- and
+body-filter rejection paths). The counter is incremented once per request,
+from the hook that records `praxis_http_requests_total`, so a request that
+fails and retries counts once.
 
 Overload rejections are counted only in `praxis_overload_rejects_total`.
 Connect failures count here under `upstream_unavailable` and also in

@@ -53,10 +53,13 @@
     reason = "test code"
 )]
 
-use std::{sync::Mutex, time::Duration};
+use std::{io::Write as _, sync::Mutex, time::Duration};
 
 use praxis_core::config::Config;
-use praxis_test_utils::{free_port, http_get, http_post, start_backend_with_shutdown, start_proxy, wait_for_tcp};
+use praxis_test_utils::{
+    free_port, http_get, http_post, read_http_request, spawn_raw_http_backend, start_backend_with_shutdown,
+    start_full_proxy, start_proxy, wait_for_tcp,
+};
 
 // -----------------------------------------------------------------------------
 // Statics
@@ -74,6 +77,22 @@ fn error_count(body: &str, error_type: &str) -> Option<f64> {
         .find(|line| line.starts_with(&format!("praxis_errors_total{{type=\"{error_type}\"}}")))
         .and_then(|line| line.split_whitespace().last())
         .and_then(|value| value.parse::<f64>().ok())
+}
+
+/// Read one counter series whose exposition line contains the requested labels.
+fn metric_count(body: &str, metric: &str, labels: &[&str]) -> Option<f64> {
+    body.lines()
+        .find(|line| line.starts_with(metric) && labels.iter().all(|label| line.contains(label)))
+        .and_then(|line| line.split_whitespace().last())
+        .and_then(|value| value.parse::<f64>().ok())
+}
+
+/// Serve one raw response after consuming a request.
+fn raw_response_backend(response: &'static [u8]) -> (u16, std::thread::JoinHandle<()>) {
+    spawn_raw_http_backend(move |mut stream| {
+        read_http_request(&mut stream);
+        stream.write_all(response).unwrap();
+    })
 }
 
 /// Poll `/metrics` until the `error_type` counter rises above `baseline`,
@@ -310,4 +329,120 @@ insecure_options:
         error_count(&body, "filter_reject").is_some_and(|count| count > before),
         "a request-body-phase rejection must be counted as type=filter_reject:\n{body}"
     );
+}
+
+#[test]
+fn errors_total_counts_declared_response_size_limits() {
+    let _serial = SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (backend_port, backend) =
+        raw_response_backend(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\n");
+    let (ambiguous_transfer_port, ambiguous_transfer_backend) = raw_response_backend(
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Length: 5\r\nConnection: close\r\n\r\n6\r\nsecret\r\n0\r\n\r\n",
+    );
+    let (ambiguous_length_port, ambiguous_length_backend) = raw_response_backend(
+        b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Length: 6\r\nConnection: close\r\n\r\nsecret",
+    );
+    let proxy_port = free_port();
+    let admin_port = free_port();
+    let yaml = format!(
+        r#"
+admin:
+  metrics_address: "127.0.0.1:{admin_port}"
+listeners:
+  - name: errors-response-size
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/ambiguous-transfer"
+            cluster: ambiguous_transfer
+          - path_prefix: "/ambiguous-length"
+            cluster: ambiguous_length
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints: ["127.0.0.1:{backend_port}"]
+          - name: ambiguous_transfer
+            endpoints: ["127.0.0.1:{ambiguous_transfer_port}"]
+          - name: ambiguous_length
+            endpoints: ["127.0.0.1:{ambiguous_length_port}"]
+body_limits:
+  max_response_bytes: 4
+insecure_options:
+  allow_private_endpoints: true
+"#
+    );
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_full_proxy(&config);
+    let admin = format!("127.0.0.1:{admin_port}");
+    wait_for_tcp(&admin);
+
+    let before_scrape = http_get(&admin, "/metrics", None).1;
+    let before = error_count(&before_scrape, "response_size_limit").unwrap_or(0.0);
+    let endpoint_label = format!("endpoint=\"127.0.0.1:{backend_port}\"");
+    let upstream_2xx_labels = ["cluster=\"backend\"", endpoint_label.as_str(), "status_class=\"2xx\""];
+    let before_upstream_2xx =
+        metric_count(&before_scrape, "praxis_upstream_requests_total{", &upstream_2xx_labels).unwrap_or(0.0);
+    let before_connect_failures = metric_count(
+        &before_scrape,
+        "praxis_upstream_connect_failures_total{",
+        &["cluster=\"backend\""],
+    )
+    .unwrap_or(0.0);
+    let (status, body) = http_get(proxy.addr(), "/oversized", None);
+    backend.join().unwrap();
+    assert_eq!(status, 502, "declared oversized responses become local 502s");
+    assert!(
+        body.contains("Upstream response body exceeds the configured size limit"),
+        "the request must fail through declared-length admission: {body}"
+    );
+
+    let scrape = wait_for_error(&admin, "response_size_limit", before);
+    let after = error_count(&scrape, "response_size_limit").unwrap_or(0.0);
+    assert!(
+        (after - before - 1.0).abs() < f64::EPSILON,
+        "one declared-length rejection must increment type=response_size_limit exactly once:\n{scrape}"
+    );
+    let after_upstream_2xx =
+        metric_count(&scrape, "praxis_upstream_requests_total{", &upstream_2xx_labels).unwrap_or(0.0);
+    let after_connect_failures = metric_count(
+        &scrape,
+        "praxis_upstream_connect_failures_total{",
+        &["cluster=\"backend\""],
+    )
+    .unwrap_or(0.0);
+    assert!(
+        (after_upstream_2xx - before_upstream_2xx - 1.0).abs() < f64::EPSILON,
+        "the upstream's actual 200 remains in the 2xx denominator:\n{scrape}"
+    );
+    assert!(
+        (after_connect_failures - before_connect_failures).abs() < f64::EPSILON,
+        "a local response-size policy is not an upstream connect failure:\n{scrape}"
+    );
+
+    for (path, ambiguous_backend) in [
+        ("/ambiguous-transfer", ambiguous_transfer_backend),
+        ("/ambiguous-length", ambiguous_length_backend),
+    ] {
+        let (status, body) = http_get(proxy.addr(), path, None);
+        ambiguous_backend.join().unwrap();
+        assert!(
+            (200..=599).contains(&status),
+            "{path}: the parser or proxy must return a final HTTP response"
+        );
+        assert!(
+            !body.contains("configured size limit"),
+            "{path}: malformed framing is handled by existing HTTP validation, not size preflight"
+        );
+        let current = error_count(&http_get(&admin, "/metrics", None).1, "response_size_limit").unwrap_or(0.0);
+        assert!(
+            (current - after).abs() < f64::EPSILON,
+            "{path}: ambiguous framing must not increment response_size_limit"
+        );
+    }
 }

@@ -360,6 +360,12 @@ pub struct PingoraRequestCtx {
     /// phase, and the access log runs later still.
     pub grpc_completion: Option<praxis_core::grpc::GrpcCompletion>,
 
+    /// Whether a declared upstream response exceeded the local size policy.
+    ///
+    /// Kept separate from the upstream status so retries and passive health
+    /// do not treat a local rejection as an upstream failure.
+    pub(crate) response_size_limit_exceeded: bool,
+
     /// Whether the response phase has been executed. Used to ensure
     /// cleanup (e.g. least-connections counter release) in the
     /// `logging()` hook when errors bypass `response_filter`.
@@ -719,6 +725,7 @@ impl Default for PingoraRequestCtx {
             response_header_snapshot: None,
             upstream_response_status: None,
             grpc_completion: None,
+            response_size_limit_exceeded: false,
             response_phase_done: false,
             response_delivery_complete: false,
             pending_rejection: None,

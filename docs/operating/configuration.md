@@ -402,6 +402,23 @@ Reloads apply to new requests; in-flight requests keep their pinned limits.
 These limits bound accumulated bytes, not parsed-object memory or aggregate
 memory across concurrent requests.
 
+For a final body-bearing response, Praxis compares a validated, unambiguous
+upstream `Content-Length` with the effective cumulative response limit before
+committing the final response. A larger length returns a complete proxy error
+(HTTP 502, or the configured gRPC trailers-only mapping) without forwarding
+upstream body bytes; a length exactly at the limit is accepted. Custom error
+formatters receive the stable code `response_body_too_large`. The comparison
+uses the upstream length before response filters can replace or remove it.
+`HEAD`, 204, 304, informational and 101 responses, and successful CONNECT
+tunnels carry no response body for this check. Missing, transfer-encoded, or
+ambiguous lengths are not used for preflight. Protocol validation still
+rejects malformed framing; unknown or under-reported bodies keep the
+incremental response limit, which may abort after headers are committed. A
+`StreamBuffer` threshold is not a cumulative response limit after `Release`.
+An unknown-length overflow detected after commit can still count as a
+passive-health failure for a tracked endpoint; the pre-commit declared-length
+rejection does not, unless the upstream response itself was a 5xx.
+
 ### Rejections and Unread Uploads
 
 A request-body limit failure logs a warning with the limit,

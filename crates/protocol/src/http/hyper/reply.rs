@@ -666,6 +666,29 @@ mod tests {
     }
 
     #[test]
+    fn response_size_error_uses_the_existing_grpc_unavailable_mapping() {
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.extensions.insert(GrpcErrorMapping::new(GrpcKind::Grpc, true));
+        let error = crate::http::pingora::handler::fail_to_proxy::response_size_limit_error();
+
+        for version in [Version::HTTP_11, Version::HTTP_2] {
+            let reply = classified_error(&error, &ctx, version);
+            assert_eq!(reply.status, StatusCode::OK, "gRPC errors use HTTP 200");
+            assert_eq!(
+                reply.headers.get("grpc-status").unwrap(),
+                "14",
+                "502 maps to UNAVAILABLE"
+            );
+            assert!(reply.body.is_none(), "gRPC mapping does not expose an HTTP body");
+            assert_eq!(
+                reply.headers.get(http::header::CONTENT_LENGTH).is_some(),
+                version != Version::HTTP_2,
+                "only HTTP/1 needs an explicit empty-body length"
+            );
+        }
+    }
+
+    #[test]
     fn head_reply_keeps_headers_without_a_body() {
         let reply = terminal_reply(
             praxis_filter::Response {

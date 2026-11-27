@@ -122,6 +122,9 @@ pub(crate) const ERROR_TYPE_DOWNSTREAM: &str = "downstream";
 /// Error type: an internal proxy fault.
 pub(crate) const ERROR_TYPE_INTERNAL: &str = "internal";
 
+/// Error type: an upstream response exceeded the configured body limit.
+pub(crate) const ERROR_TYPE_RESPONSE_SIZE_LIMIT: &str = "response_size_limit";
+
 /// Overload reject reason: process memory pressure.
 pub(crate) const OVERLOAD_REASON_MEMORY: &str = "memory";
 
@@ -1504,6 +1507,7 @@ mod tests {
             ERROR_TYPE_UPSTREAM_PROTOCOL,
             ERROR_TYPE_DOWNSTREAM,
             ERROR_TYPE_INTERNAL,
+            ERROR_TYPE_RESPONSE_SIZE_LIMIT,
         ] {
             record_error(error_type);
             let body = render_prometheus().expect("recorder should render");

@@ -30,6 +30,15 @@ pub(in crate::http) struct ProxyError {
     pub(in crate::http) status: u16,
 }
 
+/// The local policy error for an upstream response that exceeds its limit.
+pub(in crate::http) fn response_size_limit_error() -> ProxyError {
+    ProxyError {
+        code: "response_body_too_large",
+        message: "Upstream response body exceeds the configured size limit",
+        status: 502,
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Public Entry Point
 // -----------------------------------------------------------------------------
@@ -68,6 +77,14 @@ pub(super) async fn execute(
     }
     let formatter = ctx.extensions.get::<ErrorResponseFormatterHandle>();
     let grpc = ctx.extensions.get::<praxis_filter::GrpcErrorMapping>();
+
+    if ctx.response_size_limit_exceeded {
+        if final_response_written(session) {
+            return done(502);
+        }
+        ctx.rejection_cleanup_pending = true;
+        return write_error_response(session, response_size_limit_error(), formatter, grpc).await;
+    }
 
     if let ErrorType::HTTPStatus(code) = etype {
         return handle_http_status(session, code, formatter, grpc).await;
@@ -241,6 +258,18 @@ async fn handle_pending_rejection(
 pub(super) fn expected_filter_rejection(error: &pingora_core::Error, ctx: &PingoraRequestCtx) -> bool {
     matches!(error.etype(), ErrorType::HTTPStatus(400..=499))
         && ctx.error_type == Some(crate::http::pingora::metrics::ERROR_TYPE_FILTER_REJECT)
+}
+
+/// Whether the expected local response-size failure was written as a final response.
+#[cfg(feature = "pingora")]
+pub(super) fn should_suppress_response_size_error(
+    session: &Session,
+    error: &pingora_core::Error,
+    ctx: &PingoraRequestCtx,
+) -> bool {
+    ctx.response_size_limit_exceeded
+        && matches!(error.etype(), ErrorType::HTTPStatus(502))
+        && final_response_written(session)
 }
 
 /// The text to carry as `grpc-message` for a rejection.
@@ -456,6 +485,8 @@ fn classify_error_tuple(etype: &ErrorType, source: &pingora_core::ErrorSource) -
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::unwrap_used, reason = "tests")]
 mod tests {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
     use super::*;
 
     /// Make an attempt whose phase limits all have `phase_timeout`.
@@ -612,6 +643,84 @@ mod tests {
         }
     }
 
+    /// Build a live Pingora H1 session with one parsed request.
+    async fn session_with_request() -> (Session, tokio::io::DuplexStream) {
+        let (mut client, server) = tokio::io::duplex(1024);
+        client
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        let mut session = Session::new_h1(Box::new(server));
+        assert!(session.read_request().await.unwrap());
+        (session, client)
+    }
+
+    #[tokio::test]
+    async fn response_size_error_log_suppression_requires_a_written_expected_error() {
+        let (mut session, _client) = session_with_request().await;
+        let ctx = PingoraRequestCtx {
+            response_size_limit_exceeded: true,
+            ..PingoraRequestCtx::default()
+        };
+        let error = pingora_core::Error::explain(
+            ErrorType::HTTPStatus(502),
+            "upstream response body exceeds the configured size limit",
+        );
+        assert!(
+            !should_suppress_response_size_error(&session, &error, &ctx),
+            "a failed or pending response write must stay visible"
+        );
+
+        let header = pingora_http::ResponseHeader::build(502, None).unwrap();
+        session
+            .as_downstream_mut()
+            .write_error_response(header, Bytes::new())
+            .await
+            .unwrap();
+        let unexpected = pingora_core::Error::new(ErrorType::WriteError);
+        assert!(
+            !should_suppress_response_size_error(&session, &unexpected, &ctx),
+            "an unexpected write error must stay visible"
+        );
+        assert!(
+            should_suppress_response_size_error(&session, &error, &ctx),
+            "only the expected error after a final response is written is suppressed"
+        );
+        drop(ctx);
+    }
+
+    #[tokio::test]
+    async fn response_size_error_does_not_overwrite_an_existing_final_response() {
+        let (mut session, mut client) = session_with_request().await;
+        let mut ctx = PingoraRequestCtx {
+            response_size_limit_exceeded: true,
+            ..PingoraRequestCtx::default()
+        };
+        let error = pingora_core::Error::explain(
+            ErrorType::HTTPStatus(502),
+            "upstream response body exceeds the configured size limit",
+        );
+        let header = pingora_http::ResponseHeader::build(502, None).unwrap();
+        session
+            .as_downstream_mut()
+            .write_error_response(header, Bytes::new())
+            .await
+            .unwrap();
+
+        let result = execute(&mut session, &error, &mut ctx).await;
+        assert_eq!(result.error_code, 502);
+
+        drop(ctx);
+        drop(session);
+        let mut wire = Vec::new();
+        client.read_to_end(&mut wire).await.unwrap();
+        let response_count = wire
+            .windows(b"HTTP/1.1 502".len())
+            .filter(|window| *window == b"HTTP/1.1 502")
+            .count();
+        assert_eq!(response_count, 1, "a final response must never be written twice");
+    }
+
     #[test]
     fn problem_details_body_has_rfc9457_fields() {
         let err = ProxyError {
@@ -652,6 +761,19 @@ mod tests {
         assert_eq!(
             response.content_type,
             HeaderValue::from_static("application/vnd.praxis.test+json")
+        );
+    }
+
+    #[test]
+    fn response_size_error_has_a_stable_502_formatter_cause() {
+        let err = response_size_limit_error();
+        let formatter = ErrorResponseFormatterHandle::new(TestFormatter);
+
+        assert_eq!(err.code, "response_body_too_large");
+        assert_eq!(err.status, 502);
+        assert_eq!(
+            format_error_response(&err, Some(&formatter)).body,
+            Bytes::from_static(br#"{"code":"response_body_too_large","status":502}"#)
         );
     }
 

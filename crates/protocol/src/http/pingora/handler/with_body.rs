@@ -507,6 +507,10 @@ impl ProxyHttp for PingoraHttpHandler {
         handle_connect_failure(ctx, e)
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "local size-limit errors must bypass attempt accounting and retry handling"
+    )]
     fn error_while_proxy(
         &self,
         peer: &HttpPeer,
@@ -515,6 +519,11 @@ impl ProxyHttp for PingoraHttpHandler {
         ctx: &mut Self::CTX,
         client_reused: bool,
     ) -> Box<pingora_core::Error> {
+        if ctx.response_size_limit_exceeded {
+            let mut e = e;
+            e.set_retry(false);
+            return e;
+        }
         connected_to_upstream::record_attempt_failure(e.as_ref(), ctx);
         // Local rejections remain final even before fail_to_proxy writes them.
         // A committed final response also cannot be replaced; informational
@@ -579,9 +588,10 @@ impl ProxyHttp for PingoraHttpHandler {
     }
 
     fn suppress_error_log(&self, session: &Session, ctx: &Self::CTX, error: &pingora_core::Error) -> bool {
-        ctx.rejection_cleanup_pending
-            && fail_to_proxy::expected_filter_rejection(error, ctx)
-            && session.response_written().is_some_and(fail_to_proxy::is_final_response)
+        fail_to_proxy::should_suppress_response_size_error(session, error, ctx)
+            || (ctx.rejection_cleanup_pending
+                && fail_to_proxy::expected_filter_rejection(error, ctx)
+                && session.response_written().is_some_and(fail_to_proxy::is_final_response))
     }
 
     async fn upstream_request_filter(

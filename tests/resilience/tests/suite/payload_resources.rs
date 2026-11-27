@@ -1885,11 +1885,20 @@ fn bodyless_huge_lengths_stay_bounded_and_preserve_connection_framing() {
                 )
                 .unwrap();
                 let mut connection = BufReader::new(stream);
-                let response = read_h1_response(&mut connection, method == "HEAD", 4096, |_| Ok(()));
+                let mut body = Vec::new();
+                let response = read_h1_response(&mut connection, method == "HEAD", 4096, |chunk| {
+                    body.extend_from_slice(chunk);
+                    Ok(())
+                });
                 if expected == 204 && response.status == Some(502) {
                     assert!(
                         response.completion.is_some() && response.abort.is_none(),
                         "invalid 204 rejection must complete: {response:?}"
+                    );
+                    let error_body = String::from_utf8_lossy(&body);
+                    assert!(
+                        !error_body.contains("configured size limit"),
+                        "a forbidden 204 Content-Length must not trigger response-size admission: {error_body}"
                     );
                     assert_no_more_response(&mut connection);
                     probe(&addr);

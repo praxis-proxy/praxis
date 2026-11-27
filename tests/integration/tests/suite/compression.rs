@@ -413,14 +413,14 @@ fn gzip_response_ceiling_counts_upstream_content_before_encoding() {
                 wire.extend_from_slice(chunk);
                 Ok(())
             });
-            assert_eq!(result.status, Some(200));
-            assert!(
-                result
-                    .headers
-                    .iter()
-                    .any(|(name, value)| name == "content-encoding" && value == "gzip")
-            );
             if length == LIMIT {
+                assert_eq!(result.status, Some(200));
+                assert!(
+                    result
+                        .headers
+                        .iter()
+                        .any(|(name, value)| name == "content-encoding" && value == "gzip")
+                );
                 assert_eq!(result.completion, Some(H1Completion::Chunked), "{result:?}");
                 let decoded = Algorithm::Gzip.decompressor(true).unwrap().encode(&wire, true).unwrap();
                 assert_eq!(decoded.as_ref(), body.as_bytes());
@@ -433,9 +433,18 @@ fn gzip_response_ceiling_counts_upstream_content_before_encoding() {
                     );
                 }
             } else {
+                assert_eq!(result.status, Some(502), "{result:?}");
+                assert_eq!(result.completion, Some(H1Completion::ContentLength), "{result:?}");
+                assert_eq!(result.abort, None, "{result:?}");
                 assert!(
-                    result.completion.is_none(),
-                    "over-limit upstream content cannot complete: {result:?}"
+                    result.headers.iter().all(|(name, _value)| name != "content-encoding"),
+                    "the local error bypasses response compression: {result:?}"
+                );
+                assert!(
+                    !wire
+                        .windows(body.len().min(16))
+                        .any(|window| window == &body.as_bytes()[..body.len().min(16)]),
+                    "over-limit upstream bytes must not reach the client"
                 );
             }
             let (headers, clean) = send_and_read_body(proxy.addr(), "/static", None);
