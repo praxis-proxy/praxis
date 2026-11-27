@@ -85,7 +85,7 @@ impl Fixture {
             }),
             sni: Some("api.example.com".to_owned()),
             verify: true,
-            hot_reload: Some(true),
+            hot_reload: true,
         };
         Self {
             dir,

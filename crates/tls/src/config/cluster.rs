@@ -63,8 +63,12 @@ pub struct ClusterTls {
     pub verify: bool,
 
     /// Reload `client_cert` and `ca` files when they change on disk.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub hot_reload: Option<bool>,
+    ///
+    /// Opt-in; `false` when omitted. Requires the `config-reload` build
+    /// feature and at least one of `client_cert` or `ca`. Mirrors
+    /// `hot_reload` on listener TLS.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hot_reload: bool,
 }
 
 /// Raw deserialization utility for [`ClusterTls`].
@@ -89,7 +93,7 @@ struct ClusterTlsRaw {
 
     /// Reload certificate files on change.
     #[serde(default)]
-    hot_reload: Option<bool>,
+    hot_reload: bool,
 }
 
 impl<'de> Deserialize<'de> for ClusterTls {
@@ -134,7 +138,7 @@ impl ClusterTls {
                 return Err(TlsError::ClusterClientCertSelectors);
             }
         }
-        if self.is_hot_reload() {
+        if self.hot_reload {
             #[cfg(not(feature = "config-reload"))]
             tracing::warn!(
                 "cluster tls requests hot_reload but this build lacks the `config-reload` feature; \
@@ -146,11 +150,6 @@ impl ClusterTls {
         }
         Ok(())
     }
-
-    /// Whether this cluster's TLS material hot-reloads on file change.
-    pub fn is_hot_reload(&self) -> bool {
-        self.hot_reload.unwrap_or(false)
-    }
 }
 
 impl Default for ClusterTls {
@@ -161,7 +160,7 @@ impl Default for ClusterTls {
             client_cert: None,
             sni: None,
             verify: true,
-            hot_reload: None,
+            hot_reload: false,
         }
     }
 }
@@ -183,6 +182,19 @@ mod tests {
         assert!(tls.sni.is_none(), "sni should default to None");
         assert!(tls.ca.is_none(), "ca should default to None");
         assert!(tls.client_cert.is_none(), "client_cert should default to None");
+        assert!(!tls.hot_reload, "hot_reload should default to false");
+    }
+
+    #[test]
+    fn cluster_tls_deserializes_hot_reload() {
+        let tmp = temp_ca();
+        let yaml = format!("ca:\n  ca_path: {ca}\nhot_reload: true\n", ca = tmp.ca);
+        let tls: ClusterTls = serde_yaml::from_str(&yaml).unwrap();
+        assert!(tls.hot_reload, "hot_reload should parse as true");
+        assert!(
+            serde_yaml::to_string(&tls).unwrap().contains("hot_reload: true"),
+            "an enabled hot_reload should survive serialization"
+        );
     }
 
     #[test]

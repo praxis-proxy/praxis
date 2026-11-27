@@ -322,7 +322,7 @@ mod tests {
             }),
             sni: None,
             verify: true,
-            hot_reload: Some(true),
+            hot_reload: true,
         };
         (tls, dir)
     }

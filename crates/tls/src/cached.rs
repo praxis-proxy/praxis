@@ -397,7 +397,7 @@ impl CachedClusterTls {
     /// [`TlsError`]: crate::TlsError
     pub fn try_from_config(tls: &crate::ClusterTls) -> Result<Self, TlsError> {
         #[cfg(feature = "config-reload")]
-        if tls.is_hot_reload() {
+        if tls.hot_reload {
             let material = crate::upstream_reload::acquire(tls)?;
             return Ok(Self {
                 ca: material.ca.map(Material::Reloadable),
