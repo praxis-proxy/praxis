@@ -56,8 +56,23 @@ mod tests {
         receive(&mut session, b"\x88\x80abcd").await;
     }
 
+    /// Decode the prefetched frame and handle control frames with the production codec.
+    async fn drive_messages(session: &mut Session) {
+        use praxis_protocol::http::pingora::websocket_session::WebSocketSession;
+        use tungstenite::Message;
+
+        let accept = http::HeaderValue::from_static("s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+        let transport = LocalWebSocket::commit(session, accept).await.unwrap();
+        let mut messages = WebSocketSession::new(transport);
+        assert_eq!(messages.receive().await.unwrap(), Some(Message::text("ab")));
+        let oversized = Message::Binary(Bytes::from(vec![0; 1_048_577]));
+        assert!(messages.send(oversized).await.is_err());
+        messages.send(Message::text("x")).await.unwrap();
+        assert_eq!(messages.receive().await.unwrap(), None);
+    }
+
     /// A test-only terminal request hook with no upstream configured.
-    struct LocalUpgrade(Arc<AtomicUsize>);
+    struct LocalUpgrade(Arc<AtomicUsize>, bool);
 
     #[async_trait::async_trait]
     impl ProxyHttp for LocalUpgrade {
@@ -66,7 +81,11 @@ mod tests {
         fn new_ctx(&self) {}
 
         async fn request_filter(&self, session: &mut Session, (): &mut ()) -> pingora_core::Result<bool> {
-            drive(session).await;
+            if self.1 {
+                drive_messages(session).await;
+            } else {
+                drive(session).await;
+            }
             Ok(true)
         }
 
@@ -112,6 +131,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn oversized_inbound_frame_terminates_the_session() {
+        use praxis_protocol::http::pingora::websocket_session::WebSocketSession;
+        use tungstenite::{Error, Message};
+
+        let (mut peer, socket) = tokio::io::duplex(1024);
+        let head = OFFER.strip_suffix(b"\x81\x80abcd").unwrap();
+        peer.write_all(head).await.unwrap();
+        peer.write_all(b"\x82\xff\0\0\0\0\0\x10\0\x01\0\0\0\0").await.unwrap();
+        let mut session = Session::new_h1(Box::new(socket));
+        assert!(session.read_request().await.unwrap());
+        let accept = http::HeaderValue::from_static("s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+        let transport = LocalWebSocket::commit(&mut session, accept).await.unwrap();
+        let mut messages = WebSocketSession::new(transport);
+        assert!(matches!(messages.receive().await, Err(Error::Capacity(_))));
+        assert!(matches!(
+            messages.send(Message::text("x")).await,
+            Err(Error::AlreadyClosed)
+        ));
+    }
+
+    /// Verify the server control replies and the assembled message response.
+    async fn message_client(peer: TcpStream) {
+        let mut peer = BufReader::new(peer);
+        let mut head = String::new();
+        while !head.ends_with("\r\n\r\n") {
+            assert_ne!(peer.read_line(&mut head).await.unwrap(), 0);
+        }
+        let mut reply = [0; 6];
+        peer.read_exact(&mut reply).await.unwrap();
+        assert_eq!(&reply, b"\x8a\x01p\x81\x01x");
+        peer.get_mut().write_all(b"\x88\x80abcd").await.unwrap();
+        let mut close = Vec::new();
+        peer.read_to_end(&mut close).await.unwrap();
+        assert_eq!(close, b"\x88\x00");
+    }
+
+    #[tokio::test]
+    async fn bounded_session_reassembles_fragments_and_replies_to_controls() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let mut peer = TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
+            let head = OFFER.strip_suffix(b"\x81\x80abcd").unwrap();
+            let frames = b"\x01\x81\0\0\0\0a\x89\x81\0\0\0\0p\x80\x81\0\0\0\0b";
+            peer.write_all(&[head, frames].concat()).await.unwrap();
+            let (socket, _) = listener.accept().await.unwrap();
+            let completed = Arc::new(AtomicUsize::default());
+            praxis_tls::provider::install();
+            let mut proxy = HttpProxy::new(LocalUpgrade(Arc::clone(&completed), true), Arc::default());
+            proxy.handle_init_modules();
+            let proxy = Arc::new(proxy);
+            let (_signal, shutdown) = tokio::sync::watch::channel(false);
+            let session = ServerSession::new_http1(Box::new(Stream::from(socket)));
+            let ((), reusable) = tokio::join!(message_client(peer), proxy.process_new_http(session, &shutdown));
+            assert!(reusable.is_none());
+            assert_eq!(completed.load(Ordering::Relaxed), 1);
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
     async fn local_upgrade_drives_both_directions_without_an_upstream() {
         tokio::time::timeout(Duration::from_secs(5), async {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -120,7 +200,7 @@ mod tests {
             let (socket, _) = listener.accept().await.unwrap();
             let completed = Arc::new(AtomicUsize::default());
             praxis_tls::provider::install();
-            let mut proxy = HttpProxy::new(LocalUpgrade(Arc::clone(&completed)), Arc::default());
+            let mut proxy = HttpProxy::new(LocalUpgrade(Arc::clone(&completed), false), Arc::default());
             proxy.handle_init_modules();
             let proxy = Arc::new(proxy);
             let (_signal, shutdown) = tokio::sync::watch::channel(false);
