@@ -20,7 +20,8 @@
 //! which it drains to seed the sub-request's upstream before the request phase so
 //! a callout can dial a known destination without an upstream-selecting filter;
 //! and, with the `chain-binding` feature, `StagedCluster`, which names a
-//! top-level cluster whose endpoint the executor selects, pins, and reports to passive health.
+//! top-level cluster whose endpoint the executor selects, pins, retries under
+//! the cluster's retry policy, and reports to passive health.
 //! It also scopes the parent's upstream state: on entry it clears the
 //! exchange-local upstream selection and, with the `upstream-binding` feature,
 //! sets the parent's logical binding aside (an IRR step keeps seeing it, a
@@ -114,7 +115,7 @@ pub use self::{
     types::{CalloutOutcome, CalloutResponse, StagedUpstream, StagedUpstreamFallback, SubrequestRuntime},
 };
 #[cfg(feature = "chain-binding")]
-use crate::credentials::{PendingCredentials, ResolvedDestination};
+use crate::credentials::{InjectedSet, PendingCredentials, ResolvedDestination};
 #[cfg(feature = "bound-upstream-request-body")]
 use crate::extensions::BoundRequestBodyRewrite;
 #[cfg(feature = "upstream-binding")]
@@ -896,7 +897,7 @@ impl FilteredSubrequestExecutor {
         // consumers (credential injection, observability) see the staged
         // cluster and cannot be pointed at another.
         #[cfg(feature = "chain-binding")]
-        let pinned_cluster = {
+        let mut pinned_cluster = {
             let conflicting = pinned_upstream.is_some() || !fallback_addresses.is_empty();
             match staged_cluster::stage_cluster(&mut filter_ctx, conflicting) {
                 Ok(Some((upstream, pinned))) => {
@@ -917,7 +918,7 @@ impl FilteredSubrequestExecutor {
             .map_or(remaining, |timeout_ms| remaining.min(Duration::from_millis(timeout_ms)));
         let step_budget = remaining.min(self.step_timeout);
         let step_started = Instant::now();
-        let step_deadline = step_started.checked_add(step_budget).unwrap_or(deadline);
+        let step_deadline = step_started.checked_add(step_budget).unwrap_or(deadline).min(deadline);
         let in_transport = Arc::new(AtomicBool::new(false));
         let in_transport_inner = Arc::clone(&in_transport);
         let transport_outcome_inner = transport_outcome.clone();
@@ -925,15 +926,17 @@ impl FilteredSubrequestExecutor {
         // Whether a dialed attempt has not been reported to passive health yet.
         #[cfg(feature = "chain-binding")]
         let mut outstanding = false;
-        // A successful streaming attempt's observation, settled when its body
-        // ends.
         #[cfg(feature = "chain-binding")]
         let mut stream_health = None;
+        // Whether a selected-upstream body writer adapted the body for the
+        // first endpoint, which then binds every retry to that endpoint.
+        #[cfg(feature = "chain-binding")]
+        let mut body_bound = false;
 
         let step_span = tracing::info_span!("filtered_subrequest", step = label, iteration = iteration);
 
         let timed: Result<Result<RawResponse, FilterError>, tokio::time::error::Elapsed> =
-            tokio::time::timeout(step_budget, async {
+            tokio::time::timeout_at(step_deadline.into(), async {
             let mut request_body = Some(current_request.body.clone());
             if body_exceeds_limit(
                 pipeline.body_capabilities().request_body_mode,
@@ -1045,6 +1048,10 @@ impl FilteredSubrequestExecutor {
                 if self.accounting.exceeds_limit(&filter_ctx.extensions) {
                     return Ok(RawResponse::Rejected(Rejection::status(413)));
                 }
+                #[cfg(feature = "chain-binding")]
+                {
+                    body_bound = pipeline.body_capabilities().any_selected_upstream_request_body_writer;
+                }
                 // Re-pin the staged upstream once more. This phase received a
                 // mutable `ctx` and may have rewritten `ctx.upstream` after the
                 // pre-phase re-pin, so reassert the prepared destination before the
@@ -1061,7 +1068,18 @@ impl FilteredSubrequestExecutor {
                 staged_cluster::repin_cluster(&mut filter_ctx, pinned_cluster.as_ref());
             }
 
+            // Staged secrets are matched afresh on every attempt, so a retry to
+            // another endpoint can never carry a credential issued elsewhere.
+            #[cfg(feature = "chain-binding")]
+            let pending_credentials = filter_ctx.extensions.remove::<PendingCredentials>();
+            #[cfg(feature = "chain-binding")]
+            let mut first_injected: Option<InjectedSet> = None;
+            #[cfg(feature = "chain-binding")]
+            let mut retries: u32 = 0;
+            #[cfg(feature = "chain-binding")]
+            let mut attempted: Vec<Arc<str>> = Vec::new();
             let request_body = request_body.unwrap_or_default();
+            let header_base = std::mem::take(&mut sub_headers);
             let mut framework_headers = FrameworkHeaders::new();
             framework_headers.set_depth(self.depth.saturating_add(1));
             filter_ctx.apply_trace_propagation(&mut framework_headers);
@@ -1100,7 +1118,17 @@ impl FilteredSubrequestExecutor {
                 gate.entered.notify_one();
                 gate.release.notified().await;
             }
-            let attempt_result = {
+            // One iteration per transport attempt. Only a callout staged at a
+            // cluster makes more than one: its retry policy may send the request
+            // again, to another endpoint under a configured policy. Request
+            // filters ran once above; response filters run once, below, on the
+            // final attempt.
+            #[cfg_attr(
+                not(feature = "chain-binding"),
+                expect(clippy::never_loop, reason = "only cluster-staged callouts retry")
+            )]
+            let attempt_result = loop {
+                forwarding = None;
                 let upstream = filter_ctx.upstream.clone().ok_or_else(|| -> FilterError {
                     format!("filtered_subrequest: step '{label}' did not resolve an upstream").into()
                 })?;
@@ -1136,6 +1164,7 @@ impl FilteredSubrequestExecutor {
                 let peers_timed_out = built.is_none();
                 let peers = built.unwrap_or_default();
                 filter_ctx.upstream_reached = true;
+                let mut sub_headers = header_base.clone();
                 apply_request_header_mutations(&mut sub_headers, &filter_ctx);
                 // Mirror the normal proxy path (`apply_authority_override`): a
                 // configured authority override becomes the upstream Host,
@@ -1152,13 +1181,13 @@ impl FilteredSubrequestExecutor {
                 // for. Injecting after sanitization keeps the credential header from
                 // being stripped as hop-by-hop/framing.
                 #[cfg(feature = "chain-binding")]
-                if let Some(pending) = filter_ctx.extensions.remove::<PendingCredentials>() {
+                if let Some(pending) = pending_credentials.as_ref() {
                     let destination = ResolvedDestination {
                         authority: &logical_authority,
                         transport: &destination_authority,
                     };
-                    let injected = pending.inject_authorized(&destination, &mut sub_headers);
-                    if injected > 0 {
+                    let injected = pending.inject_matching(&destination, &mut sub_headers);
+                    if injected.len() > 0 {
                         // A credential was authorized against `logical_authority`, so
                         // the upstream must see exactly that authority as its Host. Pin
                         // it here — replacing any step- or caller-set Host the
@@ -1172,9 +1201,12 @@ impl FilteredSubrequestExecutor {
                         tracing::debug!(
                             authority = %logical_authority,
                             transport = %destination_authority,
-                            injected = injected,
+                            injected = injected.len(),
                             "materialized destination-bound credentials"
                         );
+                    }
+                    if first_injected.is_none() {
+                        first_injected = Some(injected);
                     }
                 }
                 let request = SubRequest {
@@ -1304,21 +1336,63 @@ impl FilteredSubrequestExecutor {
                     })))
                 };
                 // A cluster-staged callout reports every attempt to passive
-                // health.
+                // health, then retries under the cluster's policy when it allows.
                 #[cfg(feature = "chain-binding")]
-                if let Some(pinned) = pinned_cluster.as_ref() {
+                if let Some(pinned) = pinned_cluster.as_mut() {
                     outstanding = false;
-                    let contacted = forwarding.as_ref().is_some_and(|(_, progress)| progress.dial_started());
-                    let facts = attempt::facts(&result, contacted);
-                    // A stream that opened is judged when its body ends: a
-                    // failure after the headers counts against the endpoint.
+                    let progress = forwarding.as_ref().map(|(_, progress)| progress);
+                    let contacted = progress.is_some_and(RequestProgress::dial_started);
+                    let exchange = progress.and_then(RequestProgress::exchange_failure);
+                    let facts = attempt::facts(&result, contacted, exchange);
                     if matches!(&result, AttemptResult::Streaming(_)) && facts.contacted && !facts.failure {
                         stream_health = attempt::PassiveObservation::new(&filter_ctx, &pinned.cluster);
                     } else {
                         attempt::record_passive(&filter_ctx, &pinned.cluster, &facts);
                     }
+                    let retry_context = attempt::RetryContext {
+                        method: &current_request.method,
+                        body_len: request_body.len().max(current_request.body.len()),
+                        started: step_started,
+                        deadline: step_deadline,
+                    };
+                    if let Some(backoff) = attempt::decide(&pinned.cluster, &facts, retries, &retry_context) {
+                        if !attempted.contains(&upstream.address) {
+                            attempted.push(Arc::clone(&upstream.address));
+                        }
+                        let credentials = pending_credentials.as_ref().zip(first_injected.as_ref());
+                        let target = attempt::RetryTarget {
+                            attempted: &attempted,
+                            current: &upstream,
+                            credentials,
+                            body_bound,
+                        };
+                        if let Some((next, reservation)) = attempt::next_endpoint(&mut filter_ctx, pinned, &target) {
+                            // The retried attempt's response arrived, so settle its
+                            // deferred observation now; it must never follow the
+                            // next attempt's stream.
+                            if let Some(observation) = stream_health.take() {
+                                observation.finish(false);
+                            }
+                            result.discard().await;
+                            retries = retries.saturating_add(1);
+                            tracing::debug!(
+                                step = label,
+                                cluster = %pinned.cluster.name(),
+                                retries,
+                                ?backoff,
+                                upstream_address = %next.address,
+                                "retrying cluster-staged callout"
+                            );
+                            if !backoff.is_zero() {
+                                tokio::time::sleep(backoff).await;
+                            }
+                            reservation.commit();
+                            filter_ctx.upstream = Some(next);
+                            continue;
+                        }
+                    }
                 }
-                result
+                break result;
             };
             in_transport_inner.store(false, Ordering::Release);
             transport::publish_forwarding(&mut filter_ctx, forwarding.as_ref());

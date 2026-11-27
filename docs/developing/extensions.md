@@ -508,7 +508,7 @@ With the `chain-binding` build feature, a chain-binding filter can send a
 `FilteredSubrequestExecutor` callout to a top-level cluster instead of a URL.
 That `clusters:` entry supplies the callout's endpoints, load-balancing
 strategy, health, slow start, TLS (including client certificates), authority,
-base path, and timeouts.
+base path, timeouts, and retry policy.
 
 Resolve the cluster once, when the filter is built, and stage it on each
 callout:
@@ -537,9 +537,9 @@ What the executor does with a staged cluster:
   `ctx.cluster` and `ctx.upstream`. Outbound-chain filters that key on the
   cluster, such as `credential_injection`, work unchanged.
 - **Admission.** Staging a callout claims one of the cluster's
-  `max_connections` slots until its response ends (for a streaming callout,
-  until the body finishes or is dropped). A callout staged at a cluster at
-  its ceiling fails without dialing.
+  `max_connections` slots, held across retries until its response ends (for
+  a streaming callout, until the body finishes or is dropped). A callout
+  staged at a cluster at its ceiling fails without dialing.
 - **Pinning.** `ctx.upstream` is re-pinned after the request phase and after
   the selected-upstream body phase, so a chain filter cannot retarget the
   callout. If a chain filter changes `ctx.cluster` (a `router`, say), the
@@ -547,22 +547,46 @@ What the executor does with a staged cluster:
   have picked headers for the other cluster, such as a `credential_injection`
   secret. Staging `StagedCluster` together with `StagedUpstream` fails the
   callout.
+- **Retries.** The cluster's `retry_policy` applies, with the same decision the
+  main proxy path makes. A connect error counts as `connect_failure` and an
+  I/O error as `reset`. HTTP/2 errors are classified as on the main path:
+  `REFUSED_STREAM` is `refused_stream`, a GOAWAY is `reset`, and any other
+  HTTP/2 stream or connection error is never retried, since the endpoint may
+  have acted on the request. Other transport errors (circuit open, admission
+  timeout, deadline or idle timeout, oversized response, an expired
+  `per_try_timeout_ms`) are never retried, and neither is an attempt that
+  never reached its endpoint (a refused private address, a failed lookup, a
+  TLS peer with no name). A configured policy prefers an endpoint it has not
+  tried and, like the main path, redials the same one when none is left; the
+  legacy default always redials. Non-idempotent methods (most callouts
+  are `POST`) are retried only when the policy sets `allow_non_idempotent`.
+  Backoff never runs past the callout's step deadline. The retry budget is
+  charged only for a retry that actually runs. Response filters run
+  once, on the final attempt. A streaming callout can retry only before its
+  response headers are handed to the response phase.
+- **Credentials on retry.** Staged `PendingCredentials` are matched against
+  each attempt's destination. If another endpoint would receive a different
+  set of credentials than the first attempt did, the retry redials the
+  endpoint it just tried instead. When a selected-upstream request-body filter
+  rewrote the body for the first endpoint, every retry redials that endpoint,
+  since the body may carry its credential.
 - **Timeouts.** The policy's `per_try_timeout_ms` caps each attempt, from
   peer construction (including DNS resolution) to the response, inside the
-  step deadline. Its `request_timeout_ms` caps the whole callout. The executor
-  makes a single cluster endpoint attempt. It may try another address for that
-  endpoint after a connection failure, but cluster retry rules do not apply.
-- **Passive health.** Every attempt that reached an endpoint counts toward the cluster's
+  step deadline. Its `request_timeout_ms` caps the whole callout, every
+  attempt and backoff included.
+- **Passive health.** Every attempt that reached an endpoint, including a
+  failed attempt that is retried, counts toward the cluster's
   `passive_unhealthy_threshold` and `passive_healthy_threshold`. Outcomes
   decided on the caller's side (a request that could not be built, the callout
   client's admission limit or circuit breaker, or a response over the caller's
-  size limit) are excluded. A streamed response counts when its body ends, so
-  a failure after the headers counts against the endpoint, including a stream
-  that sends nothing for the stream idle timeout. A stream that ends on the
-  caller's own step deadline is not counted.
+  size limit) are not counted, and a request that could not be built is never
+  retried. A streamed response counts when its body ends, so a failure after
+  the headers counts against the endpoint, including a stream that sends
+  nothing for the stream idle timeout. A stream that ends on the caller's own
+  step deadline is not counted.
 
-Limitations: callout passive-health transitions are logged but do
-not update the health-transition metrics,
+Limitations: callout retries and passive-health transitions are logged but do
+not update `praxis_upstream_retries_total` or the health-transition metrics,
 which the main proxy path records. A `ClusterRef` keeps its own balancer
 state, separate from any `load_balancer` filter that declares the same
 cluster.

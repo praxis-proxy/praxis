@@ -303,6 +303,11 @@ impl ClusterRetryState {
         self.budget.try_acquire()
     }
 
+    /// Return a token reserved for a retry cancelled before its attempt started.
+    pub fn refund_retry(&self) {
+        self.budget.add_tokens(1, self.active_requests());
+    }
+
     /// Requests currently counted as in flight against this cluster.
     #[must_use]
     pub fn active_requests(&self) -> u64 {

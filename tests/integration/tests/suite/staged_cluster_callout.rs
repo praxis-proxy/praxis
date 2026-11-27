@@ -243,6 +243,26 @@ fn cluster_callout_injects_credential_for_staged_cluster() {
 }
 
 #[test]
+fn cluster_callout_fails_over_to_second_endpoint() {
+    let dead = free_port();
+    let live = start_raw_backend("HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nlive");
+    let proxy_port = free_port();
+    let retry = "    retry_policy:\n      max_retries: 1\n      retriable_conditions: [connect_failure]\n";
+    let config = config(
+        proxy_port,
+        "[]",
+        &cluster_yaml(&[dead, live.port()], retry),
+        Mode::Buffered,
+    );
+    let proxy = start_full_proxy_with_registry(&config, &registry());
+
+    let (status, body) = http_get(proxy.addr(), "/", None);
+
+    assert_eq!(status, 200, "the refused endpoint was retried on the live one");
+    assert_eq!(body, "live", "the body comes from the second endpoint");
+}
+
+#[test]
 fn cluster_callout_streams_sse() {
     let backend = start_raw_backend(
         "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n\

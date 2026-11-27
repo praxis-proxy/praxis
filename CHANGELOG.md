@@ -70,7 +70,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   with `ChainBindingContext::cluster` and stages it per call with
   `StagedCluster`; the executor picks the endpoint with the cluster's
   strategy, health, and slow start, pins `ctx.cluster` and `ctx.upstream`,
-  honours the cluster's configured timeouts and reports each attempt to passive
+  honours the cluster's `retry_policy`, and reports each attempt to passive
   health. `credential_injection` now applies inside such callouts' outbound
   chains.
 
