@@ -11,6 +11,9 @@ use super::{
 };
 use crate::factory::parse_filter_config;
 
+#[cfg(feature = "bandwidth")]
+mod bandwidth;
+
 // -----------------------------------------------------------------------------
 // Config Validation
 // -----------------------------------------------------------------------------

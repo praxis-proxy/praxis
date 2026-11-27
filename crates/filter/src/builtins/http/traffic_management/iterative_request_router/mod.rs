@@ -74,7 +74,7 @@ use crate::{
     extensions::SelectedClusterApplication,
     factory::parse_filter_config,
     filter::{HttpFilter, HttpFilterContext},
-    filtered_subrequest::{FilteredStreamingBody, SubrequestRuntime, normalize_response_status},
+    filtered_subrequest::{CompletionOutput, FilteredStreamingBody, SubrequestRuntime, normalize_response_status},
     pipeline::{catalog::ClusterMetadataDeclaration, subrequest::DEPTH_HEADER},
 };
 
@@ -747,15 +747,14 @@ impl IterativeRequestRouterFilter {
                                     strip_iteration_extensions(skipped.into_continuation().into_parent_extensions());
                                 return Err(error);
                             }
-                            let mut completion =
-                                match step_completion_from(skipped.into_continuation().into_completion()) {
-                                    Ok(completion) => completion,
-                                    Err(error) => {
-                                        let (error, restored_extensions) = error.into_parts();
-                                        ctx.extensions = restored_extensions;
-                                        return Err(error);
-                                    },
-                                };
+                            let mut completion = match step_completion_from(skipped.into_continuation()) {
+                                Ok(completion) => completion,
+                                Err(error) => {
+                                    let (error, restored_extensions) = error.into_parts();
+                                    ctx.extensions = restored_extensions;
+                                    return Err(error);
+                                },
+                            };
                             completion.state.previous_response = None;
                             completion.state.iteration += 1;
                             if completion.state.retained_bytes() > self.max_state_bytes {
@@ -787,13 +786,13 @@ impl IterativeRequestRouterFilter {
                             };
                             if ensure_combined_retained_limit(
                                 active_state.retained_bytes(),
-                                pending_chunks.iter().map(Bytes::len),
+                                pending_chunks.iter().map(CompletionOutput::len_bytes),
                                 self.max_state_bytes,
                             )
                             .is_err()
                             {
                                 (*body).cancel().await;
-                                let completion = match step_completion_from(continuation.into_completion()) {
+                                let completion = match step_completion_from(continuation) {
                                     Ok(completion) => completion,
                                     Err(error) => {
                                         let (error, restored_extensions) = error.into_parts();
@@ -827,7 +826,7 @@ impl IterativeRequestRouterFilter {
                     }
                 },
                 OpenedStepKind::Complete(mut outcome) => {
-                    let completion = match step_completion_from(continuation.into_completion()) {
+                    let completion = match step_completion_from(continuation) {
                         Ok(completion) => completion,
                         Err(error) => {
                             let (error, restored_extensions) = error.into_parts();
@@ -890,8 +889,9 @@ impl IterativeRequestRouterFilter {
                                 let Some(combined_bytes) = pending_chunks
                                     .iter()
                                     .chain(completed_pending_chunks.iter())
-                                    .chain(std::iter::once(&outcome.response.body))
-                                    .try_fold(0_usize, |total, chunk| total.checked_add(chunk.len()))
+                                    .map(CompletionOutput::len_bytes)
+                                    .chain(std::iter::once(outcome.response.body.len()))
+                                    .try_fold(0_usize, usize::checked_add)
                                 else {
                                     ctx.extensions = extensions;
                                     return Err("iterative_request_router: completion body byte count overflow"
@@ -907,11 +907,12 @@ impl IterativeRequestRouterFilter {
                                     );
                                 }
                                 let mut combined = Vec::with_capacity(combined_bytes);
-                                for chunk in pending_chunks.drain(..) {
-                                    combined.extend_from_slice(&chunk);
-                                }
-                                for chunk in completed_pending_chunks {
-                                    combined.extend_from_slice(&chunk);
+                                pending_chunks.extend(completed_pending_chunks);
+                                if let Err(error) =
+                                    collect_pending_chunks(&mut combined, pending_chunks.drain(..)).await
+                                {
+                                    ctx.extensions = extensions;
+                                    return Err(error);
                                 }
                                 combined.extend_from_slice(&outcome.response.body);
                                 outcome.response.body = Bytes::from(combined);
@@ -941,15 +942,15 @@ impl IterativeRequestRouterFilter {
 
 /// Append locally emitted chunks while preserving the shared retained-state bound.
 fn append_pending_chunks(
-    target: &mut VecDeque<Bytes>,
-    chunks: VecDeque<Bytes>,
+    target: &mut VecDeque<CompletionOutput>,
+    chunks: VecDeque<CompletionOutput>,
     current_bytes: usize,
     max_state_bytes: usize,
     retained_bytes: usize,
 ) -> Result<usize, FilterError> {
     let added_bytes = chunks.iter().try_fold(0_usize, |total, chunk| {
         total
-            .checked_add(chunk.len())
+            .checked_add(chunk.len_bytes())
             .ok_or_else(|| -> FilterError { "iterative_request_router: pending stream byte count overflow".into() })
     })?;
     let pending_bytes = current_bytes
@@ -967,6 +968,19 @@ fn append_pending_chunks(
     }
     target.extend(chunks);
     Ok(pending_bytes)
+}
+
+/// A buffered terminal response must settle selected emissions before handoff.
+async fn collect_pending_chunks(
+    target: &mut Vec<u8>,
+    chunks: impl Iterator<Item = CompletionOutput>,
+) -> Result<(), FilterError> {
+    for mut output in chunks {
+        while let Some(chunk) = output.next_chunk(|_| Ok(())).await? {
+            target.extend_from_slice(&chunk);
+        }
+    }
+    Ok(())
 }
 
 // -----------------------------------------------------------------------------

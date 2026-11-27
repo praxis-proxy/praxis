@@ -55,6 +55,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - Core policy-enforcement guide with PPE use cases, integration conditions,
   and links from onboarding, architecture, and security documentation.
+- Experimental `bandwidth` filter-library support for independent upload
+  and download budgets, per downstream connection or source IP, with burst
+  allowances, bounded tracking, and cancellable prefix reservations. Optional
+  `ipv6_prefix_len` groups IPv6 clients by a configured network prefix.
+
 - Expose compact JSON sizing and capped serialization utilities in
   `praxis_filter::json_size` for built-in and external filters.
 - Add cluster-staged callouts behind the experimental `chain-binding` feature
@@ -233,6 +238,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Return gRPC `DEADLINE_EXCEEDED` when Pingora's rounded upstream timeout fires just before the call's exact deadline, while preserving earlier transport timeouts.
 - Strip reserved and hop-by-hop headers from preformatted gRPC rejections while retaining safe gRPC fields, and frame empty HTTP/1 responses with one correct zero length even when filters supply stale or conflicting lengths.
 - Preserve final body-filter bytes with forwarded trailers on Hyper; abort Pingora delivery when both outputs cannot be represented or EOF filtering fails, while retaining ordinary trailers and deliberate conversion.
+
+- Record Hyper subrequest forwarding at dispatch rather than header staging,
+  while preserving Pingora's header-write evidence during upload admission.
+
+- Scale bounded zero-burst callout prefixes with the byte rate to amortize
+  timer resolution, and preserve available upstream rejections after paced upload failures.
+- Upgrade `url` to 2.5.9 to prevent stack overflow when deriving origins from
+  nested `blob:` URLs (RUSTSEC-2026-0592).
+- Check every logical subrequest output against its size limit before pacing,
+  including output following empty emissions or consuming callbacks.
+
+- Bound buffered IRR emissions retained across steps by the overall request
+  deadline rather than the timeout of their completed producing step.
+
+- Pace chunks emitted by buffered IRR steps using their originating download
+  budgets, including selected abnormal terminal output.
+
+- Preserve bandwidth accounting for successful body-consuming transforms,
+  reject ordinary IRR output above its ceiling before pacing, and allow
+  independent writers to use burst allowance not held by pending writes.
+
+- Keep transformed bandwidth charges as unreserved plans until each bounded
+  portion is admitted, preventing oversized shared debt when another writer
+  reserves concurrently.
+
+- Pace strongly shrinking bodies without oversized admission stalls, isolate
+  nested-body bandwidth attachments, and check completion output limits before
+  pacing. Completion output within an available burst survives a step timeout.
+- Preserve bandwidth charges across body transformations and release streaming
+  completion output in refundable, bounded prefixes. HTTP `per_connection`
+  library hosts must supply a stable identity and a live `ConnectionAlive` watch.
+- Resolve the pinned Pingora upload APIs for external source consumers without
+  requiring their workspaces to inherit dependency patches.
 - Keep requests streaming when any repeated Accept field contains text/event-stream.
 - Correct the multi-listener body example description to match its field extraction and routing behavior.
 - Clarify request ID handling, rewrite scope, and routing order in the logging and transformation examples.

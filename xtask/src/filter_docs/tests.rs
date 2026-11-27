@@ -699,6 +699,11 @@ fn discover_feature_requirements_reads_registry_cfg() {
         return;
     }
     let features = discover_feature_requirements(&root);
+    assert_eq!(
+        features.get("bandwidth_limit").map(String::as_str),
+        Some("bandwidth"),
+        "dual HTTP/TCP registrations must retain their Cargo feature requirement"
+    );
     assert!(
         !features.contains_key("router"),
         "unconditional registry entries should not be marked feature-gated"
