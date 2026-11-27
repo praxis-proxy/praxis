@@ -566,10 +566,10 @@ What the executor does with a staged cluster:
   response headers are handed to the response phase.
 - **Credentials on retry.** Staged `PendingCredentials` are matched against
   each attempt's destination. If another endpoint would receive a different
-  set of credentials than the first attempt did, the retry redials the first
-  endpoint instead. When a selected-upstream request-body filter rewrote the
-  body for the first endpoint, every retry redials that endpoint, since the
-  body may carry its credential.
+  set of credentials than the first attempt did, the retry redials the
+  endpoint it just tried instead. When a selected-upstream request-body filter
+  rewrote the body for the first endpoint, every retry redials that endpoint,
+  since the body may carry its credential.
 - **Timeouts.** The policy's `per_try_timeout_ms` caps each attempt, from
   peer construction (including DNS resolution) to the response, inside the
   step deadline. Its `request_timeout_ms` caps the whole callout, every
