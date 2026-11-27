@@ -60,7 +60,7 @@ jobs:
         run: python3 -B -m unittest discover -s tests/benches -p 'test_subrequest_comparison.py'
 
       - name: Set up Rust
-        uses: praxis-proxy/conventions/.github/actions/setup-rust@f671c1215f89562d286310a6cabdcbaa5da9605c # v0.4.0
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@2a0d28ddd3690ed73347ddbe59d08dac02f604ce # v0.5.0
         with:
           cache-suffix: subrequest-bench
 

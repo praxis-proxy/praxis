@@ -152,7 +152,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Rust
-        uses: praxis-proxy/conventions/.github/actions/setup-rust@f671c1215f89562d286310a6cabdcbaa5da9605c # v0.4.0
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@2a0d28ddd3690ed73347ddbe59d08dac02f604ce # v0.5.0
 
       - name: Install h2spec
         run: make target/praxis-binutils/h2spec
@@ -262,7 +262,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Rust
-        uses: praxis-proxy/conventions/.github/actions/setup-rust@f671c1215f89562d286310a6cabdcbaa5da9605c # v0.4.0
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@2a0d28ddd3690ed73347ddbe59d08dac02f604ce # v0.5.0
 
       - name: Publish dry run
         run: make publish-dry-run
@@ -326,7 +326,7 @@ jobs:
       # signed by Red Hat before anything is pushed; see docs/developing/fips.md.
       - name: Set up Rust (for the Red Hat image verification)
         if: steps.guard.outputs.skip != 'true'
-        uses: praxis-proxy/conventions/.github/actions/setup-rust@f671c1215f89562d286310a6cabdcbaa5da9605c # v0.4.0
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@2a0d28ddd3690ed73347ddbe59d08dac02f604ce # v0.5.0
         with:
           # The restored target/ would otherwise be swept into the build context.
           cache-target: "false"
@@ -543,7 +543,7 @@ jobs:
           ref: ${{ github.event.release.tag_name }}
 
       - name: Set up Rust
-        uses: praxis-proxy/conventions/.github/actions/setup-rust@f671c1215f89562d286310a6cabdcbaa5da9605c # v0.4.0
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@2a0d28ddd3690ed73347ddbe59d08dac02f604ce # v0.5.0
 
       # The release event fires for any published release, and Phase 1's
       # validate job only runs on the tag push. So skip non-version releases
