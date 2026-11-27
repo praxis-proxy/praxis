@@ -17,7 +17,7 @@ pub(crate) struct WebSocketOffer {
     pub(crate) subprotocols: Vec<String>,
     /// Expected RFC 6455 handshake response computed by the local crypto provider.
     #[cfg(feature = "pingora")]
-    expected_accept: String,
+    pub(crate) expected_accept: String,
     /// Validated extension names available for the upstream to select.
     extension_names: HashSet<String>,
     /// Original extension offers, including parameters, in wire order.

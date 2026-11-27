@@ -43,8 +43,7 @@ mod tests {
 
     /// A pending read yields to an application write, then resumes for the peer's close.
     async fn drive(session: &mut Session) {
-        let accept = http::HeaderValue::from_static("s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
-        let mut session = LocalWebSocket::commit(session, accept).await.unwrap();
+        let mut session = LocalWebSocket::commit(session).await.unwrap();
         receive(&mut session, b"\x81\x80abcd").await;
         let input = tokio::select! {
             biased;
@@ -61,8 +60,7 @@ mod tests {
         use praxis_protocol::http::pingora::websocket_session::WebSocketSession;
         use tungstenite::Message;
 
-        let accept = http::HeaderValue::from_static("s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
-        let transport = LocalWebSocket::commit(session, accept).await.unwrap();
+        let transport = LocalWebSocket::commit(session).await.unwrap();
         let mut messages = WebSocketSession::new(transport);
         assert_eq!(messages.receive().await.unwrap(), Some(Message::text("ab")));
         let oversized = Message::Binary(Bytes::from(vec![0; 1_048_577]));
@@ -116,13 +114,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invalid_challenge_does_not_commit_a_switch() {
+        let (mut peer, socket) = tokio::io::duplex(1024);
+        peer.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: invalid\r\n\r\n").await.unwrap();
+        let mut session = Session::new_h1(Box::new(socket));
+        assert!(session.read_request().await.unwrap());
+        assert!(LocalWebSocket::commit(&mut session).await.is_err());
+        assert!(session.response_written().is_none());
+        drop(session);
+        let mut response = Vec::new();
+        peer.read_to_end(&mut response).await.unwrap();
+        assert!(response.is_empty());
+    }
+
+    #[tokio::test]
     async fn framed_request_is_rejected_before_the_switch() {
         let (mut peer, socket) = tokio::io::duplex(1024);
         peer.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nContent-Length: 1\r\n\r\nx").await.unwrap();
         let mut session = Session::new_h1(Box::new(socket));
         assert!(session.read_request().await.unwrap());
-        let accept = http::HeaderValue::from_static("s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
-        assert!(LocalWebSocket::commit(&mut session, accept).await.is_err());
+        assert!(LocalWebSocket::commit(&mut session).await.is_err());
         assert!(session.response_written().is_none());
         drop(session);
         let mut response = Vec::new();
@@ -141,8 +152,7 @@ mod tests {
         peer.write_all(b"\x82\xff\0\0\0\0\0\x10\0\x01\0\0\0\0").await.unwrap();
         let mut session = Session::new_h1(Box::new(socket));
         assert!(session.read_request().await.unwrap());
-        let accept = http::HeaderValue::from_static("s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
-        let transport = LocalWebSocket::commit(&mut session, accept).await.unwrap();
+        let transport = LocalWebSocket::commit(&mut session).await.unwrap();
         let mut messages = WebSocketSession::new(transport);
         assert!(matches!(messages.receive().await, Err(Error::Capacity(_))));
         assert!(matches!(
