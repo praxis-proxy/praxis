@@ -130,7 +130,10 @@ mod tests {
     #[tokio::test]
     async fn framed_request_is_rejected_before_the_switch() {
         let (mut peer, socket) = tokio::io::duplex(1024);
-        peer.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nContent-Length: 1\r\n\r\nx").await.unwrap();
+        let head = OFFER.strip_suffix(b"\r\n\x81\x80abcd").unwrap();
+        peer.write_all(&[head, b"Content-Length: 1\r\n\r\nx"].concat())
+            .await
+            .unwrap();
         let mut session = Session::new_h1(Box::new(socket));
         assert!(session.read_request().await.unwrap());
         assert!(LocalWebSocket::commit(&mut session).await.is_err());
