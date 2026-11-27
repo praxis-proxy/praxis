@@ -777,3 +777,92 @@ async fn cluster_callout_step_deadline_counts_the_stalled_attempt_against_its_en
         "the attempt the deadline cancelled still counts as an endpoint failure"
     );
 }
+
+// -----------------------------------------------------------------------------
+// Streaming Passive Health
+// -----------------------------------------------------------------------------
+
+/// A raw backend that sends `response` and then holds the connection open.
+async fn spawn_stalling_backend(response: &'static str) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut buf = vec![0_u8; 8192];
+                let _bytes_read = socket.read(&mut buf).await;
+                socket.write_all(response.as_bytes()).await.unwrap();
+                socket.flush().await.unwrap();
+                tokio::time::sleep(Duration::from_secs(30)).await;
+            });
+        }
+    });
+    (addr, handle)
+}
+
+/// Passive health that ejects an endpoint after one failure.
+const EJECT_ON_FIRST_FAILURE: &str =
+    "health_check:\n  type: tcp\n  interval_ms: 60000\n  passive_unhealthy_threshold: 1\n";
+
+#[tokio::test]
+async fn truncated_stream_counts_as_an_endpoint_failure() {
+    let (peer, backend) = spawn_raw_backend("HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\nshort").await;
+    let health = "health_check:\n  type: tcp\n  interval_ms: 60000\n  passive_unhealthy_threshold: 1\n";
+    let declared = cluster(&[peer], health);
+    let target = ClusterRef::resolve(&declared).unwrap();
+    let pipeline = pipeline("- filter: test_streaming_selector\n", &callout_registry(), &[declared]);
+    let opened = executor(Duration::from_secs(5))
+        .run(
+            &pipeline,
+            &get(),
+            staged(&target),
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    let CalloutResponse::Streaming { response, mut body } = opened else {
+        panic!("the chain selected streaming mode");
+    };
+    let state = pipeline.health_registry().unwrap().get("weather-mcp").unwrap();
+    assert_eq!(response.status, 200);
+    assert!(state.endpoints()[0].is_healthy());
+    let _result = drain(&mut body).await;
+    assert!(!state.endpoints()[0].is_healthy());
+    backend.abort();
+}
+
+#[tokio::test]
+async fn stream_outliving_the_step_deadline_is_not_an_endpoint_failure() {
+    let (slow, backend) = spawn_stalling_backend("HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\nshort").await;
+    let declared = cluster(&[slow], EJECT_ON_FIRST_FAILURE);
+    let target = ClusterRef::resolve(&declared).unwrap();
+    let pipeline = pipeline(
+        "- filter: test_streaming_selector\n",
+        &callout_registry(),
+        std::slice::from_ref(&declared),
+    );
+
+    let opened = executor(Duration::from_millis(300))
+        .run(
+            &pipeline,
+            &get(),
+            staged(&target),
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    let CalloutResponse::Streaming { mut body, .. } = opened else {
+        panic!("the chain selected streaming mode");
+    };
+    let ended = drain(&mut body).await;
+    backend.abort();
+
+    assert!(ended.is_err(), "the step deadline ends the stream");
+    let state = pipeline.health_registry().unwrap().get("weather-mcp").unwrap();
+    assert!(
+        state.endpoints()[0].is_healthy(),
+        "the caller's own deadline is not the endpoint's fault"
+    );
+}

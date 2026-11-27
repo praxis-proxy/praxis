@@ -230,6 +230,10 @@ impl FilteredStreamingBody {
 
     /// Handle upstream EOF.
     fn handle_upstream_eof(&mut self) -> Result<Option<Bytes>, FilterError> {
+        #[cfg(feature = "chain-binding")]
+        if let Some(observation) = self.continuation.stream_health.take() {
+            observation.finish(false);
+        }
         let completion = self.complete_step()?;
         self.finished = true;
         self.deferred_completion_output = completion.filter(|bytes| !bytes.is_empty());
@@ -241,6 +245,19 @@ impl FilteredStreamingBody {
         &mut self,
         e: praxis_core::subrequest::SubRequestError,
     ) -> Result<Option<Bytes>, FilterError> {
+        // The caller's own limits (the response ceiling, the step deadline,
+        // the stream idle timeout) are not the endpoint's failures.
+        #[cfg(feature = "chain-binding")]
+        if let Some(observation) = self.continuation.stream_health.take()
+            && !matches!(
+                &e,
+                praxis_core::subrequest::SubRequestError::ResponseTooLarge { .. }
+                    | praxis_core::subrequest::SubRequestError::DeadlineExceeded
+                    | praxis_core::subrequest::SubRequestError::StreamIdleTimeout { .. }
+            )
+        {
+            observation.finish(true);
+        }
         if let praxis_core::subrequest::SubRequestError::ResponseTooLarge { limit, .. } = &e {
             self.transport_overflow_limit = Some(*limit);
         }
@@ -726,6 +743,8 @@ mod tests {
             step_deadline: Instant::now() + Duration::from_secs(30),
             peer_identity: None,
             #[cfg(feature = "chain-binding")]
+            stream_health: None,
+            #[cfg(feature = "chain-binding")]
             lease: None,
         };
         let mut filtered = FilteredStreamingBody::new(Box::new(response.body), continuation);
@@ -806,6 +825,8 @@ mod tests {
             request_start: Instant::now(),
             step_deadline,
             peer_identity: None,
+            #[cfg(feature = "chain-binding")]
+            stream_health: None,
             #[cfg(feature = "chain-binding")]
             lease: None,
         };

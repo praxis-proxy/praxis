@@ -925,6 +925,10 @@ impl FilteredSubrequestExecutor {
         // Whether a dialed attempt has not been reported to passive health yet.
         #[cfg(feature = "chain-binding")]
         let mut outstanding = false;
+        // A successful streaming attempt's observation, settled when its body
+        // ends.
+        #[cfg(feature = "chain-binding")]
+        let mut stream_health = None;
 
         let step_span = tracing::info_span!("filtered_subrequest", step = label, iteration = iteration);
 
@@ -1306,7 +1310,13 @@ impl FilteredSubrequestExecutor {
                     outstanding = false;
                     let contacted = forwarding.as_ref().is_some_and(|(_, progress)| progress.dial_started());
                     let facts = attempt::facts(&result, contacted);
-                    attempt::record_passive(&filter_ctx, &pinned.cluster, &facts);
+                    // A stream that opened is judged when its body ends: a
+                    // failure after the headers counts against the endpoint.
+                    if matches!(&result, AttemptResult::Streaming(_)) && facts.contacted && !facts.failure {
+                        stream_health = attempt::PassiveObservation::new(&filter_ctx, &pinned.cluster);
+                    } else {
+                        attempt::record_passive(&filter_ctx, &pinned.cluster, &facts);
+                    }
                 }
                 result
             };
@@ -1626,6 +1636,7 @@ impl FilteredSubrequestExecutor {
         );
         #[cfg(feature = "chain-binding")]
         {
+            continuation.stream_health = stream_health;
             continuation.lease = pinned_cluster.map(|pinned| pinned.lease);
         }
         Ok(OpenedSubrequest { continuation, kind })

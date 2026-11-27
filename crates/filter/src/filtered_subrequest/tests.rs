@@ -1576,6 +1576,8 @@ fn into_parent_extensions_restores_parent_upstream_scope() {
         step_deadline: std::time::Instant::now(),
         peer_identity: None,
         #[cfg(feature = "chain-binding")]
+        stream_health: None,
+        #[cfg(feature = "chain-binding")]
         lease: None,
     };
 
@@ -1632,6 +1634,8 @@ fn into_completion_restores_parent_upstream_scope() {
         request_start: std::time::Instant::now(),
         step_deadline: std::time::Instant::now(),
         peer_identity: None,
+        #[cfg(feature = "chain-binding")]
+        stream_health: None,
         #[cfg(feature = "chain-binding")]
         lease: None,
     };

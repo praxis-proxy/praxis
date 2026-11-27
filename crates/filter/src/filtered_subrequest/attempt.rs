@@ -3,6 +3,9 @@
 
 //! Transport attempt classification for passive health.
 #[cfg(feature = "chain-binding")]
+use std::sync::Arc;
+
+#[cfg(feature = "chain-binding")]
 use praxis_core::health::PassiveTransition;
 use praxis_core::subrequest::{StreamingSubResponse, SubRequestError};
 
@@ -105,28 +108,52 @@ fn decided_by_caller(result: &AttemptResult) -> bool {
 /// health entry or passive thresholds.
 #[cfg(feature = "chain-binding")]
 pub(super) fn record_passive(ctx: &HttpFilterContext<'_>, cluster: &ClusterRef, facts: &AttemptFacts) {
-    if !facts.contacted {
-        return;
+    if facts.contacted
+        && let Some(observation) = PassiveObservation::new(ctx, cluster)
+    {
+        observation.finish(facts.failure);
     }
-    let Some(idx) = ctx.selected_endpoint_index else {
-        return;
-    };
-    let Some(health) = ctx.health_registry.and_then(|registry| registry.get(cluster.name())) else {
-        return;
-    };
-    match health.observe_passive(idx, facts.failure) {
-        Some(PassiveTransition::Unhealthy { threshold }) => tracing::warn!(
-            cluster = %cluster.name(),
-            endpoint_index = idx,
-            threshold,
-            "passive health: endpoint marked unhealthy"
-        ),
-        Some(PassiveTransition::Recovered { threshold }) => tracing::info!(
-            cluster = %cluster.name(),
-            endpoint_index = idx,
-            threshold,
-            "passive health: endpoint recovered"
-        ),
-        None => {},
+}
+
+/// Endpoint selected for one transport observation.
+#[cfg(feature = "chain-binding")]
+pub(super) struct PassiveObservation {
+    /// Health state retained across streaming body reads.
+    health: praxis_core::health::ClusterHealthState,
+    /// Selected endpoint.
+    idx: usize,
+    /// Cluster name for transition logs.
+    cluster: Arc<str>,
+}
+
+#[cfg(feature = "chain-binding")]
+impl PassiveObservation {
+    /// Capture the selected endpoint.
+    pub(super) fn new(ctx: &HttpFilterContext<'_>, cluster: &ClusterRef) -> Option<Self> {
+        Some(Self {
+            health: Arc::clone(ctx.health_registry?.get(cluster.name())?),
+            idx: ctx.selected_endpoint_index?,
+            cluster: Arc::from(cluster.name()),
+        })
+    }
+
+    /// Apply the terminal transport outcome once.
+    pub(super) fn finish(self, failure: bool) {
+        let Self { health, idx, cluster } = self;
+        match health.observe_passive(idx, failure) {
+            Some(PassiveTransition::Unhealthy { threshold }) => tracing::warn!(
+                cluster = %cluster,
+                endpoint_index = idx,
+                threshold,
+                "passive health: endpoint marked unhealthy"
+            ),
+            Some(PassiveTransition::Recovered { threshold }) => tracing::info!(
+                cluster = %cluster,
+                endpoint_index = idx,
+                threshold,
+                "passive health: endpoint recovered"
+            ),
+            None => {},
+        }
     }
 }
