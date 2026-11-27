@@ -177,7 +177,7 @@ impl<C: Connector> SubResponseBody<C> {
                     Ok(Completion::Incomplete) => {},
                     Err(err) => {
                         self.shutdown_and_done("h2_error").await;
-                        return Err(transport_error(err));
+                        return Err(transport_error(err, None));
                     },
                 }
 
@@ -196,13 +196,13 @@ impl<C: Connector> SubResponseBody<C> {
                     },
                     Err(err) => {
                         self.shutdown_and_done("io_error").await;
-                        Err(transport_error(err))
+                        Err(transport_error(err, None))
                     },
                 }
             },
             Ok(Err(err)) => {
                 self.shutdown_and_done("io_error").await;
-                Err(transport_error(err))
+                Err(transport_error(err, None))
             },
             Err(_elapsed) => {
                 // Distinguish stream deadline, read timeout, and idle timeout.

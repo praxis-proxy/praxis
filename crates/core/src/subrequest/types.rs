@@ -13,7 +13,7 @@
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU8, Ordering},
     },
     time::Duration,
 };
@@ -32,20 +32,65 @@ use crate::{backend, egress::Connector};
 /// including after its future is cancelled. A true value does not prove that
 /// the backend processed the request; it preserves that possibility after a
 /// response read fails. Admission, validation and failed dials leave it false.
+///
+/// It also keeps how an HTTP/2 exchange failed ([`ExchangeFailure`]), which
+/// [`SubRequestError::Io`] does not carry: for a buffered exchange, through
+/// the whole response; for a streaming one, up to its response head. Errors
+/// from a streaming body after that are not recorded.
 #[derive(Clone, Debug, Default)]
-pub struct RequestProgress(Arc<AtomicBool>);
+pub struct RequestProgress(Arc<Witness>);
+
+/// The shared state behind a [`RequestProgress`].
+#[derive(Debug, Default)]
+struct Witness {
+    /// Whether the transport sent the request head.
+    forwarded: AtomicBool,
+    /// 0 for none, then [`ExchangeFailure::Refused`] (1) or `Aborted` (2).
+    failure: AtomicU8,
+}
 
 impl RequestProgress {
     /// Whether this attempt successfully sent its request head.
     #[must_use]
     pub fn forwarded(&self) -> bool {
-        self.0.load(Ordering::Acquire)
+        self.0.forwarded.load(Ordering::Acquire)
+    }
+
+    /// How the exchange failed at the HTTP/2 layer, when it did.
+    #[must_use]
+    pub fn exchange_failure(&self) -> Option<ExchangeFailure> {
+        match self.0.failure.load(Ordering::Acquire) {
+            1 => Some(ExchangeFailure::Refused),
+            2 => Some(ExchangeFailure::Aborted),
+            _ => None,
+        }
+    }
+
+    /// Record how the exchange failed at the HTTP/2 layer.
+    pub fn record_exchange_failure(&self, failure: ExchangeFailure) {
+        let code = match failure {
+            ExchangeFailure::Refused => 1,
+            ExchangeFailure::Aborted => 2,
+        };
+        self.0.failure.store(code, Ordering::Release);
     }
 
     /// Publish forwarding only after the transport's head write succeeds.
     pub(super) fn mark_forwarded(&self) {
-        self.0.store(true, Ordering::Release);
+        self.0.forwarded.store(true, Ordering::Release);
     }
+}
+
+/// How an HTTP/2 exchange failed, for deciding whether to replay it.
+///
+/// Reported as [`SubRequestError::Io`]; the class is kept on the attempt's
+/// [`RequestProgress`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExchangeFailure {
+    /// The peer refused the stream (`REFUSED_STREAM`) without processing it.
+    Refused,
+    /// The peer may have acted on the request before the exchange failed.
+    Aborted,
 }
 
 /// An outbound HTTP request for a sub-request exchange.

@@ -77,6 +77,16 @@ pub enum EgressError {
     #[error("exchange failed: {0}")]
     Io(String),
 
+    /// The peer refused the HTTP/2 stream (`REFUSED_STREAM`), so it did not
+    /// process the request.
+    #[error("stream refused: {0}")]
+    Refused(String),
+
+    /// An HTTP/2 stream or connection error other than `REFUSED_STREAM`, a
+    /// GOAWAY or an I/O failure: the peer may have acted on the request.
+    #[error("exchange aborted: {0}")]
+    Aborted(String),
+
     /// This build carries no network backend.
     #[error("no network backend is compiled into this build")]
     Unavailable,

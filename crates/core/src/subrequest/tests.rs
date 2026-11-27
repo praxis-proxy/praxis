@@ -3388,3 +3388,29 @@ async fn forwarding_progress_stays_false_before_contact() {
         }
     }
 }
+
+#[test]
+fn transport_error_keeps_the_http2_class_on_the_attempt() {
+    use crate::egress::EgressError;
+
+    let cases = [
+        (
+            EgressError::Aborted("internal error".to_owned()),
+            Some(ExchangeFailure::Aborted),
+        ),
+        (
+            EgressError::Refused("refused stream".to_owned()),
+            Some(ExchangeFailure::Refused),
+        ),
+        (EgressError::Io("connection reset".to_owned()), None),
+    ];
+    for (error, expected) in cases {
+        let progress = RequestProgress::default();
+        let mapped = transport_error(error, Some(&progress));
+        assert!(
+            matches!(mapped, SubRequestError::Io(_)),
+            "callers keep seeing an I/O error: {mapped}"
+        );
+        assert_eq!(progress.exchange_failure(), expected, "the attempt keeps the class");
+    }
+}
