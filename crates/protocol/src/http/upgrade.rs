@@ -57,7 +57,11 @@ pub(crate) fn classify_request(
     let Some(offer) = parse_request(headers, method, version)? else {
         return Ok(None);
     };
-    let names = offered_extension_names(headers).map_err(|_reason| malformed_handshake())?;
+    let mut names = HashSet::new();
+    visit_offered_extensions(headers, |name| {
+        names.insert(name.to_owned());
+    })
+    .map_err(|_reason| malformed_handshake())?;
     if !websocket_permitted {
         return Err(denied_upgrade());
     }
@@ -69,6 +73,20 @@ pub(crate) fn classify_request(
         extensions: headers.get_all("sec-websocket-extensions").iter().cloned().collect(),
         subprotocols: offer.subprotocols.into_iter().map(str::to_owned).collect(),
     }))
+}
+
+/// Validate a local offer and derive its acceptance without retaining forwarded metadata.
+#[cfg(feature = "managed-websocket")]
+pub(crate) fn local_accept(
+    headers: &HeaderMap,
+    method: &Method,
+    version: Version,
+) -> Result<Option<String>, UpgradeRefusal> {
+    let Some(offer) = parse_request(headers, method, version)? else {
+        return Ok(None);
+    };
+    visit_offered_extensions(headers, |_| {}).map_err(|_reason| malformed_handshake())?;
+    expected_accept(offer.key).map(Some)
 }
 
 /// Parse and validate a client offer without copying header strings.
@@ -191,17 +209,18 @@ fn validate_selected_extensions(offer: &WebSocketOffer, headers: &HeaderMap) -> 
 }
 
 /// Parse the client extension fields before contacting an endpoint.
-fn offered_extension_names(headers: &HeaderMap) -> Result<HashSet<String>, &'static str> {
-    let mut names = HashSet::new();
+fn visit_offered_extensions(headers: &HeaderMap, mut visit: impl FnMut(&str)) -> Result<(), &'static str> {
+    let mut present = false;
     for field in headers.get_all("sec-websocket-extensions") {
         for name in extension_names(field)? {
-            names.insert(name?.to_owned());
+            visit(name?);
+            present = true;
         }
     }
-    if names.is_empty() && headers.contains_key("sec-websocket-extensions") {
+    if !present && headers.contains_key("sec-websocket-extensions") {
         return Err("empty WebSocket extension offer");
     }
-    Ok(names)
+    Ok(())
 }
 
 /// Extract each extension token before its optional semicolon-separated parameters.
