@@ -32,14 +32,14 @@ impl<'a> LocalWebSocket<'a> {
         {
             return Error::e_explain(ErrorType::InvalidHTTPHeader, "invalid local WebSocket upgrade state");
         }
-        let offer = crate::http::upgrade::classify_request(&request.headers, &request.method, request.version, true)
+        let accept = crate::http::upgrade::local_accept(&request.headers, &request.method, request.version)
             .map_err(|refusal| Error::explain(ErrorType::HTTPStatus(refusal.status), refusal.message))?
             .ok_or_else(|| Error::explain(ErrorType::InvalidHTTPHeader, "expected a WebSocket upgrade offer"))?;
         let mut head = ResponseHeader::build(StatusCode::SWITCHING_PROTOCOLS, None)?;
         head.set_version(Version::HTTP_11);
         head.insert_header(header::CONNECTION, "Upgrade")?;
         head.insert_header(header::UPGRADE, "websocket")?;
-        head.insert_header(header::SEC_WEBSOCKET_ACCEPT, offer.expected_accept)?;
+        head.insert_header(header::SEC_WEBSOCKET_ACCEPT, accept)?;
         session
             .as_downstream_mut()
             .write_response_header(Box::new(head))
