@@ -24,7 +24,7 @@ mod tests {
         upstreams::peer::HttpPeer,
     };
     use pingora_proxy::{HttpProxy, ProxyHttp, Session};
-    use praxis_protocol::http::pingora::local_upgrade::LocalWebSocket;
+    use praxis_protocol::http::pingora::local_upgrade::{LocalWebSocket, PreparedLocalWebSocket};
     use tokio::{
         io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader},
         net::{TcpListener, TcpStream},
@@ -60,7 +60,8 @@ mod tests {
         use praxis_protocol::http::pingora::websocket_session::WebSocketSession;
         use tungstenite::Message;
 
-        let transport = LocalWebSocket::commit(session).await.unwrap();
+        let offer = PreparedLocalWebSocket::prepare(session).unwrap();
+        let transport = offer.commit(session).await.unwrap();
         let mut messages = WebSocketSession::new(transport);
         assert_eq!(messages.receive().await.unwrap(), Some(Message::text("ab")));
         let oversized = Message::Binary(Bytes::from(vec![0; 1_048_577]));
@@ -111,6 +112,72 @@ mod tests {
         assert_eq!(&reply, b"\x81\x01x\x88\x00");
         socket.get_mut().write_all(b"\x88\x80abcd").await.unwrap();
         assert_eq!(socket.read(&mut reply).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn prepared_offer_refuses_changed_negotiation_before_switching() {
+        let (mut peer, socket) = tokio::io::duplex(1024);
+        peer.write_all(OFFER).await.unwrap();
+        let mut session = Session::new_h1(Box::new(socket));
+        assert!(session.read_request().await.unwrap());
+        let offer = PreparedLocalWebSocket::prepare(&session).unwrap();
+        session
+            .req_header_mut()
+            .insert_header("sec-websocket-protocol", "new-protocol")
+            .unwrap();
+        assert_eq!(
+            offer.commit(&mut session).await.err().unwrap().etype,
+            pingora_core::ErrorType::InternalError
+        );
+        assert!(session.response_written().is_none());
+    }
+
+    #[tokio::test]
+    async fn prepared_offer_refuses_changed_request_target() {
+        let (mut peer, socket) = tokio::io::duplex(1024);
+        peer.write_all(OFFER).await.unwrap();
+        let mut session = Session::new_h1(Box::new(socket));
+        assert!(session.read_request().await.unwrap());
+        let offer = PreparedLocalWebSocket::prepare(&session).unwrap();
+        session.req_header_mut().set_uri(http::Uri::from_static("/other"));
+        assert_eq!(
+            offer.commit(&mut session).await.err().unwrap().etype,
+            pingora_core::ErrorType::InternalError
+        );
+        assert!(session.response_written().is_none());
+    }
+
+    #[tokio::test]
+    async fn prepared_offer_refuses_changed_virtual_host() {
+        let (mut peer, socket) = tokio::io::duplex(1024);
+        peer.write_all(OFFER).await.unwrap();
+        let mut session = Session::new_h1(Box::new(socket));
+        assert!(session.read_request().await.unwrap());
+        let offer = PreparedLocalWebSocket::prepare(&session).unwrap();
+        session.req_header_mut().insert_header("host", "other.example").unwrap();
+        assert_eq!(
+            offer.commit(&mut session).await.err().unwrap().etype,
+            pingora_core::ErrorType::InternalError
+        );
+        assert!(session.response_written().is_none());
+    }
+
+    #[tokio::test]
+    async fn prepared_offer_compares_wire_target_even_when_parsed_uris_match() {
+        let (mut peer, socket) = tokio::io::duplex(1024);
+        peer.write_all(OFFER).await.unwrap();
+        let mut session = Session::new_h1(Box::new(socket));
+        assert!(session.read_request().await.unwrap());
+        session.req_header_mut().set_raw_path(b"/\xff").unwrap();
+        let original = session.req_header().uri.clone();
+        let offer = PreparedLocalWebSocket::prepare(&session).unwrap();
+        session.req_header_mut().set_raw_path(b"/\xfe").unwrap();
+        assert_eq!(session.req_header().uri, original);
+        assert_eq!(
+            offer.commit(&mut session).await.err().unwrap().etype,
+            pingora_core::ErrorType::InternalError
+        );
+        assert!(session.response_written().is_none());
     }
 
     #[tokio::test]

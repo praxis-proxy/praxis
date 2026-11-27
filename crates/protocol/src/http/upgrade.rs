@@ -24,6 +24,14 @@ pub(crate) struct WebSocketOffer {
     pub(crate) extensions: Vec<http::HeaderValue>,
 }
 
+#[cfg(feature = "managed-websocket")]
+impl WebSocketOffer {
+    /// Consume the validated offer and return its acceptance header value.
+    pub(crate) fn into_accept(self) -> String {
+        self.expected_accept
+    }
+}
+
 /// Parsed client offer borrowing handshake fields from the request head.
 struct BorrowedOffer<'head> {
     /// Validated client nonce.
