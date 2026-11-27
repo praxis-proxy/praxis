@@ -532,7 +532,11 @@ async fn serve_recording_connection(
     if request.is_none() {
         return;
     }
-    let response = "HTTP/1.1 200 OK\r\nContent-Length: 25\r\nConnection: close\r\n\r\nupstream-hot-reload-example";
+    let body = "upstream-hot-reload-example";
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
     if tokio::io::AsyncWriteExt::write_all(&mut tls, response.as_bytes())
         .await
         .is_err()

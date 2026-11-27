@@ -174,16 +174,22 @@ impl Drop for UpstreamEntry {
     /// Stop the watcher, then remove the stale weak reference by key.
     ///
     /// The registry map holds only a [`Weak`], so removing it here cannot
-    /// drop another entry and recurse.
+    /// drop another entry and recurse. The removal happens only when the
+    /// stored weak reference still names this entry: a replacement
+    /// registration that landed between this entry's death and its drop
+    /// must survive, or the next acquire would spawn a duplicate watcher.
     fn drop(&mut self) {
         let shutdown = self.shutdown.lock().unwrap_or_else(PoisonError::into_inner).take();
         if let Some(shutdown) = shutdown {
             let _sent = shutdown.send(true);
         }
-        registry()
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(&self.paths);
+        let mut map = registry().lock().unwrap_or_else(PoisonError::into_inner);
+        let stale = map
+            .get(&self.paths)
+            .is_some_and(|weak| std::ptr::eq(weak.as_ptr(), &*self));
+        if stale {
+            map.remove(&self.paths);
+        }
     }
 }
 
@@ -379,6 +385,31 @@ mod tests {
         assert!(
             !Arc::ptr_eq(&first_cert, &second_cert),
             "different path sets must not share an entry"
+        );
+    }
+
+    #[test]
+    fn dropping_an_entry_preserves_a_replacement_registration() {
+        let (tls, _dir) = hot_reload_config();
+        let paths = UpstreamPaths::from_config(&tls);
+        let stale = UpstreamEntry::new(paths.clone()).unwrap();
+        let replacement = UpstreamEntry::new(paths.clone()).unwrap();
+        {
+            let mut map = registry().lock().unwrap();
+            map.insert(paths.clone(), Arc::downgrade(&stale));
+            // A replacement acquire landed between the stale entry's death
+            // and its drop: it overwrote the note with its own registration.
+            map.insert(paths, Arc::downgrade(&replacement));
+        }
+        drop(stale);
+        let registered = registry()
+            .lock()
+            .unwrap()
+            .get(&UpstreamPaths::from_config(&tls))
+            .and_then(Weak::upgrade);
+        assert!(
+            registered.is_some_and(|entry| Arc::ptr_eq(&entry, &replacement)),
+            "a dying entry must not remove a replacement's registration"
         );
     }
 }
