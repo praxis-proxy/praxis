@@ -118,6 +118,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `runtime.overload_purge: false` disables explicit allocator purging while
   retaining the other overload actions; changing it requires a restart.
 
+- `praxis_filter_active{filter}` reports running or awaiting HTTP and TCP filter
+  hooks, including branch request hooks. `praxis_body_buffer_bytes` reports
+  retained body payload through buffer freezing and shared body ownership.
+  Both metrics are independent of overload protection.
+
 ### Changed
 
 - **Breaking:** `metrics.labels` takes one `true`/`false` setting per
